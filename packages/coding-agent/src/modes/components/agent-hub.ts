@@ -222,6 +222,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#rows: AgentRef[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
+	/** Stable roster order captured on first refresh: keyboard navigation must
+	 *  not jump as agents heartbeat. Existing agent generations keep their rank
+	 *  while the hub is open; newly appearing generations append at the end. */
+	#rowOrder: Map<AgentRef, number> | undefined;
+	#nextRowOrder = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
@@ -324,15 +329,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			: registerPersistedSubagents(this.#registry, deps.sessionFile, {
 					shouldContinue: () => !this.#disposed,
 				})
-					.then(() => {
-						if (!this.#disposed) this.#refreshRows();
-					})
 					.catch((error: unknown) => {
 						logger.warn("Failed to register persisted subagents", { error });
 					})
 					.finally(() => {
+						// Clear the loading flag first so this refresh captures the
+						// full status/recency ranking rather than a partial roster.
 						this.#loadingPersistedSubagents = false;
-						if (!this.#disposed) this.#requestRender();
+						if (!this.#disposed) {
+							this.#refreshRows();
+							this.#requestRender();
+						}
 					});
 		this.#refreshRows();
 	}
@@ -505,17 +512,41 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
+		// Stable roster order: capture the status+recency ranking once so keyboard
+		// navigation is not disrupted by heartbeats (issue #10524). Existing rows
+		// keep their rank while the hub is open; new agents append at the end.
+		// Defer the capture until persisted-subagent discovery settles so a
+		// mid-scan refresh cannot freeze a partial roster (the remaining agents
+		// would otherwise append in readdir order instead of being ranked).
+		const rowOrder = this.#rowOrder;
+		let ordered: AgentRef[];
+		if (!rowOrder) {
+			ordered = refs.sort(
+				(a, b) =>
+					STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+					b.lastActivity - a.lastActivity ||
+					a.id.localeCompare(b.id),
+			);
+			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
+				this.#rowOrder = new Map();
+				for (const ref of ordered) this.#rowOrder.set(ref, this.#nextRowOrder++);
+			}
+		} else {
+			for (const rankedRef of rowOrder.keys()) {
+				if (!refs.includes(rankedRef)) rowOrder.delete(rankedRef);
+			}
+			ordered = refs.sort(
+				(a, b) => (rowOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (rowOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
+			);
+			for (const ref of ordered) {
+				if (!rowOrder.has(ref)) rowOrder.set(ref, this.#nextRowOrder++);
+			}
+		}
 		const query = this.#agentFilter.trim();
-		const filtered =
-			query.length > 0 ? refs.filter(ref => fuzzyAgentMatch(query, `${ref.id} ${ref.displayName ?? ""}`)) : refs;
-		// Live recency ordering: the most recently active agent surfaces first and
-		// rows move as activity changes, matching the recency-first tree summary.
-		const rosterRows = filtered.sort(
-			(a, b) =>
-				STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
-				b.lastActivity - a.lastActivity ||
-				a.id.localeCompare(b.id),
-		);
+		const rosterRows =
+			query.length > 0
+				? ordered.filter(ref => fuzzyAgentMatch(query, `${ref.id} ${ref.displayName ?? ""}`))
+				: ordered;
 
 		if (this.#viewMode === "tree") {
 			const tree = projectAgentTree(rosterRows);

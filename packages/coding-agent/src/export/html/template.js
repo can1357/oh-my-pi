@@ -69,9 +69,15 @@
         if (entry.type === 'message' && entry.message.role === 'assistant') {
           const content = entry.message.content;
           if (Array.isArray(content)) {
-            for (const block of content) {
+            for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
+              const block = content[blockIndex];
               if (block.type === 'toolCall') {
-                toolCallMap.set(block.id, { name: block.name, arguments: block.arguments });
+                toolCallMap.set(block.id, {
+                  name: block.name,
+                  arguments: block.arguments,
+                  entryId: entry.id,
+                  blockIndex,
+                });
               }
             }
           }
@@ -491,26 +497,29 @@
         return s.slice(0, maxLen) + '...';
       }
 
+      function normalizeTreeText(s) {
+        return s.replace(/[\n\t]/g, ' ').trim();
+      }
+
       /**
        * Get display text for tree node (returns HTML string).
        */
       function getTreeNodeDisplayHtml(entry, label) {
-        const normalize = s => s.replace(/[\n\t]/g, ' ').trim();
         const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
 
         switch (entry.type) {
           case 'message': {
             const msg = entry.message;
             if (msg.role === 'user') {
-              const content = truncate(normalize(extractContent(msg.content)));
+              const content = truncate(normalizeTreeText(extractContent(msg.content)));
               return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
             }
             if (msg.role === 'developer') {
-              const content = truncate(normalize(extractContent(msg.content)));
+              const content = truncate(normalizeTreeText(extractContent(msg.content)));
               return labelHtml + `<span class="tree-role-developer">developer:</span> ${escapeHtml(content)}`;
             }
             if (msg.role === 'assistant') {
-              const textContent = truncate(normalize(extractContent(msg.content)));
+              const textContent = truncate(normalizeTreeText(extractContent(msg.content)));
               if (textContent) {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(textContent)}`;
               }
@@ -530,11 +539,11 @@
               return labelHtml + `<span class="tree-role-tool">[${msg.toolName || 'tool'}]</span>`;
             }
             if (msg.role === 'bashExecution') {
-              const cmd = truncate(normalize(msg.command || ''));
+              const cmd = truncate(normalizeTreeText(msg.command || ''));
               return labelHtml + `<span class="tree-role-tool">[bash]:</span> ${escapeHtml(cmd)}`;
             }
             if (msg.role === 'jsExecution') {
-              const code = truncate(normalize(msg.code || ''));
+              const code = truncate(normalizeTreeText(msg.code || ''));
               return labelHtml + `<span class="tree-role-tool">[js]:</span> ${escapeHtml(code)}`;
             }
             return labelHtml + `<span class="tree-muted">[${msg.role}]</span>`;
@@ -542,12 +551,12 @@
           case 'compaction':
             return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
           case 'branch_summary': {
-            const summary = truncate(normalize(entry.summary || ''));
+            const summary = truncate(normalizeTreeText(entry.summary || ''));
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
           }
           case 'custom_message': {
             const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
-            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
+            return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalizeTreeText(content)))}`;
           }
           case 'model_change':
             return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.model)}]</span>`;
@@ -560,12 +569,140 @@
         }
       }
 
+      /**
+       * Split an OMP interleaved assistant into sidebar text/tool rows.
+       * Pi stores those continuations as separate entries; OMP keeps one
+       * content array. Do not mutate session entries or parentIds.
+       */
+      function buildInterleavedAssistantRows(flatNode, toolResultNodes, includeTools) {
+        const entry = flatNode.node.entry;
+        if (entry.type !== 'message' || entry.message.role !== 'assistant') return null;
+
+        const content = entry.message.content;
+        if (!Array.isArray(content)) return null;
+
+        let sawToolCall = false;
+        let hasTextAfterToolCall = false;
+        for (const block of content) {
+          if (block.type === 'toolCall') {
+            sawToolCall = true;
+          } else if (sawToolCall && block.type === 'text' && block.text && canonicalizeMessage(block.text)) {
+            hasTextAfterToolCall = true;
+            break;
+          }
+        }
+        if (!hasTextAfterToolCall) return null;
+
+        const rows = [];
+        let text = '';
+        let textBlockIndex = null;
+        let navigationId = entry.id;
+        let isFirstAssistantRow = true;
+        const flushText = () => {
+          const normalized = canonicalizeMessage(text);
+          text = '';
+          if (!normalized) return;
+          rows.push({
+            flatNode,
+            assistantText: normalized,
+            anchorId: assistantBlockDomId(entry.id, textBlockIndex, mainSctx),
+            navigationId,
+            showLabel: isFirstAssistantRow,
+            timelineId: entry.id,
+          });
+          textBlockIndex = null;
+          isFirstAssistantRow = false;
+        };
+
+        for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
+          const block = content[blockIndex];
+          if (block.type === 'text' && block.text) {
+            if (textBlockIndex === null && canonicalizeMessage(block.text)) textBlockIndex = blockIndex;
+            text += block.text;
+          } else if (block.type === 'toolCall') {
+            flushText();
+            if (!includeTools) {
+              navigationId = entry.id;
+              continue;
+            }
+            const anchorId = assistantBlockDomId(entry.id, blockIndex, mainSctx);
+            const resultNode = toolResultNodes.get(block.id);
+            if (resultNode) {
+              navigationId = resultNode.node.entry.id;
+              rows.push({
+                flatNode: resultNode,
+                anchorId,
+                navigationId,
+                timelineId: entry.id,
+              });
+            } else {
+              navigationId = entry.id;
+              rows.push({
+                flatNode,
+                assistantToolCall: block,
+                anchorId,
+                navigationId,
+                timelineId: entry.id,
+              });
+            }
+          }
+        }
+        flushText();
+
+        return rows;
+      }
+
+      function projectSidebarRows(filteredNodes, includeTools = true) {
+        const toolResultNodes = new Map();
+        if (includeTools) {
+          for (const flatNode of filteredNodes) {
+            const entry = flatNode.node.entry;
+            if (entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolCallId) {
+              toolResultNodes.set(entry.message.toolCallId, flatNode);
+            }
+          }
+        }
+
+        const projectedByAssistantId = new Map();
+        const claimedToolResultIds = new Set();
+        for (const flatNode of filteredNodes) {
+          const rows = buildInterleavedAssistantRows(flatNode, toolResultNodes, includeTools);
+          if (!rows) continue;
+          projectedByAssistantId.set(flatNode.node.entry.id, rows);
+          for (const row of rows) {
+            const entry = row.flatNode.node.entry;
+            if (entry.type === 'message' && entry.message.role === 'toolResult') {
+              claimedToolResultIds.add(entry.id);
+            }
+          }
+        }
+
+        const rows = [];
+        for (const flatNode of filteredNodes) {
+          const entry = flatNode.node.entry;
+          if (!includeTools && entry.type === 'message' && entry.message.role === 'toolResult') continue;
+          const projected = projectedByAssistantId.get(entry.id);
+          if (projected) {
+            rows.push(...projected);
+          } else if (!claimedToolResultIds.has(entry.id)) {
+            let anchorId;
+            if (entry.type === 'message' && entry.message.role === 'toolResult') {
+              const toolCall = toolCallMap.get(entry.message.toolCallId);
+              if (toolCall) anchorId = assistantBlockDomId(toolCall.entryId, toolCall.blockIndex, mainSctx);
+            }
+            rows.push({ flatNode, anchorId, navigationId: entry.id });
+          }
+        }
+        return rows;
+      }
+
       // ============================================================
       // TREE RENDERING (DOM manipulation)
       // ============================================================
 
       let currentLeafId = leafId;
       let currentTargetId = urlTargetId || leafId;
+      let currentTargetAnchorId = null;
       let treeRendered = false;
 
       function renderTree() {
@@ -573,22 +710,45 @@
         const activePathIds = buildActivePathIds(currentLeafId);
         const flatNodes = flattenTree(tree, activePathIds);
         const filtered = filterNodes(flatNodes, currentLeafId);
+        const allSidebarRows = projectSidebarRows(flatNodes);
+        const sidebarRows = projectSidebarRows(filtered, filterMode !== 'no-tools');
         const container = document.getElementById('tree-container');
+        const activeRowIndex = currentTargetAnchorId
+          ? sidebarRows.findIndex(row => row.anchorId === currentTargetAnchorId)
+          : -1;
+        const activeTimelineId = activeRowIndex >= 0 ? sidebarRows[activeRowIndex].timelineId : undefined;
+        // Block-anchor selection uses the projected-row prefix, not parentId
+        // ancestry — tool-result chains can be reversed relative to content.
+        const isSidebarRowOnPath = (row, rowIndex) => {
+          if (activeRowIndex >= 0) {
+            if (rowIndex > activeRowIndex) return false;
+            if (activeTimelineId && row.timelineId === activeTimelineId) return true;
+          }
+          const entry = row.flatNode.node.entry;
+          return activePathIds.has(row.navigationId || entry.id);
+        };
 
         // Full render only on first call or when filter/search changes
         if (!treeRendered) {
           container.innerHTML = '';
 
-          for (const flatNode of filtered) {
+          for (let rowIndex = 0; rowIndex < sidebarRows.length; rowIndex++) {
+            const row = sidebarRows[rowIndex];
+            const flatNode = row.flatNode;
             const entry = flatNode.node.entry;
-            const isOnPath = activePathIds.has(entry.id);
-            const isTarget = entry.id === currentTargetId;
+            const pathId = row.navigationId || entry.id;
+            const isOnPath = isSidebarRowOnPath(row, rowIndex);
+            const isTarget = currentTargetAnchorId
+              ? row.anchorId === currentTargetAnchorId
+              : entry.id === currentTargetId;
 
             const div = document.createElement('div');
             div.className = 'tree-node';
             if (isOnPath) div.classList.add('in-path');
             if (isTarget) div.classList.add('active');
             div.dataset.id = entry.id;
+            div.dataset.pathId = pathId;
+            if (row.anchorId) div.dataset.anchorId = row.anchorId;
 
             const prefix = buildTreePrefix(flatNode);
             const prefixSpan = document.createElement('span');
@@ -601,12 +761,21 @@
 
             const content = document.createElement('span');
             content.className = 'tree-content';
-            content.innerHTML = getTreeNodeDisplayHtml(entry, flatNode.node.label);
+            if (row.assistantText !== undefined) {
+              const label = row.showLabel ? flatNode.node.label : undefined;
+              const labelHtml = label ? `<span class="tree-label">[${escapeHtml(label)}]</span> ` : '';
+              content.innerHTML = labelHtml + `<span class="tree-role-assistant">assistant:</span> ${escapeHtml(truncate(normalizeTreeText(row.assistantText)))}`;
+            } else if (row.assistantToolCall) {
+              const call = row.assistantToolCall;
+              content.innerHTML = `<span class="tree-role-tool">${escapeHtml(formatToolCall(call.name, call.arguments || {}))}</span>`;
+            } else {
+              content.innerHTML = getTreeNodeDisplayHtml(entry, flatNode.node.label);
+            }
 
             div.appendChild(prefixSpan);
             div.appendChild(marker);
             div.appendChild(content);
-            div.addEventListener('click', () => navigateTo(entry.id));
+            div.addEventListener('click', () => navigateTo(row.navigationId || entry.id, 'target', null, row.anchorId));
 
             container.appendChild(div);
           }
@@ -615,10 +784,15 @@
         } else {
           // Just update markers and classes
           const nodes = container.querySelectorAll('.tree-node');
-          for (const node of nodes) {
+          for (let rowIndex = 0; rowIndex < nodes.length; rowIndex++) {
+            const node = nodes[rowIndex];
+            const row = sidebarRows[rowIndex];
+            if (!row) continue;
             const id = node.dataset.id;
-            const isOnPath = activePathIds.has(id);
-            const isTarget = id === currentTargetId;
+            const isOnPath = isSidebarRowOnPath(row, rowIndex);
+            const isTarget = currentTargetAnchorId
+              ? node.dataset.anchorId === currentTargetAnchorId
+              : id === currentTargetId;
 
             node.classList.toggle('in-path', isOnPath);
             node.classList.toggle('active', isTarget);
@@ -630,7 +804,7 @@
           }
         }
 
-        document.getElementById('tree-status').textContent = `${filtered.length} / ${flatNodes.length} entries`;
+        document.getElementById('tree-status').textContent = `${sidebarRows.length} / ${allSidebarRows.length} rows`;
 
         // Scroll active node into view after layout
         setTimeout(() => {
@@ -665,6 +839,10 @@
 
       function replaceTabs(text) {
         return text.replace(/\t/g, '   ');
+      }
+
+      function assistantBlockDomId(entryId, blockIndex, sctx) {
+        return `${sctx.idPrefix}${entryId}-block-${blockIndex}`;
       }
 
       function findToolResult(toolCallId, entryList) {
@@ -747,7 +925,7 @@
       globalThis.__OMP_TOOL_VIEW_DATA = TOOL_VIEW_DATA;
       let toolViewSeq = 0;
 
-      function renderToolCall(call, sctx) {
+      function renderToolCall(call, sctx, blockId) {
         const result = findToolResult(call.id, sctx.entries);
         const statusClass = result ? (result.isError ? 'error' : 'success') : 'pending';
         const key = 'tv' + (++toolViewSeq);
@@ -760,7 +938,7 @@
             openAgent: (id) => openSubSession(joinKey(sctx.prefix, id)),
           },
         });
-        return '<omp-tool-view class="tool-execution ' + statusClass + '" data-key="' + key + '" open></omp-tool-view>';
+        return '<omp-tool-view class="tool-execution ' + statusClass + '" id="' + blockId + '" data-key="' + key + '" open></omp-tool-view>';
       }
 
       // ============================================================
@@ -1086,26 +1264,26 @@
           if (msg.role === 'assistant') {
             let html = `<div class="assistant-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
 
-            for (const block of msg.content) {
+            // Walk message.content once. Do not bucket blocks by type.
+            for (let blockIndex = 0; blockIndex < msg.content.length; blockIndex++) {
+              const block = msg.content[blockIndex];
+              const blockId = assistantBlockDomId(entry.id, blockIndex, sctx);
               if (block.type === 'text') {
                 const canon = canonicalizeMessage(block.text);
                 if (canon) {
-                  html += `<div class="assistant-text markdown-content">${safeMarkedParse(block.text)}</div>`;
+                  html += `<div class="assistant-text markdown-content" id="${blockId}">${safeMarkedParse(block.text)}</div>`;
                 }
               } else if (block.type === 'thinking') {
                 const thinking = canonicalizeMessage(block.thinking);
                 if (!thinking) continue;
-                html += `<div class="thinking-block">
+                html += `<div class="thinking-block" id="${blockId}">
                   <div class="thinking-text">${escapeHtml(thinking)}</div>
                   <div class="thinking-collapsed">Thinking ...</div>
                 </div>`;
               } else if (block.type === 'image') {
-                html += `<div class="message-images"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
-              }
-            }
-            for (const block of msg.content) {
-              if (block.type === 'toolCall') {
-                html += renderToolCall(block, sctx);
+                html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
+              } else if (block.type === 'toolCall') {
+                html += renderToolCall(block, sctx, blockId);
               }
             }
 
@@ -1316,12 +1494,18 @@
         return node;
       }
 
-      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null) {
+      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null, scrollTargetDomId = null) {
+        const leafChanged = currentLeafId !== targetId;
         currentLeafId = targetId;
         currentTargetId = scrollToEntryId || targetId;
+        currentTargetAnchorId = scrollTargetDomId;
         const path = getPath(targetId);
 
-        renderTree();
+        if (leafChanged) {
+          forceTreeRerender();
+        } else {
+          renderTree();
+        }
 
         document.getElementById('header-container').innerHTML = renderHeader();
 
@@ -1356,7 +1540,7 @@
             content.scrollTop = content.scrollHeight;
           } else if (scrollMode === 'target') {
             const scrollTargetId = scrollToEntryId || targetId;
-            const targetEl = document.getElementById(`entry-${scrollTargetId}`);
+            const targetEl = document.getElementById(scrollTargetDomId || `entry-${scrollTargetId}`);
             if (targetEl) {
               targetEl.scrollIntoView({ block: 'center' });
               if (scrollToEntryId) {

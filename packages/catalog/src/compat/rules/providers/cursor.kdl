@@ -2,6 +2,11 @@
 
 provider "cursor" {
 	thinking-mode "effort"
+	class "anthropic" {
+		family "fable" {
+			requires-cursor-tool-schema-projection #true
+		}
+	}
 	// GetUsableModels advertises no input modalities or context windows.
 	// K3 (including the bare `k3` alias Cursor serves) is natively
 	// multimodal and 1M-context.
