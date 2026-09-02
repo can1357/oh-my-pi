@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Supervised PTY processes now answer terminal status and device-attribute queries instead of hanging before accepting input ([#10573](https://github.com/can1357/oh-my-pi/issues/10573)).
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

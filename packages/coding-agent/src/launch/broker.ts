@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { Terminal } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
@@ -725,10 +726,26 @@ class DaemonBroker {
 			cols: DAEMON_PTY_COLUMNS,
 			rows: DAEMON_PTY_ROWS,
 		};
+		const terminal = new Terminal({
+			cols: options.cols,
+			rows: options.rows,
+			scrollback: 0,
+		});
+		terminal.onData(data => {
+			if (generation !== record.generation || record.pty !== session) return;
+			try {
+				session.write(data);
+			} catch {
+				// The PTY may exit between parsing its final output and sending the terminal reply.
+			}
+		});
 		const onChunk = (error: Error | null, chunk: string): void => {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
-			if (chunk) this.#onOutput(record, generation, chunk);
+			if (chunk) {
+				terminal.write(chunk);
+				this.#onOutput(record, generation, chunk);
+			}
 		};
 		const started = Promise.withResolvers<number | undefined>();
 		const onStart = (error: Error | null, pid: number): void => {
@@ -756,16 +773,23 @@ class DaemonBroker {
 			const shell = procmgr.getShellConfig().shell;
 			run = session.start({ command, shell, ...options }, onChunk, onStart);
 		}
-		void run.then(
-			async result => {
-				await this.#onPtyExit(record, generation, result);
-				started.resolve(undefined);
-			},
-			async error => {
-				await this.#settle(record, generation, undefined, error instanceof Error ? error.message : String(error));
-				started.resolve(undefined);
-			},
-		);
+		void run
+			.then(
+				async result => {
+					await this.#onPtyExit(record, generation, result);
+					started.resolve(undefined);
+				},
+				async error => {
+					await this.#settle(
+						record,
+						generation,
+						undefined,
+						error instanceof Error ? error.message : String(error),
+					);
+					started.resolve(undefined);
+				},
+			)
+			.finally(() => terminal.dispose());
 
 		const pid = await started.promise;
 		if (pid !== undefined && generation === record.generation) {
