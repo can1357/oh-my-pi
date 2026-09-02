@@ -57,10 +57,10 @@ import type {
 	MCPServerConnection,
 } from "../../mcp/types";
 import { shortenPath } from "../../tools/render-utils";
-import { urlHyperlinkAlways } from "../../tui";
+import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
-import { loginUrlCopyCommand, persistLoginUrl } from "../../utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../../utils/login-url";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "../components/chat-block";
 import { DynamicBorder } from "../components/dynamic-border";
@@ -971,7 +971,15 @@ export class MCPCommandController {
 							const urlFile = persistLoginUrl(info.url);
 							if (urlFile) {
 								block.addChild(
-									new Text(theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 1, 0),
+									new WidthAwareText(
+										contentWidth =>
+											wrapCommandRow(
+												theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`),
+												contentWidth,
+											).join("\n"),
+										1,
+										0,
+									),
 								);
 							}
 						}
@@ -2462,7 +2470,7 @@ export class MCPCommandController {
 		// wait for a browser that never opened.
 		const launched = openPath(session.authUrl);
 		const smitheryUrlFile = persistLoginUrl(session.authUrl);
-		this.#showMessage(
+		this.#showMessage(contentWidth =>
 			[
 				"",
 				theme.bold("Smithery Login"),
@@ -2471,7 +2479,9 @@ export class MCPCommandController {
 					: theme.fg("muted", "Browser launch disabled by BROWSER=none. Log in at the URL below."),
 				theme.fg("dim", "Authorize URL:"),
 				theme.fg("accent", session.authUrl),
-				...(smitheryUrlFile ? [theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(smitheryUrlFile)}`)] : []),
+				...(smitheryUrlFile
+					? wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(smitheryUrlFile)}`), contentWidth)
+					: []),
 				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
 				"",
 			].join("\n"),
@@ -2711,7 +2721,7 @@ export class MCPCommandController {
 	/**
 	 * Show a message in the chat
 	 */
-	#showMessage(text: string): void {
+	#showMessage(text: string | ((contentWidth: number) => string)): void {
 		showCommandMessage(this.ctx, text);
 	}
 }
