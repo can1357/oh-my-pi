@@ -81,6 +81,7 @@ const recoverableTabIds = new Set<number>();
 const liveOwnedTabIds = new Set<number>();
 const recoveryLoaderIds = new Map<number, string>();
 let recoveryLoaderUpdates: Promise<void> = Promise.resolve();
+let recoveryLoaderGeneration = 0;
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
@@ -90,8 +91,9 @@ let orphanSweepDeadlineMs: number | null = null;
 // letting it cancel the new grace period and detach the just-lost live session.
 let connectionGeneration = 0;
 let orphanSweepDeadlineGeneration = 0;
-const loadRecoverableState = createRetryableLoader(() =>
-	chrome.storage.session
+const loadRecoverableState = createRetryableLoader(() => {
+	const loaderGeneration = recoveryLoaderGeneration;
+	return chrome.storage.session
 		.get({
 			[RECOVERABLE_TAB_IDS_KEY]: [],
 			[LIVE_OWNED_TAB_IDS_KEY]: [],
@@ -114,7 +116,11 @@ const loadRecoverableState = createRetryableLoader(() =>
 			);
 			recoverableStartupMutations.clear();
 			const storedLoaderIds = stored[RECOVERY_LOADER_IDS_KEY];
-			if (storedLoaderIds && typeof storedLoaderIds === "object") {
+			if (
+				loaderGeneration === recoveryLoaderGeneration &&
+				storedLoaderIds &&
+				typeof storedLoaderIds === "object"
+			) {
 				for (const [tabId, loaderId] of Object.entries(storedLoaderIds)) {
 					const parsed = Number(tabId);
 					if (Number.isInteger(parsed) && typeof loaderId === "string")
@@ -127,8 +133,8 @@ const loadRecoverableState = createRetryableLoader(() =>
 			);
 			if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
 			return true;
-		}),
-);
+		});
+});
 const initialRecoverableReady = loadRecoverableState();
 let recoverableUpdates: Promise<void> = initialRecoverableReady.catch(() => {});
 let orphanSweepDeadlineUpdates: Promise<void> = initialRecoverableReady.catch(
@@ -219,7 +225,7 @@ async function setOrphanSweepDeadline(
 			delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now()),
 		});
 	}
-	orphanSweepDeadlineUpdates = serializeOrphanSweepDeadlineUpdate(
+	const update = serializeOrphanSweepDeadlineUpdate(
 		orphanSweepDeadlineUpdates,
 		alarmUpdate,
 		() => generation === orphanSweepDeadlineGeneration,
@@ -240,7 +246,8 @@ async function setOrphanSweepDeadline(
 			}
 		},
 	);
-	await orphanSweepDeadlineUpdates;
+	orphanSweepDeadlineUpdates = update.catch(() => {});
+	await update;
 }
 
 async function maybeScheduleOrphanSweep(
@@ -249,8 +256,7 @@ async function maybeScheduleOrphanSweep(
 	requireRecoveryStateLoaded(await loadRecoverableState());
 	await recoverableUpdates;
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
-	if (nextDeadlineMs !== orphanSweepDeadlineMs)
-		await setOrphanSweepDeadline(nextDeadlineMs);
+	await setOrphanSweepDeadline(nextDeadlineMs);
 }
 
 /**
@@ -355,6 +361,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		// storage write that MV3 may terminate with the worker.
 		for (const tabId of tabIds) {
 			guardDetachments.add(tabId);
+			recoveryLoaderGeneration++;
 			recoveryLoaderIds.delete(tabId);
 			void trackPendingDetach(
 				(async () => {
@@ -981,6 +988,7 @@ async function connect(): Promise<void> {
 		if (helloDeliveredSocket === socket) helloDeliveredSocket = null;
 		recoveryLoaderUpdates = Promise.all(
 			attachmentGuard.attachedTabIds().map(async (tabId) => {
+				recoveryLoaderGeneration++;
 				recoveryLoaderIds.delete(tabId);
 				const frameTree = (await chrome.debugger
 					.sendCommand({ tabId }, "Page.getFrameTree")
