@@ -13,6 +13,10 @@
 
 ## [18.1.14] - 2026-09-07
 
+### Added
+
+- factory-droid: Fable models on the direct anthropic upstream now send the CLI's refusal fallback chain (`fallbacks: [{model: "claude-opus-5"}]` plus the `server-side-fallback`/`fallback-credit` betas), so proxy-side refusals retry against Opus 5 instead of surfacing.
+
 ### Fixed
 
 - Fixed reasoning-off requests (e.g. GitHub Copilot `gpt-6-astra`) surfacing `400 Unsupported value: 'none' … Supported values are: …` instead of retrying at the lowest allowed effort: the reasoning-effort fallback now recognizes `Supported values` phrasing ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
