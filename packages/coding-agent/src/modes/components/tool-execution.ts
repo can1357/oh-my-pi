@@ -56,6 +56,29 @@ const OPENCODE_TOOL_GLYPHS: Record<string, string> = {
 	task: "◆",
 	todo: "▪",
 };
+
+// OSC 8 hyperlink span: `ESC ] 8 ; params ; uri (BEL|ST) text ESC ] 8 ; ; (BEL|ST)`.
+// The opener requires a non-empty URI so a stray closer can never match.
+const OSC8_LINK_REGEX = /(\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\))([\s\S]*?)(\x1b\]8;;(?:\x07|\x1b\\))/;
+
+/**
+ * Re-attach the first OSC-8 hyperlink from `source` (the renderer's fully
+ * styled status row) onto the matching plain-text segment of `row` (its
+ * stripped opencode restyle). The opener/closer bytes are reused verbatim, so
+ * the link target is exactly the renderer's own resolution (e.g. write links
+ * `details.resolvedPath`, read keeps its selector line) — no relative-vs-
+ * absolute guessing from raw args. Rows without a link pass through unchanged.
+ */
+function restoreFirstHyperlink(row: string, source: string): string {
+	const match = OSC8_LINK_REGEX.exec(source);
+	if (!match) return row;
+	const [, opener, linked, closer] = match;
+	const linkedPlain = replaceTabs(stripVTControlCharacters(linked!));
+	if (!linkedPlain) return row;
+	const at = row.indexOf(linkedPlain);
+	if (at === -1) return row;
+	return `${row.slice(0, at)}${opener}${linkedPlain}${closer}${row.slice(at + linkedPlain.length)}`;
+}
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
@@ -1080,11 +1103,15 @@ export class ToolExecutionComponent extends Container {
 		// live calls keep their native styling (spinner/accent) so activity
 		// stays legible, matching opencode's emphasized in-flight rows.
 		if (this.#result !== undefined && !this.#isPartial && !this.#result.isError) {
-			const plain = stripVTControlCharacters(first)
+			// Tabs are legal in filenames and custom status details; normalize
+			// them before measuring so the advertised single row truncates
+			// predictably instead of wrapping or leaving visual holes.
+			const plain = replaceTabs(stripVTControlCharacters(first))
 				.trim()
 				.replace(/^[^\p{L}\p{N}]{1,2}\s+/u, "");
 			const glyph = OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "∗";
-			this.#collapsedLines = [theme.fg("dim", truncateToWidth(` ${glyph} ${plain}`, Math.max(1, width)))];
+			const row = restoreFirstHyperlink(` ${glyph} ${plain}`, first);
+			this.#collapsedLines = [theme.fg("dim", truncateToWidth(row, Math.max(1, width)))];
 		} else {
 			this.#collapsedLines = [first];
 		}

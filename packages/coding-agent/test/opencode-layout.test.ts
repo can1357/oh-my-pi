@@ -1,12 +1,15 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import * as url from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import type { LayoutMode } from "@oh-my-pi/pi-coding-agent/modes/layout-mode";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { CachedOutputBlock } from "@oh-my-pi/pi-coding-agent/tui/output-block";
-import { Text, type TUI } from "@oh-my-pi/pi-tui";
+import { CachedOutputBlock, markFramedBlockComponent } from "@oh-my-pi/pi-coding-agent/tui/output-block";
+import { replaceTabs, Text, type TUI } from "@oh-my-pi/pi-tui";
 
 /**
  * Contract under test (`display.layout: "opencode"`):
@@ -24,7 +27,13 @@ import { Text, type TUI } from "@oh-my-pi/pi-tui";
  */
 describe("opencode layout", () => {
 	beforeAll(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
 		await initTheme();
+	});
+
+	afterAll(() => {
+		resetSettingsForTest();
 	});
 
 	const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
@@ -143,6 +152,59 @@ describe("opencode layout", () => {
 			new UserMessageComponent("hello world", false, undefined, omp).render(60)[0]!,
 		);
 		expect(plain).not.toContain("│");
+	});
+
+	it("keeps the OSC-8 file link in a collapsed write row", () => {
+		settings.override("tui.hyperlinks", "always");
+		try {
+			const resolvedPath = path.resolve("/workspace/src/example.ts");
+			const component = new ToolExecutionComponent(
+				"write",
+				{ file_path: "src/example.ts", content: "hello\n" },
+				{ layout: opencode },
+				undefined,
+				ui,
+				process.cwd(),
+			);
+			component.updateResult(
+				{ content: [{ type: "text", text: "Wrote 1 lines" }], details: { resolvedPath } },
+				false,
+			);
+
+			const rows = component.render(120).filter(line => /\S/.test(stripVTControlCharacters(line)));
+			expect(rows).toHaveLength(1);
+			// The dim restyle must retain the renderer's own OSC-8 link — same
+			// URI the framed header carried (write links details.resolvedPath).
+			expect(rows[0]).toContain(url.pathToFileURL(resolvedPath).href);
+			expect(rows[0]).toContain("\x1b]8;;");
+			expect(stripVTControlCharacters(rows[0]!)).toContain("example.ts");
+		} finally {
+			settings.clearOverride("tui.hyperlinks");
+		}
+	});
+
+	it("normalizes tabs so a collapsed row stays one clean line", () => {
+		// Framed (self-drawing) renderers pass their rows through verbatim —
+		// truncateToWidth's short-string fast path preserves a raw `\t` — so the
+		// collapse restyle is the last place that can normalize it.
+		const tool: MultiLineTool = {
+			name: "custom_render",
+			label: "Custom",
+			mergeCallAndResult: true,
+			renderResult() {
+				return markFramedBlockComponent({
+					render: () => ["HEAD\tLINE ok", "DETAIL-1"],
+					invalidate() {},
+				}) as unknown as Text;
+			},
+		};
+		const component = makeComponent(tool, opencode);
+		component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		const rows = component.render(80).filter(line => /\S/.test(stripVTControlCharacters(line)));
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).not.toContain("\t");
+		expect(stripVTControlCharacters(rows[0]!)).toContain(replaceTabs("HEAD\tLINE ok"));
 	});
 
 	it("keys CachedOutputBlock on the explicit flat option", () => {

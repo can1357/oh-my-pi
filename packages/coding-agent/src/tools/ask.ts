@@ -1342,6 +1342,7 @@ export const askToolRenderer = {
 				state: "pending",
 				borderColor: "borderMuted",
 				width,
+				flat,
 			};
 		});
 	},

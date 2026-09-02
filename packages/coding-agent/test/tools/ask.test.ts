@@ -1476,6 +1476,31 @@ describe("AskTool option markers", () => {
 	});
 });
 
+describe("askToolRenderer opencode flat layout", () => {
+	it("renders the single-question call flat (no frame glyphs)", async () => {
+		const theme = darkTheme;
+		const args = { question: "Continue with the plan?", options: [{ label: "Yes" }, { label: "No" }] };
+		const framed = stripAnsi(
+			askToolRenderer.renderCall(args, { expanded: true, isPartial: false }, theme!).render(120).join("\n"),
+		);
+		const flatLines = askToolRenderer
+			.renderCall(args, { expanded: true, isPartial: false, renderContext: { flat: true } }, theme!)
+			.render(120)
+			.map(stripAnsi);
+
+		// Sanity: the default layout draws the frame these assertions key on.
+		expect(framed).toContain(theme!.boxRound.topLeft);
+		// Flat: no border rows anywhere, and the first visible row is the Ask
+		// status line — the one-line preview a collapsed pending question shows.
+		const flat = flatLines.join("\n");
+		expect(flat).not.toContain(theme!.boxRound.topLeft);
+		expect(flat).not.toContain(theme!.boxRound.vertical);
+		expect(flat).not.toContain(theme!.boxRound.bottomLeft);
+		expect(flatLines.find(line => /\S/.test(line))).toContain("Ask");
+		expect(flat).toContain("Continue with the plan?");
+	});
+});
+
 describe("askToolRenderer malformed call args", () => {
 	it("renders double-encoded questions string instead of crashing the TUI", async () => {
 		const theme = darkTheme;
