@@ -16,6 +16,7 @@ import type {
 	TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import {
+	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
 	snapshotAttachmentState,
@@ -919,7 +920,14 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	}
 	// A relay-requested detach is attributed explicitly so the bridge can
 	// reconcile the stale snapshot instead of treating it as a user cancel.
-	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+	// A fresh user cancellation / DevTools takeover wins even when it races an
+	// in-flight relay detach. Consume the stale marker, but report user intent to
+	// the bridge so it bans/retracts the tab instead of reattaching it.
+	const relayInitiated = consumeRelayInitiatedDetach(
+		relayInitiatedDetachTabs,
+		source.tabId,
+		reason,
+	);
 	if (!relayInitiated && pendingAttachTabs.has(source.tabId))
 		canceledPendingAttachTabs.add(source.tabId);
 	void forgetRecoverable(source.tabId);

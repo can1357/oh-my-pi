@@ -58,6 +58,11 @@ class AttachmentGuard {
 function noteAttachmentStateChange(epochs, tabId) {
   epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
+function consumeRelayInitiatedDetach(markedTabs, tabId, reason) {
+  const relayMarked = markedTabs.delete(tabId);
+  const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
+  return relayMarked && !userDetach;
+}
 function snapshotAttachmentState(epochs, tabIds) {
   const snapshot = new Map;
   for (const tabId of tabIds)
@@ -658,7 +663,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     refreshHello();
     return;
   }
-  const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+  const relayInitiated = consumeRelayInitiatedDetach(relayInitiatedDetachTabs, source.tabId, reason);
   if (!relayInitiated && pendingAttachTabs.has(source.tabId))
     canceledPendingAttachTabs.add(source.tabId);
   forgetRecoverable(source.tabId);
