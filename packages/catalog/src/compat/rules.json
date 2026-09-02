@@ -49,6 +49,7 @@
 		"providers/kimi-code.kdl",
 		"providers/llama.cpp.kdl",
 		"providers/lm-studio.kdl",
+		"providers/merge-gateway.kdl",
 		"providers/meta.kdl",
 		"providers/minimax-code-cn.kdl",
 		"providers/minimax-code.kdl",
@@ -9088,6 +9089,26 @@
 				],
 				"wire": {
 					"supportsNamedToolChoice": false
+				}
+			},
+			{
+				"source": "providers/merge-gateway.kdl:6",
+				"class": "deepseek",
+				"providers": [
+					"merge-gateway"
+				],
+				"wire": {
+					"streamMarkupHealingPattern": "dsml"
+				}
+			},
+			{
+				"source": "providers/merge-gateway.kdl:3",
+				"providers": [
+					"merge-gateway"
+				],
+				"wire": {
+					"trustExplicitThinkingOnly": true,
+					"requiresStructuredOutputHardening": true
 				}
 			},
 			{

@@ -41,6 +41,8 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/** When true, same-id dynamic rows replace lower-precedence metadata instead of being field-merged. */
+	dynamicModelsReplaceExisting?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
@@ -310,9 +312,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
-	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);
+	const replaceDynamicModels = options.dynamicModelsReplaceExisting ?? false;
+	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels, replaceDynamicModels);
 	const mergedWithModelsDev = mergeDynamicModels(mergedWithCache, modelsDevModels);
-	const mergedModels = mergeDynamicModels(mergedWithModelsDev, dynamicModels);
+	const mergedModels = mergeDynamicModels(mergedWithModelsDev, dynamicModels, replaceDynamicModels);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
@@ -355,7 +358,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
 			const fallbackSnapshotModels = collapseBuiltVariants(
-				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
+				mergeDynamicModels(
+					mergeDynamicModels(staticModels, latestCacheModels, replaceDynamicModels),
+					modelsDevModels,
+				),
 			);
 			writeModelCache(
 				cacheProviderId,
@@ -470,6 +476,7 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 function mergeDynamicModels<TApi extends Api>(
 	baseModels: readonly Model<TApi>[],
 	dynamicModels: readonly Model<TApi>[],
+	replaceExisting = false,
 ): Model<TApi>[] {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
@@ -486,7 +493,7 @@ function mergeDynamicModels<TApi extends Api>(
 			merged.set(dynamicModel.id, dynamicModel);
 			continue;
 		}
-		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel));
+		merged.set(dynamicModel.id, replaceExisting ? dynamicModel : mergeDynamicModel(existingModel, dynamicModel));
 	}
 	return Array.from(merged.values());
 }

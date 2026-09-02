@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Merge Gateway can now be connected with `/login merge-gateway` or `MERGE_GATEWAY_API_KEY`, exposing its coding-agent-compatible catalog; schema-bound Merge subagents fail closed and use yield-only correction after invalid results.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

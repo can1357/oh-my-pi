@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `createToolBatchAbortScope` extension point so hosts can cancel pending sibling tool calls after a batch-level failure.
+
 ## [18.1.2] - 2026-09-01
 
 ### Fixed

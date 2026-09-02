@@ -1,0 +1,9 @@
+// Merge Gateway preserves route-authored thinking metadata and serves DeepSeek through DSML templates.
+
+provider "merge-gateway" {
+	trust-explicit-thinking-only #true
+	requires-structured-output-hardening #true
+	class "deepseek" {
+		stream-markup-healing-pattern "dsml"
+	}
+}

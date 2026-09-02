@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added API-key login and validation for Merge Gateway.
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed

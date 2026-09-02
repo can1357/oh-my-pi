@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { Model } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -29,6 +32,24 @@ const AGENT: AgentDefinition = {
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
+
+type FallbackTestModel = {
+	provider: string;
+	id: string;
+	compat: { requiresStructuredOutputHardening?: boolean };
+	reasoning?: boolean;
+	thinking?: { mode: "effort"; efforts: string[] };
+	contextWindow?: number;
+	contextPromotionTarget?: string;
+};
+
+function fallbackTestModel(provider: string, id: string, requiresHardening = false): FallbackTestModel {
+	return {
+		provider,
+		id,
+		compat: requiresHardening ? { requiresStructuredOutputHardening: true } : {},
+	};
+}
 
 function session(
 	options: {
@@ -119,6 +140,427 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
+	});
+
+	it("applies fail-closed yield-only correction only when resolved policy requires it", () => {
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(true, true, "permissive")).toEqual({
+			mode: "strict",
+			failureToolNames: ["yield"],
+		});
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(false, true, "permissive")).toEqual({
+			mode: "permissive",
+			failureToolNames: undefined,
+		});
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(true, undefined, undefined)).toEqual({
+			mode: undefined,
+			failureToolNames: undefined,
+		});
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(true, null, "permissive")).toEqual({
+			mode: "permissive",
+			failureToolNames: undefined,
+		});
+		expect(() => executorModule.resolveStructuredOutputHarnessPolicy(true, false, "permissive")).toThrow(
+			"Invalid strict effective output schema",
+		);
+		expect(() => executorModule.resolveStructuredOutputHarnessPolicy(true, "{", "permissive")).toThrow(
+			"Invalid strict effective output schema",
+		);
+		expect(
+			executorModule.isOutputSchemaCorrectionLock({
+				type: "session_init",
+				outputSchemaCorrectionLocked: true,
+			}),
+		).toBe(true);
+		expect(executorModule.isOutputSchemaCorrectionLock({ type: "session_init" })).toBe(false);
+		expect(
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening: true,
+				prewalkMayRequireHardening: false,
+			}),
+		).toBe(true);
+		expect(
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening: false,
+				prewalkMayRequireHardening: true,
+			}),
+		).toBe(true);
+	});
+
+	it("finds structured-output hardening through nested exact-model fallback chains", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"openrouter/b": fallbackTestModel("openrouter", "b"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["openrouter/b"],
+				"openrouter/b": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(true);
+	});
+
+	it("stops nested fallback traversal at unauthenticated intermediate models", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"openrouter/b": fallbackTestModel("openrouter", "b"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async (model: FallbackTestModel) => (model.provider === "openrouter" ? undefined : "key"),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["openrouter/b"],
+				"openrouter/b": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("treats credential resolver failures as unavailable fallbacks", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async (model: FallbackTestModel) => {
+				if (model.provider === "merge-gateway") throw new Error("credential resolver failed");
+				return "anthropic-key";
+			},
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("ignores configured fallback chains when runtime model fallback is disabled", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.modelFallback": false,
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("ignores hardening fallbacks above the spawn effort ceiling", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": {
+				...fallbackTestModel("merge-gateway", "c", true),
+				thinking: { mode: "effort", efforts: ["high"] },
+				reasoning: true,
+			},
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+				effortCeiling: Effort.Low,
+			}),
+		).toBe(false);
+	});
+
+	it("ignores authenticated hardening fallbacks from disabled providers", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			disabledProviders: ["merge-gateway"],
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("does not harden an authenticated primary when its hardening fallback lacks credentials", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async (model: FallbackTestModel) => (model.provider === "openai" ? "openai-key" : undefined),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		const fallbackMayRequireHardening = await executorModule.reachableModelMayRequireStructuredOutputHardening({
+			settings,
+			modelRegistry,
+			initialSelector: "openai/a",
+			normalizedOutputSchema: { type: "object" },
+			roleHint: undefined,
+		});
+		expect(fallbackMayRequireHardening).toBe(false);
+		expect(
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening,
+				prewalkMayRequireHardening: false,
+			}),
+		).toBe(false);
+	});
+
+	it("hardens an armed prewalk target whose runtime fallback requires it", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openrouter/b": fallbackTestModel("openrouter", "b"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openrouter/b": ["merge-gateway/c"],
+			},
+		});
+		const prewalkMayRequireHardening = await executorModule.reachableModelMayRequireStructuredOutputHardening({
+			settings,
+			modelRegistry,
+			initialSelector: "openrouter/b",
+			normalizedOutputSchema: { type: "object" },
+			roleHint: undefined,
+		});
+		expect(prewalkMayRequireHardening).toBe(true);
+		expect(
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening: false,
+				prewalkMayRequireHardening,
+			}),
+		).toBe(true);
+	});
+
+	it("hardens an authenticated context-promotion target", async () => {
+		const currentModel = {
+			...fallbackTestModel("openai", "a"),
+			contextWindow: 100,
+			contextPromotionTarget: "merge-gateway/c",
+		};
+		const promotionTarget = {
+			...fallbackTestModel("merge-gateway", "c", true),
+			contextWindow: 200,
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) =>
+				[currentModel, promotionTarget].find(model => model.provider === provider && model.id === id),
+			getAvailable: () => [currentModel, promotionTarget],
+			getApiKey: async (model: FallbackTestModel) => (model.provider === "merge-gateway" ? "merge-key" : undefined),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"contextPromotion.enabled": true,
+			"retry.modelFallback": false,
+		});
+		const reachableModelMayRequireHardening = await executorModule.reachableModelMayRequireStructuredOutputHardening({
+			settings,
+			modelRegistry,
+			initialSelector: "openai/a",
+			normalizedOutputSchema: { type: "object" },
+			roleHint: undefined,
+		});
+		expect(reachableModelMayRequireHardening).toBe(true);
+		expect(
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: currentModel as Model,
+				fallbackMayRequireHardening: reachableModelMayRequireHardening,
+				prewalkMayRequireHardening: false,
+			}),
+		).toBe(true);
+	});
+
+	it("follows context promotion after a runtime fallback switch", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": { ...fallbackTestModel("openai", "a"), contextWindow: 100 },
+			"openrouter/b": {
+				...fallbackTestModel("openrouter", "b"),
+				contextWindow: 120,
+				contextPromotionTarget: "merge-gateway/c",
+			},
+			"merge-gateway/c": { ...fallbackTestModel("merge-gateway", "c", true), contextWindow: 200 },
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getAvailable: () => Object.values(models),
+			getApiKey: async (model: FallbackTestModel) =>
+				model.provider === "openrouter" || model.provider === "merge-gateway" ? "key" : undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"contextPromotion.enabled": true,
+			"retry.fallbackChains": {
+				"openai/a": ["openrouter/b"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(true);
+	});
+
+	it("expands provider wildcards before following nested model-key chains", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"openrouter/a": fallbackTestModel("openrouter", "a"),
+			"merge-gateway/a": fallbackTestModel("merge-gateway", "a", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["openrouter/*"],
+				"openrouter/a": ["merge-gateway/a"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(true);
+	});
+
+	it("skips credential-backed reachability for schema-less tasks", async () => {
+		const getApiKey = vi.fn(async () => "merge-key");
+		const modelRegistry = {
+			find: () => fallbackTestModel("merge-gateway", "c", true),
+			hasProvider: () => true,
+			getApiKey,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				normalizedOutputSchema: undefined,
+				roleHint: undefined,
+			}),
+		).toBe(false);
+		expect(getApiKey).not.toHaveBeenCalled();
+	});
+
+	it("tolerates malformed fallback chains with an incomplete model-registry test double", async () => {
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				default: [123],
+				broken: "not-an-array",
+			} as never,
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry: {} as ModelRegistry,
+				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(false);
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {

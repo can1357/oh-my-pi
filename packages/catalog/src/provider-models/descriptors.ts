@@ -7,6 +7,7 @@
  */
 import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } from "./descriptor-types";
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
+import { mergeGatewayModelManagerOptions } from "./merge-gateway";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	aiandModelManagerOptions,
@@ -284,6 +285,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["LM_STUDIO_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => lmStudioModelManagerOptions(config),
 		allowUnauthenticated: true,
+	},
+	{
+		id: "merge-gateway",
+		defaultModel: "openai/gpt-5.6-sol",
+		envVars: ["MERGE_GATEWAY_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => mergeGatewayModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Merge Gateway" },
 	},
 	{
 		id: "minimax",

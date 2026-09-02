@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Merge Gateway as a dynamically discovered provider with separate native capability declarations and OMP compatibility policy for pricing, limits, vision, reasoning, tools, structured output, streaming, zero-data retention, and DeepSeek DSML recovery.
+
 ## [18.1.3] - 2026-09-02
 
 ### Added

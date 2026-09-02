@@ -7,22 +7,13 @@
 import { modelLimitsFor, pricingPeerFor } from "../src/compat/behavior";
 import { isCollapsedVariantSpec } from "../src/compat/collapse";
 import { resolveModelPolicy } from "../src/compat/resolve";
-import { compareRevision, parseRevision } from "../src/compat/revision";
-import { classifyModel } from "../src/compat/taxonomy";
 import { resolveCursorInput } from "../src/discovery/cursor";
-import { bareModelId, getLongestModelLikeIdSegment } from "../src/identity/id";
+import { getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
 import { isOllamaCloudOutputCapped, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS } from "../src/provider-models/ollama";
 import { ALIBABA_TOKEN_PLAN_STATIC_MODELS } from "../src/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { buildCanonicalModelIndex, buildCanonicalReferenceData } from "./equivalence";
-
-function revisionsEqual(left: string | undefined, right: string): boolean {
-	if (left === undefined) return false;
-	const parsedLeft = parseRevision(left);
-	const parsedRight = parseRevision(right);
-	return parsedLeft !== undefined && parsedRight !== undefined && compareRevision(parsedLeft, parsedRight) === 0;
-}
 
 const CLOUDFLARE_AI_GATEWAY_BASE_URL = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic";
 
@@ -103,6 +94,17 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isCollapsedVariantSpec(model)) return;
+	if (model.thinking) {
+		const explicitPolicy = resolveModelPolicy(model);
+		if (
+			explicitPolicy.compat !== undefined &&
+			"trustExplicitThinkingOnly" in explicitPolicy.compat &&
+			explicitPolicy.compat.trustExplicitThinkingOnly === true
+		) {
+			model.thinking = explicitPolicy.thinking;
+			return;
+		}
+	}
 	if (
 		model.compat &&
 		"thinkingFormat" in model.compat &&
@@ -126,54 +128,6 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 		model.thinking = requiresProviderAuthoredEffort ? { ...thinking, requiresEffort: true } : thinking;
 	} else {
 		delete model.thinking;
-	}
-}
-
-/**
- * Link OpenAI model variants to their context promotion targets.
- *
- * When a model's context is exhausted, the agent can promote to a sibling model
- * on the same provider:
- * - `codex-spark` variants promote to the full `gpt-5.5`.
- * - every `gpt-5.5` flavor (base, `-pro`, `-instant`, dated snapshots, and
- *   namespaced ids like `openai/gpt-5.5`) promotes to its `gpt-5.4` sibling.
- *
- * The sibling is resolved by parsed version + matching provider/api, not a
- * hardcoded bare id, so namespaced (`openrouter/openai/gpt-5.4`), dotted
- * (`amazon-bedrock` `openai.gpt-5.4`), and dated (`gpt-5.4-2026-03-05`) ids all
- * link. The runtime still gates on the target actually being larger
- * (`#resolveContextPromotionTarget`), so an equal/smaller sibling is a harmless
- * no-op rather than a counterproductive switch.
- */
-export function linkOpenAIPromotionTargets(models: ModelSpec<Api>[]): void {
-	for (const candidate of models) {
-		const candidateIdentity = classifyModel(candidate.provider, candidate.id, { lenient: true });
-		if (candidateIdentity.class !== "openai") continue;
-		let targetVersion: string | undefined;
-		if (candidateIdentity.family === "codex-spark") {
-			targetVersion = "5.5";
-		} else if (revisionsEqual(candidateIdentity.revision, "5.5")) {
-			targetVersion = "5.4";
-		} else {
-			continue;
-		}
-		// Prefer the plainest sibling id (shortest bare segment) so the base model
-		// wins over `-pro`/`-mini`/`-nano` siblings that parse to the same version.
-		let fallback: ModelSpec<Api> | undefined;
-		let fallbackBareLength = Number.POSITIVE_INFINITY;
-		for (const model of models) {
-			if (model === candidate) continue;
-			if (model.provider !== candidate.provider || model.api !== candidate.api) continue;
-			const identity = classifyModel(model.provider, model.id, { lenient: true });
-			if (identity.class !== "openai" || !revisionsEqual(identity.revision, targetVersion)) continue;
-			const bareLength = bareModelId(model.id).length;
-			if (bareLength < fallbackBareLength) {
-				fallback = model;
-				fallbackBareLength = bareLength;
-			}
-		}
-		if (!fallback) continue;
-		candidate.contextPromotionTarget = `${fallback.provider}/${fallback.id}`;
 	}
 }
 

@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Effort, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -50,9 +50,22 @@ import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import {
+	findRetryFallbackCandidates,
+	getRetryFallbackChains,
+	parseRetryFallbackSelector,
+	resolveRetryFallbackChainKey,
+} from "../session/retry-fallback-chains";
+import { resolveContextPromotionConfiguredTarget } from "../session/role-models";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
+import {
+	type ConfiguredThinkingLevel,
+	modelSupportsEffortCeiling,
+	prewalkWouldBeNoop,
+	resolveTaskEffortLevel,
+	type TaskEffort,
+} from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -91,6 +104,30 @@ export type { YieldItem } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
+export interface StructuredOutputHarnessPolicy {
+	mode: StructuredSubagentSchemaMode | undefined;
+	failureToolNames: readonly string[] | undefined;
+}
+/** Schema-bearing agents with a resolved hardening policy fail closed after the first invalid result. */
+export function resolveStructuredOutputHarnessPolicy(
+	requiresStructuredOutputHardening: boolean,
+	outputSchema: unknown,
+	requestedMode: StructuredSubagentSchemaMode | undefined,
+): StructuredOutputHarnessPolicy {
+	const { normalized, error } = normalizeSchema(outputSchema);
+	if (!requiresStructuredOutputHardening || (normalized === undefined && error === undefined)) {
+		return { mode: requestedMode, failureToolNames: undefined };
+	}
+	if (error) throw new Error(`Invalid strict effective output schema: ${error}`);
+	if (requestedMode !== "strict") {
+		const { error } = buildOutputValidator(outputSchema);
+		if (error) throw new Error(`Invalid strict effective output schema: ${error}`);
+	}
+	return { mode: "strict", failureToolNames: ["yield"] };
+}
+export function isOutputSchemaCorrectionLock(entry: { type: string; outputSchemaCorrectionLocked?: boolean }): boolean {
+	return entry.type === "session_init" && entry.outputSchemaCorrectionLocked === true;
+}
 
 /**
  * Soft per-agent request budgets (assistant requests per run). Crossing the
@@ -162,6 +199,26 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.split(",")
 		.map(entry => entry.trim())
 		.filter(Boolean);
+}
+export function modelRequiresStructuredOutputHardening(model: Model<Api> | undefined): boolean {
+	const compat = model?.compat;
+	return (
+		compat !== undefined &&
+		"requiresStructuredOutputHardening" in compat &&
+		compat.requiresStructuredOutputHardening === true
+	);
+}
+
+export function structuredOutputHardeningMayApply(args: {
+	actualModel: Model<Api> | undefined;
+	fallbackMayRequireHardening: boolean;
+	prewalkMayRequireHardening: boolean;
+}): boolean {
+	return (
+		modelRequiresStructuredOutputHardening(args.actualModel) ||
+		args.fallbackMayRequireHardening ||
+		args.prewalkMayRequireHardening
+	);
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
@@ -281,6 +338,111 @@ function installSubagentRetryFallbackChain(args: {
 	}
 	settings.override("retry.fallbackChains", fallbackChains);
 	return role;
+}
+export async function reachableModelMayRequireStructuredOutputHardening(args: {
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	initialSelector: string | undefined;
+	roleHint: string | undefined;
+	normalizedOutputSchema: unknown;
+	effortCeiling?: Effort;
+}): Promise<boolean> {
+	const { settings, modelRegistry, initialSelector, roleHint, effortCeiling, normalizedOutputSchema } = args;
+	if (normalizedOutputSchema === undefined || !initialSelector) return false;
+	const fallbackEnabled = settings.get("retry.modelFallback");
+	const promotionEnabled = settings.get("contextPromotion.enabled") === true;
+	if (!fallbackEnabled && !promotionEnabled) return false;
+	if (
+		typeof modelRegistry.find !== "function" ||
+		typeof modelRegistry.getApiKey !== "function" ||
+		(fallbackEnabled && typeof modelRegistry.hasProvider !== "function") ||
+		(promotionEnabled && typeof modelRegistry.getAvailable !== "function")
+	) {
+		return false;
+	}
+	const disabledProviders = new Set(settings.get("disabledProviders"));
+	const chains = fallbackEnabled ? getRetryFallbackChains(settings) : {};
+	const availableModels = promotionEnabled ? modelRegistry.getAvailable() : [];
+	const context = {
+		chains,
+		getModelRole: (role: string) => settings.getModelRole(role),
+		modelLookup: modelRegistry,
+	};
+	const hasUsableCredential = async (candidate: Model<Api>): Promise<boolean> => {
+		try {
+			return Boolean(await modelRegistry.getApiKey(candidate));
+		} catch {
+			return false;
+		}
+	};
+	const queue: Array<{
+		selector: string;
+		roleHint?: string;
+		isFallback: boolean;
+		credentialVerified: boolean;
+	}> = [{ selector: initialSelector, roleHint, isFallback: false, credentialVerified: false }];
+	const seen = new Set<string>();
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		const visitKey = `${current.selector}\u0000${current.roleHint ?? ""}\u0000${current.isFallback ? "fallback" : "root"}`;
+		if (seen.has(visitKey)) continue;
+		seen.add(visitKey);
+		const parsed = parseRetryFallbackSelector(current.selector, modelRegistry);
+		const currentModel = parsed ? modelRegistry.find(parsed.provider, parsed.id) : undefined;
+		if (currentModel && disabledProviders.has(currentModel.provider)) continue;
+		if (
+			current.isFallback &&
+			currentModel &&
+			effortCeiling !== undefined &&
+			!modelSupportsEffortCeiling(currentModel, effortCeiling)
+		) {
+			continue;
+		}
+		if (current.isFallback && !currentModel) continue;
+		const requiresHardening = modelRequiresStructuredOutputHardening(currentModel);
+		const requiresCredential = current.isFallback || current.credentialVerified || requiresHardening;
+		const credentialAvailable =
+			currentModel && requiresCredential
+				? current.credentialVerified || (await hasUsableCredential(currentModel))
+				: false;
+		if (current.isFallback && !credentialAvailable) continue;
+		if (requiresHardening && credentialAvailable) return true;
+		if (promotionEnabled && currentModel) {
+			const contextWindow = currentModel.contextWindow ?? 0;
+			const target =
+				contextWindow > 0 ? resolveContextPromotionConfiguredTarget(currentModel, availableModels) : undefined;
+			if (
+				target &&
+				(target.provider !== currentModel.provider || target.id !== currentModel.id) &&
+				target.contextWindow != null &&
+				target.contextWindow > contextWindow &&
+				(await hasUsableCredential(target))
+			) {
+				if (modelRequiresStructuredOutputHardening(target)) return true;
+				queue.push({
+					selector: formatModelStringWithRouting(target),
+					isFallback: false,
+					credentialVerified: true,
+				});
+			}
+		}
+		const chainKey = fallbackEnabled
+			? resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint)
+			: undefined;
+		const candidates = chainKey
+			? findRetryFallbackCandidates(context, chainKey, current.selector, currentModel, {
+					allowMissingPrimary: true,
+				})
+			: [];
+		for (const candidate of candidates) {
+			queue.push({
+				selector: candidate.raw,
+				isFallback: true,
+				credentialVerified: false,
+			});
+		}
+	}
+	return false;
 }
 
 export interface IrcPeerRosterRow {
@@ -2372,6 +2534,8 @@ export interface IrcWakeTurnMonitorOptions {
 	maxRuntimeMs?: number;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Live schema mode resolver for kept-alive turns whose model can change after installation. */
+	getOutputSchemaMode?: () => StructuredSubagentSchemaMode | undefined;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
 }
@@ -2469,7 +2633,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					modelOverride: options.modelOverride,
 					modelRole: options.modelRole,
 					outputSchema: options.outputSchema,
-					outputSchemaMode: options.outputSchemaMode,
+					outputSchemaMode: options.getOutputSchemaMode?.() ?? options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
 					artifactsDir: options.artifactsDir,
 					eventBus: options.eventBus,
@@ -2755,6 +2919,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	let effectiveOutputSchemaMode = options.outputSchemaMode;
+	let resolveOutputSchemaFailurePolicy: CreateAgentSessionOptions["resolveOutputSchemaFailurePolicy"];
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
@@ -2913,7 +3079,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
 			outputSchema,
-			outputSchemaMode: options.outputSchemaMode,
+			outputSchemaMode: effectiveOutputSchemaMode,
+			getOutputSchemaMode: () => effectiveOutputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
 			artifactsDir: options.artifactsDir,
 		});
@@ -3008,6 +3175,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			const retryFallbackCandidates = resolveSubagentRetryFallbackCandidates(
+				modelPatterns,
+				modelRegistry,
+				subagentSettings,
+			);
+			const { normalized: normalizedOutputSchema, error: outputSchemaError } = normalizeSchema(outputSchema);
+			if (outputSchemaError) throw new Error(`Invalid output schema: ${outputSchemaError}`);
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -3025,7 +3199,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+				candidates: retryFallbackCandidates,
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
@@ -3035,6 +3209,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					role: retryFallbackRole,
 					requested: modelPatterns,
 				});
+			}
+			const selectedFallbackCandidate = retryFallbackCandidates.find(
+				candidate => candidate.model.provider === model?.provider && candidate.model.id === model?.id,
+			);
+			const initialFallbackSelector =
+				selectedFallbackCandidate?.selector ?? (model ? formatModelStringWithRouting(model) : modelPatterns[0]);
+			const prewalkPattern = resolveAgentPrewalkPattern({
+				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
+				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
+			});
+			let prewalkTarget: Model<Api> | undefined;
+			let prewalkThinkingLevel: ConfiguredThinkingLevel | undefined;
+			let prewalkWarning: string | undefined;
+			if (prewalkPattern) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
+				prewalkTarget = resolvedPrewalk.model;
+				prewalkThinkingLevel = resolvedPrewalk.thinkingLevel;
+				prewalkWarning = resolvedPrewalk.warning;
 			}
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
@@ -3080,21 +3273,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
-			});
 			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+				if (!prewalkTarget || !modelRegistry.hasConfiguredAuth(prewalkTarget)) {
 					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
 						agent: agent.name,
 						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
+						warning: prewalkWarning,
 					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, prewalkTarget, prewalkThinkingLevel)) {
 					// Same model AND same effective thinking level: switching would only
 					// inject the plan/checklist nudges for no gain — skip. An effort-only
 					// delta on the same model still arms (it is a real cheapening hand-off).
@@ -3103,8 +3289,62 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						pattern: prewalkPattern,
 					});
 				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+					prewalk = { target: prewalkTarget, thinkingLevel: prewalkThinkingLevel };
 				}
+			}
+			let requiresStructuredOutputHardening = false;
+			if (normalizedOutputSchema !== undefined) {
+				const prewalkMayRequireHardening =
+					prewalk !== undefined &&
+					(modelRequiresStructuredOutputHardening(prewalk.target) ||
+						(await reachableModelMayRequireStructuredOutputHardening({
+							settings: subagentSettings,
+							modelRegistry,
+							initialSelector: formatModelStringWithRouting(prewalk.target),
+							normalizedOutputSchema,
+							roleHint: prewalkPattern
+								? resolveExplicitModelRole([prewalkPattern], subagentSettings)
+								: undefined,
+							effortCeiling: spawnEffortCeiling,
+						})));
+				const fallbackInitialSelector =
+					authFallbackUsed && model ? formatModelStringWithRouting(model) : initialFallbackSelector;
+				const fallbackRoleHint = authFallbackUsed ? undefined : (retryFallbackRole ?? modelRole);
+				requiresStructuredOutputHardening = structuredOutputHardeningMayApply({
+					actualModel: model,
+					fallbackMayRequireHardening: await reachableModelMayRequireStructuredOutputHardening({
+						settings: subagentSettings,
+						modelRegistry,
+						initialSelector: fallbackInitialSelector,
+						roleHint: fallbackRoleHint,
+						normalizedOutputSchema,
+						effortCeiling: spawnEffortCeiling,
+					}),
+					prewalkMayRequireHardening,
+				});
+			}
+			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
+				requiresStructuredOutputHardening,
+				outputSchema,
+				options.outputSchemaMode,
+			);
+			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
+			if (normalizedOutputSchema !== undefined) {
+				resolveOutputSchemaFailurePolicy = liveModel => {
+					if (!modelRequiresStructuredOutputHardening(liveModel)) {
+						effectiveOutputSchemaMode = options.outputSchemaMode;
+						return undefined;
+					}
+					effectiveOutputSchemaMode = "strict";
+					try {
+						const livePolicy = resolveStructuredOutputHarnessPolicy(true, outputSchema, options.outputSchemaMode);
+						return livePolicy.failureToolNames
+							? { mode: livePolicy.mode ?? "strict", toolNames: livePolicy.failureToolNames }
+							: undefined;
+					} catch {
+						return { mode: "strict", toolNames: ["yield"] };
+					}
+				};
 			}
 
 			const restrictToolNames = options.restrictToolNames === true;
@@ -3146,7 +3386,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
-			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 			// Root resolved by the latest roster ensure; the prompt callback renders
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
@@ -3158,6 +3397,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+				lockedInit?: { tools: string[]; outputSchemaFailureToolNames?: string[] },
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
@@ -3175,10 +3415,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
-				toolNames,
+				toolNames: lockedInit?.tools ?? toolNames,
 				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: options.restrictToolNames,
+				outputSchemaMode: effectiveOutputSchemaMode,
+				outputSchemaFailureToolNames: lockedInit?.outputSchemaFailureToolNames,
+				resolveOutputSchemaFailurePolicy: lockedInit ? undefined : resolveOutputSchemaFailurePolicy,
+				restrictToolNames: lockedInit ? true : options.restrictToolNames,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
@@ -3186,9 +3428,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
 				extensionRoots: options.extensionRoots,
-				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,
-				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
+				preloadedExtensionPaths: lockedInit || restrictToolNames ? [] : options.preloadedExtensionPaths,
+				preloadedPreparedExtensions: lockedInit || restrictToolNames ? [] : options.preloadedPreparedExtensions,
+				preloadedCustomToolPaths: lockedInit || restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
 					const ircRoster = ircEnabled
 						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
@@ -3226,12 +3468,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentId: id,
 				agentDisplayName: agent.name,
 				expectedAgentRef,
-				enableLsp: lspEnabled,
-				enableIrc: options.enableIrc,
+				enableLsp: lockedInit ? false : lspEnabled,
+				enableIrc: lockedInit ? false : options.enableIrc,
 				skipPythonPreflight,
-				enableMCP,
-				mcpManager,
-				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				enableMCP: lockedInit ? false : enableMCP,
+				mcpManager: lockedInit ? undefined : mcpManager,
+				customTools: !lockedInit && mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
@@ -3293,8 +3535,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 								AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
 						);
 					}
+					const lockedInit = reopened.getBranch().findLast(isOutputSchemaCorrectionLock);
 					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
+						buildSubagentSessionOptions(
+							reopened,
+							expectedAgentRef,
+							lockedInit?.type === "session_init" ? lockedInit : undefined,
+						),
 					);
 					// Re-run the executor's extension wiring on the rebuilt session.
 					// Skipping it leaves the runner pre-init, so a `tool_call` handler
@@ -3357,7 +3604,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
+				outputSchemaMode: effectiveOutputSchemaMode,
+				outputSchemaRequestedMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 			});
 
@@ -3633,7 +3881,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		modelOverride,
 		modelRole,
 		outputSchema,
-		outputSchemaMode: options.outputSchemaMode,
+		outputSchemaMode: effectiveOutputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
 		signal,
 		artifactsDir: options.artifactsDir,

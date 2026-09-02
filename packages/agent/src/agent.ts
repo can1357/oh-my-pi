@@ -304,6 +304,9 @@ export interface AgentOptions {
 	 * `undefined`.
 	 */
 	cwdResolver?: () => string | undefined;
+	/** Host-owned cancellation scope for sibling calls in one tool batch. */
+	createToolBatchAbortScope?: AgentLoopConfig["createToolBatchAbortScope"];
+
 	/**
 	 * Called after a tool call has been validated and is about to execute.
 	 * See {@link AgentLoopConfig.beforeToolCall} for full semantics.
@@ -401,6 +404,7 @@ export class Agent {
 	#cursorOnToolResult?: CursorToolResultHandler;
 	#cwd?: string;
 	#cwdResolver?: () => string | undefined;
+	#createToolBatchAbortScope?: AgentLoopConfig["createToolBatchAbortScope"];
 
 	#runningPrompt?: Promise<void>;
 	#resolveRunningPrompt?: () => void;
@@ -505,6 +509,7 @@ export class Agent {
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
+		this.#createToolBatchAbortScope = opts.createToolBatchAbortScope;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
 		this.transformAssistantMessage = opts.transformAssistantMessage;
@@ -1467,6 +1472,7 @@ export class Agent {
 			dialect: this.#dialect,
 			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
 			appendOnlyContext: this.#appendOnlyContext,
+			createToolBatchAbortScope: this.#createToolBatchAbortScope,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
 			transformAssistantMessage: this.transformAssistantMessage

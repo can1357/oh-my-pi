@@ -241,6 +241,8 @@ export interface ToolSession {
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Called after schema-invalid yield; true means correction tools were permanently constrained. */
+	onOutputSchemaValidationFailure?: () => boolean | Promise<boolean>;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Session starts with a prewalk hand-off armed. Keeps `todo` in yield-gated

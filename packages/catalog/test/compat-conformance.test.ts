@@ -10,6 +10,8 @@ import models from "../src/models.json";
  * Additions require a comment naming the runtime path that resolves them.
  */
 const RUNTIME_ONLY_PROVIDERS = new Set([
+	// Authenticated Merge model-manager discovery; account-specific rows are never bundled.
+	"merge-gateway",
 	"kimi-search",
 	"ollama",
 	"siliconflow",

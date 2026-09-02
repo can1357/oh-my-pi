@@ -1356,6 +1356,161 @@ describe("agentLoop with AgentMessage", () => {
 		expect(turnEndEvent.toolResults.map(result => result.toolCallId)).toEqual(["tool-2", "tool-1"]);
 	});
 
+	it("aborts running and queued non-exempt siblings when the host locks a tool batch", async () => {
+		const schema = type({});
+		const slowStarted = Promise.withResolvers<void>();
+		let batchController: AbortController | undefined;
+		let slowAborted = false;
+		let writeExecuted = false;
+		const yieldTool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "yield",
+			label: "Yield",
+			description: "Validate the final result",
+			parameters: schema,
+			async execute() {
+				await slowStarted.promise;
+				batchController?.abort(new DOMException("Correction locked to yield", "AbortError"));
+				throw new Error("Output does not match schema");
+			},
+		};
+		const bashTool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: schema,
+			async execute(_toolCallId, _params, signal) {
+				slowStarted.resolve();
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener(
+					"abort",
+					() => {
+						slowAborted = true;
+						aborted.reject(signal.reason);
+					},
+					{ once: true },
+				);
+				await aborted.promise;
+				return { content: [{ type: "text", text: "unexpected" }], details: {} };
+			},
+		};
+		const writeTool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "write",
+			label: "Write",
+			description: "Write a file",
+			parameters: schema,
+			concurrency: "exclusive",
+			async execute() {
+				writeExecuted = true;
+				return { content: [{ type: "text", text: "unexpected" }], details: {} };
+			},
+		};
+		const context: AgentContext = {
+			systemPrompt: [""],
+			messages: [],
+			tools: [yieldTool, bashTool, writeTool],
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "yield-1", name: "yield", arguments: {} },
+						{ type: "toolCall", id: "bash-1", name: "bash", arguments: {} },
+						{ type: "toolCall", id: "write-1", name: "write", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			createToolBatchAbortScope: () => {
+				batchController = new AbortController();
+				return {
+					signal: batchController.signal,
+					shouldAbort: toolName => toolName !== "yield",
+				};
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("run")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		expect(slowAborted).toBe(true);
+		expect(writeExecuted).toBe(false);
+		const toolResults = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+		expect(toolResults.map(result => result.toolCallId)).toEqual(
+			expect.arrayContaining(["yield-1", "bash-1", "write-1"]),
+		);
+		expect(toolResults.find(result => result.toolCallId === "write-1")?.isError).toBe(true);
+	});
+
+	it("matches batch-abort exemptions against a resolved tool's canonical name", async () => {
+		const schema = type({});
+		const allowedStarted = Promise.withResolvers<void>();
+		const lockReached = Promise.withResolvers<void>();
+		let batchController: AbortController | undefined;
+		let allowedExecutions = 0;
+		const yieldTool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "yield",
+			label: "Yield",
+			description: "Lock correction tools",
+			parameters: schema,
+			async execute() {
+				await allowedStarted.promise;
+				batchController?.abort(new DOMException("Correction locked", "AbortError"));
+				lockReached.resolve();
+				throw new Error("Output does not match schema");
+			},
+		};
+		const allowedTool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "canonical_allowed",
+			customWireName: "wire_allowed",
+			label: "Allowed",
+			description: "Remain active during correction",
+			parameters: schema,
+			async execute(_toolCallId, _params, signal) {
+				allowedStarted.resolve();
+				await lockReached.promise;
+				signal?.throwIfAborted();
+				allowedExecutions++;
+				return { content: [{ type: "text", text: "allowed" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [yieldTool, allowedTool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "yield-alias", name: "yield", arguments: {} },
+						{ type: "toolCall", id: "allowed-alias", name: "wire_allowed", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			createToolBatchAbortScope: () => {
+				batchController = new AbortController();
+				return {
+					signal: batchController.signal,
+					shouldAbort: toolName => toolName !== "yield" && toolName !== "canonical_allowed",
+				};
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("run")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+		await stream.result();
+		expect(allowedExecutions).toBe(1);
+	});
+
 	it("resolves function-form concurrency per call", async () => {
 		const toolSchema = type({ value: "string", exclusive: "boolean?" });
 		const startTimes: Record<string, number> = {};

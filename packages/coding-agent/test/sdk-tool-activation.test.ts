@@ -161,6 +161,59 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("locks a schema-correction session to yield after its first invalid result", async () => {
+		const tempDir = makeTempDir();
+		const outputSchema = {
+			type: "object",
+			properties: { token: { type: "string", minLength: 3 } },
+			required: ["token"],
+		};
+		const codeModeModel: Model = {
+			...requireBundledModel("openai", "gpt-5"),
+			provider: "openai-codex",
+			toolMode: "code_mode_only",
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			model: codeModeModel,
+			settings: Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
+			outputSchema,
+			outputSchemaFailureToolNames: ["yield"],
+			requireYieldTool: true,
+		});
+		session.sessionManager.appendSessionInit({
+			systemPrompt: "structured worker",
+			task: "return structured data",
+			tools: session.getEnabledToolNames(),
+			outputSchema,
+			outputSchemaMode: "strict",
+		});
+
+		try {
+			expect(session.getActiveToolNames().some(name => name !== "yield")).toBe(true);
+			const yieldTool = session.getToolByName("yield");
+			expect(yieldTool).toBeDefined();
+			await expect(yieldTool!.execute("bad-yield", { result: { data: { token: "x" } } })).rejects.toThrow(
+				"Output does not match schema",
+			);
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+			expect(session.getActiveToolNames()).not.toContain("eval");
+			expect(session.getXdevToolEntries()).toEqual([]);
+			await session.setActiveToolsByName(["read", "yield"]);
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+			const persisted = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+			expect(persisted).toMatchObject({
+				type: "session_init",
+				tools: ["yield"],
+				outputSchemaCorrectionLocked: true,
+				restrictToolNames: true,
+				outputSchemaMode: "strict",
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("mounts discoverable tools under xd:// for explicit tool lists omitting write", async () => {
 		const tempDir = makeTempDir();
 
@@ -1832,6 +1885,23 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("does not re-add plan-mode write above an active tool ceiling", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["yield", "write"],
+			requireYieldTool: true,
+		});
+
+		try {
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.setActiveToolCeiling(["yield"]);
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("upgrades write explicitly selected by a runtime caller to filesystem access", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
@@ -2228,6 +2298,256 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			for (const provider of providers) modelRegistry.authStorage.removeRuntimeApiKey(provider);
 		}
 	};
+
+	it("aborts a running side-effect sibling after an invalid yield locks the active batch", async () => {
+		const tempDir = makeTempDir();
+		let sideEffectExecutions = 0;
+		const sideEffectTool = {
+			name: "sdk_side_effect",
+			label: "SDK Side Effect",
+			description: "Records a side effect",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _onUpdate, _ctx, signal) {
+				const aborted = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+				await aborted.promise;
+				sideEffectExecutions++;
+				return { content: [{ type: "text" as const, text: "unexpected" }], details: {} };
+			},
+		} satisfies CustomTool;
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				toolNames: ["yield", sideEffectTool.name],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				customTools: [sideEffectTool],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				outputSchemaFailureToolNames: ["yield"],
+				requireYieldTool: true,
+			});
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "yield-invalid",
+								name: "yield",
+								arguments: { result: { data: { token: "x" } } },
+							},
+							{
+								type: "toolCall",
+								id: "side-effect-queued",
+								name: sideEffectTool.name,
+								arguments: {},
+							},
+						],
+					},
+
+					{ content: ["done"] },
+				],
+			});
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("return structured output");
+				expect(sideEffectExecutions).toBe(0);
+				const sideEffectResult = session.messages.find(
+					message => message.role === "toolResult" && message.toolCallId === "side-effect-queued",
+				) as ToolResultMessage | undefined;
+				expect(sideEffectResult?.isError).toBe(true);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+	it("lets a live resolver clear an initial hardening policy before correction lock", async () => {
+		const tempDir = makeTempDir();
+		const hardeningModel: Model = {
+			...requireBundledModel("openai", "gpt-5"),
+			provider: "merge-gateway",
+			id: "initial-merge",
+		};
+		await withProviderAuth(["merge-gateway", "openai"], async () => {
+			const options = baseOptions(tempDir);
+			const nonHardeningModel = options.model;
+			if (!nonHardeningModel) throw new Error("Expected non-hardening model");
+			const { session } = await createAgentSession({
+				...options,
+				model: hardeningModel,
+				toolNames: ["yield", "write"],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				outputSchemaMode: "strict",
+				outputSchemaFailureToolNames: ["yield"],
+				resolveOutputSchemaFailurePolicy: model =>
+					model.provider === "merge-gateway" ? { mode: "strict", toolNames: ["yield"] } : undefined,
+				requireYieldTool: true,
+			});
+			try {
+				await session.setModel(nonHardeningModel);
+				const yieldTool = session.getToolByName("yield");
+				if (!yieldTool) throw new Error("Expected yield tool");
+				await expect(yieldTool.execute("bad-yield", { result: { data: { token: "x" } } })).rejects.toThrow(
+					"Output does not match schema",
+				);
+				expect(session.getActiveToolNames()).toContain("write");
+				expect(
+					session.sessionManager
+						.getBranch()
+						.findLast(entry => entry.type === "session_init" && entry.outputSchemaCorrectionLocked),
+				).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("applies correction policy against the live model after a runtime switch", async () => {
+		const tempDir = makeTempDir();
+		const runtimeModel: Model = {
+			...requireBundledModel("openai", "gpt-5"),
+			provider: "merge-gateway",
+			id: "runtime-merge",
+		};
+		const policyModels: string[] = [];
+		await withProviderAuth(["merge-gateway", "openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				toolNames: ["yield", "write"],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				resolveOutputSchemaFailurePolicy: model => {
+					policyModels.push(model.id);
+					return model.provider === "merge-gateway" ? { mode: "strict", toolNames: ["yield"] } : undefined;
+				},
+				requireYieldTool: true,
+			});
+			const initialModel = session.model;
+			if (!initialModel) throw new Error("Expected an initial model");
+			session.sessionManager.appendSessionInit({
+				systemPrompt: "structured worker",
+				task: "return structured data",
+				tools: session.getEnabledToolNames(),
+				outputSchemaMode: "permissive",
+			});
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "yield-invalid-runtime-switch",
+								name: "yield",
+								arguments: { result: { data: { token: "x" } } },
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.setModel(runtimeModel);
+				expect(policyModels.at(-1)).toBe(runtimeModel.id);
+				await session.prompt("return structured output");
+				expect(session.getActiveToolNames()).toEqual(["yield"]);
+				const init = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+				expect(init?.type === "session_init" ? init.outputSchemaMode : undefined).toBe("strict");
+				const policyCallCount = policyModels.length;
+				await session.setModel(initialModel);
+				const yieldTool = session.getToolByName("yield");
+				if (!yieldTool) throw new Error("Expected yield tool");
+				await expect(
+					yieldTool.execute("bad-yield-after-lock", { result: { data: { token: "x" } } }),
+				).rejects.toThrow("Output does not match schema");
+				expect(policyModels).toHaveLength(policyCallCount);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("keeps a same-batch sibling that remains in the correction allowlist", async () => {
+		const tempDir = makeTempDir();
+		let allowedExecutions = 0;
+		const lockReached = Promise.withResolvers<void>();
+		const allowedTool = {
+			name: "sdk_allowed_correction",
+			label: "SDK Allowed Correction",
+			description: "Completes an allowed correction",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _onUpdate, _ctx, signal) {
+				await lockReached.promise;
+				signal?.throwIfAborted();
+				allowedExecutions++;
+				return { content: [{ type: "text" as const, text: "allowed" }], details: {} };
+			},
+		} satisfies CustomTool;
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				toolNames: ["yield", allowedTool.name],
+				restrictToolNames: true,
+				allowRestrictedCustomTools: true,
+				customTools: [allowedTool],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				outputSchemaFailureToolNames: ["yield", allowedTool.name],
+				requireYieldTool: true,
+			});
+			const setActiveToolCeiling = session.setActiveToolCeiling.bind(session);
+			vi.spyOn(session, "setActiveToolCeiling").mockImplementation(async names => {
+				await setActiveToolCeiling(names);
+				lockReached.resolve();
+			});
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "yield-invalid-allowed",
+								name: "yield",
+								arguments: { result: { data: { token: "x" } } },
+							},
+							{
+								type: "toolCall",
+								id: "allowed-correction",
+								name: allowedTool.name,
+								arguments: {},
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.prompt("return structured output");
+				expect(allowedExecutions).toBe(1);
+				const allowedResult = session.messages.find(
+					message => message.role === "toolResult" && message.toolCallId === "allowed-correction",
+				) as ToolResultMessage | undefined;
+				expect(allowedResult?.isError).toBeFalsy();
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
 
 	it("answers a native pi_edit after a session switches onto Cursor", async () => {
 		const tempDir = makeTempDir();

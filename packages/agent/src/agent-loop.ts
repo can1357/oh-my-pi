@@ -2346,10 +2346,21 @@ async function executeToolCalls(
 	// neither queued steering nor a peer IRC ever hard-kills a partially
 	// side-effecting foreground tool (e.g. `bash`) — those get the cooperative
 	// `steeringSignal` above, and the message injects at the next boundary.
-	const nonInterruptibleSignal: AbortSignal = signal ?? new AbortController().signal;
-	const interruptibleSignal: AbortSignal = signal
+	const neverAbortSignal = new AbortController().signal;
+	const nonInterruptibleBaseSignal: AbortSignal = signal ?? neverAbortSignal;
+	const interruptibleBaseSignal: AbortSignal = signal
 		? AbortSignal.any([signal, steeringAbortController.signal, ircAbortController.signal])
 		: AbortSignal.any([steeringAbortController.signal, ircAbortController.signal]);
+	const toolBatchAbortScope = config.createToolBatchAbortScope?.();
+	const recordSignal = (toolName: string, interruptible: boolean): AbortSignal => {
+		const baseSignal = interruptible ? interruptibleBaseSignal : nonInterruptibleBaseSignal;
+		if (!toolBatchAbortScope) return baseSignal;
+		let shouldAbort = true;
+		try {
+			shouldAbort = toolBatchAbortScope.shouldAbort(toolName);
+		} catch {}
+		return shouldAbort ? AbortSignal.any([baseSignal, toolBatchAbortScope.signal]) : baseSignal;
+	};
 	const interruptState: { triggered: boolean; source?: SteeringInterruptSource | "irc" } = { triggered: false };
 
 	// Streamed messages were prepared (validation + `beforeToolCall`) before
@@ -2384,7 +2395,7 @@ async function executeToolCalls(
 			tool,
 			args,
 			interruptible,
-			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
+			signal: recordSignal(tool?.name ?? toolCall.name, interruptible),
 			started: false,
 			result: undefined as AgentToolResult<any> | undefined,
 			isError: false,

@@ -35,6 +35,7 @@ export function getExtraHelpText(): string {
   CLINE_API_KEY              - ClinePass subscription models
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
+  MERGE_GATEWAY_API_KEY      - Merge Gateway
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
 
   ${chalk.dim("# Cloud Providers")}

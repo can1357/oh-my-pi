@@ -9,6 +9,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	"merge-gateway": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -86,6 +87,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "merge-gateway": {
+			const baseUrl = (options.baseUrl ?? "https://api-gateway.merge.dev/v1/openai").replace(/\/+$/g, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `merge-gateway:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

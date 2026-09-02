@@ -5027,6 +5027,11 @@ export class AgentSession {
 		return this.#tools.setActiveToolsByName(toolNames);
 	}
 
+	/** Permanently constrains active and subsequently discovered tools until disposal. */
+	setActiveToolCeiling(toolNames: string[]): Promise<void> {
+		return this.#tools.setActiveToolCeiling(toolNames);
+	}
+
 	/** Restores an exact top-level versus `xd://` tool partition. */
 	setActiveToolPresentation(
 		toolNames: string[],

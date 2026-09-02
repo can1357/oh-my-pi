@@ -31,6 +31,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { linkOpenAIPromotionTargets } from "../src/context-promotion";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	AIAND_STATIC_MODELS,
@@ -71,10 +72,20 @@ import {
 	applyOllamaCloudOutputCap,
 	CLOUDFLARE_FALLBACK_MODEL,
 	hasBillableCost,
-	linkOpenAIPromotionTargets,
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
+function requestedProvider(): string | undefined {
+	const inline = Bun.argv.find(argument => argument.startsWith("--provider="));
+	const index = Bun.argv.indexOf("--provider");
+	const value = inline?.slice("--provider=".length) ?? (index >= 0 ? Bun.argv[index + 1] : undefined);
+	if ((inline !== undefined || index >= 0) && !value?.trim()) {
+		throw new Error("--provider requires a non-empty provider id");
+	}
+	return value?.trim();
+}
+
+const REQUESTED_PROVIDER = requestedProvider();
 
 /**
  * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
@@ -87,16 +98,27 @@ const packageRoot = path.join(import.meta.dir, "..");
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
- * via `allowed_model_uids`). Fetching them during generation would bake one
- * private account's entitlements into the shared bundle, and those rows then
- * survive forever as previous-snapshot zombies: a later regen without that
- * credential can never mark the provider authoritative to prune them. These
- * providers are never fetched at generation time and their previous-snapshot
- * rows are dropped — the curated static seed is the only bundled surface, and
- * runtime discovery is authoritative per credential (mirrors the GitLab Duo
- * fallback-only policy below).
+ * via `allowed_model_uids`; Merge exposes an account-specific route roster).
+ * Ordinary full-catalog generation must not bake one private account's
+ * entitlements into the shared bundle or preserve previous-snapshot zombies.
+ * Explicit `--provider` generation may refresh that provider intentionally
+ * with the caller's credential. Runtime discovery remains authoritative per
+ * credential.
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "merge-gateway"]);
+
+export function shouldFetchProviderSource(providerId: string, requestedProvider?: string): boolean {
+	if (DISCOVERY_ONLY_PROVIDERS.has(providerId)) return false;
+	if (requestedProvider !== undefined) return providerId === requestedProvider;
+	return !CREDENTIAL_SCOPED_PROVIDERS.has(providerId);
+}
+
+export function shouldFetchModelsDevSource(requestedProvider?: string): boolean {
+	return (
+		requestedProvider === undefined ||
+		MODELS_DEV_PROVIDER_DESCRIPTORS.some(descriptor => descriptor.providerId === requestedProvider)
+	);
+}
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -520,12 +542,14 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 
 async function generateModels() {
 	// Fetch models from dynamic sources.
-	const modelsDevModels = await loadModelsDevData();
+	const modelsDevModels = shouldFetchModelsDevSource(REQUESTED_PROVIDER)
+		? (await loadModelsDevData()).filter(
+				model => REQUESTED_PROVIDER === undefined || model.provider === REQUESTED_PROVIDER,
+			)
+		: [];
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
-			isCatalogDescriptor(descriptor) &&
-			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
+			isCatalogDescriptor(descriptor) && shouldFetchProviderSource(descriptor.providerId, REQUESTED_PROVIDER),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -679,12 +703,14 @@ async function generateModels() {
 		{ label: "Codex", providerId: "openai-codex", authoritative: true, fetch: fetchCodexDiscoveryModels },
 	] as const;
 	const specialDiscoveries = await Promise.all(
-		specialDiscoverySources.map(async source => ({
-			label: source.label,
-			providerId: source.providerId,
-			authoritative: source.authoritative,
-			models: await source.fetch(),
-		})),
+		specialDiscoverySources
+			.filter(source => shouldFetchProviderSource(source.providerId, REQUESTED_PROVIDER))
+			.map(async source => ({
+				label: source.label,
+				providerId: source.providerId,
+				authoritative: source.authoritative,
+				models: await source.fetch(),
+			})),
 	);
 	const authoritativeSpecialDiscoveryProviders = new Set<string>();
 	for (const discovery of specialDiscoveries) {
@@ -793,11 +819,22 @@ async function generateModels() {
 	};
 
 	const modelSpecs: Record<string, Record<string, ModelSpec>> = sortObj(providers);
-	const MODELS: Record<string, Record<string, Model<Api>>> = {};
+	let MODELS: Record<string, Record<string, Model<Api>>> = {};
 	for (const [provider, models] of Object.entries(modelSpecs)) {
 		MODELS[provider] = Object.fromEntries(
 			Object.entries(sortObj(models)).map(([id, model]) => [id, buildModel(model)]),
 		);
+	}
+	if (REQUESTED_PROVIDER) {
+		const generated = MODELS[REQUESTED_PROVIDER];
+		if (!generated) {
+			throw new Error(`Requested provider "${REQUESTED_PROVIDER}" produced no bundled models`);
+		}
+		MODELS = sortObj({
+			...(prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>),
+			[REQUESTED_PROVIDER]: generated,
+		});
+		console.log(`Preserved previous bundled models outside provider: ${REQUESTED_PROVIDER}`);
 	}
 
 	// Generate JSON file
@@ -836,5 +873,6 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 }
 
 if (import.meta.main) {
-	generateModels().catch(console.error);
+	// Uncaught failures must propagate a nonzero exit status to scripts and CI.
+	await generateModels();
 }
