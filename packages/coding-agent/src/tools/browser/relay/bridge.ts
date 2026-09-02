@@ -3181,6 +3181,13 @@ export class RelayBridge {
 				// recreated target it can neither initialize nor drive.
 				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
+				// The forced detach committed but this reattach failed terminally, so
+				// the recovery authorization is spent. Clear refreshDetachInFlight too:
+				// leaving it set would let a later genuine user detach (after a
+				// navigation clears tab.banned and a fresh client attaches) be
+				// misclassified by #onHello as this stale relay-initiated refresh and
+				// reattached against the user's intent.
+				tab.refreshDetachInFlight = false;
 				this.#retractTab(tab);
 				return;
 			}

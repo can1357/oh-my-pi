@@ -4639,6 +4639,98 @@ describe("RelayBridge tab grouping", () => {
 		expect(reply2?.error).toBeDefined();
 	});
 
+	it("clears refresh authorization after a terminal reattach failure so a later user detach is honored", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Arm forceFreshRootBeforeReplay via an interrupted initial preload add.
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+
+		// Reconnect drives the forced fresh-root detach; it settles cleanly, then the
+		// follow-up reattach fails TERMINALLY on the same live socket (DevTools or
+		// another debugger claimed the tab), returning ok:false rather than a
+		// transport interruption. This is the branch that retracts the tab.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.pending("detach").length === 1,
+			"forced fresh-root detach issued",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.pending("attach").length === 1,
+			"recovery reattach in flight after detach settled",
+		);
+		nack(bridge, ext2, "attach", "busy");
+		await flush();
+
+		// A navigation clears the transient ban, then a fresh client successfully
+		// attaches a new page session on the same live socket. This path never goes
+		// through a refresh detach, so if the terminal-failure branch left
+		// refreshDetachInFlight set, it now survives as stale authorization.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "tabUpdated",
+				tab: tab({ tabId: 1, groupId: -1, url: "https://example.com/next" }),
+			}),
+		);
+		await flush();
+		const pageSession2 = await attachPage(bridge, ext2, cdp, connId, 1);
+
+		// The socket drops and the user clicks Cancel (or DevTools takes over) while
+		// it is down, so the reconnect hello omits the tab from recoverableTabIds.
+		// With the stale authorization cleared, this is a genuine user detach and must
+		// be honored — not reattached against the user's intent.
+		bridge.extClosed(ext2);
+		await flush();
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1, url: "https://example.com/next" })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
+		await flush();
+
+		expect(ext3.rpcs("attach")).toHaveLength(0);
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession2,
+				method: "Runtime.evaluate",
+			}),
+		);
+		await flush();
+		const reply = cdp.messages.find((m) => m.id === cmdId);
+		expect(reply?.error).toBeDefined();
+	});
+
 	it("keeps refresh authorization when the forced detach settles but the reattach loses its socket", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
