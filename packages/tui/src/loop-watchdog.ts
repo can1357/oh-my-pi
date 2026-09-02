@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { logger, takeRecentLoopPhase } from "@oh-my-pi/pi-utils";
+import { type LoopSentinelHandle, startLoopSentinel } from "./loop-sentinel";
 
 export interface LoopWatchdogOptions {
 	/** How far ahead each probe tick is scheduled, in ms. Default 250. */
@@ -14,6 +15,13 @@ export interface LoopWatchdogOptions {
 	cpuNow?: () => number;
 	/** Timer source; injectable for tests. Default `setTimeout`. */
 	schedule?: (cb: () => void, ms: number) => LoopWatchdogTimer;
+	/**
+	 * Also run the off-thread loop sentinel while this watchdog runs. Default
+	 * true. The on-loop probe cannot observe a permanent wedge (its own tick
+	 * never fires), so the sentinel is what reports those; it additionally
+	 * self-gates off under NODE_ENV=test and OMP_LOOP_SENTINEL=0.
+	 */
+	sentinel?: boolean;
 }
 
 /**
@@ -70,6 +78,8 @@ export class LoopWatchdog {
 	// cannot leave the pre-stop timer chain rescheduling itself in parallel.
 	#generation = 0;
 	#handle: LoopWatchdogTimer | undefined;
+	#sentinelEnabled: boolean;
+	#sentinel: LoopSentinelHandle | undefined;
 
 	constructor(options: LoopWatchdogOptions = {}) {
 		this.#intervalMs = options.intervalMs ?? 250;
@@ -88,12 +98,14 @@ export class LoopWatchdog {
 				const timer = setTimeout(cb, ms);
 				return { unref: () => timer.unref?.(), cancel: () => clearTimeout(timer) };
 			});
+		this.#sentinelEnabled = options.sentinel ?? true;
 	}
 
 	start(): void {
 		if (this.#running) return;
 		this.#running = true;
 		this.#wasBlocked = false;
+		if (this.#sentinelEnabled) this.#sentinel ??= startLoopSentinel();
 		this.#armTick();
 	}
 
@@ -103,10 +115,13 @@ export class LoopWatchdog {
 		this.#generation++;
 		this.#handle?.cancel?.();
 		this.#handle = undefined;
+		this.#sentinel?.stop();
+		this.#sentinel = undefined;
 	}
 
 	#armTick(): void {
 		const generation = this.#generation;
+		this.#sentinel?.beat();
 		this.#expected = this.#now() + this.#intervalMs;
 		this.#expectedCpu = this.#cpuNow();
 		this.#handle = this.#schedule(() => this.#tick(generation), this.#intervalMs);
