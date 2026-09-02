@@ -310,7 +310,16 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 		// ── Extract through extractArchive ───────────────────────────
 		const extractDir = path.join(tempRoot, "extracted");
 		await fs.mkdir(extractDir, { recursive: true });
-		await extractArchive(tarballPath, extractDir, { limits: NPM_ARCHIVE_LIMITS });
+		try {
+			await extractArchive(tarballPath, extractDir, { limits: NPM_ARCHIVE_LIMITS });
+		} catch (err) {
+			// extractArchive names the offending member in its message, and that
+			// path is archive-controlled. It reaches the TUI through installation,
+			// so it gets the same treatment as every other untrusted fragment here
+			// rather than being echoed raw.
+			const detail = err instanceof Error ? err.message : String(err);
+			throw new Error(stage(`archive extraction failed: ${sanitizeFragment(detail, 200)}`));
+		}
 
 		// ── Require one top-level package/ directory ─────────────────
 		const entries = await fs.readdir(extractDir, { withFileTypes: true });
@@ -335,9 +344,16 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 		const manifestPath = path.join(pkgPath, "package.json");
 		let manifest: NpmPackageManifest;
 		try {
-			manifest = JSON.parse(await Bun.file(manifestPath).text()) as NpmPackageManifest;
+			const parsed: unknown = JSON.parse(await Bun.file(manifestPath).text());
+			// JSON.parse accepts `null`, scalars, and arrays. The cast alone would
+			// pass them through and the first field read would throw a bare
+			// TypeError, losing the package-and-stage diagnostic.
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new Error("manifest is not a JSON object");
+			}
+			manifest = parsed as NpmPackageManifest;
 		} catch {
-			throw new Error(stage("extracted package/package.json is missing or not valid JSON"));
+			throw new Error(stage("extracted package/package.json is missing or not a JSON object"));
 		}
 		if (manifest.name !== pkg) {
 			throw new Error(
@@ -383,6 +399,7 @@ interface NpmPackageManifest {
 	name?: unknown;
 	version?: unknown;
 	dependencies?: unknown;
+	optionalDependencies?: unknown;
 	bundledDependencies?: unknown;
 	bundleDependencies?: unknown;
 }
@@ -390,17 +407,26 @@ interface NpmPackageManifest {
 /**
  * Runtime dependencies an npm tarball will not carry. npm packs
  * `bundledDependencies` (and its `bundleDependencies` alias) into the tarball's
- * own node_modules, and either spelling may be `true` to bundle everything;
- * anything left in `dependencies` needs a package manager, which plugin
- * installation deliberately never runs.
+ * own node_modules, and either spelling may be `true` to bundle everything.
+ * Anything left in `dependencies` or `optionalDependencies` needs a package
+ * manager, which plugin installation deliberately never runs — so from this
+ * installer's point of view an optional dependency is simply always absent.
  */
 function unbundledRuntimeDeps(manifest: NpmPackageManifest): string[] {
-	const deps = manifest.dependencies;
-	if (!deps || typeof deps !== "object" || Array.isArray(deps)) return [];
 	const bundled = manifest.bundledDependencies ?? manifest.bundleDependencies;
 	if (bundled === true) return [];
 	const names = new Set(Array.isArray(bundled) ? bundled.filter(d => typeof d === "string") : []);
-	return Object.keys(deps).filter(name => !names.has(name));
+	const unbundled: string[] = [];
+	// `optionalDependencies` counts the same way: npm would install it, the
+	// tarball does not carry it, and this installer runs no package manager, so
+	// a plugin that imports one loads against a package that is never there.
+	for (const deps of [manifest.dependencies, manifest.optionalDependencies]) {
+		if (!deps || typeof deps !== "object" || Array.isArray(deps)) continue;
+		for (const name of Object.keys(deps)) {
+			if (!names.has(name) && !unbundled.includes(name)) unbundled.push(name);
+		}
+	}
+	return unbundled;
 }
 
 /**
@@ -782,6 +808,12 @@ async function fetchWithRedirects(
 
 		// Handle redirects (3xx)
 		if (response.status >= 300 && response.status < 400) {
+			// A redirect hop's body is never read. Cancel it here, before any
+			// validation branch, so one cancel covers every exit below — each
+			// `throw` and the next hop alike. Otherwise an endpoint that answers a
+			// redirect with a large or endless body keeps that connection alive
+			// past this iteration, and repeated installs leak them.
+			await response.body?.cancel().catch(() => {});
 			const location = response.headers.get("location");
 			if (!location) {
 				clearTimer();

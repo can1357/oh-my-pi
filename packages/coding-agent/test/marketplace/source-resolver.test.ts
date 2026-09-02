@@ -52,7 +52,11 @@ type MockPackumentPayload = Partial<MockPackument>;
 
 /** Build a valid tar.gz archive containing `package/` with a plugin.json. */
 async function makeValidTarball(packageName: string, packageVersion: string): Promise<Uint8Array> {
-	const pluginJson = JSON.stringify({ name: packageName, version: packageVersion, description: "test" });
+	const pluginJson = JSON.stringify({
+		name: packageName,
+		version: packageVersion,
+		description: "test",
+	});
 	const entries: readonly [string, string][] = [
 		["package/", ""],
 		["package/package.json", pluginJson],
@@ -73,7 +77,9 @@ function makePackument(
 	versions: Array<{ version: string; tarball?: string; integrity?: string }>,
 	latest?: string,
 ): MockPackument {
-	const distTags: Record<string, string> = { latest: latest ?? versions[versions.length - 1].version };
+	const distTags: Record<string, string> = {
+		latest: latest ?? versions[versions.length - 1].version,
+	};
 	const versionMap: MockPackument["versions"] = {};
 	for (const v of versions) {
 		const tarball = v.tarball ?? `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-${v.version}.tgz`;
@@ -185,14 +191,20 @@ describe("resolvePluginSource", () => {
 
 	// Network-dependent: object sources attempt real git clones
 	it.skip("resolves github object source via git clone", async () => {
-		const entry = makeEntry({ source: "github", repo: "nonexistent-owner/nonexistent-repo" });
+		const entry = makeEntry({
+			source: "github",
+			repo: "nonexistent-owner/nonexistent-repo",
+		});
 		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow(
 			/git clone failed/,
 		);
 	});
 
 	it.skip("resolves url object source via git clone", async () => {
-		const entry = makeEntry({ source: "url", url: "https://example.com/nonexistent.git" });
+		const entry = makeEntry({
+			source: "url",
+			url: "https://example.com/nonexistent.git",
+		});
 		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow(
 			/git clone failed/,
 		);
@@ -226,7 +238,11 @@ describe("resolvePluginSource — npm", () => {
 		versions?: Array<{ version: string; integrity?: string }>;
 		latest?: string;
 		tarballBytes?: Uint8Array;
-	}): Promise<{ packument: MockPackument; tarballUrl: string; integrity: string }> {
+	}): Promise<{
+		packument: MockPackument;
+		tarballUrl: string;
+		integrity: string;
+	}> {
 		const pkg = opts.pkg ?? "test-plugin";
 		const defaultVersion = opts.versions?.[opts.versions.length - 1]?.version ?? "1.0.0";
 		const tarballBytes = opts.tarballBytes ?? (await makeValidTarball(pkg, defaultVersion));
@@ -266,7 +282,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.2.3", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.2.3",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 
 		expect(result.dir).toMatch(/package$/);
@@ -285,7 +306,11 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 
 		expect(result.resolvedVersion).toBe("2.0.0");
@@ -302,7 +327,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "^1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "^1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 
 		expect(result.resolvedVersion).toBe("1.5.0");
@@ -340,7 +370,12 @@ describe("resolvePluginSource — npm", () => {
 		// Corrupt the name in the packument
 		packument.versions["1.0.0"].name = "wrong-name";
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/name mismatch/);
 	});
 
@@ -354,7 +389,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/integrity verification failed/);
 	});
 
@@ -368,7 +408,12 @@ describe("resolvePluginSource — npm", () => {
 		// Remove integrity
 		packument.versions["1.0.0"].dist.integrity = "";
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/missing integrity/);
 	});
 
@@ -413,12 +458,22 @@ describe("resolvePluginSource — npm", () => {
 	});
 
 	it("rejects invalid package name", async () => {
-		const entry = makeEntry({ source: "npm", package: "INVALID_UPPER", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "INVALID_UPPER",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/Invalid.*package name/);
 	});
 
 	it("rejects empty version expression", async () => {
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/nonempty/);
 	});
 
@@ -444,7 +499,10 @@ describe("resolvePluginSource — npm", () => {
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 			if (url === `${REGISTRY_ORIGIN}/test-plugin`) {
-				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/v1/test-plugin` } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: `${REGISTRY_ORIGIN}/v1/test-plugin` },
+				});
 			}
 			if (url === `${REGISTRY_ORIGIN}/v1/test-plugin`) {
 				return new Response(JSON.stringify(packument), {
@@ -458,7 +516,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 
 		expect(result.resolvedVersion).toBe("1.0.0");
@@ -468,12 +531,20 @@ describe("resolvePluginSource — npm", () => {
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 			if (url === `${REGISTRY_ORIGIN}/test-plugin`) {
-				return new Response(null, { status: 302, headers: { location: "https://evil.example/test-plugin" } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: "https://evil.example/test-plugin" },
+				});
 			}
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/leaves registry origin/);
 	});
 
@@ -491,7 +562,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/top-level.*package/);
 	});
 
@@ -510,7 +586,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/siblings/);
 	});
 
@@ -523,7 +604,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/integrity verification failed/);
 
 		// Verify no npm-* temp dirs left in tmpDir
@@ -541,7 +627,12 @@ describe("resolvePluginSource — npm", () => {
 			latest: "3.1.4",
 			tarballBytes,
 		});
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "3.1.4", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "3.1.4",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 		expect(result.resolvedVersion).toBe("3.1.4");
 		// Verify the resolved version is the exact one, not latest or a range match
@@ -567,7 +658,11 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0" });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 
 		expect(result.resolvedVersion).toBe("1.0.0");
@@ -596,7 +691,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "^99.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "^99.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/no version matching/);
 	});
 
@@ -645,7 +745,10 @@ describe("resolvePluginSource — npm", () => {
 
 	it("persists selected version when tarball package.json omits version field", async () => {
 		// Tarball package.json has no "version" — only the resolver handoff can supply it.
-		const pluginJson = JSON.stringify({ name: "test-plugin", description: "test" });
+		const pluginJson = JSON.stringify({
+			name: "test-plugin",
+			description: "test",
+		});
 		const entries: readonly [string, string][] = [
 			["package/", ""],
 			["package/package.json", pluginJson],
@@ -659,14 +762,22 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 		expect(result.resolvedVersion).toBe("1.0.0");
 	});
 
 	it("rejects tarball whose embedded package.json version differs from selected", async () => {
 		// Tarball package.json says 9.9.9 but packument selected 1.0.0 → identity mismatch.
-		const pluginJson = JSON.stringify({ name: "test-plugin", version: "9.9.9" });
+		const pluginJson = JSON.stringify({
+			name: "test-plugin",
+			version: "9.9.9",
+		});
 		const entries: readonly [string, string][] = [
 			["package/", ""],
 			["package/package.json", pluginJson],
@@ -680,14 +791,22 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/package identity/);
 	});
 
 	// ── Contract: identity name mismatch ─────────────────────────────────
 
 	it("rejects tarball whose embedded package.json name differs from requested", async () => {
-		const pluginJson = JSON.stringify({ name: "evil-package", version: "1.0.0" });
+		const pluginJson = JSON.stringify({
+			name: "evil-package",
+			version: "1.0.0",
+		});
 		const entries: readonly [string, string][] = [
 			["package/", ""],
 			["package/package.json", pluginJson],
@@ -701,7 +820,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/package identity/);
 	});
 
@@ -730,7 +854,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/must be public HTTPS/);
 		expect(tarballFetched).toBe(false);
 	});
@@ -745,11 +874,17 @@ describe("resolvePluginSource — npm", () => {
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
-				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/r1` } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: `${REGISTRY_ORIGIN}/r1` },
+				});
 			}
 			if (url.startsWith(`${REGISTRY_ORIGIN}/r`)) {
 				const n = parseInt(url.slice(`${REGISTRY_ORIGIN}/r`.length), 10);
-				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/r${n + 1}` } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: `${REGISTRY_ORIGIN}/r${n + 1}` },
+				});
 			}
 			if (url === tarballUrl) {
 				return new Response(tarballBytes, { status: 200 });
@@ -757,7 +892,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/exceeded .* redirects/);
 	});
 
@@ -781,7 +921,10 @@ describe("resolvePluginSource — npm", () => {
 				signal: init?.signal as AbortSignal | undefined,
 			});
 			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
-				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/v1/${pkg}` } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: `${REGISTRY_ORIGIN}/v1/${pkg}` },
+				});
 			}
 			if (url === `${REGISTRY_ORIGIN}/v1/${pkg}`) {
 				return new Response(JSON.stringify(packument), {
@@ -795,7 +938,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await resolvePluginSource(entry, { tmpDir });
 
 		expect(capturedInits.length).toBeGreaterThan(0);
@@ -824,8 +972,16 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
-		const ctx: NpmResolveContext = { tmpDir, limits: { packumentMaxBytes: 1024 } };
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const ctx: NpmResolveContext = {
+			tmpDir,
+			limits: { packumentMaxBytes: 1024 },
+		};
 		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/exceeds.*bytes/);
 	});
 
@@ -855,8 +1011,16 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
-		const ctx: NpmResolveContext = { tmpDir, limits: { tarballMaxBytes: 1024 } };
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const ctx: NpmResolveContext = {
+			tmpDir,
+			limits: { tarballMaxBytes: 1024 },
+		};
 		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/tarball exceeds/);
 	});
 
@@ -882,7 +1046,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		// tarballMaxBytes smaller than the served body so the streamed cap triggers.
 		const ctx: NpmResolveContext = { tmpDir, limits: { tarballMaxBytes: 32 } };
 		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/tarball exceeds/);
@@ -902,8 +1071,16 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
-		const ctx: NpmResolveContext = { tmpDir, limits: { packumentTimeoutMs: 50 } };
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const ctx: NpmResolveContext = {
+			tmpDir,
+			limits: { packumentTimeoutMs: 50 },
+		};
 		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/timed out after/);
 	});
 
@@ -927,7 +1104,10 @@ describe("resolvePluginSource — npm", () => {
 				});
 			}
 			if (url === cdnTarballUrl) {
-				return new Response(null, { status: 302, headers: { location: cdnRedirectUrl } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: cdnRedirectUrl },
+				});
 			}
 			if (url === cdnRedirectUrl) {
 				return new Response(tarballBytes, { status: 200 });
@@ -935,7 +1115,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 		expect(result.resolvedVersion).toBe("1.0.0");
 	});
@@ -958,12 +1143,20 @@ describe("resolvePluginSource — npm", () => {
 				});
 			}
 			if (url === cdnTarballUrl) {
-				return new Response(null, { status: 302, headers: { location: otherOriginUrl } });
+				return new Response(null, {
+					status: 302,
+					headers: { location: otherOriginUrl },
+				});
 			}
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/leaves.*origin/);
 	});
 
@@ -977,13 +1170,20 @@ describe("resolvePluginSource — npm", () => {
 			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
 				return new Response(null, {
 					status: 302,
-					headers: { location: `https://user:pass@${REGISTRY_ORIGIN.slice("https://".length)}/v1/${pkg}` },
+					headers: {
+						location: `https://user:pass@${REGISTRY_ORIGIN.slice("https://".length)}/v1/${pkg}`,
+					},
 				});
 			}
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/credentials/);
 	});
 
@@ -999,7 +1199,12 @@ describe("resolvePluginSource — npm", () => {
 		// Wrong algorithm prefix
 		packument.versions["1.0.0"].dist.integrity = `sha1-${Buffer.from("x".repeat(20)).toString("base64")}`;
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/SHA-512 SRI/);
 	});
 
@@ -1013,7 +1218,12 @@ describe("resolvePluginSource — npm", () => {
 		// Contains invalid base64 chars (spaces, exclamation)
 		packument.versions["1.0.0"].dist.integrity = "sha512-!!!not base64!!!";
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/SHA-512 SRI/);
 	});
 
@@ -1027,7 +1237,12 @@ describe("resolvePluginSource — npm", () => {
 		// Valid base64 but decodes to only 4 bytes, not 64
 		packument.versions["1.0.0"].dist.integrity = "sha512-AAAA";
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/64 bytes/);
 	});
 
@@ -1036,14 +1251,22 @@ describe("resolvePluginSource — npm", () => {
 	it("rejects packument with no versions map", async () => {
 		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
 		const pkg = "test-plugin";
-		const packument: MockPackumentPayload = { name: pkg, "dist-tags": { latest: "1.0.0" } };
+		const packument: MockPackumentPayload = {
+			name: pkg,
+			"dist-tags": { latest: "1.0.0" },
+		};
 		const packuments = new Map([[pkg, packument]]);
 		const tarballs = new Map([[`${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`, tarballBytes]]);
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
 			createNpmFetchMock(packuments, tarballs) as typeof fetch,
 		);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/no versions/);
 	});
 
@@ -1060,7 +1283,11 @@ describe("resolvePluginSource — npm", () => {
 			createNpmFetchMock(packuments, tarballs) as typeof fetch,
 		);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/dist-tags.latest is missing/);
 	});
 
@@ -1075,7 +1302,11 @@ describe("resolvePluginSource — npm", () => {
 			createNpmFetchMock(packuments, tarballs) as typeof fetch,
 		);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/not found in versions/);
 	});
 
@@ -1087,7 +1318,10 @@ describe("resolvePluginSource — npm", () => {
 		// Add a non-semver key "next" that must be ignored by range resolution.
 		(packument.versions as Record<string, { name: string; dist: { tarball: string; integrity: string } }>).next = {
 			name: pkg,
-			dist: { tarball: `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-next.tgz`, integrity },
+			dist: {
+				tarball: `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-next.tgz`,
+				integrity,
+			},
 		};
 		const packuments = new Map([[pkg, packument]]);
 		const tarballs = new Map([
@@ -1098,7 +1332,12 @@ describe("resolvePluginSource — npm", () => {
 			createNpmFetchMock(packuments, tarballs) as typeof fetch,
 		);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "^1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "^1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 		expect(result.resolvedVersion).toBe("1.5.0");
 	});
@@ -1106,7 +1345,12 @@ describe("resolvePluginSource — npm", () => {
 	// ── Contract: registry URL edges ─────────────────────────────────────
 
 	it("rejects 'not a url' as invalid registry URL", async () => {
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: "not a url" });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: "not a url",
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/invalid registry URL/);
 	});
 
@@ -1158,7 +1402,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/without Location/);
 	});
 
@@ -1172,7 +1421,12 @@ describe("resolvePluginSource — npm", () => {
 			return new Response("not found", { status: 404 });
 		}) as unknown as typeof fetch);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/invalid redirect Location/);
 	});
 
@@ -1190,7 +1444,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/top-level.*package/);
 	});
 
@@ -1210,7 +1469,12 @@ describe("resolvePluginSource — npm", () => {
 		while (expr.length < 256) expr += " ";
 		expect(expr.length).toBe(256);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: expr, registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: expr,
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 		expect(result.resolvedVersion).toBe("1.0.0");
 	});
@@ -1229,7 +1493,12 @@ describe("resolvePluginSource — npm", () => {
 		while (expr.length < 257) expr += " ";
 		expect(expr.length).toBe(257);
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: expr, registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: expr,
+			registry: REGISTRY_ORIGIN,
+		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/256 bytes/);
 	});
 
@@ -1254,7 +1523,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		let thrown: Error | undefined;
 		try {
 			await resolvePluginSource(entry, { tmpDir });
@@ -1289,7 +1563,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		const result = await resolvePluginSource(entry, { tmpDir });
 		expect(result.dir).toMatch(/package$/);
 		expect(result.resolvedVersion).toBe("1.0.0");
@@ -1313,7 +1592,12 @@ describe("resolvePluginSource — npm", () => {
 			tarballBytes,
 		});
 
-		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
 		let thrown: Error | undefined;
 		try {
 			await resolvePluginSource(entry, { tmpDir });
@@ -1323,5 +1607,279 @@ describe("resolvePluginSource — npm", () => {
 		expect(thrown).toBeDefined();
 		expect(thrown?.message).toMatch(/found siblings/);
 		expect(thrown?.message).not.toMatch(/[\t\n\r]/);
+	});
+	// ── Contract: optionalDependencies treated as runtime deps ──────────
+
+	it("rejects tarball with unbundled optional dependencies", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			optionalDependencies: { "left-pad": "^1.0.0" },
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/runtime dependencies its npm tarball does not ship/);
+		expect(thrown?.message).toContain("left-pad");
+	});
+
+	it("accepts tarball whose optional dependencies are bundled", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			optionalDependencies: { "left-pad": "^1.0.0" },
+			bundledDependencies: ["left-pad"],
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.dir).toMatch(/package$/);
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	// ── Contract: non-object manifest gives staged diagnostic ───────────
+
+	it("rejects non-object package.json with staged diagnostic, not bare TypeError", async () => {
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", "null"],
+			["package/.claude-plugin/plugin.json", JSON.stringify({ name: "test-plugin", version: "1.0.0" })],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/missing or not a JSON object/);
+		expect(thrown?.message).toContain("test-plugin");
+		expect(thrown?.message).not.toContain("Cannot read properties");
+	});
+
+	// ── Contract: extraction error sanitized ────────────────────────────
+
+	it("sanitizes control characters from extraction error messages", async () => {
+		// Craft a tar archive with a hard-link entry whose name contains a tab
+		// and a newline, with an invalid target (".."). readTar throws during
+		// indexing with the raw member name in the message; the resolver wraps
+		// it through sanitizeFragment, stripping every C0 control character.
+		function makeRawTarHeader(opts: {
+			name: string;
+			typeflag: number;
+			size?: number;
+			linkname?: string;
+		}): Uint8Array {
+			const header = new Uint8Array(512);
+			const enc = new TextEncoder();
+			const writeStr = (offset: number, length: number, value: string): void => {
+				const bytes = enc.encode(value);
+				if (bytes.byteLength > length) throw new Error("tar header field too long");
+				header.set(bytes, offset);
+			};
+			const writeOctal = (offset: number, length: number, value: number): void => {
+				const str = value.toString(8).padStart(length - 1, "0");
+				for (let i = 0; i < str.length; i++) header[offset + i] = str.charCodeAt(i);
+				header[offset + length - 1] = 0;
+			};
+			writeStr(0, 100, opts.name);
+			writeOctal(100, 8, 0o644);
+			writeOctal(108, 8, 0);
+			writeOctal(116, 8, 0);
+			writeOctal(124, 12, opts.size ?? 0);
+			writeOctal(136, 12, 0);
+			for (let i = 148; i < 156; i++) header[i] = 0x20;
+			header[156] = opts.typeflag;
+			writeStr(157, 100, opts.linkname ?? "");
+			writeStr(257, 6, "ustar");
+			header[262] = 0;
+			writeStr(263, 2, "00");
+			let checksum = 0;
+			for (const byte of header) checksum += byte;
+			const chkStr = checksum.toString(8).padStart(6, "0");
+			for (let i = 0; i < 6; i++) header[148 + i] = chkStr.charCodeAt(i);
+			header[154] = 0;
+			header[155] = 0x20;
+			return header;
+		}
+
+		const evilName = "pkg\tevil\nname";
+		const header = makeRawTarHeader({
+			name: evilName,
+			typeflag: 0x31,
+			linkname: "..",
+		});
+		const terminator = new Uint8Array(1024);
+		const tarBytes = new Uint8Array(header.byteLength + terminator.byteLength);
+		tarBytes.set(header, 0);
+		tarBytes.set(terminator, header.byteLength);
+		const tarballBytes = Bun.gzipSync(tarBytes);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/archive extraction failed/);
+		expect(thrown?.message).not.toMatch(/[\t\n\r]/);
+	});
+
+	// ── Contract: redirect body cancelled ───────────────────────────────
+
+	it("cancels a redirect response body before following it", async () => {
+		const pkg = "test-plugin";
+		const tarballBytes = await makeValidTarball(pkg, "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity, tarball: tarballUrl }]);
+		const packumentUrl = `${REGISTRY_ORIGIN}/${pkg}`;
+		const redirectedUrl = `${REGISTRY_ORIGIN}/${pkg}-redirected`;
+
+		let redirectBodyCancelled = false;
+		const redirectBody = new ReadableStream({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode("redirect body"));
+			},
+			cancel() {
+				redirectBodyCancelled = true;
+			},
+		});
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === packumentUrl) {
+				return new Response(redirectBody, {
+					status: 302,
+					headers: { location: redirectedUrl },
+				});
+			}
+			if (url === redirectedUrl) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, {
+					status: 200,
+					headers: { "content-type": "application/gzip" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({
+			source: "npm",
+			package: pkg,
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.dir).toMatch(/package$/);
+		expect(result.resolvedVersion).toBe("1.0.0");
+		expect(redirectBodyCancelled).toBe(true);
+	});
+
+	it("cancels a redirect response body before throwing on cross-origin redirect", async () => {
+		const pkg = "test-plugin";
+		const packumentUrl = `${REGISTRY_ORIGIN}/${pkg}`;
+
+		let redirectBodyCancelled = false;
+		const redirectBody = new ReadableStream({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode("redirect body"));
+			},
+			cancel() {
+				redirectBodyCancelled = true;
+			},
+		});
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === packumentUrl) {
+				return new Response(redirectBody, {
+					status: 302,
+					headers: { location: "https://other-origin.example/foo" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({
+			source: "npm",
+			package: pkg,
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/redirect leaves registry origin/);
+		expect(redirectBodyCancelled).toBe(true);
 	});
 });
