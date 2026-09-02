@@ -24,6 +24,7 @@
 
 pub mod appearance;
 pub mod ast;
+pub mod atomic_write;
 pub mod audio;
 pub mod block;
 pub mod clipboard;

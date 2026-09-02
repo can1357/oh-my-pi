@@ -16,6 +16,7 @@ import type {
 	TextContent,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
+import * as nativeBindings from "@oh-my-pi/pi-natives";
 import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
@@ -156,6 +157,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly typebox = TypeBox;
 	readonly arktype = type;
 	readonly zod = zod;
+	readonly hasAtomicLocalWrite = typeof nativeBindings.atomicLocalWrite === "function";
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
 		name: string;
