@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
+### Fixed
+
+- Fixed TTY output backpressure reporting so pending write progress is accurately reflected during large writes.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

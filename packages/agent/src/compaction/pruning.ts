@@ -141,6 +141,7 @@ function estimatePrunedSavings(tokens: number, notice: string): number {
  * mutations inside the cheap-to-recache tail.
  */
 function computeMessageSuffixTokens(entries: readonly SessionEntry[], tokenizer: Tokenizer): number[] {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const suffix = new Array<number>(entries.length);
 	let accumulated = 0;
 	for (let i = entries.length - 1; i >= 0; i--) {

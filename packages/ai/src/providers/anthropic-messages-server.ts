@@ -4,9 +4,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { captureRequestHeaders, resolvePromptCacheKey } from "../auth-gateway/http";
 import * as AIError from "../error";
 import type {
+	AnthropicMessagePayload,
 	AnthropicServerToolContent,
 	AssistantMessage,
 	AssistantMessageEventStream,
+	DeveloperMessage,
 	Message,
 	RedactedThinkingContent,
 	StopReason,
@@ -27,7 +29,7 @@ import {
 	type AnthropicUserContentBlock,
 	anthropicMessagesRequestSchema,
 } from "./anthropic-messages-server-schema";
-import { isAnthropicServerToolHistoryBlock } from "./anthropic-wire";
+import { isAnthropicServerToolHistoryBlock, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 
 /**
  * Anthropic Messages API (https://docs.anthropic.com/en/api/messages) ↔ pi-ai
@@ -249,6 +251,7 @@ function walkTools(tools: AnthropicTool[] | undefined): Tool[] | undefined {
 		name: tool.name,
 		description: tool.description ?? "",
 		parameters: tool.input_schema as Record<string, unknown>,
+		deferLoading: tool.defer_loading,
 	}));
 }
 
@@ -315,6 +318,34 @@ function deriveCacheRetention(data: {
  * Values outside this table (none exist in the schema today) are ignored
  * rather than guessed at.
  */
+function walkSystemMessage(message: AnthropicMessage, timestamp: number): DeveloperMessage {
+	const text: TextContent[] = [];
+	const toolChanges: NonNullable<AnthropicMessagePayload["toolChanges"]> = [];
+	if (typeof message.content === "string") {
+		if (message.content.length > 0) text.push({ type: "text", text: message.content });
+	} else {
+		for (const block of message.content) {
+			if (block.type === "text") {
+				if (block.text.length > 0) text.push({ type: "text", text: block.text });
+			} else if (block.type === "tool_addition" || block.type === "tool_removal") {
+				toolChanges.push({ type: block.type, name: block.tool.name });
+			}
+		}
+	}
+	const payload: AnthropicMessagePayload = {
+		type: "anthropicMessage",
+		clearAt: message.clear_at,
+		effort: message.output_config?.effort ?? undefined,
+		toolChanges: toolChanges.length > 0 ? toolChanges : undefined,
+	};
+	return {
+		role: "developer",
+		content: text,
+		providerPayload: payload,
+		timestamp,
+	};
+}
+
 const REASONING_EFFORT_BY_WIRE: Partial<Record<string, Effort>> = {
 	low: Effort.Low,
 	medium: Effort.Medium,
@@ -334,6 +365,8 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	for (const message of data.messages as AnthropicMessage[]) {
 		if (message.role === "user") {
 			for (const m of walkUserContent(message.content, now)) messages.push(m);
+		} else if (message.role === "system") {
+			messages.push(walkSystemMessage(message, now));
 		} else {
 			const assistant: AssistantMessage = {
 				role: "assistant",
@@ -366,6 +399,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 		options.parallelToolCalls = false;
 	}
 	if (data.thinking) {
+		if (data.thinking.type !== "disabled" && data.thinking.block_binding) {
+			options.anthropicPrefixMismatchBehavior = data.thinking.block_binding.prefix_mismatch_behavior;
+		}
 		switch (data.thinking.type) {
 			case "enabled":
 				options.explicitThinkingBudgetTokens = data.thinking.budget_tokens;
@@ -516,6 +552,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		// `AssistantMessage.stopReason` carries the matched string. Intentionally
 		// `null` for now (Anthropic schema allows it).
 		stop_sequence: null,
+		...(message.inputTransformations ? { input_transformations: message.inputTransformations } : {}),
 		usage: encodeUsage(message),
 	};
 }
@@ -552,10 +589,13 @@ const ZERO_WIRE_USAGE: Record<string, unknown> = {
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
-	_options?: ParsedRequest["options"],
+	options?: ParsedRequest["options"],
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	let pingTimer: NodeJS.Timeout | undefined;
+	const bindingControlsRequested =
+		options?.headers?.["anthropic-beta"]?.split(",").some(beta => beta.trim() === THINKING_BINDING_CONTROLS_BETA) ??
+		false;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
 		cancelled = true;
@@ -571,7 +611,6 @@ export function encodeStream(
 		async start(controller) {
 			const messageId = newMessageId();
 			let started = false;
-			let lastPartial: AssistantMessage | undefined;
 			const open = new Map<number, OpenBlock>();
 
 			const ensureStart = (partial: AssistantMessage | undefined) => {
@@ -590,6 +629,9 @@ export function encodeStream(
 							// TODO: same as encodeResponse — surface matched stop sequence
 							// once pi-ai propagates it.
 							stop_sequence: null,
+							...(bindingControlsRequested
+								? { input_transformations: partial?.inputTransformations ?? [] }
+								: {}),
 							usage: partial ? encodeUsage(partial) : ZERO_WIRE_USAGE,
 						},
 					}),
@@ -738,14 +780,20 @@ export function encodeStream(
 							closeBlock(ev.contentIndex);
 							break;
 						case "done": {
-							for (const idx of [...open.keys()]) closeBlock(idx);
+							for (const idx of Array.from(open.keys())) closeBlock(idx);
 							emitServerToolBlocksBefore(ev.message, ev.message.content.length);
 							controller.enqueue(
 								sseFrame("message_delta", {
 									type: "message_delta",
 									// TODO: surface matched stop sequence once pi-ai
 									// propagates it on the `done` event.
-									delta: { stop_reason: mapStopReasonOut(ev.reason), stop_sequence: null },
+									delta: {
+										stop_reason: mapStopReasonOut(ev.reason),
+										stop_sequence: null,
+									},
+									...(bindingControlsRequested
+										? { input_transformations: ev.message.inputTransformations ?? [] }
+										: {}),
 									usage: encodeUsage(ev.message),
 								}),
 							);
@@ -766,13 +814,13 @@ export function encodeStream(
 				// Stream ended without an explicit done: emit a complete envelope
 				// (message_start + message_delta carrying a stop_reason) so strict
 				// clients don't reject the response as a protocol error.
-				ensureStart(lastPartial);
-				for (const idx of [...open.keys()]) closeBlock(idx);
+				ensureStart(undefined);
+				for (const idx of Array.from(open.keys())) closeBlock(idx);
 				controller.enqueue(
 					sseFrame("message_delta", {
 						type: "message_delta",
 						delta: { stop_reason: "end_turn", stop_sequence: null },
-						usage: lastPartial ? encodeUsage(lastPartial) : ZERO_WIRE_USAGE,
+						usage: ZERO_WIRE_USAGE,
 					}),
 				);
 				controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));

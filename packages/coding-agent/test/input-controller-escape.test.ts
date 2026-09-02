@@ -130,12 +130,11 @@ function createContext(): {
 		pendingImageLinks: [],
 	};
 
-	let ctx!: InteractiveModeContext;
 	const ensureLoadingAnimation = vi.fn(() => {
 		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
 	});
 
-	ctx = {
+	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		ui: {
 			requestRender,

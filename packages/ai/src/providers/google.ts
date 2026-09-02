@@ -38,8 +38,8 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 			const url = `${base}/models/${model.id}:streamGenerateContent?alt=sse`;
 			const headers: Record<string, string> = {
 				"x-goog-api-key": apiKey,
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
+				...model.headers,
+				...options?.headers,
 			};
 			return { params, url, headers, fetch: options?.fetch };
 		},

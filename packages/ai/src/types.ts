@@ -426,6 +426,11 @@ export interface StreamOptions {
 	 * Side-channel and advisor requests must leave it unset.
 	 */
 	anthropicCacheRefresh?: boolean;
+	/**
+	 * Anthropic preserved-thinking behavior when a signed block no longer matches
+	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
+	 */
+	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
 	/**
@@ -864,7 +869,23 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload;
+/** Anthropic-only controls attached to a mid-conversation system message. */
+export interface AnthropicMessagePayload {
+	type: "anthropicMessage";
+	clearAt?: "never" | "next_user_message";
+	effort?: "low" | "medium" | "high" | "xhigh" | "max";
+	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
+}
+
+export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload;
+
+/** Provider-reported rewrite applied to request content before inference. */
+export interface ProviderInputTransformation {
+	type: string;
+	path?: string;
+	reason?: string;
+	[key: string]: unknown;
+}
 
 export interface UserMessage {
 	role: "user";
@@ -873,6 +894,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** Timestamp of a client-side history rewrite represented by this message. */
+	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -983,6 +1006,8 @@ export interface AssistantMessage {
 	 * server's actual state.
 	 */
 	disabledFeatures?: string[];
+	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
+	inputTransformations?: ProviderInputTransformation[];
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
@@ -1258,6 +1283,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
+	/** Withhold this Anthropic tool until a `tool_addition` message references it. */
+	deferLoading?: boolean;
 	/**
 	 * Optional grammar constraint for OpenAI custom-tool emission.
 	 * When set, providers that support grammar-constrained tools (currently only

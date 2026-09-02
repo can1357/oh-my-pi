@@ -73,9 +73,9 @@ function nextImageIdSeed(): number {
  *
  * The budget keeps the most recent `cap` images live and demotes older ones to
  * their text fallback. Demotion needs a full redraw (so off-screen rows are
- * rewritten) plus an explicit graphics purge of the demoted ids — {@link Image}
- * reports display order via {@link observe}, and the TUI drives the purge +
- * redraw on the frame after a new image pushes the count past the cap.
+ * rewritten) plus an explicit graphics purge of the demoted ids. {@link Image}
+ * reports display order via {@link observe}; when that reveals a stricter split,
+ * the TUI repeats the pass before emitting its terminal frame.
  *
  * `cap <= 0` disables budgeting: every image stays a live graphic.
  */
@@ -87,6 +87,8 @@ export class ImageBudget {
 	#idToKey = new Map<number, string>();
 	/** Display-order image ids observed during the in-flight pass. */
 	#passIds: number[] = [];
+	/** Per-id suppression decision from the first observation in this pass. */
+	#passSuppression = new Map<number, boolean>();
 	/**
 	 * Suppress threshold reflected in the frame currently on the terminal: images
 	 * at display indices `[0, #onTerminal)` are shown as text there.
@@ -104,7 +106,7 @@ export class ImageBudget {
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
-	#pendingTransmits: string[] = [];
+	#pendingTransmits = new Map<number, string>();
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
@@ -185,6 +187,7 @@ export class ImageBudget {
 	 */
 	beginPass(stable = false): void {
 		this.#passIds.length = 0;
+		this.#passSuppression.clear();
 		this.#stablePass = stable;
 		this.#applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
 	}
@@ -199,47 +202,49 @@ export class ImageBudget {
 	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
 	 */
 	observe(imageId: number): boolean {
+		const existing = this.#passSuppression.get(imageId);
+		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
 			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
+			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
 		const suppressed = this.#cap > 0 && index < this.#planned;
+		this.#passSuppression.set(imageId, suppressed);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
 	}
 
 	/**
-	 * End a render pass. Returns true when this frame must purge graphics and
-	 * fully repaint to apply a stricter budget; read the ids via
-	 * {@link takePurgeIds}.
+	 * End a render pass. Returns true when the pass discovered a stricter budget
+	 * and must be repeated before its terminal frame is emitted.
 	 */
 	endPass(): boolean {
 		const total = this.#passIds.length;
 		this.#lastTotal = total;
-		let reset = false;
 		if (this.#applyingReset) {
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
-				this.#purgeIds.push(id);
-				// d=I frees the data too, so the image must re-transmit if it returns.
+				// A transmit queued by a discarded discovery pass never reached
+				// the terminal, so cancel it instead of transmitting then purging.
+				if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
 				this.#transmitted.delete(id);
 				this.#deletePlacementState(id);
 				this.#forgetKeyForId(id);
 			}
 			this.#onTerminal = this.#planned;
 			this.#applyingReset = false;
-			reset = true;
 		}
-		this.#reconcile(total);
+		const retry = this.#reconcile(total);
 		// Snapshot the committed display-order suppression by id: the prefix
 		// [0, #onTerminal) is what the terminal currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
 		this.#suppressedIds = new Set(this.#passIds.slice(0, this.#onTerminal));
-		return reset;
+		return retry;
 	}
 
 	/** Image ids to delete from the terminal this frame; clears the pending set. */
@@ -256,7 +261,7 @@ export class ImageBudget {
 		const ids = [...this.#transmitted];
 		this.#transmitted.clear();
 		this.#purgeIds = [];
-		this.#pendingTransmits = [];
+		this.#pendingTransmits.clear();
 		this.#keyToId.clear();
 		this.#idToKey.clear();
 		this.#placementState.clear();
@@ -393,12 +398,12 @@ export class ImageBudget {
 	enqueueTransmit(imageId: number, sequence: string): void {
 		if (this.#transmitted.has(imageId)) return;
 		this.#transmitted.add(imageId);
-		this.#pendingTransmits.push(sequence);
+		this.#pendingTransmits.set(imageId, sequence);
 	}
 
 	/** Whether a frame has image data queued but not yet written to the terminal. */
 	hasPendingTransmits(): boolean {
-		return this.#pendingTransmits.length > 0;
+		return this.#pendingTransmits.size > 0;
 	}
 
 	/**
@@ -410,7 +415,7 @@ export class ImageBudget {
 	get quiescent(): boolean {
 		return (
 			this.#lastTotal === 0 &&
-			this.#pendingTransmits.length === 0 &&
+			this.#pendingTransmits.size === 0 &&
 			this.#purgeIds.length === 0 &&
 			this.#planned === this.#onTerminal
 		);
@@ -418,9 +423,9 @@ export class ImageBudget {
 
 	/** Transmit sequences to write before this frame's placements; clears the queue. */
 	takeTransmits(): readonly string[] {
-		if (this.#pendingTransmits.length === 0) return EMPTY_TRANSMITS;
-		const sequences = this.#pendingTransmits;
-		this.#pendingTransmits = [];
+		if (this.#pendingTransmits.size === 0) return EMPTY_TRANSMITS;
+		const sequences = [...this.#pendingTransmits.values()];
+		this.#pendingTransmits.clear();
 		return sequences;
 	}
 
@@ -433,9 +438,9 @@ export class ImageBudget {
 	 * re-emit together; keeps no base64 in budget state (the transmit-once design).
 	 */
 	forgetTransmitted(): void {
-		if (this.#transmitted.size === 0 && this.#pendingTransmits.length === 0) return;
+		if (this.#transmitted.size === 0 && this.#pendingTransmits.size === 0) return;
 		this.#transmitted.clear();
-		this.#pendingTransmits = [];
+		this.#pendingTransmits.clear();
 	}
 
 	#forgetKeyForId(id: number): void {
@@ -445,15 +450,16 @@ export class ImageBudget {
 		if (this.#keyToId.get(key) === id) this.#keyToId.delete(key);
 	}
 
-	#reconcile(total: number): void {
+	#reconcile(total: number): boolean {
 		const desired = this.#cap > 0 ? Math.max(0, total - this.#cap) : 0;
 		if (desired === this.#planned) {
 			// Budget relaxed without a stricter frame (cap raised or images
 			// removed): surviving graphics are untouched and re-exposed rows
 			// repaint normally, so just track the looser threshold.
 			if (this.#planned < this.#onTerminal) this.#onTerminal = this.#planned;
-			return;
+			return false;
 		}
+		const retry = desired > this.#onTerminal;
 		this.#planned = desired;
 		// More images must be demoted than the terminal shows: schedule the purge +
 		// full-redraw frame. Fewer: no ghosts to clear, so just catch the tracking
@@ -461,6 +467,7 @@ export class ImageBudget {
 		// render is needed to apply the new threshold.
 		if (desired <= this.#onTerminal) this.#onTerminal = desired;
 		this.#requestRender();
+		return retry;
 	}
 }
 

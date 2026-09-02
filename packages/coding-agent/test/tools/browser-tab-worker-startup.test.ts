@@ -15,9 +15,12 @@ import {
 	initializeTabWorkerForTest,
 	releaseTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import { chromiumAvailable } from "./chromium-probe";
+import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
+// proves the binary execs (`chrome --version` exits 0 with no X server).
+const VISIBLE_BROWSER_AVAILABLE = await visibleBrowserAvailable();
 
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
@@ -125,7 +128,7 @@ describe("browser tab worker startup", () => {
 
 		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
 
-		// 5 s remain → guard min(10 s, 5 s / 3) = 1.67 s → floored to 2 s.
+		// 5 s remain -> guard min(10 s, 5 s / 3) = 1.67 s -> floored to 2 s.
 		// A fresh (un-carried) budget would guard for 10 s.
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
 	});
@@ -217,7 +220,7 @@ describe("browser init deadline carry-over", () => {
 	);
 });
 describe("visible OMP-owned browser tabs", () => {
-	it.skipIf(!CHROMIUM_AVAILABLE)(
+	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
 			let browser: BrowserHandle | undefined;
@@ -225,16 +228,22 @@ describe("visible OMP-owned browser tabs", () => {
 			try {
 				browser = await acquireBrowser({ kind: "headless", headless: false }, { cwd: process.cwd() });
 				if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
-				// Shared broker launches use --no-startup-window. Mirror that empty
-				// target set even though bun tests use the process-local launcher.
-				for (const page of await browser.browser.pages()) await page.close();
-				expect(await browser.browser.pages()).toHaveLength(0);
 
 				const firstName = `visible-owned-a-${process.pid}-${Math.random().toString(36).slice(2)}`;
 				const firstUrl = `data:text/html,<title>${firstName}</title><main>first</main>`;
 				const first = await acquireTab(firstName, browser, { url: firstUrl, timeoutMs: 30_000 });
 				names.push(firstName);
-				const firstPage = (await browser.browser.pages()).find(page => page.url() === firstUrl);
+
+				// Shared broker launches use --no-startup-window. Mirror that
+				// OMP-owned-only target set, but only after the owned page exists:
+				// a headful Chromium quits when its last window closes, so closing
+				// every page first would kill the browser this test still needs.
+				for (const page of await browser.browser.pages()) {
+					if (page.url() !== firstUrl) await page.close();
+				}
+				const remaining = await browser.browser.pages();
+				expect(remaining.map(page => page.url())).toEqual([firstUrl]);
+				const firstPage = remaining[0];
 				if (!firstPage) throw new Error("Expected the first managed page");
 
 				const before = await firstPage.evaluate(() => ({ width: innerWidth, height: innerHeight }));

@@ -212,9 +212,8 @@ const modelSegment: StatusLineSegment = {
 		// `/advisor status`.
 		// Optional chaining: lightweight session doubles (test mocks) that don't
 		// implement getAdvisorStatusOverview skip the badge instead of crashing.
-		const advisorIcon = theme.icon.advisor;
 		const advisorStats = ctx.session.getAdvisorStatusOverview?.();
-		if (advisorIcon && advisorStats?.configured && advisorStats.advisors.length > 0) {
+		if (advisorStats?.configured && advisorStats.advisors.length > 0) {
 			const statuses = advisorStats.advisors.map(a => a.status);
 			const badgeColor = statuses.includes("error")
 				? "error"
@@ -223,7 +222,11 @@ const modelSegment: StatusLineSegment = {
 					: statuses.includes("running")
 						? "success"
 						: "dim";
-			content += theme.fg(badgeColor, ` ${advisorIcon}`);
+			// Closed eye once every advisor has finished reviewing the yielded
+			// turn — no more comments until a new primary turn starts.
+			const allYielded = advisorStats.advisors.every(a => a.yielded);
+			const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
+			if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
 		}
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);

@@ -17,6 +17,7 @@ import {
 	registerCustomApi,
 	type SimpleStreamOptions,
 	type TextContent,
+	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -1217,6 +1218,101 @@ describe("AgentSession message pipeline", () => {
 			// The native bash actually ran the wrapper's command, not the model's.
 			expect(delegatedText).toContain("from-wrapper");
 			expect(delegatedText).not.toContain("from-model");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("uses an extension web_search implementation when the built-in is enabled", async () => {
+		using tempDir = TempDir.createSync("@pi-web-search-override-");
+		const api: Api = "test-web-search-override";
+		let requests = 0;
+		registerCustomApi(api, () => {
+			requests++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (requests === 1) {
+					const message = createAssistantMessage("");
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: "call-web-search-1",
+						name: "web_search",
+						arguments: {},
+					};
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage("done");
+					stream.push({ type: "done", reason: "stop", message });
+				}
+			});
+			return stream;
+		});
+		const modelSpec: ModelSpec<Api> = {
+			id: "local-web-search-override-model",
+			name: "Local Web Search Override Model",
+			api,
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		};
+		const model = buildModel(modelSpec);
+		let customInvoked = false;
+		const customWebSearch: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "web_search",
+				label: "Custom Web Search",
+				description: "Custom extension web search",
+				parameters: pi.arktype({}),
+				async execute() {
+					customInvoked = true;
+					return {
+						content: [{ type: "text", text: "custom-web-search-result" }],
+						details: {},
+					};
+				},
+			});
+		};
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"tools.xdev": false,
+				"web_search.enabled": true,
+			}),
+			model,
+			disableExtensionDiscovery: true,
+			extensions: [customWebSearch],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["web_search"],
+		});
+		try {
+			await session.sendUserMessage("search");
+
+			expect(customInvoked).toBe(true);
+			const toolResult = session.agent.state.messages.find(message => message.role === "toolResult");
+			const text = toolResult?.content.find(block => block.type === "text");
+			expect(text?.type === "text" ? text.text : "").toBe("custom-web-search-result");
 		} finally {
 			await session.dispose();
 			authStorage.close();

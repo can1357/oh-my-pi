@@ -152,7 +152,6 @@ function makeRenderCtx(
 ): { ctx: InteractiveModeContext; chatContainer: TranscriptContainer } {
 	const chatContainer = new TranscriptContainer();
 	chatContainer.setToolActivityVisible(!hideToolActivity);
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),
@@ -224,7 +223,7 @@ function makeRenderCtx(
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, chatContainer };
 }
 

@@ -270,6 +270,23 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
+	it("does not replay a long OpenCode Go usage limit after committed text", () => {
+		const openCodeModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		if (!openCodeModel) throw new Error("Expected bundled OpenCode Go model");
+		const recovery = new TurnRecovery(
+			createHost(openCodeModel, modelRegistry, {
+				fallbackChains: {
+					[`${openCodeModel.provider}/${openCodeModel.id}`]: ["openai/gpt-4o-mini"],
+				},
+			}),
+		);
+		const message = {
+			...makeMessage([{ type: "text", text: "Already shown to the user" }], openCodeModel),
+			errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+		} as AssistantMessage;
+		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
 	it("allows replay-safe hard fallback and excludes committed text with a configured chain", () => {
 		const fallbackChains = {
 			[`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"],

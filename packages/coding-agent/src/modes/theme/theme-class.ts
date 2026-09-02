@@ -590,6 +590,7 @@ export class Theme {
 			cost: this.#symbols["icon.cost"],
 			subscription: this.#symbols["icon.subscription"],
 			advisor: this.#symbols["icon.advisor"],
+			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
 			omp: this.#symbols["icon.omp"],
 			esc: this.#symbols["icon.esc"],

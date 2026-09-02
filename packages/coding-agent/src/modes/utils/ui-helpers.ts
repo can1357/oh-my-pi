@@ -34,7 +34,11 @@ import {
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { StrippedToolCallsPlaceholder } from "../../modes/components/stripped-tool-calls-placeholder";
 import { ToolActivityContainer } from "../../modes/components/tool-activity";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "../../modes/components/tool-execution";
+import {
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+	toolRenderName,
+} from "../../modes/components/tool-execution";
 import { TranscriptBlock, TranscriptContainer } from "../../modes/components/transcript-container";
 import { createUsageRowBlock, turnElapsedMs } from "../../modes/components/usage-row";
 import { UserMessageComponent } from "../../modes/components/user-message";
@@ -359,6 +363,8 @@ export class UiHelpers {
 	): Generator<void, void, void> {
 		// Preserved: message_start handler owns this lifecycle (see #783)
 		this.ctx.pendingTools.clear();
+		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
+		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
@@ -454,6 +460,11 @@ export class UiHelpers {
 			todoSnapshot = null;
 			previous.seal();
 		};
+		// Detached task calls persist their initial `async.state === "running"`
+		// result, but the job keeps streaming progress afterwards. Parked here
+		// (not finalized) so replayed and live frames still route to the card;
+		// the ids are handed back to the controller after the loop (#10447).
+		const backgroundTaskCallIds = new Set<string>();
 		const messages = sessionContext.messages;
 		const count = messages.length;
 		for (let i = 0; i < count; i++) {
@@ -510,9 +521,11 @@ export class UiHelpers {
 						appendAssistantSegment(afterToolSegment);
 						continue;
 					}
-					resolveWaitingPoll(content.name);
+					const tool = this.ctx.viewSession.getToolByName(content.name);
+					const renderToolName = toolRenderName(content.name, tool);
+					resolveWaitingPoll(renderToolName);
 
-					if (content.name === "read" && readArgsCollapseIntoGroup(content.arguments)) {
+					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (hasErrorStop && errorMessage) {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
@@ -553,7 +566,6 @@ export class UiHelpers {
 
 					readGroup?.seal();
 					readGroup = null;
-					const tool = this.ctx.viewSession.getToolByName(content.name);
 					const partialJson = getStreamingPartialJson(content);
 					// Mid-stream rebuild (theme change, settings, focus replay): decode
 					// display args from the raw stream exactly like the live reveal path.
@@ -565,14 +577,14 @@ export class UiHelpers {
 						? decodeStreamedToolArgs(partialJson, {
 								rawInput,
 								fullArgs: content.arguments,
-								streamingStringKeys: streamingStringKeysForTool(content.name, rawInput),
+								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
 							})
 						: content.arguments;
 					const component = new ToolExecutionComponent(
-						content.name,
+						renderToolName,
 						renderArgs,
 						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(content.name),
+							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 							snapshots: getFileSnapshotStore(this.ctx.viewSession),
 							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
@@ -666,24 +678,40 @@ export class UiHelpers {
 				// Match tool results to pending tool components
 				const component = this.ctx.pendingTools.get(message.toolCallId);
 				if (component) {
-					component.updateResult(message, false, message.toolCallId);
-					this.ctx.pendingTools.delete(message.toolCallId);
-					if (
-						message.toolName === "hub" &&
-						component instanceof ToolExecutionComponent &&
-						component.isDisplaceableBlock()
-					) {
-						waitingPoll = component;
-					} else if (
-						message.toolName === "todo" &&
-						component instanceof ToolExecutionComponent &&
-						component.canBeDisplacedBy("todo")
-					) {
-						// A successful todo result supersedes the prior live snapshot. Failed
-						// follow-ups return false from canBeDisplacedBy("todo"), so the
-						// last-good panel stays on screen.
-						resolveTodoSnapshot("todo");
-						todoSnapshot = component;
+					const asyncDetails = (message.details as { async?: { state?: string; jobId?: string } } | undefined)
+						?.async;
+					const isBackgroundTask =
+						message.toolName === "task" &&
+						asyncDetails?.state === "running" &&
+						(activeToolExecutionUpdates.some(event => event.toolCallId === message.toolCallId) ||
+							runningAsyncJobs.some(job => job.id === asyncDetails.jobId));
+					// A detached task's persisted result is only its "still running"
+					// snapshot. Keep the card partial, parked, and in `pendingTools` so
+					// the snapshot replay and later live progress frames land on it
+					// instead of hitting the no-pending-component early return (#10447).
+					component.updateResult(message, isBackgroundTask, message.toolCallId);
+					if (isBackgroundTask) {
+						component.parkAsBackground();
+						backgroundTaskCallIds.add(message.toolCallId);
+					} else {
+						this.ctx.pendingTools.delete(message.toolCallId);
+						if (
+							message.toolName === "hub" &&
+							component instanceof ToolExecutionComponent &&
+							component.isDisplaceableBlock()
+						) {
+							waitingPoll = component;
+						} else if (
+							message.toolName === "todo" &&
+							component instanceof ToolExecutionComponent &&
+							component.canBeDisplacedBy("todo")
+						) {
+							// A successful todo result supersedes the prior live snapshot. Failed
+							// follow-ups return false from canBeDisplacedBy("todo"), so the
+							// last-good panel stays on screen.
+							resolveTodoSnapshot("todo");
+							todoSnapshot = component;
+						}
 					}
 				}
 			} else {
@@ -739,6 +767,14 @@ export class UiHelpers {
 		if (this.ctx.viewSession.isStreaming) {
 			this.ctx.eventController?.inheritTurnStart(turnStartedAt);
 		}
+		// Re-register parked background task cards with the controller: focus
+		// attach resets its `#backgroundTaskCallIds` before replaying, and unlike
+		// the todo/turn handoffs this must run whether or not the session streams
+		// — a detached task keeps running while the main session sits idle
+		// (#10447). Membership is re-checked against `pendingTools`.
+		if (backgroundTaskCallIds.size > 0) {
+			this.ctx.eventController?.markBackgroundTaskCalls(backgroundTaskCallIds);
+		}
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
 		// during the replay — with `keepDanglingToolCalls` these are exactly the
@@ -760,10 +796,17 @@ export class UiHelpers {
 				}
 			}
 		} else {
-			for (const component of this.ctx.pendingTools.values()) {
+			for (const [toolCallId, component] of this.ctx.pendingTools) {
+				// A parked background task keeps running even while the main session
+				// is idle, so leave its card pending — sealing and clearing it would
+				// drop the replayed snapshot and every later job frame (#10447).
+				if (backgroundTaskCallIds.has(toolCallId)) {
+					component.setArgsComplete(toolCallId);
+					continue;
+				}
 				component.seal();
+				this.ctx.pendingTools.delete(toolCallId);
 			}
-			this.ctx.pendingTools.clear();
 		}
 		this.ctx.ui.requestRender();
 	}

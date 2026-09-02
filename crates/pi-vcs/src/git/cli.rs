@@ -204,9 +204,18 @@ pub(crate) async fn run_checked(
 	run(cwd, args, options).await?.into_checked(args)
 }
 
-/// Synchronous bounded runner for render paths (reftable ref reads). Enforces
-/// [`SYNC_TIMEOUT`] by polling so a stalled git cannot freeze rendering.
-pub(crate) fn run_sync(cwd: &Path, args: &[String]) -> Result<CliOutput> {
+/// Whether `err` means the git binary could not be launched at all (missing
+/// binary or deleted cwd), as opposed to git running and failing. Callers with
+/// an in-process fallback (e.g. porcelain status) branch on this.
+pub(crate) fn is_spawn_failure(err: &Error) -> bool {
+	matches!(err, Error::Backend { context: "git spawn", .. })
+}
+
+/// Synchronous bounded runner with a caller-chosen deadline; render paths pass
+/// [`SYNC_TIMEOUT`] so a stalled git cannot freeze the UI. Stdout/stderr are
+/// drained concurrently with capped retention, so output larger than the OS
+/// pipe buffer can never stall the child into a spurious timeout.
+pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result<CliOutput> {
 	let argv = hardened_args(args, true);
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
@@ -231,26 +240,75 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String]) -> Result<CliOutput> {
 	cmd.env("GIT_OPTIONAL_LOCKS", "0");
 	cmd.env("GIT_TERMINAL_PROMPT", "0");
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
+	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take());
+	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take());
 
-	let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
-	loop {
+	let deadline = std::time::Instant::now() + timeout;
+	let status = loop {
 		match child.try_wait()? {
-			Some(status) => {
-				let output = child.wait_with_output()?;
-				return Ok(CliOutput {
-					exit_code: status.code().unwrap_or(-1),
-					stdout:    String::from_utf8_lossy(&output.stdout).into_owned(),
-					stderr:    String::from_utf8_lossy(&output.stderr).into_owned(),
-				});
-			},
+			Some(status) => break Some(status),
 			None if std::time::Instant::now() >= deadline => {
 				let _ = child.kill();
 				let _ = child.wait();
-				return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
+				break None;
 			},
 			None => std::thread::sleep(Duration::from_millis(10)),
 		}
+	};
+	// The child has exited (or been killed), so the pipes reach EOF and the
+	// readers terminate; join can only block briefly on the final drain.
+	let stdout = stdout.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let stderr = stderr.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let Some(status) = status else {
+		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
+	};
+	Ok(CliOutput { exit_code: status.code().unwrap_or(-1), stdout, stderr })
+}
+
+/// Drain a child stream on a helper thread, mirroring [`read_capped`].
+///
+/// `None` when the stream is absent or the thread cannot be spawned (e.g.
+/// under the same memory pressure that motivates the CLI path); dropping the
+/// stream then closes the pipe, so a chatty child fails with EPIPE and
+/// surfaces as a non-zero exit instead of a hang.
+fn spawn_sync_reader(
+	name: &'static str,
+	stream: Option<impl std::io::Read + Send + 'static>,
+) -> Option<std::thread::JoinHandle<String>> {
+	let stream = stream?;
+	std::thread::Builder::new()
+		.name(name.into())
+		.spawn(move || read_capped_sync(stream))
+		.ok()
+}
+
+/// Synchronous mirror of [`read_capped`]: cap retention at
+/// [`OUTPUT_LIMIT_BYTES`] while draining to EOF so the child never blocks.
+fn read_capped_sync(mut stream: impl std::io::Read) -> String {
+	let mut retained: Vec<u8> = Vec::new();
+	let mut buf = [0u8; 8 * 1024];
+	let mut truncated = false;
+	loop {
+		let n = match stream.read(&mut buf) {
+			Ok(0) | Err(_) => break,
+			Ok(n) => n,
+		};
+		if truncated {
+			continue;
+		}
+		let remaining = OUTPUT_LIMIT_BYTES - retained.len();
+		if n <= remaining {
+			retained.extend_from_slice(&buf[..n]);
+		} else {
+			retained.extend_from_slice(&buf[..remaining]);
+			truncated = true;
+		}
 	}
+	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	if truncated {
+		text.push_str(TRUNCATION_MARKER);
+	}
+	text
 }
 
 fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {

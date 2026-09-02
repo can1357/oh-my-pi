@@ -720,6 +720,48 @@ describe("model thinking derivation", () => {
 		expect(sonnet5Bedrock.thinking?.supportsDisplay).toBe(true);
 	});
 
+	it("bakes Fable 5.1 prefix binding and first-party controls", () => {
+		const direct = createModel({
+			id: "claude-fable-5-1",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+		const vertex = createModel({
+			id: "claude-fable-5-1",
+			api: "anthropic-messages",
+			provider: "google-vertex",
+		});
+		const bedrock = createModel({
+			id: "global.anthropic.claude-fable-5-1-v1:0",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+
+		expect(direct.thinking?.prefixBinding).toBe(true);
+		expect(vertex.thinking?.prefixBinding).toBe(true);
+		expect(bedrock.thinking?.prefixBinding).toBe(true);
+		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
+		expect(direct.compat.supportsPerMessageEffort).toBe(true);
+		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
+	});
+
+	it("does not advertise mid-conversation system messages on Claude Sonnet 5", () => {
+		const sonnet5 = createModel({
+			id: "claude-sonnet-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+		const opus48 = createModel({
+			id: "claude-opus-4-8",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+
+		expect(sonnet5.compat.supportsMidConversationSystem).toBe(false);
+		expect(opus48.compat.supportsMidConversationSystem).toBe(true);
+	});
+
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {
 		// Bedrock serves the GPT-5.x SKUs through OpenAI's own request schema,
 		// which rejects Anthropic's budget block: `unknown_parameter: 'thinking'`.

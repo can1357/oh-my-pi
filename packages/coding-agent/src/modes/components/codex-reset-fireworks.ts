@@ -284,6 +284,7 @@ function renderCodexResetFireworks(
 	const artWidth = Math.min(96, safeWidth);
 	const left = Math.floor((safeWidth - artWidth) / 2);
 	const skyHeight = Math.max(0, safeHeight - 3);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const canvas = Array.from({ length: safeHeight }, () => new Array<CanvasCell | undefined>(safeWidth));
 
 	drawStars(canvas, left, artWidth, skyHeight, frame);
