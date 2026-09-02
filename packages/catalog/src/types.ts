@@ -1077,6 +1077,8 @@ export interface Model<TApi extends Api = Api> {
 	 * inferring it from the transport API.
 	 */
 	requiresGlyphTokenization?: boolean;
+	/** Whether this model requires Cursor's tool-schema combiner projection. */
+	requiresCursorToolSchemaProjection?: boolean;
 	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
@@ -1236,7 +1238,12 @@ export interface Model<TApi extends Api = Api> {
  */
 export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	Model<TApi>,
-	"compat" | "identity" | "compatConfig" | "requiresGlyphTokenization" | "supportsComputerUseConfig"
+	| "compat"
+	| "identity"
+	| "compatConfig"
+	| "requiresGlyphTokenization"
+	| "requiresCursorToolSchemaProjection"
+	| "supportsComputerUseConfig"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;

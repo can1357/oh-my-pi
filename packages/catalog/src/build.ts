@@ -32,7 +32,8 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * Applies resolved catalog-data axes onto the model: reviewed metadata
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
- * (`priority`, `apply-patch-tool-type`, `service-tier-cost`) is rule-owned;
+ * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
+ * `requires-cursor-tool-schema-projection`) is rule-owned;
  * `context-promotion-target` fills only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
@@ -50,6 +51,12 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
+	}
+	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
+	if (requiresCursorToolSchemaProjection === true) {
+		model.requiresCursorToolSchemaProjection = true;
+	} else {
+		delete model.requiresCursorToolSchemaProjection;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {

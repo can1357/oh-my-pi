@@ -786,8 +786,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.pin": "\uf08d",
 	// pick:  | alt: ⊛ ◍ 
 	"icon.tokens": "\ue26b",
-	// pick:  | alt: ◫ ▦
-	"icon.context": "\ue70f",
+	// pick:  (nf-cod-window) | alt:  (nf-cod-empty_window) ◫ ▦
+	"icon.context": "\ueb7f",
 	// pick:  | alt: $ ¢
 	"icon.cost": "\uf155",
 	// pick: 󰙺 (nf-md-currency_usd_off)

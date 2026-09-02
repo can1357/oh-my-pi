@@ -302,6 +302,8 @@ base = [
 "util.base32" = []
 "util.base64" = ["util.base32"]
 "util.basename" = []
+# Shared POSIX BRE translation behind grep/sed.
+"util.bre" = []
 "util.cat" = []
 "util.cksum" = []
 "util.cmp" = []
@@ -312,7 +314,7 @@ base = [
 "util.dirname" = []
 "util.fd" = []
 "util.find" = []
-"util.grep" = []
+"util.grep" = ["util.bre"]
 "util.head" = []
 "util.hostname" = []
 "util.jq" = []
@@ -348,7 +350,7 @@ base = [
 # Shares the PCRE2 JIT probe with `grep`.
 "util.rg" = ["util.grep"]
 "util.rm" = []
-"util.sed" = []
+"util.sed" = ["util.bre"]
 "util.seq" = []
 "util.sha1sum" = ["util.cksum"]
 "util.sha224sum" = ["util.cksum"]
@@ -376,6 +378,7 @@ utils = [
   "util.base32",
   "util.base64",
   "util.basename",
+  "util.bre",
   "util.cat",
   "util.cksum",
   "util.cmp",
