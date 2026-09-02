@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- The ACP `/usage` renderer no longer splits one anonymous credential (no email/account/project identity, e.g. Ollama Cloud API-key logins) into multiple `account N` rows: limits of a single report now share one report-scoped label.
+
 
 ## [18.1.3] - 2026-09-02
 

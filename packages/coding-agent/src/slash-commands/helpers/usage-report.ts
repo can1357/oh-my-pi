@@ -25,7 +25,7 @@ function formatUsageAmount(limit: UsageLimit): string {
 	return `${usedText}${remainingText}`;
 }
 
-function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index: number): string {
+function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, reportIndex: number): string {
 	const metaOrgName = report.metadata?.orgName;
 	const metaOrgId = report.metadata?.orgId;
 	const org =
@@ -49,7 +49,10 @@ function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index:
 	const metaProjectId = report.metadata?.projectId;
 	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
 	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+	// Report-scoped on purpose: one report is one credential fetch, so every
+	// anonymous limit of the same report shares a label — indexing by the limit
+	// loop would present one credential as `account 1`, `account 2`, …
+	return `account ${reportIndex + 1}`;
 }
 
 function renderUsageReports(
@@ -81,7 +84,7 @@ function renderUsageReports(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
-		for (const report of providerReports) {
+		for (const [reportIndex, report] of providerReports.entries()) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const savedResets = report.resetCredits?.availableCount ?? 0;
 			if (savedResets > 0) {
@@ -127,7 +130,7 @@ function renderUsageReports(
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${formatUsageReportAccount(report, limit, reportIndex)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
