@@ -49,6 +49,20 @@ export class ThinkingInbandScanner implements InbandScanner {
 		return this.#consume(false);
 	}
 
+	/**
+	 * Enter thinking mode without a leading open tag, for chat templates that
+	 * prefill the opener into the prompt (Qwen3's `<think>\n` prefix) so the
+	 * model streams only the closing `</think>`. Subsequent {@link feed} content
+	 * is treated as reasoning until that close tag; an unterminated block still
+	 * flushes as thinking. No-op once a block is already open or inside a code
+	 * span/fence, so a genuine leading `<think>` still parses normally.
+	 */
+	beginImpliedThinking(): void {
+		if (this.#closeTag || this.#fenced || this.#codeTicks > 0) return;
+		this.#closeTag = "</think>";
+		this.#thinking = "";
+	}
+
 	flush(): InbandScanEvent[] {
 		const events = this.#consume(true);
 		if (this.#buffer.length === 0) return events;

@@ -1066,6 +1066,18 @@ const streamOpenAICompletionsOnce = (
 				: undefined;
 			const explicitReasoningDeltasMayBeCumulative = policy.stream.reasoningDeltasMayBeCumulative;
 			let suppressHealedThinking = false;
+			let impliedThinkingSeeded = false;
+			// Qwen3's chat template prefills the `<think>` opener into the prompt,
+			// so hosts that don't split reasoning into a separate field stream only
+			// the closing `</think>` and the in-band healer never sees an opener.
+			// When reasoning is active and no structured reasoning field has arrived,
+			// treat leaked content as reasoning until that close (issue #10571). Gated
+			// by the Qwen preserve-thinking compat fact so field-based hosts (recent
+			// Ollama /v1) and non-Qwen models are unaffected.
+			const impliedThinkingOpenEnabled =
+				streamMarkupHealing !== undefined &&
+				policy.reasoning.enabled &&
+				policy.compat.qwenPreserveThinking === true;
 			let healedToolCallEmitted = false;
 			const emitHealedToolCall = (call: HealedToolCall): void => {
 				finishCurrentBlock(currentBlock);
@@ -1220,6 +1232,14 @@ const streamOpenAICompletionsOnce = (
 							Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
 
 						if (streamMarkupHealing) {
+							if (impliedThinkingOpenEnabled && !impliedThinkingSeeded && !suppressHealedThinking) {
+								impliedThinkingSeeded = true;
+								// Skip when the host actually emitted an opening tag — the
+								// normal healer handles a real `<think>…</think>` block.
+								if (!/^\s*<[a-zA-Z]/.test(normalizedDeltaText)) {
+									streamMarkupHealing.beginImpliedThinking();
+								}
+							}
 							const healingEvents = hasStructuredToolCalls
 								? streamMarkupHealing.feedEventsWithoutCalls(normalizedDeltaText)
 								: streamMarkupHealing.feedEvents(normalizedDeltaText);

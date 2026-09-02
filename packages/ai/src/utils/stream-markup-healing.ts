@@ -74,6 +74,16 @@ export class StreamMarkupHealing {
 	}
 
 	/**
+	 * Seed implied-open reasoning on the always-on thinking healer. Used by the
+	 * chat-completions parser for Qwen3-style chat templates that prefill the
+	 * `<think>` opener into the prompt, so the model streams only the closing
+	 * `</think>`. See {@link ThinkingInbandScanner.beginImpliedThinking}.
+	 */
+	beginImpliedThinking(): void {
+		this.#thinkingScanner.beginImpliedThinking();
+	}
+
+	/**
 	 * Feed a chunk and return visible text only. Reconstructed tool calls are
 	 * stored for {@link drainCompleted}; thinking blocks are intentionally not
 	 * returned by this compatibility helper. Use {@link feedEvents} when the caller

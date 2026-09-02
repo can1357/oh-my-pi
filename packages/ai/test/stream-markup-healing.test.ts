@@ -259,6 +259,112 @@ describe("openai-completions leaked thinking healing", () => {
 	});
 });
 
+describe("openai-completions implied-open reasoning (Qwen3 prefilled <think>)", () => {
+	// Qwen3's chat template prefills the `<think>` opener into the prompt, so a
+	// host that streams reasoning inline (not in a `reasoning` field) emits only
+	// the closing `</think>`. The healer must treat the leaked chain-of-thought
+	// as reasoning instead of dumping it into the visible reply (issue #10571).
+	function qwenLocalModel(): Model<"openai-completions"> {
+		return buildModel({
+			id: "qwen3.8-27b-q4:latest",
+			name: "qwen3.8-27b-q4",
+			api: "openai-completions",
+			provider: "localai",
+			baseUrl: "http://localhost:11434/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 16_384,
+			compat: { supportsReasoningEffort: true },
+		});
+	}
+
+	async function runContent(
+		contents: string[],
+		options: { reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max"; disableReasoning?: boolean } = {},
+	): Promise<{ thinking: string; text: string }> {
+		const model = qwenLocalModel();
+		const fetchMock = mockFetch([
+			...contents.map(content => chunk(model.id, { content })),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test",
+			reasoning: options.reasoning,
+			disableReasoning: options.disableReasoning,
+			fetch: fetchMock,
+		}).result();
+		const thinking = result.content
+			.filter((b): b is ThinkingContent => b.type === "thinking")
+			.map(b => b.thinking)
+			.join("");
+		const text = result.content
+			.filter((b): b is TextContent => b.type === "text")
+			.map(b => b.text)
+			.join("");
+		return { thinking, text };
+	}
+
+	it("lifts inline reasoning that streams only a closing </think> into a thinking block", async () => {
+		const { thinking, text } = await runContent(["Let me think. ", "2 plus 2.\n</think>\n\n", "The answer is 4."], {
+			reasoning: "low",
+		});
+		expect(thinking).toContain("Let me think. 2 plus 2.");
+		expect(text).not.toContain("</think>");
+		expect(text.trim()).toBe("The answer is 4.");
+	});
+
+	it("still parses a genuine <think> opener normally", async () => {
+		const { thinking, text } = await runContent(["<think>real reasoning</think>Answer."], { reasoning: "low" });
+		expect(thinking).toBe("real reasoning");
+		expect(text).toBe("Answer.");
+	});
+
+	it("leaves the reply as visible text when reasoning is disabled", async () => {
+		const { thinking, text } = await runContent(["Just the answer, no think tag."], { disableReasoning: true });
+		expect(thinking).toBe("");
+		expect(text).toBe("Just the answer, no think tag.");
+	});
+
+	it("does not consume the answer as reasoning when a structured reasoning field is present", async () => {
+		const model = qwenLocalModel();
+		const fetchMock = mockFetch([
+			chunk(model.id, { reasoning_content: "field reasoning" }),
+			chunk(model.id, { content: "Plain answer with no think tag." }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test",
+			reasoning: "low",
+			fetch: fetchMock,
+		}).result();
+		const thinking = result.content
+			.filter((b): b is ThinkingContent => b.type === "thinking")
+			.map(b => b.thinking)
+			.join("");
+		const text = result.content
+			.filter((b): b is TextContent => b.type === "text")
+			.map(b => b.text)
+			.join("");
+		expect(thinking).toBe("field reasoning");
+		expect(text).toBe("Plain answer with no think tag.");
+	});
+
+	it("beginImpliedThinking captures reasoning until the first close tag", () => {
+		const scanner = new ThinkingInbandScanner();
+		scanner.beginImpliedThinking();
+		const events: InbandScanEvent[] = [...scanner.feed("reasoning here\n</think>\nanswer"), ...scanner.flush()];
+		const thinking = events.map(e => (e.type === "thinkingDelta" ? e.delta : "")).join("");
+		const text = events.map(e => (e.type === "text" ? e.text : "")).join("");
+		expect(thinking).toBe("reasoning here\n");
+		expect(text).toBe("\nanswer");
+		expect(events.filter(e => e.type === "thinkingEnd")).toHaveLength(1);
+	});
+});
+
 describe("official OpenAI leaked thinking healing exemption", () => {
 	// The official OpenAI endpoint returns structured reasoning and never leaks
 	// fences, so neither the provider-local healer nor the central

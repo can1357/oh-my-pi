@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed reasoning not showing for locally-hosted Qwen3 models over the `openai-completions` API when the host streams the chain-of-thought inline: Qwen3's chat template prefills the `<think>` opener into the prompt, so the model emits only the closing `</think>`, and omp dumped the entire reasoning into the visible reply. It's now healed back into a thinking block ([#10571](https://github.com/can1357/oh-my-pi/issues/10571)).
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed
