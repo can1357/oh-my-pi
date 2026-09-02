@@ -157,6 +157,12 @@ export interface SegmentContext {
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null;
+	/** Provider-reported subscription windows for the advisor's own account,
+	 *  keyed to the advisor model's provider/identity (not the primary's). */
+	advisorUsage: {
+		fiveHour?: { percent: number; resetMinutes?: number };
+		sevenDay?: { percent: number; resetHours?: number };
+	} | null;
 }
 
 export interface RenderedSegment {

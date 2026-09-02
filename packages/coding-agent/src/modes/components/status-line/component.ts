@@ -362,6 +362,8 @@ export class StatusLineComponent implements Component {
 	#standaloneGap = false;
 	#autocompleteActiveProbe: (() => boolean) | undefined;
 	#renderRevision = 0;
+	/** Revision bumped when the top border's width epoch changes (two-line overflow row width). */
+	#widthEpochRevision = 0;
 	#settings: StatusLineSettings = {};
 	#effectiveSettings: EffectiveStatusLineSettings | undefined;
 	#cachedBranch: string | null | undefined = undefined;
@@ -475,6 +477,13 @@ export class StatusLineComponent implements Component {
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+	} | null = null;
+	// Advisor-scoped share of the same provider reports: the advisor's own
+	// provider/identity, independent of the primary model's. Fetching both from
+	// one report array keeps a single 5-min refresh cycle.
+	#cachedAdvisorUsage: {
+		fiveHour?: { percent: number; resetMinutes?: number };
+		sevenDay?: { percent: number; resetHours?: number };
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
@@ -889,6 +898,7 @@ export class StatusLineComponent implements Component {
 
 	invalidate(): void {
 		this.#renderRevision++;
+		this.#widthEpochRevision++;
 		// Generic repaint invalidation (theme change, message event, model
 		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
 		// the render path self-invalidates via cwd/context cache-miss checks, so
@@ -1340,7 +1350,18 @@ export class StatusLineComponent implements Component {
 		// so switching models must drop the previous model's cached scope instead
 		// of showing it for the rest of the TTL.
 		const activeModelId = session.state.model?.id ?? session.model?.id ?? "";
-		return `${this.#formatUsageContextKey(activeProvider, identity)}\0${activeModelId}`;
+		const parts = [`${this.#formatUsageContextKey(activeProvider, identity)}\0${activeModelId}`];
+		// The advisor share of the same reports is keyed to the advisor's own
+		// accounts; rotation must invalidate the cache the same way the primary's
+		// does. Order is the stable roster order, so the key is render-stable.
+		for (const account of session.getAdvisorUsageAccounts?.() ?? []) {
+			const accountIdentity = session.modelRegistry?.authStorage?.getOAuthAccountIdentity(
+				account.provider,
+				account.providerSessionId ?? session.sessionId,
+			);
+			parts.push(this.#formatUsageContextKey(account.provider, accountIdentity));
+		}
+		return parts.join("\u001e");
 	}
 
 	/**
@@ -1353,6 +1374,7 @@ export class StatusLineComponent implements Component {
 		const usageContextKey = this.#getUsageContextKey(session);
 		if (this.#cachedUsageContextKey !== usageContextKey) {
 			this.#cachedUsage = null;
+			this.#cachedAdvisorUsage = null;
 			this.#usageFetchedAt = 0;
 			this.#cachedUsageContextKey = usageContextKey;
 		}
@@ -1409,10 +1431,12 @@ export class StatusLineComponent implements Component {
 			modelId: activeModelId,
 			identity: activeIdentity,
 		});
+		const advisorUsage = this.#normalizeAdvisorUsage(reports, session.getAdvisorUsageAccounts?.() ?? [], session);
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
-		const usageChanged = this.#cachedUsage !== normalized;
+		const usageChanged = this.#cachedUsage !== normalized || this.#cachedAdvisorUsage !== advisorUsage;
 		this.#cachedUsage = normalized;
+		this.#cachedAdvisorUsage = advisorUsage;
 		this.#usageFetchedAt = Date.now();
 		// Usage fetch is async; without a repaint the top border stays blank until
 		// some unrelated event (git resolve, keystroke, …) rebuilds it.
@@ -1690,6 +1714,103 @@ export class StatusLineComponent implements Component {
 	}
 
 	/**
+	 * Advisor-scoped usage windows from the same account-wide fetch. The advisor
+	 * often runs on a different provider/account than the primary model, so the
+	 * match is keyed to each live advisor's own provider + OAuth identity (the
+	 * same derivation the runtime uses to pick the advisor's API key). The
+	 * rendered percent is the worst across the roster — one shared quota pool,
+	 * and the operative number for status. Untiered windows win over tiered
+	 * within a provider, mirroring {@link #normalizeUsageReports}.
+	 */
+	#normalizeAdvisorUsage(
+		reports: unknown,
+		accounts: readonly { provider: string; providerSessionId?: string }[],
+		session: AgentSession,
+	): {
+		fiveHour?: { percent: number; resetMinutes?: number };
+		sevenDay?: { percent: number; resetHours?: number };
+	} | null {
+		if (!Array.isArray(reports) || accounts.length === 0) return null;
+		const authStorage = session.modelRegistry?.authStorage;
+		if (!authStorage?.getOAuthAccountIdentity) return null;
+		const now = Date.now();
+		const fiveHour: { percent: number; resetMinutes?: number; resetHours?: number } = { percent: -1 };
+		const sevenDay: { percent: number; resetMinutes?: number; resetHours?: number } = { percent: -1 };
+		let fiveHourUntiered = false;
+		let sevenDayUntiered = false;
+		const revise = (bucket: typeof fiveHour, percent: number, resetsAt: number | undefined): void => {
+			if (percent <= bucket.percent) return;
+			bucket.percent = percent;
+			if (typeof resetsAt === "number") {
+				bucket.resetMinutes = Math.max(0, Math.round((resetsAt - now) / 60_000));
+				bucket.resetHours = Math.max(0, Math.round((resetsAt - now) / 3_600_000));
+			}
+		};
+		for (const report of reports) {
+			if (!report || typeof report !== "object") continue;
+			const provider = (report as { provider?: unknown }).provider;
+			const limits = (report as { limits?: unknown }).limits;
+			if (!Array.isArray(limits) || typeof provider !== "string") continue;
+			if (!accounts.some(a => a.provider === provider)) continue;
+			const usageReport = report as UsageReport;
+			for (const account of accounts.filter(a => a.provider === provider)) {
+				const identity = authStorage.getOAuthAccountIdentity(
+					provider,
+					account.providerSessionId ?? session.sessionId,
+				);
+				for (const limit of limits) {
+					if (!limit || typeof limit !== "object") continue;
+					if (identity && !limitMatchesActiveAccount(usageReport, limit as UsageLimit, identity)) continue;
+					const l = limit as {
+						scope?: { windowId?: string; tier?: string };
+						window?: { resetsAt?: number; durationMs?: number };
+						amount?: { usedFraction?: number };
+					};
+					const windowClass = this.#advisorUsageWindowClass(l);
+					if (!windowClass) continue;
+					const fraction = l.amount?.usedFraction;
+					if (typeof fraction !== "number") continue;
+					const untiered = !l.scope?.tier;
+					if (windowClass === "5h") {
+						if (untiered) fiveHourUntiered = true;
+						if (fiveHourUntiered && !untiered) continue;
+						revise(fiveHour, fraction * 100, l.window?.resetsAt);
+					} else {
+						if (untiered) sevenDayUntiered = true;
+						if (sevenDayUntiered && !untiered) continue;
+						revise(sevenDay, fraction * 100, l.window?.resetsAt);
+					}
+				}
+			}
+		}
+		const result: {
+			fiveHour?: { percent: number; resetMinutes?: number };
+			sevenDay?: { percent: number; resetHours?: number };
+		} = {};
+		if (fiveHour.percent >= 0) result.fiveHour = { percent: fiveHour.percent, resetMinutes: fiveHour.resetMinutes };
+		if (sevenDay.percent >= 0) result.sevenDay = { percent: sevenDay.percent, resetHours: sevenDay.resetHours };
+		return result.fiveHour || result.sevenDay ? result : null;
+	}
+
+	/**
+	 * Map a reported limit onto the 5h/7d subscription windows. Canonical window
+	 * ids win; a duration within tolerance falls back so cache rows written
+	 * before a provider was canonicalized still map (same tolerance the primary
+	 * normalization uses).
+	 */
+	#advisorUsageWindowClass(l: {
+		scope?: { windowId?: string };
+		window?: { durationMs?: number };
+	}): "5h" | "7d" | undefined {
+		const windowId = l.scope?.windowId;
+		if (windowId === "5h" || windowId === "7d") return windowId;
+		const durationMs = l.window?.durationMs;
+		if (durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000) return "5h";
+		if (durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000) return "7d";
+		return undefined;
+	}
+
+	/**
 	 * Used-tokens / context-window totals for the status-line context% segment,
 	 * memoized so the per-event redraw stays O(1) when nothing changed.
 	 *
@@ -1839,6 +1960,7 @@ export class StatusLineComponent implements Component {
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			advisorUsage: this.#cachedAdvisorUsage,
 		};
 	}
 
@@ -2049,28 +2171,51 @@ export class StatusLineComponent implements Component {
 		};
 		const totalWidth = () => leftWidth + rightWidth + minimumGapWidth();
 
+		// Segments shed by line 1's size budget move to the overflow line instead
+		// of being lost. Collected here in pop/drop order (right-to-left), then
+		// reversed back to reading order when assembling the second line.
+		const overflowLeft: string[] = [];
+		const overflowRight: string[] = [];
+
 		if (topFillWidth > 0) {
 			// Truncate the session-name segment before dropping right segments —
 			// the title is the only elastic one on the right, and dropping it
 			// wholesale left narrow bars (and the ≤76-col composer previews)
 			// without any title.
+			// The shrink exists to keep the title on line 1 at medium widths. If the
+			// segment is still popped past the floor, the overflow line has no width
+			// budget, so hand it the full (unshrunk) title — popping a chopped copy
+			// would defeat the two-line overflow.
+			let fullName: string | undefined;
+			let shrunkName: string | undefined;
 			const nameSegIdx = rightSegIds.indexOf("session_name");
 			if (nameSegIdx >= 0 && totalWidth() > topFillWidth) {
 				// Badge/job parts were unshifted ahead of the tracked segment ids.
-				const nameIdx = nameSegIdx + (right.length - rightSegIds.length);
-				const currentNameVW = visibleWidth(right[nameIdx]);
+				const nIdx = nameSegIdx + (right.length - rightSegIds.length);
+				const currentNameVW = visibleWidth(right[nIdx]);
 				const minNameVW = 8;
 				const shrinkBy = Math.min(Math.max(0, currentNameVW - minNameVW), totalWidth() - topFillWidth);
 				if (shrinkBy > 0) {
-					right[nameIdx] = truncateToWidth(right[nameIdx], currentNameVW - shrinkBy);
+					fullName = right[nIdx];
+					shrunkName = truncateToWidth(right[nIdx], currentNameVW - shrinkBy);
+					right[nIdx] = shrunkName;
 					rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 				}
 			}
 			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
+				const popped = right.pop();
+				if (popped !== undefined) {
+					// The shrink kept only the title on a narrow bar; when it is popped
+					// to the overflow line there is no width budget, so emit the full
+					// unshrunk title there instead of the chopped copy.
+					overflowRight.push(
+						shrunkName !== undefined && popped === shrunkName && fullName !== undefined ? fullName : popped,
+					);
+				}
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
+			let fullPath: string | undefined;
 			const pathIdx = leftSegIds.indexOf("path");
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
@@ -2098,7 +2243,8 @@ export class StatusLineComponent implements Component {
 							if (!adjusted.visible || !adjusted.content) break;
 							reRendered = adjusted;
 						}
-						left[pathIdx] = reRendered.content;
+						fullPath = reRendered.content;
+						left[pathIdx] = fullPath;
 						leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
 					}
 				}
@@ -2116,6 +2262,12 @@ export class StatusLineComponent implements Component {
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				const dropped = left[dropIdx];
+				// Same reasoning as the right title: the over-shrunk path renders
+				// full on the overflow line when it is dropped to line 2.
+				overflowLeft.push(
+					fullPath !== undefined && dropped === left[pathIdx] && pathIdx === dropIdx ? fullPath : dropped,
+				);
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth + bandCapWidth, leftSepWidth);
@@ -2148,22 +2300,38 @@ export class StatusLineComponent implements Component {
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
 
-		if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
-			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+		// Line 1 keeps upstream's placement semantics verbatim (empty guard,
+		// space-fallback when a side is absent on plain layouts), with only the
+		// box-layout gap composed through the context gauge.
+		let line1: string;
+		if (!leftGroup && !rightGroup) {
+			line1 = "";
+		} else if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
+			line1 = leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+		} else {
+			const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+			if (plain) {
+				// Standalone composers: no gauge line between the groups, just air.
+				line1 = leftGroup + padding(gapWidth) + rightGroup;
+			} else {
+				// Box layout: with one group absent (an unnamed session hides
+				// `session_name`, emptying the default preset's right group) the
+				// gauge runs to the border edge instead of disappearing, so
+				// embedded context labels don't fall back to a context chip until
+				// the session is titled.
+				line1 =
+					leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+			}
 		}
 
-		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
-		if (plain) {
-			// Standalone composers: no gauge line between the groups, just air.
-			return leftGroup + padding(gapWidth) + rightGroup;
-		}
-		// Box layout: with one group absent (an unnamed session hides
-		// `session_name`, emptying the default preset's right group) the gauge
-		// runs to the border edge instead of disappearing, so embedded context
-		// labels don't fall back to a context chip until the session is titled.
-		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+		// Line 2: overflowed segments kept in original reading order — left group
+		// first, then right group — joined by the dot separator. Each part is
+		// already self-contained ANSI from renderSegment, so no bg group or
+		// powerline caps are needed; the editor frames/pads this row.
+		const overflowParts = [...overflowLeft.reverse(), ...overflowRight.reverse()];
+		if (overflowParts.length === 0) return line1;
+		return `${line1}\n${overflowParts.join(theme.sep.dot)}`;
 	}
 
 	/**
@@ -2315,10 +2483,17 @@ export class StatusLineComponent implements Component {
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
 		const content = this.#dimWhileFocusProxied(this.#buildStatusLine(width, "box", previewTitle));
+		// With a two-line overflow the reported width is the widest line, which is
+		// what the editor budgets per row. A single-line bar keeps today's value.
+		let borderWidth = 0;
+		for (const line of content.split("\n")) {
+			const lineWidth = visibleWidth(line);
+			if (lineWidth > borderWidth) borderWidth = lineWidth;
+		}
 		return {
 			content,
-			width: visibleWidth(content),
-			revision: this.#renderRevision,
+			width: borderWidth,
+			revision: this.#widthEpochRevision,
 		};
 	}
 

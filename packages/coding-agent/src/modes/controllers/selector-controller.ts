@@ -241,7 +241,7 @@ export class SelectorController {
 						// The bar exactly as the active composer shape renders it (box top
 						// border, claude rule + chip, or the plain standalone bottom bar).
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
+						return this.ctx.statusLine.getTopBorder(availableWidth).content.split("\n")[0];
 					},
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());

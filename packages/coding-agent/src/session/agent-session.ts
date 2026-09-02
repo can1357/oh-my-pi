@@ -10184,6 +10184,11 @@ export class AgentSession {
 		return this.#advisors.getAdvisorStatusOverview();
 	}
 
+	/** Advisor OAuth contexts for provider usage-limit reporting (see SessionAdvisors). */
+	getAdvisorUsageAccounts(): { provider: string; providerSessionId?: string }[] {
+		return this.#advisors.getAdvisorUsageAccounts();
+	}
+
 	/** Return cumulative cost recorded for the current session's advisor activity. */
 	getAdvisorCost(): number {
 		return this.#advisors.getAdvisorCost();

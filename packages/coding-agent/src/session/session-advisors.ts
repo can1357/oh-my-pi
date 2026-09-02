@@ -1948,6 +1948,17 @@ export class SessionAdvisors {
 		return { configured: this.#advisorEnabled, advisors };
 	}
 
+	/**
+	 * Advisor OAuth contexts for usage-limit reporting. One entry per live
+	 * advisor: its model provider plus the provider session id its credentials
+	 * resolve from (the same derivation the runtime uses to pick the API key).
+	 * The status line keys its provider-usage fetch to these so the advisor's
+	 * 5h/7d quota displays independently of the primary model's provider.
+	 */
+	getAdvisorUsageAccounts(): { provider: string; providerSessionId?: string }[] {
+		return this.#advisors.map(a => ({ provider: a.model.provider, providerSessionId: a.providerSessionId }));
+	}
+
 	/** Return cumulative advisor cost recorded for the current session. */
 	getAdvisorCost(): number {
 		let cost = 0;

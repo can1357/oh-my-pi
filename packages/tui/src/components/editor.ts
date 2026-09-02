@@ -1093,7 +1093,11 @@ export class Editor implements Component, Focusable {
 		};
 
 		const topRow = style.renderTop(chromeCtx);
-		if (topRow !== undefined) result.push(topRow);
+		if (topRow !== undefined) {
+			// A two-line status bar renders one framed row per `\n` (line 1 cornered,
+			// following lines with `│` sides) so the rows stay separate editor lines.
+			result.push(...topRow.split("\n"));
+		}
 
 		// Render each layout line
 		// Keep the hardware cursor at the text insertion point while autocomplete

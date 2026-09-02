@@ -88,6 +88,7 @@ function createCtx(overrides?: {
 			pr: null,
 		},
 		usage: null,
+		advisorUsage: null,
 	};
 }
 
@@ -297,7 +298,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 		width: number,
 		leftSegmentIds: StatusLineSegmentId[],
 		ctx: SegmentContext,
-	): { surviving: StatusLineSegmentId[]; contents: string[] } {
+	): { surviving: StatusLineSegmentId[]; contents: string[]; overflow: string[] } {
 		const left: string[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
 		for (const segId of leftSegmentIds) {
@@ -355,13 +356,17 @@ describe("overflow: path shrinks before git is dropped", () => {
 			}
 			return left.length - 1;
 		};
+		// Segment contents shed by the budget, in original (left-group reading) order —
+		// mirrors production, which moves these to the overflow line instead of losing them.
+		const overflow: string[] = [];
 		while (groupWidth() > width && left.length > 0) {
 			const dropIdx = leftOverflowDropIndex();
+			overflow.push(left[dropIdx]);
 			left.splice(dropIdx, 1);
 			leftSegIds.splice(dropIdx, 1);
 		}
 
-		return { surviving: [...leftSegIds], contents: [...left] };
+		return { surviving: [...leftSegIds], contents: [...left], overflow: [...overflow].reverse() };
 	}
 
 	it("keeps git segment when path can be shrunk to fit", () => {
@@ -377,6 +382,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 
 		expect(result.surviving).toContain("git");
 		expect(result.surviving).toContain("path");
+		expect(result.overflow).toEqual([]);
 	});
 
 	it("drops git only when terminal is extremely narrow", () => {
@@ -393,6 +399,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 		const result = simulateOverflow(200, ["path", "git"], ctx);
 
 		expect(result.surviving).toEqual(["path", "git"]);
+		expect(result.overflow).toEqual([]);
 	});
 
 	it("shrinks a short path when maxLength exceeds actual path length", () => {
@@ -504,8 +511,128 @@ describe("overflow: path survives before model", () => {
 		expect(groupWidth([pi, model, minPath])).toBeGreaterThan(width);
 		expect(groupWidth([pi, minPath])).toBeLessThanOrEqual(width);
 
-		const rendered = stripAnsi(component.getTopBorder(width).content);
-		expect(rendered).toContain("xyz");
-		expect(rendered).not.toContain("MODEL_SHOULD_DROP");
+		const border = component.getTopBorder(width);
+		const lines = border.content.split("\n");
+		// Line 1 keeps the cwd path and sheds the model segment — kept-set unchanged.
+		expect(stripAnsi(lines[0])).toContain("xyz");
+		expect(stripAnsi(lines[0])).not.toContain("MODEL_SHOULD_DROP");
+		// The shed segment is preserved on the overflow line instead of being lost.
+		expect(lines.length).toBe(2);
+		expect(stripAnsi(lines[1])).toContain("MODEL_SHOULD_DROP");
+	});
+});
+
+describe("status line two-line overflow", () => {
+	/**
+	 * Component whose left group (pi, model, path) overflows a tight width and
+	 * sheds the model segment; a generous width keeps everything on one line.
+	 */
+	function buildLeftOverflow() {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-statusline-twoline-"));
+		const cwd = path.join(root, "cwdxyz");
+		fs.mkdirSync(cwd);
+		setProjectDir(cwd);
+
+		const modelName = `MODEL_KEPT_ON_LINE2_${"x".repeat(20)}`;
+		const component = new StatusLineComponent(createStatusLineSession("two line overflow", modelName));
+		const pathOptions = { abbreviate: false, maxLength: 32, stripWorkPrefix: false };
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "model", "path"],
+			rightSegments: [],
+			separator: "none",
+			sessionAccent: false,
+			transparent: true,
+			segmentOptions: {
+				model: { showThinkingLevel: false },
+				path: pathOptions,
+			},
+		});
+		return { component, modelName, pathOptions };
+	}
+
+	function leftOverflowWidth(
+		session: object,
+		pathOptions: { abbreviate: boolean; maxLength: number; stripWorkPrefix: boolean },
+	): number {
+		const ctx = {
+			...createCtx({ pathMaxLength: pathOptions.maxLength }),
+			session,
+			options: {
+				model: { showThinkingLevel: false },
+				path: pathOptions,
+			},
+		} as SegmentContext;
+		const pi = renderSegment("pi", ctx).content;
+		const model = renderSegment("model", ctx).content;
+		const separatorWidth = visibleWidth(theme.sep.space);
+		const groupWidth = (parts: string[]) =>
+			parts.reduce((sum, part) => sum + visibleWidth(part), 0) +
+			Math.max(0, parts.length - 1) * (separatorWidth + 2) +
+			2;
+		return groupWidth([pi, model]) + 1;
+	}
+
+	it("moves the dropped left segment to a second line instead of losing it", () => {
+		const { component, modelName, pathOptions } = buildLeftOverflow();
+		const width = leftOverflowWidth(createStatusLineSession("two line overflow", modelName), pathOptions);
+
+		const border = component.getTopBorder(width);
+		const lines = border.content.split("\n");
+		// Line 1 sheds the model (same kept-set as before); line 2 keeps its text.
+		expect(lines.length).toBe(2);
+		expect(stripAnsi(lines[0])).toContain("xyz");
+		expect(stripAnsi(lines[0])).not.toContain(modelName);
+		expect(stripAnsi(lines[1])).toContain(modelName);
+	});
+
+	it("stays single-line at a generous width (no regression)", () => {
+		const { component, modelName } = buildLeftOverflow();
+		const border = component.getTopBorder(500);
+		expect(border.content).not.toContain("\n");
+		expect(stripAnsi(border.content)).toContain(modelName);
+	});
+
+	it("reports the max visible line width for a two-line overflow", () => {
+		const { component, modelName, pathOptions } = buildLeftOverflow();
+		const session = createStatusLineSession("two line overflow", modelName);
+		const width = leftOverflowWidth(session, pathOptions);
+
+		const border = component.getTopBorder(width);
+		const lines = border.content.split("\n");
+		expect(lines.length).toBe(2);
+		const lineWidths = lines.map(line => visibleWidth(line));
+		expect(border.width).toBe(Math.max(...lineWidths));
+	});
+
+	it("moves popped right segments to a second line instead of losing them", () => {
+		const session = createStatusLineSession("Right session", `MODEL_RIGHT_${"z".repeat(24)}`);
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["model", "session_name"],
+			separator: "none",
+			sessionAccent: false,
+			transparent: true,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		});
+
+		// Generous width: everything fits on line 1.
+		const wide = component.getTopBorder(500).content;
+		expect(wide).not.toContain("\n");
+		expect(stripAnsi(wide)).toContain("Right session");
+		expect(stripAnsi(wide)).toContain("MODEL_RIGHT_");
+
+		// Very narrow width pops the right group's segments to the overflow line.
+		const border = component.getTopBorder(8);
+		const lines = border.content.split("\n");
+		expect(lines.length).toBe(2);
+		expect(stripAnsi(lines[0])).not.toContain("Right session");
+		const line2 = stripAnsi(lines[1]);
+		// Line-1 budgeting may truncate the elastic title before it pops;
+		// it must still land on the overflow row instead of being lost.
+		expect(line2).toContain("Right s");
+		expect(line2).toContain("MODEL_RIGHT_");
 	});
 });
