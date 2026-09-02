@@ -1103,7 +1103,9 @@ export class ToolExecutionComponent extends Container {
 			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
-		if (this.#allocation === 1) {
+		// Opencode layout stays flat even under viewport squeeze: the 2-row
+		// `╭─`/`╰` frame is the omp look, so always use the one-line form there.
+		if (this.#allocation === 1 || isOpencodeLayout()) {
 			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
 			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
 			return [truncateToWidth(`${styledGlyph} ${text}`, width)];

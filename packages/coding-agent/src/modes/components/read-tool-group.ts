@@ -547,20 +547,23 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		// Opencode layout (collapsed): every read renders as its own flat dim
 		// `→ Read path` row — no group header, tree connectors, usage rows, or
-		// previews. Errors keep their status mark so failures stay visible.
-		// Ctrl+O (`setExpanded`) restores the full grouped view.
-		if (isOpencodeLayout() && !this.#expanded && displayRows.length > 0) {
+		// previews. Non-success statuses (pending, warning, error) keep their
+		// status mark so liveness and failures stay visible, and rows keep their
+		// OSC-8 file hyperlink. Ctrl+O (`setExpanded`) restores the grouped view.
+		if (isOpencodeLayout() && !this.#expanded) {
 			const flat: string[] = [];
 			for (const row of displayRows) {
 				const status = this.#statusForTargets(row.targets);
-				const pathText = stripVTControlCharacters(this.#formatRowPath(row));
+				const plain = stripVTControlCharacters(this.#formatRowPath(row));
+				const linkPath = row.targets[0]?.linkPath;
+				const pathText = linkPath ? fileHyperlink(linkPath, plain) : plain;
 				flat.push(
-					status === "error" || status === "warning"
-						? ` ${this.#formatStatus(status)} ${theme.fg("dim", `Read ${pathText}`)}`
-						: theme.fg("dim", ` → Read ${pathText}`),
+					status === "success"
+						? theme.fg("dim", ` → Read ${pathText}`)
+						: ` ${this.#formatStatus(status)} ${theme.fg("dim", `Read ${pathText}`)}`,
 				);
 			}
-			this.#text.setText(flat.join("\n"));
+			this.#text.setText(flat.length > 0 ? flat.join("\n") : theme.fg("dim", " → Read"));
 			this.addChild(this.#text);
 			return;
 		}

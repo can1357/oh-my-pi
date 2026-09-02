@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `display.layout` setting (Appearance → Display) with an `opencode` option: a flat, opencode-style transcript where collapsed tool calls render as one status line (Ctrl+O expands), framed tool output renders without borders, and user messages get a left accent gutter. A new setup-wizard scene offers the choice on first run and on upgrade.
+
 ### Fixed
 
 - Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.
@@ -969,9 +973,6 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
-### Added
-
-- Added `display.layout` setting (Appearance → Display) with an `opencode` option: a flat, opencode-style transcript where collapsed tool calls render as one status line (Ctrl+O expands), framed tool output renders without borders, and user messages get a left accent gutter. A new setup-wizard scene offers the choice on first run and on upgrade.
 
 ## [17.2.15] - 2026-08-12
 

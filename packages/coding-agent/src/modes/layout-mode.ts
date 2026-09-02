@@ -18,10 +18,6 @@ export function setLayoutMode(mode: LayoutMode): void {
 	layoutMode = mode;
 }
 
-export function getLayoutMode(): LayoutMode {
-	return layoutMode;
-}
-
 export function isOpencodeLayout(): boolean {
 	return layoutMode === "opencode";
 }
