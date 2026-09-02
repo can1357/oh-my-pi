@@ -393,6 +393,7 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		// storage write that MV3 may terminate with the worker.
 		const loaderGeneration = ++recoveryLoaderGeneration;
 		for (const tabId of tabIds) {
+			const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 			guardDetachments.add(tabId);
 			recoveryLoaderIds.delete(tabId);
 			void trackPendingDetach(
@@ -418,7 +419,10 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 					// the attachment truly survived so a subsequent sweep reclaims it;
 					// otherwise the onDetach listener already forgot it.
 					const targets = await chrome.debugger.getTargets().catch(() => null);
-					if (shouldRetrackAfterDetachFailure(targets, tabId)) {
+					if (
+						(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
+						shouldRetrackAfterDetachFailure(targets, tabId)
+					) {
 						void trackAttachments([tabId]);
 					}
 				}),

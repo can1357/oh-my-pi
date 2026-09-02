@@ -36,6 +36,15 @@ describe("attachment-state", () => {
 		expect(filterFreshAttachmentState(epochs, snapshot, tabIds)).toEqual([]);
 	});
 
+	it("invalidates a guard retry snapshot when the user detaches", () => {
+		const epochs = new Map<number, number>();
+		const snapshot = snapshotAttachmentState(epochs, [1]);
+
+		noteAttachmentStateChange(epochs, 1);
+
+		expect(filterFreshAttachmentState(epochs, snapshot, [1])).toEqual([]);
+	});
+
 	it("lets user detach reasons override an in-flight relay marker", () => {
 		for (const reason of ["canceled_by_user", "replaced_with_devtools"]) {
 			const markedTabs = new Set([1]);

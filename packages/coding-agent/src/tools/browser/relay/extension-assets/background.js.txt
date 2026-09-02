@@ -384,6 +384,7 @@ var attachmentGuard = new AttachmentGuard({
   detachAll: (tabIds) => {
     const loaderGeneration = ++recoveryLoaderGeneration;
     for (const tabId of tabIds) {
+      const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
       guardDetachments.add(tabId);
       recoveryLoaderIds.delete(tabId);
       trackPendingDetach((async () => {
@@ -397,7 +398,7 @@ var attachmentGuard = new AttachmentGuard({
       })().catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
-        if (shouldRetrackAfterDetachFailure(targets, tabId)) {
+        if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
           trackAttachments([tabId]);
         }
       }));
