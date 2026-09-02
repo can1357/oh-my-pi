@@ -185,12 +185,17 @@ function updateRecoverable(
 	for (const tabId of affectedTabIds) recoverableStartupMutations.add(tabId);
 	update(affectedTabIds);
 	const generation = ++recoverableUpdateGeneration;
-	const persistCurrent = (): Promise<unknown> =>
-		chrome.storage.session.set({
+	const persistCurrent = async (): Promise<unknown> => {
+		// Never replace the persisted ownership snapshot from a partially initialized
+		// worker. A successful (possibly retried) load first merges every unaffected
+		// id; recoverableStartupMutations keeps this event's per-tab change authoritative.
+		await loadRecoverableState();
+		return chrome.storage.session.set({
 			[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
 			[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
 			[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
 		});
+	};
 	const immediateWrite = persistCurrent().catch(() => {});
 	recoverableUpdates = serializeRecoverableStateUpdate(
 		recoverableUpdates,

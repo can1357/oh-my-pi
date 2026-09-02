@@ -257,11 +257,14 @@ function updateRecoverable(tabIds, update) {
     recoverableStartupMutations.add(tabId);
   update(affectedTabIds);
   const generation = ++recoverableUpdateGeneration;
-  const persistCurrent = () => chrome.storage.session.set({
-    [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
-    [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
-    [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
-  });
+  const persistCurrent = async () => {
+    await loadRecoverableState();
+    return chrome.storage.session.set({
+      [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+      [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+      [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
+    });
+  };
   const immediateWrite = persistCurrent().catch(() => {});
   recoverableUpdates = serializeRecoverableStateUpdate(recoverableUpdates, immediateWrite, () => generation === recoverableUpdateGeneration, persistCurrent);
   return recoverableUpdates;
