@@ -69,7 +69,9 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 	} catch {
 		// Malformed URLs fall back during discovery, so share the default endpoint's cache.
 	}
-	return `${providerId}:ollama-models-v1:${Bun.hash(endpoint).toString(36)}`;
+	// v2 invalidates rows cached before `/api/show` capabilities retained
+	// modality provenance, which let class-level fallbacks restore image input.
+	return `${providerId}:ollama-models-v2:${Bun.hash(endpoint).toString(36)}`;
 }
 
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */

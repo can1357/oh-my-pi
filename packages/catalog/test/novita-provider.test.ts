@@ -91,4 +91,27 @@ describe("Novita built-in provider", () => {
 		expect(model?.contextWindow).toBe(262144);
 		expect(model?.maxTokens).toBe(131072);
 	});
+
+	test("preserves Novita's explicit text-only modality over MiniCPM's catalog fallback", async () => {
+		const options = novitaModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{
+							id: "openbmb/minicpm-v-4_5",
+							status: 1,
+							context_size: 32768,
+							max_output_tokens: 8192,
+							endpoints: ["chat/completions"],
+							input_modalities: ["text"],
+						},
+					],
+				}),
+		});
+
+		const model = (await options.fetchDynamicModels?.())?.[0];
+
+		expect(model?.input).toEqual(["text"]);
+		expect(model?.catalogFallback).toEqual({ liveInputModalities: true });
+	});
 });

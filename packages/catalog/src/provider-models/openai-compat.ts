@@ -1730,6 +1730,9 @@ function mapNovitaModel(
 		reasoning: novitaArrayIncludes(entry.features, "reasoning"),
 		supportsTools: novitaArrayIncludes(entry.features, "function-calling"),
 		input: toInputCapabilities(entry.input_modalities),
+		...(Array.isArray(entry.input_modalities)
+			? { catalogFallback: { ...model.catalogFallback, liveInputModalities: true } }
+			: {}),
 		cost: {
 			input: toNovitaCostPerMillion(entry.input_token_price_per_m),
 			output: toNovitaCostPerMillion(entry.output_token_price_per_m),

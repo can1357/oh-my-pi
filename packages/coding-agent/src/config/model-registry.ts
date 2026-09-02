@@ -1523,15 +1523,15 @@ export class ModelRegistry {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
 		if (providerConfig.discovery.type === "openai-models-list") {
-			// context-v3 invalidates rows cached before server-advertised input
-			// modalities were parsed from `/v1/models`; warm v2 rows pinned
-			// vision-capable ids at `input: ["text"]` until a forced refresh.
+			// context-v4 invalidates rows that parsed server-advertised modalities
+			// without retaining their provenance; otherwise catalog fallbacks can
+			// still overwrite an explicit text-only declaration after cache load.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
 			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-context-v3`
-				: `${providerConfig.provider}:openai-models-list-context-v3`;
+				? `${providerConfig.provider}:openai-models-list-bare-context-v4`
+				: `${providerConfig.provider}:openai-models-list-context-v4`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v9 invalidates rows that lack authoritative capability provenance,

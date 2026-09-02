@@ -947,6 +947,42 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.getProviderDiscoveryState("ollama")?.status).toBe("cached");
 	});
 
+	test("ignores Ollama rows cached before explicit input-modality provenance", () => {
+		writeRawModelsJson({
+			ollama: {
+				baseUrl: "http://127.0.0.1:11434/v1",
+				api: "openai-responses",
+				auth: "none",
+				discovery: { type: "ollama" },
+			},
+		});
+		writeModelCache(
+			`ollama:ollama-models-v1:${Bun.hash("http://127.0.0.1:11434").toString(36)}`,
+			Date.now(),
+			[
+				buildModel({
+					id: "openbmb/minicpm-v-4_5",
+					name: "MiniCPM-V 4.5",
+					api: "openai-responses",
+					provider: "ollama",
+					baseUrl: "http://127.0.0.1:11434/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 32_768,
+					maxTokens: 8_192,
+				}),
+			],
+			true,
+			"",
+			cacheDbPath,
+		);
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+		expect(registry.find("ollama", "openbmb/minicpm-v-4_5")).toBeUndefined();
+	});
+
 	test("refreshes cached discovery when models config is newer than the cache", async () => {
 		writeRawModelsJson({
 			ollama: {
@@ -2404,6 +2440,47 @@ providers:
 		expect(registry.find("openai-test", "low")?.input).toEqual(["text"]);
 		// Silent server → default text-only fallback.
 		expect(registry.find("openai-test", "medium")?.input).toEqual(["text"]);
+	});
+
+	test("openai-models-list preserves an explicit text-only MiniCPM deployment", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9996",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) === "http://127.0.0.1:9996/v1/models") {
+				return Response.json({
+					data: [{ id: "openbmb/minicpm-v-4_5", input_modalities: ["text"] }],
+				});
+			}
+			throw new Error(`Unexpected URL: ${String(input)}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refresh();
+
+		expect(registry.find("openai-test", "openbmb/minicpm-v-4_5")?.input).toEqual(["text"]);
+	});
+
+	test("Ollama discovery preserves an explicit text-only MiniCPM deployment", async () => {
+		const models = await discoverOllamaModels(
+			{
+				provider: "ollama-test",
+				baseUrl: "http://127.0.0.1:11434",
+				api: "openai-completions",
+				discovery: { type: "ollama" },
+			},
+			{
+				fetch: mockOllamaDiscovery(["openbmb/minicpm-v-4_5"], undefined, { capabilities: ["completion"] }),
+				getBearerApiKeyResolver: async () => undefined,
+			},
+		);
+
+		expect(models[0]?.input).toEqual(["text"]);
 	});
 
 	test("openai-models-list with injectV1: false hits {baseUrl}/models verbatim", async () => {

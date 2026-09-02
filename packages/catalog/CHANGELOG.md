@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- Preserved endpoint-declared text-only input modalities during Novita and local Ollama model discovery.
 - Fixed compatibility detection for vendor-prefixed GLM models on Mistral and Cerebras, restoring the appropriate tokenizer and reasoning-history behavior.
 - Removed an obsolete OpenCode provider entry that exposed unavailable Zen models in the model picker.
 - Fixed model revision detection for parameterized model IDs, including correct classification of Qwen, Fireworks Kimi, and Cursor-wrapped Grok models.

@@ -173,6 +173,7 @@ export interface DiscoveryContext {
 type OllamaDiscoveredModelMetadata = {
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	inputAuthoritative: boolean;
 	contextWindow?: number;
 };
 
@@ -447,6 +448,7 @@ async function discoverOllamaModelMetadata(
 			return {
 				reasoning: normalized.has("thinking"),
 				input: supportsVision ? ["text", "image"] : ["text"],
+				inputAuthoritative: true,
 				contextWindow,
 			};
 		}
@@ -454,6 +456,7 @@ async function discoverOllamaModelMetadata(
 			return {
 				reasoning: false,
 				input: ["text"],
+				inputAuthoritative: false,
 				contextWindow,
 			};
 		}
@@ -461,6 +464,7 @@ async function discoverOllamaModelMetadata(
 		return {
 			reasoning: capabilities.thinking === true,
 			input: supportsVision ? ["text", "image"] : ["text"],
+			inputAuthoritative: typeof capabilities.vision === "boolean" || typeof capabilities.image === "boolean",
 			contextWindow,
 		};
 	} catch {
@@ -511,6 +515,7 @@ export async function discoverOllamaModels(
 			baseUrl: `${endpoint}/v1`,
 			reasoning: metadata?.reasoning ?? false,
 			input: metadata?.input ?? ["text"],
+			...(metadata?.inputAuthoritative ? { catalogFallback: { liveInputModalities: true } } : {}),
 			imageInputDecoder: "stb",
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: metadata?.contextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW,
@@ -877,6 +882,7 @@ export async function discoverOpenAIModelsList(
 		// headers/baseUrl/cost stay local.
 		const reference = resolveModelReference(id, references) as ModelSpec<Api> | undefined;
 		const referenceCompat = reference?.compat as OpenAICompat | undefined;
+		const reportedInput = extractOpenAIModelsListInputCapabilities(item);
 		const api =
 			providerConfig.discovery.type === "litellm"
 				? resolveLiteLLMApi(undefined, id, providerConfig.api)
@@ -896,9 +902,8 @@ export async function discoverOpenAIModelsList(
 				baseUrl,
 				reasoning: reference?.reasoning ?? false,
 				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-				input: nativeMetadataForModel?.input ??
-					extractOpenAIModelsListInputCapabilities(item) ??
-					reference?.input ?? ["text"],
+				input: nativeMetadataForModel?.input ?? reportedInput ?? reference?.input ?? ["text"],
+				...(reportedInput !== undefined ? { catalogFallback: { liveInputModalities: true } } : {}),
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 				// Proxy/gateway pricing is provider-specific and rarely matches
 				// upstream bundled catalogs, so keep costs local-unknown even
