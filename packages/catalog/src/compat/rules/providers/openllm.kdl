@@ -1,0 +1,9 @@
+// Provider-wire compat for the local OpenLLM gateway. The daemon fans out to
+// heterogeneous upstream models but exposes a fixed low/medium/high
+// reasoning-effort vocabulary; discovery gates `reasoning` on the /v1/models
+// `capabilities` list, so non-reasoning entries never surface a ladder.
+// priority=-1 so a class-lineage ladder wins equal-rank ties.
+
+provider "openllm" priority=-1 {
+	thinking-efforts "low" "medium" "high"
+}

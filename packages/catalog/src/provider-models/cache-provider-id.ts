@@ -26,6 +26,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
+		case "openllm":
+			return Bun.env.OPENLLM_BASE_URL ?? "http://127.0.0.1:8787/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
@@ -94,6 +96,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `reasoning: false` and must be refetched.
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "openllm": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			return `openllm:models-v1:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		default:
 			return providerId;

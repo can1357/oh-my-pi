@@ -42,6 +42,7 @@ import {
 	openaiModelManagerOptions,
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
+	openllmModelManagerOptions,
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
@@ -383,6 +384,12 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["OPENCODE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeZenModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
+	},
+	{
+		id: "openllm",
+		defaultModel: "ultra",
+		envVars: ["OPENLLM_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => openllmModelManagerOptions(config),
 	},
 	{
 		id: "openrouter",

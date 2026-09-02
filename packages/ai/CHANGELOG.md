@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `openllm` provider login for the OpenLLM local gateway (`OPENLLM_API_KEY` optional; empty key stores a local placeholder). The login probes the daemon first and shows the install command when none is running.
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `openllm-local` placeholder key is no longer sent as a discovery bearer token.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed
