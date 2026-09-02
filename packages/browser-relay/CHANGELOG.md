@@ -4,10 +4,9 @@
 
 ### Fixed
 
-- Fixed the browser-relay extension missing attachments that were created after the relay had already disconnected, so a late `chrome.debugger.attach` no longer escapes the orphan sweep and leaves Chrome's "started debugging this browser" infobar stranded after the grace timer expires ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed a fast-reconnect race where the extension's cleanup detach of a late-resolving attach was reported as a user cancellation: it is now marked guard-internal so the surviving relay reconciles the tab from the next `hello` instead of banning it ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed the extension never reclaiming a debugger attachment that survived an MV3 service-worker restart while the relay stayed unreachable: startup/install/keepalive now reconcile surviving attachments and arm an orphan sweep independent of a successful relay connection ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed a fast-reconnect race where a guard detach resolving during reconnect fired a second `hello` alongside the new socket's own: both could launch competing recovery attaches, and the loser's "already attached" failure retracted the tab the winner just recovered. Hello refreshes are now coalesced per live socket so only one recovery attach is launched ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed orphaned debugger attachments and the Chrome debugging infobar surviving relay outages or extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed reconnect races that could lose, duplicate, or misclassify recovered browser-relay attachments ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+
 ## [18.0.7] - 2026-08-26
 
 ### Changed
