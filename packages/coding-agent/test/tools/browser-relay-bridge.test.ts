@@ -4275,6 +4275,89 @@ describe("RelayBridge tab grouping", () => {
 		expect(reply2?.error).toBeDefined();
 	});
 
+	it("keeps refresh authorization when the forced detach settles but the reattach loses its socket", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Arm forceFreshRootBeforeReplay via an interrupted initial preload add.
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+
+		// Reconnect drives the forced fresh-root detach. This time the detach RPC
+		// SETTLES cleanly (tab.attached -> false), but the follow-up reattach is
+		// interrupted by a socket drop before the extension persists a fresh
+		// recovery marker. The relay-initiated detach already removed the tab from
+		// recoverableTabIds, so the replacement hello lands unattached +
+		// non-recoverable while recovery is still mid-reattach.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.pending("detach").length === 1,
+			"forced fresh-root detach issued",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.pending("attach").length === 1,
+			"recovery reattach in flight after detach settled",
+		);
+		bridge.extClosed(ext2);
+		await flush();
+
+		// refreshDetachInFlight must still be set: the reattach never confirmed a
+		// new recovery marker, so this replacement hello is the in-flight refresh,
+		// not a user detach. The bridge must reattach and preserve the session.
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
+		await waitFor(
+			() => ext3.rpcs("attach").length === 1,
+			"recovery reattach after the interrupted reattach",
+		);
+		ack(bridge, ext3, "attach");
+		await flush();
+
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+			}),
+		);
+		ack(bridge, ext3, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find((m) => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+	});
+
 	it("honors a user detach that arrives while only a fresh-root replay is pending", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

@@ -112,6 +112,7 @@ var KEEPALIVE_ALARM = "omp-relay-keepalive";
 var ORPHAN_SWEEP_ALARM = "omp-relay-orphan-sweep";
 var ORPHAN_SWEEP_DEADLINE_KEY = "ompOrphanSweepDeadlineMs";
 var ws = null;
+var helloDeliveredSocket = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
 var pendingAttaches = new Set;
@@ -182,9 +183,14 @@ async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   if (nextDeadlineMs !== orphanSweepDeadlineMs)
     await setOrphanSweepDeadline(nextDeadlineMs);
 }
+function relayInitializedReadyState() {
+  if (ws !== null && ws === helloDeliveredSocket)
+    return ws.readyState;
+  return null;
+}
 function computeNextOrphanSweepDeadline(forceDisconnected) {
   const disconnected = orphanSweepSeesRelayDisconnected({
-    socketReadyState: ws?.readyState,
+    socketReadyState: relayInitializedReadyState(),
     openReadyState: WebSocket.OPEN,
     forceDisconnected
   });
@@ -206,7 +212,7 @@ async function maybeRunOrphanSweep() {
     nowMs: Date.now(),
     deadlineMs: orphanSweepDeadlineMs,
     disconnected: orphanSweepSeesRelayDisconnected({
-      socketReadyState: ws?.readyState,
+      socketReadyState: relayInitializedReadyState(),
       openReadyState: WebSocket.OPEN
     }),
     hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
@@ -217,7 +223,7 @@ async function maybeRunOrphanSweep() {
   await setOrphanSweepDeadline(null);
   if (!shouldProceedWithOrphanSweep({
     disconnected: orphanSweepSeesRelayDisconnected({
-      socketReadyState: ws?.readyState,
+      socketReadyState: relayInitializedReadyState(),
       openReadyState: WebSocket.OPEN
     }),
     hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
@@ -546,7 +552,7 @@ async function reconcileOrphans() {
   }
   await trackAttachments(attachedTabIds, () => true, attachmentState);
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
-    socketReadyState: ws?.readyState,
+    socketReadyState: relayInitializedReadyState(),
     openReadyState: WebSocket.OPEN
   })) {
     attachmentGuard.onDisconnected();
@@ -566,6 +572,7 @@ async function connect() {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
     refreshHello(() => {
+      helloDeliveredSocket = socket;
       attachmentGuard.onConnected();
       setOrphanSweepDeadline(null);
     });
@@ -580,6 +587,8 @@ async function connect() {
     if (ws !== socket)
       return;
     ws = null;
+    if (helloDeliveredSocket === socket)
+      helloDeliveredSocket = null;
     if (pingTimer !== null) {
       clearInterval(pingTimer);
       pingTimer = null;

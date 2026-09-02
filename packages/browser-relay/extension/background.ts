@@ -45,6 +45,12 @@ const ORPHAN_SWEEP_ALARM = "omp-relay-orphan-sweep";
 const ORPHAN_SWEEP_DEADLINE_KEY = "ompOrphanSweepDeadlineMs";
 
 let ws: WebSocket | null = null;
+// The socket on which a hello has actually reached the relay. An OPEN socket is
+// not enough to declare the relay initialized: `buildHello()` can reject or
+// stall (transient tabs/getTargets failure), so orphan-sweep bookkeeping must
+// gate on hello delivery, not mere readiness. Compared by identity, so a
+// replacement socket reads as uninitialized until it sends its own hello.
+let helloDeliveredSocket: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
 const pendingAttaches = new Set<Promise<void>>();
@@ -134,11 +140,22 @@ async function maybeScheduleOrphanSweep(
 		await setOrphanSweepDeadline(nextDeadlineMs);
 }
 
+/**
+ * Ready-state to feed the orphan-sweep disconnect check. Reports OPEN only when
+ * the live socket has actually delivered a hello; an open-but-uninitialized
+ * socket (post-restart, before/without a successful `buildHello()`) reads as
+ * disconnected so the sweep stays armed until the relay owns reconciliation.
+ */
+function relayInitializedReadyState(): number | null | undefined {
+	if (ws !== null && ws === helloDeliveredSocket) return ws.readyState;
+	return null;
+}
+
 function computeNextOrphanSweepDeadline(
 	forceDisconnected: boolean,
 ): number | null {
 	const disconnected = orphanSweepSeesRelayDisconnected({
-		socketReadyState: ws?.readyState,
+		socketReadyState: relayInitializedReadyState(),
 		openReadyState: WebSocket.OPEN,
 		forceDisconnected,
 	});
@@ -176,7 +193,7 @@ async function maybeRunOrphanSweep(): Promise<void> {
 			nowMs: Date.now(),
 			deadlineMs: orphanSweepDeadlineMs,
 			disconnected: orphanSweepSeesRelayDisconnected({
-				socketReadyState: ws?.readyState,
+				socketReadyState: relayInitializedReadyState(),
 				openReadyState: WebSocket.OPEN,
 			}),
 			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
@@ -189,7 +206,7 @@ async function maybeRunOrphanSweep(): Promise<void> {
 	if (
 		!shouldProceedWithOrphanSweep({
 			disconnected: orphanSweepSeesRelayDisconnected({
-				socketReadyState: ws?.readyState,
+				socketReadyState: relayInitializedReadyState(),
 				openReadyState: WebSocket.OPEN,
 			}),
 			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
@@ -727,13 +744,16 @@ async function reconcileOrphans(): Promise<void> {
 		}
 	}
 	await trackAttachments(attachedTabIds, () => true, attachmentState);
-	// Only an open socket owns reconciliation via hello. A merely CONNECTING
-	// socket may still stall/fail before any hello or in-memory timer exists, so
-	// the persisted deadline must stay armed until the connection is proven live.
+	// Only a socket that has actually delivered a hello owns reconciliation. A
+	// merely OPEN (or CONNECTING) socket may still stall/fail in `buildHello()`
+	// before any hello reaches the relay, so the persisted deadline must stay
+	// armed — and the guard treated as disconnected — until hello delivery is
+	// proven. Gating on readiness alone would clear the sweep for an
+	// open-but-uninitialized socket and strand the surviving attachment.
 	if (
 		attachedTabIds.length > 0 &&
 		orphanSweepSeesRelayDisconnected({
-			socketReadyState: ws?.readyState,
+			socketReadyState: relayInitializedReadyState(),
 			openReadyState: WebSocket.OPEN,
 		})
 	) {
@@ -766,6 +786,7 @@ async function connect(): Promise<void> {
 		// from the refresh's post-send callback, once the hello has actually been
 		// sent and the relay owns reconciliation.
 		refreshHello(() => {
+			helloDeliveredSocket = socket;
 			attachmentGuard.onConnected();
 			void setOrphanSweepDeadline(null);
 		});
@@ -778,6 +799,7 @@ async function connect(): Promise<void> {
 	socket.onclose = () => {
 		if (ws !== socket) return;
 		ws = null;
+		if (helloDeliveredSocket === socket) helloDeliveredSocket = null;
 		if (pingTimer !== null) {
 			clearInterval(pingTimer);
 			pingTimer = null;

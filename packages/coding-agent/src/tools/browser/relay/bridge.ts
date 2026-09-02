@@ -3147,10 +3147,16 @@ export class RelayBridge {
 		});
 		tab.detaching = done;
 		await done;
-		// The detach settled cleanly on this socket, so its `recoverableTabIds`
-		// omission is no longer a lingering concern for the next hello.
-		tab.refreshDetachInFlight = false;
-		return await this.#ensureAttached(tab);
+		// The forced detach committed, but the reattach can still be interrupted
+		// before the extension persists a fresh recovery marker. Keep
+		// `refreshDetachInFlight` set until `#ensureAttached()` succeeds so a
+		// replacement hello arriving mid-reattach — tab unattached, dropped from
+		// `recoverableTabIds` by this relay-initiated detach — is still recognized as
+		// the in-flight refresh and preserves the sessions, instead of retracting
+		// them as a user detach. This mirrors the already-unattached shortcut above.
+		const attached = await this.#ensureAttached(tab);
+		if (attached) tab.refreshDetachInFlight = false;
+		return attached;
 	}
 
 	/** Restore root-domain state promised by page sessions preserved across recovery. */
