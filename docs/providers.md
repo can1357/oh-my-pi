@@ -152,6 +152,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
+| `openllm`                        | `OPENLLM_API_KEY` (any non-empty value; the local daemon needs no real key)   |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
@@ -202,6 +203,22 @@ These implicit engines are **skipped** when:
 - the provider ID appears in the effective `disabledProviders` list.
 
 For installing and running these engines, see [Local models](./local-models.md).
+
+## OpenLLM
+
+[OpenLLM](https://www.openllm.sh) is a local gateway that manages both BYOK API providers and subscription providers (Claude, ChatGPT, Kimi, Grok, Cursor, …). You arrange them into fallback chains, then pick a chain such as `ultra`, `plus`, or `lite` as your model. If the first provider is unavailable, rate-limited, or cannot fit the request, OpenLLM tries the next one without changing your `omp` configuration.
+
+Install OpenLLM (the installer also starts the daemon):
+
+```sh
+curl -fsSL https://www.openllm.sh/install | bash
+```
+
+Then enable the provider once, the same way as `vllm`: run `/login` (or `omp auth-broker login openllm`), pick OpenLLM, and press Enter at the key prompt. The login first checks whether a daemon answers at `http://127.0.0.1:8787/v1` (or `OPENLLM_BASE_URL`); if nothing does, the prompt shows the install command, and Enter still saves the placeholder for a daemon you start later or one configured in `models.yml`. The daemon carries its own credentials, so a placeholder token is stored and `omp` talks to it over loopback. Alternatively set `OPENLLM_API_KEY` to any non-empty value.
+
+The model list is read live from the daemon's `/v1/models`, so every model and chain you configure in OpenLLM shows up in `/model`; `ultra`, `plus`, and `lite` are always present as a static fallback when the daemon is unreachable. Set `OPENLLM_BASE_URL` to point at a daemon on another host or port.
+
+OpenLLM also ships an MCP server for semantic code search and persistent memory; see the [OpenLLM example](./mcp-config.md#openllm-search-and-memory-server-via-stdio) in the MCP configuration guide.
 
 ## Disabling model providers
 

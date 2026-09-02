@@ -1517,6 +1517,23 @@ vLLM is an open-source high-throughput LLM serving engine running local or self-
 - **Context Window Extraction**: Custom `mapModel` in `vllmModelManagerOptions` extracts `contextWindow` from vLLM's non-standard `/v1/models` response field `entry.max_model_len` using `toPositiveNumber(entry.max_model_len, model.contextWindow)`.
 - **Cache Provider ID**: Resolved by `resolveModelCacheProviderId("vllm", { baseUrl })` in `packages/catalog/src/provider-models/cache-provider-id.ts` (using `getDefaultModelDiscoveryBaseUrl("vllm")`), generating base-URL-hashed cache keys formatted as `vllm:${Bun.hash(baseUrl).toString(36)}`.
 
+## OpenLLM (Local BYOK/subscription gateway) (`openllm`)
+OpenLLM is a local gateway daemon (`http://127.0.0.1:8787/v1`) that fans requests out to BYOK API providers and subscription plans through user-defined fallback chains, driven over the OpenAI Responses transport (`openai-responses`). Entry modules are `packages/ai/src/registry/openllm.ts` for authentication and `packages/catalog/src/provider-models/openai-compat.ts` (`openllmModelManagerOptions`) for catalog options and dynamic model discovery.
+
+### Special casings
+- **Fallback-chain aliases**: `ultra`, `plus`, and `lite` are shipped as `staticModels` so they remain selectable when the daemon is down. Because a chain can be rewired to any model, the aliases advertise the full surface (reasoning, image input, 1M context, 128K output) and carry `priority` 0/1/2 so they lead the picker; live `/v1/models` entries override limits by id via `mergeDynamicModels`.
+- **Capability-driven mapping**: `mapModel` reads the daemon's non-standard `/v1/models` fields: `capabilities` (`reasoning` → `reasoning: true` plus an effort dial, `vision` → image input), `display_name`, `context_window`, and `max_output_tokens`.
+- **Loopback defaults**: the default base URL is a loopback address, so the local-backend compat defaults (extended stream idle timeout, reasoning replay) apply through URL detection rather than a `LOCAL_OPENAI_COMPAT_PROVIDERS` entry.
+
+### Auth & usage
+- **Daemon probe on login**: `loginOpenllm` first requests `${OPENLLM_BASE_URL ?? http://127.0.0.1:8787/v1}/models` (3 s timeout; 401/403 count as reachable) and, when nothing answers, leads the key prompt with the install one-liner (`curl -fsSL https://www.openllm.sh/install | bash`) while still accepting Enter, since the probe reads only `OPENLLM_BASE_URL` and a `models.yml` endpoint is only known to runtime discovery. No `authUrl` is set, so no browser is opened.
+- **Placeholder token**: like `vllm`, the provider is descriptor-based, so it becomes available once a credential exists. The login stores `"openllm-local"` when the key prompt is left empty; `OPENLLM_API_KEY` with any non-empty value works too. The daemon itself ignores the bearer token.
+- **Base URL override**: `OPENLLM_BASE_URL` (or `baseUrl` from `models.yml`) replaces the default `http://127.0.0.1:8787/v1`.
+
+### Catalog model handling
+- **Descriptor Configuration**: Registered in `packages/catalog/src/provider-models/descriptors.ts` with `id: "openllm"`, `defaultModel: "ultra"`, `envVars: ["OPENLLM_API_KEY"]`, and `allowUnauthenticated: true`. No `catalogDiscovery` is set, so nothing is baked into `models.json`.
+- **Cache Provider ID**: `resolveModelCacheProviderId("openllm", { baseUrl })`.
+
 ## Wafer Serverless (`wafer-serverless`)
 Wafer Serverless is a pay-as-you-go provider proxying multiple upstream models (such as Zhipu GLM, Moonshot Kimi, Alibaba Qwen, and DeepSeek) through an OpenAI-compatible API at `https://pass.wafer.ai/v1`. It relies on the OpenAI Chat Completions transport (`openai-completions`).
 

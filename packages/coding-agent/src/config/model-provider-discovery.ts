@@ -30,8 +30,14 @@ export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(S
 
 // Sentinels for local-only OAuth tokens — declared inline to avoid loading
 // provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
-// packages/ai/src/registry/lm-studio.ts, and packages/ai/src/registry/vllm.ts.
-const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
+// packages/ai/src/registry/lm-studio.ts, packages/ai/src/registry/openllm.ts, and
+// packages/ai/src/registry/vllm.ts.
+const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>([
+	"llama-cpp-local",
+	"lm-studio-local",
+	"openllm-local",
+	"vllm-local",
+]);
 
 /**
  * Hard bound for extension-provided fetchDynamicModels to prevent indefinite hangs

@@ -5826,6 +5826,80 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 22b. OpenLLM
+// ---------------------------------------------------------------------------
+
+const OPENLLM_DISCOVERY_TIMEOUT_MS = 10_000;
+
+function openllmStaticModels(baseUrl: string): readonly ModelSpec<"openai-responses">[] {
+	// Fallback-chain aliases the daemon always exposes. A chain is rewired by
+	// the user and can route to any model, so the aliases advertise the full
+	// capability surface (reasoning, images, 1M context); the daemon decides
+	// per request what the routed model honors. Live /v1/models rows override
+	// the limits once the daemon is reachable. `priority` keeps the aliases at
+	// the top of the picker ahead of the per-provider passthrough ids.
+	return ["ultra", "plus", "lite"].map((id, priority) => ({
+		id,
+		name: id,
+		priority,
+		api: "openai-responses",
+		provider: "openllm",
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	}));
+}
+
+export interface OpenllmModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function openllmModelManagerOptions(
+	config?: OpenllmModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("openllm")!;
+	return {
+		providerId: "openllm",
+		cacheProviderId: resolveModelCacheProviderId("openllm", { baseUrl }),
+		staticModels: openllmStaticModels(baseUrl),
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-responses",
+				provider: "openllm",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const capabilities = Array.isArray(entry.capabilities)
+						? entry.capabilities.filter((value): value is string => typeof value === "string")
+						: [];
+					// The daemon advertises reasoning per model; buildModel derives the
+					// effort ladder from providers/openllm.kdl.
+					const reasoning = capabilities.includes("reasoning");
+					return {
+						...defaults,
+						name:
+							typeof entry.display_name === "string" && entry.display_name.length > 0
+								? entry.display_name
+								: defaults.name,
+						reasoning,
+						input: capabilities.includes("vision") ? ["text", "image"] : ["text"],
+						contextWindow: toPositiveNumber(entry.context_window, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_output_tokens, defaults.maxTokens),
+					};
+				},
+				fetch: config?.fetch,
+				timeoutMs: OPENLLM_DISCOVERY_TIMEOUT_MS,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 23. NanoGPT
 // ---------------------------------------------------------------------------
 

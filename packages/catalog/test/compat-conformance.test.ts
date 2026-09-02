@@ -19,6 +19,8 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"vllm",
 	"openai-codex-device",
+	// Local gateway; resolved by openllmModelManagerOptions in provider-models/openai-compat.ts.
+	"openllm",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {

@@ -470,6 +470,43 @@ describe("issue #970 custom provider discovery", () => {
 		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
 	});
 
+	test("does not send openllm-local placeholder as discovery bearer", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			[
+				"providers:",
+				"  openllm:",
+				"    baseUrl: http://127.0.0.1:8787/v1",
+				"    apiKey: openllm-local",
+				"    api: openai-completions",
+				"    discovery:",
+				"      type: openai-models-list",
+			].join("\n"),
+		);
+
+		const fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (
+			input,
+			init,
+		) => {
+			const url = String(input);
+			if (url !== "http://127.0.0.1:8787/v1/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBeUndefined();
+			return new Response(JSON.stringify({ data: [{ id: "ultra" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		await registry.refreshProvider("openllm");
+
+		expect(registry.getProviderDiscoveryState("openllm")?.status).toBe("ok");
+	});
+
 	test("does not send llama.cpp-local placeholder as discovery bearer", async () => {
 		fs.writeFileSync(
 			modelsPath,

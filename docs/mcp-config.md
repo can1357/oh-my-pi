@@ -307,6 +307,23 @@ Relevant Slack endpoints from Slack's docs:
 }
 ```
 
+### OpenLLM search and memory server via stdio
+
+Semantic code and documentation search plus persistent memory from the [OpenLLM](https://www.openllm.sh) CLI (`curl -fsSL https://www.openllm.sh/install | bash`). Indexing large repositories can take a while, so the timeout is raised above the 30-second default.
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "openllm": {
+      "command": "openllm",
+      "args": ["mcp"],
+      "timeout": 300000
+    }
+  }
+}
+```
+
 ### GitHub hosted server via HTTP
 
 ```json

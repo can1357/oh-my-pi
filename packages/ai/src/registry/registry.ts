@@ -51,6 +51,7 @@ import { openaiCodexProvider } from "./openai-codex";
 import { openaiCodexDeviceProvider } from "./openai-codex-device";
 import { opencodeGoProvider } from "./opencode-go";
 import { opencodeZenProvider } from "./opencode-zen";
+import { openllmProvider } from "./openllm";
 import { openrouterProvider } from "./openrouter";
 import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
@@ -157,6 +158,7 @@ const ALL = [
 	lmStudioProvider,
 	llamaCppProvider,
 	vllmProvider,
+	openllmProvider,
 	openaiProvider,
 	googleProvider,
 	googleVertexProvider,

@@ -64,6 +64,7 @@
 		"providers/openai.kdl",
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
+		"providers/openllm.kdl",
 		"providers/openrouter.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
@@ -11540,6 +11541,20 @@
 						"reasoningContentField": "reasoning_content"
 					},
 					"supportsContextManagement": false
+				}
+			},
+			{
+				"source": "providers/openllm.kdl:7",
+				"providers": [
+					"openllm"
+				],
+				"priority": -1,
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high"
+					]
 				}
 			},
 			{

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `openllm` provider for the OpenLLM local gateway (`http://127.0.0.1:8787/v1`, `OPENLLM_BASE_URL` override), with live `/v1/models` discovery and `ultra`/`plus`/`lite` static fallbacks
+
 ## [18.1.4] - 2026-09-02
 
 ### Changed
@@ -11,7 +15,6 @@
 ### Fixed
 
 - Antigravity and Gemini CLI now collapse every Gemini Flash generation from 3.6 on (`gemini-3.8-flash-low/-medium/-high` and the `-tiered` alias, and future revisions) into one routed `gemini-<rev>-flash` entry via a revision-templated `variant-family`, instead of surfacing raw per-level ids until a per-revision rule lands.
-
 ## [18.1.3] - 2026-09-02
 
 ### Added

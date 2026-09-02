@@ -14,6 +14,7 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		{ providerId: "ollama", baseUrl: "http://ollama.example:11434/v1/" },
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
 		{ providerId: "opencode-zen", baseUrl: "https://opencode.example/zen/v1/" },
+		{ providerId: "openllm", baseUrl: "http://openllm.example:8787/v1" },
 		{ providerId: "vllm", baseUrl: "http://vllm.example:8000/v1" },
 	] as const;
 	for (const { providerId, baseUrl } of cases) {
@@ -30,4 +31,12 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a" }));
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/" }));
 	expect(teamA).not.toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-b/v1" }));
+});
+
+test("openllm cache scope is keyed by base URL", () => {
+	const local = resolveModelCacheProviderId("openllm", { baseUrl: "http://127.0.0.1:8787/v1" });
+	expect(local).not.toBe(resolveModelCacheProviderId("openllm", { baseUrl: "http://gateway.example:8787/v1" }));
+	if (Bun.env.OPENLLM_BASE_URL === undefined) {
+		expect(resolveModelCacheProviderId("openllm")).toBe(local);
+	}
 });
