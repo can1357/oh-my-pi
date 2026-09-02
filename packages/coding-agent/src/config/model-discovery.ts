@@ -483,33 +483,41 @@ export async function discoverOllamaModels(
 ): Promise<Model<Api>[]> {
 	const endpoint = normalizeOllamaBaseUrl(providerConfig.baseUrl);
 	const tagsUrl = `${endpoint}/api/tags`;
-	const headers = { ...providerConfig.headers };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
-	const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 250, customTimeoutMs), async signal => {
-		const response = await ctx.fetch(tagsUrl, {
-			headers,
-			signal,
+	const attempt = async (h: Record<string, string>) => {
+		const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 250, customTimeoutMs), async signal => {
+			const response = await ctx.fetch(tagsUrl, {
+				headers: h,
+				signal,
+			});
+			if (!response.ok) {
+				throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
+			}
+			return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
 		});
-		if (!response.ok) {
-			throw new Error(`HTTP ${response.status} from ${tagsUrl}`);
-		}
-		return (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
-	});
-	const entries = (payload.models ?? []).flatMap(item => {
-		const id = item.model || item.name;
-		return id ? [{ id, name: item.name || id }] : [];
-	});
-	const metadataById = new Map(
-		await Promise.all(
-			entries.map(
+		const listed = (payload.models ?? []).flatMap(item => {
+			const id = item.model || item.name;
+			return id ? [{ id, name: item.name || id }] : [];
+		});
+		// The metadata probe is the same authority as the listing, so it reuses
+		// the headers the listing succeeded with rather than the bare config.
+		const metadata = await Promise.all(
+			listed.map(
 				async entry =>
-					[
-						entry.id,
-						await discoverOllamaModelMetadata(ctx, endpoint, entry.id, headers, customTimeoutMs),
-					] as const,
+					[entry.id, await discoverOllamaModelMetadata(ctx, endpoint, entry.id, h, customTimeoutMs)] as const,
 			),
-		),
-	);
+		);
+		return [listed, metadata] as const;
+	};
+	// A remote ollama behind bearer auth takes its credential from the same
+	// resolver as every other authenticated discovery path, including a key
+	// installed process-locally by --provider-api-keys.
+	const apiKey = await ctx.getBearerApiKeyResolver(providerConfig.provider);
+	const [entries, metadataEntries] = apiKey
+		? await withAuth(apiKey, key => attempt(replaceBearerAuthorization(baseHeaders, key)))
+		: await attempt(baseHeaders);
+	const metadataById = new Map(metadataEntries);
 	return entries.map(entry => {
 		const metadata = metadataById.get(entry.id);
 		return buildModel({

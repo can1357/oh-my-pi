@@ -1377,6 +1377,10 @@ describe("ModelRegistry runtime discovery", () => {
 				},
 			);
 
+			// Credential resolution precedes the probe, so the timeout is armed one
+			// microtask turn after the call; advancing the clock before that turn
+			// would move time past a timer that does not exist yet.
+			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
 			vi.advanceTimersByTime(25);
 			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
 
@@ -2885,5 +2889,72 @@ providers:
 
 		expect(registry.find("github-copilot", cachedAlias.id)).toBeUndefined();
 		expect(registry.find("github-copilot", bundledBase.id)?.headers).toEqual(bundledBase.headers);
+	});
+});
+
+describe("ollama discovery authentication", () => {
+	test("sends the resolved bearer credential to both ollama probes", async () => {
+		// A bearer-authenticated remote ollama whose key comes only from
+		// --provider-api-keys: the registry accepts the runtime key, so the
+		// probes must carry it or /api/tags and /api/show answer 401 and the
+		// provider ends up model-less.
+		const seen: Record<string, string | undefined> = {};
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			seen[new URL(url).pathname] = new Headers(init?.headers).get("authorization") ?? undefined;
+			if (url.endsWith("/api/tags")) {
+				return new Response(JSON.stringify({ models: [{ model: "qwen3:8b", name: "qwen3:8b" }] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url.endsWith("/api/show")) {
+				return new Response(JSON.stringify({ capabilities: ["thinking"] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const models = await discoverOllamaModels(
+			{
+				provider: "ollama-remote",
+				api: "openai-responses",
+				baseUrl: "https://ollama.example/",
+				headers: { "X-Tenant": "acme" },
+				discovery: { type: "ollama" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => "bundle-key" },
+		);
+
+		expect(seen["/api/tags"]).toBe("Bearer bundle-key");
+		expect(seen["/api/show"]).toBe("Bearer bundle-key");
+		expect(models.map(model => model.id)).toEqual(["qwen3:8b"]);
+		expect({ ...models[0]?.headers }["X-Tenant"]).toBe("acme");
+	});
+
+	test("leaves a configured authorization header alone when no credential resolves", async () => {
+		// Local ollama has no key; the provider's own configured header must not
+		// be replaced by an empty bearer.
+		const seen: (string | undefined)[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			seen.push(new Headers(init?.headers).get("authorization") ?? undefined);
+			if (String(input).endsWith("/api/tags")) {
+				return new Response(JSON.stringify({ models: [] }), { headers: { "Content-Type": "application/json" } });
+			}
+			throw new Error(`Unexpected URL: ${input}`);
+		};
+
+		await discoverOllamaModels(
+			{
+				provider: "ollama",
+				api: "openai-responses",
+				baseUrl: "http://127.0.0.1:11434",
+				headers: { Authorization: "Basic configured" },
+				discovery: { type: "ollama" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+
+		expect(seen).toEqual(["Basic configured"]);
 	});
 });

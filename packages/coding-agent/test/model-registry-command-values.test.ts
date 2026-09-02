@@ -274,6 +274,46 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect({ ...model.headers }.Authorization).toBe("Bearer configured-override-key");
 	});
 
+	test("removing a preinstalled runtime API key restores a lowercase modelOverride header", async () => {
+		// HTTP header names are case-insensitive, and the non-official Anthropic
+		// path takes the first case-insensitive match. Capturing the materialized
+		// proxy kept BOTH the canonical runtime `Authorization` and the configured
+		// lowercase `authorization`, so a removed runtime credential kept being
+		// sent because it was inserted first.
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					anthropic: {
+						apiKey: `!${stdoutCommand("cmd-api-key")}`,
+						authHeader: true,
+						modelOverrides: {
+							"claude-sonnet-4-5": { headers: { authorization: "Bearer configured-override-key" } },
+						},
+					},
+				},
+			}),
+		);
+		authStorage.setRuntimeApiKey("anthropic", "runtime-api-key");
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry
+			.getAll()
+			.find(candidate => candidate.provider === "anthropic" && candidate.id === "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic claude-sonnet-4-5");
+		const installed = { ...model.headers };
+		expect(installed.Authorization).toBe("Bearer runtime-api-key");
+		// One authorization entry, whatever its spelling: two would leave the
+		// case-insensitive readers picking by insertion order.
+		expect(Object.keys(installed).filter(name => name.toLowerCase() === "authorization")).toHaveLength(1);
+
+		authStorage.removeRuntimeApiKey("anthropic");
+		const removed = { ...model.headers };
+		expect(Object.keys(removed).filter(name => name.toLowerCase() === "authorization")).toHaveLength(1);
+		expect(Object.entries(removed).find(([name]) => name.toLowerCase() === "authorization")?.[1]).toBe(
+			"Bearer configured-override-key",
+		);
+	});
+
 	test("modelOverrides headers resolve from command stdout", async () => {
 		fs.writeFileSync(
 			modelsPath,

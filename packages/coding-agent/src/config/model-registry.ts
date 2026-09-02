@@ -2161,7 +2161,18 @@ export class ModelRegistry {
 		if (!override.headers || !patched.headers) return patched;
 		if (this.#providerOverrides.get(provider)?.authHeader !== true) return patched;
 		if (!Object.keys(override.headers).some(header => header.toLowerCase() === "authorization")) return patched;
-		const headers = createLiveConfigHeaders([{ ...patched.headers }], {
+		// Spreading the patched model captures whatever was materialized at
+		// composition time — including a runtime `Authorization` and the
+		// configured lowercase variant side by side. Drop every case-insensitive
+		// authorization entry from the snapshot and re-add the override as a live
+		// source, so a removed runtime key falls back to the configured value
+		// instead of the captured credential a case-insensitive reader would
+		// pick first.
+		const fallbackHeaders = { ...patched.headers };
+		for (const name in fallbackHeaders) {
+			if (name.toLowerCase() === "authorization") delete fallbackHeaders[name];
+		}
+		const headers = createLiveConfigHeaders([fallbackHeaders, override.headers], {
 			authHeader: true,
 			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(provider),
 		});
