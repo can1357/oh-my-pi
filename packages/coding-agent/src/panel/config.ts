@@ -150,7 +150,7 @@ function parsePanelMember(value: unknown, path: string): PanelMember {
 
 function parsePanelRole(value: unknown, path: string): PanelRole {
 	const record = requireRecord(value, path);
-	requireKnownKeys(record, ["strategy", "members", "minFamilies", "distinctFamilies"], path);
+	requireKnownKeys(record, ["strategy", "members", "minFamilies"], path);
 
 	const strategyRaw = record.strategy;
 	if (typeof strategyRaw !== "string" || !(PANEL_STRATEGIES as readonly string[]).includes(strategyRaw)) {
@@ -186,29 +186,10 @@ function parsePanelRole(value: unknown, path: string): PanelRole {
 		minFamilies = record.minFamilies;
 	}
 
-	let distinctFamilies: boolean | undefined;
-	if (record.distinctFamilies !== undefined) {
-		if (typeof record.distinctFamilies !== "boolean") {
-			throw new PanelConfigError(`${path}.distinctFamilies`, "must be a boolean");
-		}
-		// Tighten-only: a `personas` role may adopt cross-family independence, but
-		// an `independent` role cannot trade its diversity claim away. Otherwise
-		// the setting would be a documented switch for defeating the invariant
-		// that makes an independent panel worth running.
-		if (record.distinctFamilies === false && strategy === "independent") {
-			throw new PanelConfigError(
-				`${path}.distinctFamilies`,
-				"cannot be false for an independent role; use the personas strategy when repeated families are intended",
-			);
-		}
-		distinctFamilies = record.distinctFamilies;
-	}
-
 	return Object.freeze({
 		strategy,
 		members: Object.freeze(members),
 		...(minFamilies !== undefined ? { minFamilies } : {}),
-		...(distinctFamilies !== undefined ? { distinctFamilies } : {}),
 	});
 }
 
@@ -309,10 +290,9 @@ export function resolvePanelRole(settings: PanelSettings, roleId: string | undef
 
 /**
  * Validates a resolved role against its saved member shape: resolved-list
- * length, index ordering, and the role's family policy. Distinctness defaults
- * to on for `independent` and off for `personas`, where repeated families are
- * the perspective-coverage contract, and either default can be overridden by
- * `distinctFamilies`. A `minFamilies` floor applies to both strategies.
+ * length, index ordering, and the role's family policy. `independent` requires
+ * one family per seat; `personas` allows repeated families, since perspective
+ * coverage is that strategy's contract. A `minFamilies` floor applies to both.
  * Persona existence and task-mode availability are validated separately by
  * {@link resolvePanelPersona}, which the runtime calls once per personas
  * member before dispatch.
@@ -342,7 +322,7 @@ export function validateResolvedPanelRole(
 		}
 	});
 
-	const requireDistinct = role.distinctFamilies ?? role.strategy === "independent";
+	const requireDistinct = role.strategy === "independent";
 	// A single-seat lineup makes no diversity claim: there is nothing for a
 	// second family to differ from, so an unknown lineage is not load-bearing.
 	const claimsDiversity = (requireDistinct && members.length > 1) || role.minFamilies !== undefined;
@@ -388,7 +368,6 @@ export function panelLineupHash(role: PanelRole, members: readonly ResolvedPanel
 	const normalized = {
 		strategy: role.strategy,
 		minFamilies: role.minFamilies ?? null,
-		distinctFamilies: role.distinctFamilies ?? null,
 		members: [...members]
 			.sort((left, right) => left.index - right.index)
 			.map(member => ({
