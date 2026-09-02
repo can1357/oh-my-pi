@@ -520,8 +520,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			return;
 		}
 		const correction = Promise.resolve().then(async () => {
-			await this.#session.onOutputSchemaValidationFailure?.();
-			this.#schemaCorrectionLocked = true;
+			this.#schemaCorrectionLocked = (await this.#session.onOutputSchemaValidationFailure?.()) === true;
 		});
 		this.#schemaCorrectionPromise = correction;
 		try {

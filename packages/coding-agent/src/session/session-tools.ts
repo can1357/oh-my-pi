@@ -936,7 +936,9 @@ export class SessionTools {
 
 		const pinnedWrite = isPresentationPinned("write");
 		const activeDeferrableTool = tools.some(tool => tool.deferrable === true);
-		const transportNeeded = mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled();
+		const writeTransportAllowed = !activeToolCeiling || activeToolCeiling.has("write");
+		const transportNeeded =
+			writeTransportAllowed && (mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled());
 		if (transportNeeded && !builtInWriteAvailable) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
 			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;

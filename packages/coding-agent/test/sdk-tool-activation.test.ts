@@ -1885,6 +1885,23 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("does not re-add plan-mode write above an active tool ceiling", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["yield", "write"],
+			requireYieldTool: true,
+		});
+
+		try {
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.setActiveToolCeiling(["yield"]);
+			expect(session.getActiveToolNames()).toEqual(["yield"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("upgrades write explicitly selected by a runtime caller to filesystem access", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
@@ -2331,6 +2348,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 							},
 						],
 					},
+
 					{ content: ["done"] },
 				],
 			});
@@ -2342,6 +2360,59 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					message => message.role === "toolResult" && message.toolCallId === "side-effect-queued",
 				) as ToolResultMessage | undefined;
 				expect(sideEffectResult?.isError).toBe(true);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+	it("applies correction policy against the live model after a runtime switch", async () => {
+		const tempDir = makeTempDir();
+		const runtimeModel: Model = {
+			...requireBundledModel("openai", "gpt-5"),
+			provider: "merge-gateway",
+			id: "runtime-merge",
+		};
+		await withProviderAuth(["merge-gateway"], async () => {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				toolNames: ["yield", "write"],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				resolveOutputSchemaFailurePolicy: model =>
+					model.provider === "merge-gateway" ? { mode: "strict", toolNames: ["yield"] } : undefined,
+				requireYieldTool: true,
+			});
+			session.sessionManager.appendSessionInit({
+				systemPrompt: "structured worker",
+				task: "return structured data",
+				tools: session.getEnabledToolNames(),
+				outputSchemaMode: "permissive",
+			});
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "yield-invalid-runtime-switch",
+								name: "yield",
+								arguments: { result: { data: { token: "x" } } },
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+			try {
+				await session.setModel(runtimeModel);
+				await session.prompt("return structured output");
+				expect(session.getActiveToolNames()).toEqual(["yield"]);
+				const init = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
+				expect(init?.type === "session_init" ? init.outputSchemaMode : undefined).toBe("strict");
 			} finally {
 				await session.dispose();
 			}

@@ -367,6 +367,13 @@ export async function reachableModelMayRequireStructuredOutputHardening(args: {
 		getModelRole: (role: string) => settings.getModelRole(role),
 		modelLookup: modelRegistry,
 	};
+	const hasUsableCredential = async (candidate: Model<Api>): Promise<boolean> => {
+		try {
+			return Boolean(await modelRegistry.getApiKey(candidate));
+		} catch {
+			return false;
+		}
+	};
 	const queue: Array<{
 		selector: string;
 		roleHint?: string;
@@ -393,12 +400,12 @@ export async function reachableModelMayRequireStructuredOutputHardening(args: {
 		if (current.isFallback && !currentModel) continue;
 		const requiresHardening = modelRequiresStructuredOutputHardening(currentModel);
 		const requiresCredential = current.isFallback || current.credentialVerified || requiresHardening;
-		const hasUsableCredential =
+		const credentialAvailable =
 			currentModel && requiresCredential
-				? current.credentialVerified || Boolean(await modelRegistry.getApiKey(currentModel))
+				? current.credentialVerified || (await hasUsableCredential(currentModel))
 				: false;
-		if (current.isFallback && !hasUsableCredential) continue;
-		if (requiresHardening && hasUsableCredential) return true;
+		if (current.isFallback && !credentialAvailable) continue;
+		if (requiresHardening && credentialAvailable) return true;
 		if (promotionEnabled && currentModel) {
 			const contextWindow = currentModel.contextWindow ?? 0;
 			const target =
@@ -408,7 +415,7 @@ export async function reachableModelMayRequireStructuredOutputHardening(args: {
 				(target.provider !== currentModel.provider || target.id !== currentModel.id) &&
 				target.contextWindow != null &&
 				target.contextWindow > contextWindow &&
-				(await modelRegistry.getApiKey(target))
+				(await hasUsableCredential(target))
 			) {
 				if (modelRequiresStructuredOutputHardening(target)) return true;
 				queue.push({
@@ -2911,6 +2918,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	} = options;
 	let effectiveOutputSchemaMode = options.outputSchemaMode;
 	let outputSchemaFailureToolNames: readonly string[] | undefined;
+	let resolveOutputSchemaFailurePolicy: CreateAgentSessionOptions["resolveOutputSchemaFailurePolicy"];
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
@@ -3318,6 +3326,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			);
 			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
 			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
+			if (normalizedOutputSchema !== undefined && outputSchemaFailureToolNames === undefined) {
+				resolveOutputSchemaFailurePolicy = liveModel => {
+					if (!modelRequiresStructuredOutputHardening(liveModel)) return undefined;
+					const livePolicy = resolveStructuredOutputHarnessPolicy(true, outputSchema, options.outputSchemaMode);
+					effectiveOutputSchemaMode = livePolicy.mode;
+					return livePolicy.failureToolNames
+						? { mode: livePolicy.mode ?? "strict", toolNames: livePolicy.failureToolNames }
+						: undefined;
+				};
+			}
 
 			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
@@ -3391,6 +3409,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: effectiveOutputSchemaMode,
 				outputSchemaFailureToolNames: lockedInit?.outputSchemaFailureToolNames ?? outputSchemaFailureToolNames,
+				resolveOutputSchemaFailurePolicy: lockedInit ? undefined : resolveOutputSchemaFailurePolicy,
 				restrictToolNames: lockedInit ? true : options.restrictToolNames,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,

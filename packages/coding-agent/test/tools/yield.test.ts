@@ -398,6 +398,7 @@ describe("YieldTool", () => {
 				},
 				onOutputSchemaValidationFailure: () => {
 					lockdowns++;
+					return true;
 				},
 			}),
 		);
@@ -1231,6 +1232,7 @@ describe("YieldTool", () => {
 				onOutputSchemaValidationFailure: () => {
 					lockdowns++;
 					activeTools = ["yield"];
+					return true;
 				},
 			}),
 		);
@@ -1246,6 +1248,37 @@ describe("YieldTool", () => {
 		expect(lockdowns).toBe(1);
 	});
 
+	it("re-evaluates correction policy until the live model requires a lock", async () => {
+		const outputSchema = {
+			type: "object",
+			properties: { token: { type: "string", minLength: 3 } },
+			required: ["token"],
+		};
+		let requiresLock = false;
+		let policyChecks = 0;
+		const tool = new YieldTool(
+			createSession({
+				outputSchema,
+				onOutputSchemaValidationFailure: () => {
+					policyChecks++;
+					return requiresLock;
+				},
+			}),
+		);
+
+		await expect(
+			tool.execute("invalid-before-switch", { result: { data: { token: "x" } } } as never),
+		).rejects.toThrow("Output does not match schema");
+		requiresLock = true;
+		await expect(tool.execute("invalid-after-switch", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"Output does not match schema",
+		);
+		await expect(tool.execute("invalid-locked", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"Output does not match schema",
+		);
+		expect(policyChecks).toBe(2);
+	});
+
 	it("retries correction lockdown when installation fails", async () => {
 		const outputSchema = {
 			type: "object",
@@ -1259,6 +1292,7 @@ describe("YieldTool", () => {
 				onOutputSchemaValidationFailure: () => {
 					lockdowns++;
 					if (lockdowns === 1) throw new Error("lock installation failed");
+					return true;
 				},
 			}),
 		);

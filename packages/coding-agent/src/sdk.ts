@@ -559,6 +559,13 @@ export interface CreateAgentSessionOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Active tool names to retain after the first schema-invalid yield; undefined keeps the current set. */
 	outputSchemaFailureToolNames?: readonly string[];
+	/**
+	 * Re-resolve correction policy against the live model after a runtime switch.
+	 * Returning undefined leaves a permissive session unlocked.
+	 */
+	resolveOutputSchemaFailurePolicy?: (
+		model: Model,
+	) => { mode: StructuredSubagentSchemaMode; toolNames: readonly string[] } | undefined;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
@@ -1766,35 +1773,54 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const outputSchemaFailureToolNames = options.outputSchemaFailureToolNames
 			? [...options.outputSchemaFailureToolNames]
 			: undefined;
-		const outputSchemaFailureToolNameSet = outputSchemaFailureToolNames
-			? new Set(outputSchemaFailureToolNames)
-			: undefined;
+		const canResolveOutputSchemaFailurePolicy =
+			outputSchemaFailureToolNames !== undefined || options.resolveOutputSchemaFailurePolicy !== undefined;
+		const resolveOutputSchemaFailurePolicy = ():
+			| { mode: StructuredSubagentSchemaMode | undefined; toolNames: readonly string[] }
+			| undefined => {
+			if (outputSchemaFailureToolNames) {
+				return {
+					mode: options.outputSchemaMode,
+					toolNames: outputSchemaFailureToolNames,
+				};
+			}
+			const activeModel = session?.model;
+			return activeModel ? options.resolveOutputSchemaFailurePolicy?.(activeModel) : undefined;
+		};
 		let activeToolBatchAbortController: AbortController | undefined;
-		const createToolBatchAbortScope = outputSchemaFailureToolNames
+		const createToolBatchAbortScope = canResolveOutputSchemaFailurePolicy
 			? () => {
 					const controller = new AbortController();
 					activeToolBatchAbortController = controller;
 					return {
 						signal: controller.signal,
-						shouldAbort: (toolName: string) => outputSchemaFailureToolNameSet?.has(toolName) !== true,
+						shouldAbort: (toolName: string) => {
+							const policy = resolveOutputSchemaFailurePolicy();
+							return policy !== undefined && !policy.toolNames.includes(toolName);
+						},
 					};
 				}
 			: undefined;
-		const lockOutputSchemaCorrectionTools = outputSchemaFailureToolNames
-			? async (): Promise<void> => {
+		const lockOutputSchemaCorrectionTools = canResolveOutputSchemaFailurePolicy
+			? async (): Promise<boolean> => {
+					const policy = resolveOutputSchemaFailurePolicy();
+					if (!policy) return false;
 					activeToolBatchAbortController?.abort(
 						new DOMException("Structured-output correction locked this batch to allowed tools", "AbortError"),
 					);
-					await session.setActiveToolCeiling(outputSchemaFailureToolNames);
+					await session.setActiveToolCeiling([...policy.toolNames]);
 					const init = sessionManager.getBranch().findLast(entry => entry.type === "session_init");
-					if (init?.type !== "session_init") return;
+					if (init?.type !== "session_init") return true;
 					const { type: _type, id: _id, parentId: _parentId, timestamp: _timestamp, ...contract } = init;
 					sessionManager.appendSessionInit({
 						...contract,
-						tools: outputSchemaFailureToolNames,
+						tools: [...policy.toolNames],
+						outputSchemaMode: policy.mode ?? contract.outputSchemaMode,
+						outputSchemaFailureToolNames: [...policy.toolNames],
 						outputSchemaCorrectionLocked: true,
 						restrictToolNames: true,
 					});
+					return true;
 				}
 			: undefined;
 		const toolSession: ToolSession = {

@@ -241,6 +241,35 @@ describe("structured subagent primitive", () => {
 		).toBe(false);
 	});
 
+	it("treats credential resolver failures as unavailable fallbacks", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async (model: FallbackTestModel) => {
+				if (model.provider === "merge-gateway") throw new Error("credential resolver failed");
+				return "anthropic-key";
+			},
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
 	it("ignores configured fallback chains when runtime model fallback is disabled", async () => {
 		const models: Record<string, FallbackTestModel> = {
 			"openai/a": fallbackTestModel("openai", "a"),
