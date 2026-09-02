@@ -18,10 +18,13 @@ type ExtRpc<Op extends RelayRpcRequest["op"]> = {
 class FakeExtSocket implements RelaySocket {
 	readonly messages: RelayToExtMessage[] = [];
 	readonly #acked = new Set<number>();
+	closeCount = 0;
 	send(text: string): void {
 		this.messages.push(JSON.parse(text) as RelayToExtMessage);
 	}
-	close(): void {}
+	close(): void {
+		this.closeCount++;
+	}
 	rpcs<Op extends RelayRpcRequest["op"]>(op: Op): Array<ExtRpc<Op>> {
 		return this.messages.filter(
 			(msg): msg is ExtRpc<Op> => msg.t === "rpc" && msg.op === op,
@@ -4266,6 +4269,7 @@ describe("RelayBridge tab grouping", () => {
 			expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(
 				true,
 			);
+			expect(ext.closeCount).toBe(1);
 
 			const ext2 = new FakeExtSocket();
 			connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {

@@ -324,7 +324,7 @@ class CdpConnection {
 	}
 }
 
-/** Transport replacement is retryable and must not permanently ban a tab. */
+/** Transport loss is retryable and must not permanently ban a tab. */
 class ExtensionReplacedError extends Error {}
 
 /** A timed-out RPC may already have mutated Chrome even though its result was lost. */
@@ -3809,7 +3809,7 @@ export class RelayBridge {
 					url: tab.url,
 					error: err instanceof Error ? err.message : String(err),
 				});
-				if (!(err instanceof ExtensionReplacedError)) tab.banned = true;
+				if (!isExtensionTransportInterrupted(err)) tab.banned = true;
 				return false;
 			})
 			.finally(() => {
@@ -3936,11 +3936,17 @@ export class RelayBridge {
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		const timer = setTimeout(() => {
 			this.#pendingRpc.delete(id);
-			reject(
-				new ExtensionRpcTimeoutError(
-					`extension rpc '${req.op}' timed out after ${timeoutMs}ms`,
-				),
+			const error = new ExtensionRpcTimeoutError(
+				`extension rpc '${req.op}' timed out after ${timeoutMs}ms`,
 			);
+			reject(error);
+			// Chrome may have applied this RPC even though its result missed the
+			// deadline. Replace the transport so the next hello reconciles every
+			// mutation that treats this typed timeout as an ambiguous interruption.
+			if (this.#ext === ext) {
+				ext.close();
+				this.extClosed(ext);
+			}
 		}, timeoutMs);
 		this.#pendingRpc.set(id, { resolve, reject, timer });
 		ext.send(
