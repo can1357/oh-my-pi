@@ -136,6 +136,32 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("cline-pass", "kimi-k3")).toBeDefined();
 	});
 
+	test("refreshes the authoritative Meta catalog with the Muse OAuth-minted API key", async () => {
+		await authStorage.set("meta", {
+			type: "oauth",
+			access: "meta-account-access",
+			refresh: "meta-account-refresh",
+			expires: Date.now() + 3_600_000,
+			apiKey: "LLM|subscription-catalog-key",
+		});
+		let authorization = "";
+		const oauthRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: (input, init) => {
+				const url = String(input);
+				if (url === "https://api.meta.ai/v1/models") {
+					authorization = new Headers(init?.headers).get("Authorization") ?? "";
+					return Promise.resolve(Response.json({ data: [{ id: "muse-spark-1.3-contributor" }] }));
+				}
+				return Promise.reject(new Error(`network disabled for ${url}`));
+			},
+		});
+
+		await oauthRegistry.refreshProvider("meta", "online");
+
+		expect(authorization).toBe("Bearer LLM|subscription-catalog-key");
+		expect(getProviderModels(oauthRegistry, "meta").map(model => model.id)).toEqual(["muse-spark-1.3-contributor"]);
+	});
+
 	test("validates provider config before mutating custom API state", () => {
 		const beforeAnthropicCount = registry.getAll().filter(model => model.provider === "anthropic").length;
 

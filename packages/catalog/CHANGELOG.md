@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Muse Spark 1.3 Standard and Contributor models with account-aware Meta catalog refresh.
+
 ## [18.1.4] - 2026-09-02
 
 ### Changed

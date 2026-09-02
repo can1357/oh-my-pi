@@ -4352,12 +4352,47 @@ export function coreWeaveModelManagerOptions(
 
 const META_MODEL_API_BASE_URL = "https://api.meta.ai/v1";
 const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+const META_MUSE_SPARK_CONTRIBUTOR_COST = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 } as const;
 const META_MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
 
 export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	{
+		id: "muse-spark-1.3",
+		name: "Muse Spark 1.3",
+		api: "openai-responses",
+		provider: "meta",
+		baseUrl: META_MODEL_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: META_MUSE_SPARK_COST,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		thinking: META_MUSE_SPARK_THINKING,
+		compat: {
+			supportsReasoningEffort: true,
+			includeEncryptedReasoning: true,
+		},
+	},
+	{
+		id: "muse-spark-1.3-contributor",
+		name: "Muse Spark 1.3 Contributor (Data Used for Training)",
+		api: "openai-responses",
+		provider: "meta",
+		baseUrl: META_MODEL_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: META_MUSE_SPARK_CONTRIBUTOR_COST,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		thinking: META_MUSE_SPARK_THINKING,
+		compat: {
+			supportsReasoningEffort: true,
+			includeEncryptedReasoning: true,
+		},
+	},
 	{
 		id: "muse-spark-1.1",
 		name: "Muse Spark 1.1",
@@ -4400,7 +4435,7 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 		baseUrl: META_MODEL_API_BASE_URL,
 		reasoning: true,
 		input: ["text", "image"],
-		cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+		cost: META_MUSE_SPARK_CONTRIBUTOR_COST,
 		contextWindow: 1_048_576,
 		maxTokens: 131_072,
 		thinking: META_MUSE_SPARK_THINKING,
@@ -4410,6 +4445,44 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 		},
 	},
 ];
+
+const META_MUSE_STATIC_MODEL_BY_ID = new Map(META_MUSE_STATIC_MODELS.map(model => [model.id, model]));
+
+const META_MUSE_SPARK_PREFIX = "muse-spark-";
+const META_MUSE_SPARK_CONTRIBUTOR_SUFFIX = "-contributor";
+
+function isMetaMuseSparkModelId(modelId: string): boolean {
+	return modelId.startsWith(META_MUSE_SPARK_PREFIX);
+}
+
+function metaMuseSparkName(modelId: string): string {
+	const contributor = modelId.endsWith(META_MUSE_SPARK_CONTRIBUTOR_SUFFIX);
+	const versionEnd = contributor ? -META_MUSE_SPARK_CONTRIBUTOR_SUFFIX.length : undefined;
+	const version = modelId.slice(META_MUSE_SPARK_PREFIX.length, versionEnd);
+	return `Muse Spark ${version}${contributor ? " Contributor (Data Used for Training)" : ""}`;
+}
+
+function mapMetaMuseSparkModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-responses">,
+	reference: ModelSpec<"openai-responses"> | undefined,
+): ModelSpec<"openai-responses"> {
+	const canonicalReference = META_MUSE_STATIC_MODEL_BY_ID.get(defaults.id) ?? reference;
+	const model = mapWithBundledReference(entry, defaults, canonicalReference);
+	return {
+		...model,
+		name: metaMuseSparkName(defaults.id),
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: toPositiveNumber(entry.context_length, 1_048_576),
+		maxTokens: toPositiveNumber(entry.max_completion_tokens, 131_072),
+		thinking: META_MUSE_SPARK_THINKING,
+		compat: {
+			supportsReasoningEffort: true,
+			includeEncryptedReasoning: true,
+		},
+	};
+}
 
 // ---------------------------------------------------------------------------
 // 15.76 Amazon Bedrock Mantle
@@ -4544,8 +4617,10 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 			providerId: "meta",
 			defaultBaseUrl: META_MODEL_API_BASE_URL,
 			config,
+			dynamicModelsAuthoritative: true,
 			requireApiKey: true,
-			mapModel: mapWithBundledReference,
+			filterModel: (_entry, model) => isMetaMuseSparkModelId(model.id),
+			mapModel: mapMetaMuseSparkModel,
 		}),
 		staticModels: META_MUSE_STATIC_MODELS,
 	};
