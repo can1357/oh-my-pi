@@ -634,6 +634,7 @@ async function buildHello(): Promise<
 	// too. Wait until the pending attach/detach set stays stable through the
 	// target snapshot; otherwise a same-socket refresh can still capture stale
 	// attached state, clear `tab.attaching`, and trigger a second recovery attach.
+	requireRecoveryStateLoaded(await recoverableReady);
 	await recoverableUpdates;
 	const [tabs, targets] = await snapshotAfterPendingOperationsSettle(
 		() => pendingOperationGeneration,

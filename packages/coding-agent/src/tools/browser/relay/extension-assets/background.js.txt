@@ -487,6 +487,7 @@ function invalidateHelloRefresh() {
     helloRefresh.dirty = true;
 }
 async function buildHello() {
+  requireRecoveryStateLoaded(await recoverableReady);
   await recoverableUpdates;
   const [tabs, targets] = await snapshotAfterPendingOperationsSettle(() => pendingOperationGeneration, () => [...pendingAttaches, ...pendingDetaches], () => Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]));
   const snapshots = [];

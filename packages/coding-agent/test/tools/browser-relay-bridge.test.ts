@@ -3874,7 +3874,18 @@ describe("RelayBridge tab grouping", () => {
 				},
 			}),
 		);
-		await flush();
+		await waitFor(
+			() => ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
+		);
+		ack(bridge, ext, "send", {
+			frameTree: { frame: { loaderId: "loader-before" } },
+		});
+		await waitFor(
+			() =>
+				ext
+					.pending("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
 
@@ -3888,6 +3899,12 @@ describe("RelayBridge tab grouping", () => {
 			"preload-script runImmediately recovery attach RPC",
 		);
 		ack(bridge, ext2, "attach");
+		await waitFor(
+			() => ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
+		);
+		ack(bridge, ext2, "send", {
+			frameTree: { frame: { loaderId: "loader-before" } },
+		});
 		await waitFor(
 			() =>
 				ext2
@@ -3926,7 +3943,18 @@ describe("RelayBridge tab grouping", () => {
 				},
 			}),
 		);
-		await flush();
+		await waitFor(
+			() => ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
+		);
+		ack(bridge, ext, "send", {
+			frameTree: { frame: { loaderId: "loader-before" } },
+		});
+		await waitFor(
+			() =>
+				ext
+					.pending("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
 
@@ -3955,17 +3983,12 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "detach");
 		await waitFor(() => ext2.pending("attach").length === 1);
 		ack(bridge, ext2, "attach");
-		bridge.extMessage(
-			ext2,
-			JSON.stringify({
-				t: "tabUpdated",
-				tab: tab({
-					tabId: 1,
-					groupId: -1,
-					url: "https://example.com/after-recovery-navigation",
-				}),
-			}),
+		await waitFor(
+			() => ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
 		);
+		ack(bridge, ext2, "send", {
+			frameTree: { frame: { loaderId: "loader-after-navigation" } },
+		});
 		await waitFor(
 			() =>
 				ext2

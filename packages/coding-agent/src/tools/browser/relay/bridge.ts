@@ -81,6 +81,8 @@ interface PreservedPreloadScript {
 	/** Current root-side identifier, remapped after recovery replay. */
 	rootIdentifier: string;
 	params?: Record<string, unknown>;
+	/** Main-frame document that already received an immediate invocation. */
+	loaderId?: string;
 	sequence: number;
 }
 
@@ -992,6 +994,10 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
 			return;
 		}
+		const loaderId =
+			msg.params?.runImmediately === true
+				? await this.#mainFrameLoaderId(ref.tabId).catch(() => undefined)
+				: undefined;
 		let result: Record<string, unknown> | undefined;
 		try {
 			result = (await this.#rpc({
@@ -1040,6 +1046,7 @@ export class RelayBridge {
 			clientIdentifier,
 			rootIdentifier,
 			msg.params,
+			loaderId,
 		);
 		this.#reply(conn, msg, { ...(result ?? {}), identifier: clientIdentifier });
 	}
@@ -1861,6 +1868,7 @@ export class RelayBridge {
 		clientIdentifier: string,
 		rootIdentifier: string,
 		params: Record<string, unknown> | undefined,
+		loaderId?: string,
 	): void {
 		let scripts = tab.preloadScripts.get(ownerSessionId);
 		if (!scripts) {
@@ -1872,6 +1880,7 @@ export class RelayBridge {
 			clientIdentifier,
 			rootIdentifier,
 			params,
+			loaderId,
 			sequence: ++this.#subscriptionSeq,
 		});
 	}
@@ -3423,7 +3432,7 @@ export class RelayBridge {
 		tab: TabState,
 		conns: CdpConnection[],
 		expectedExt: RelaySocket | null,
-		runImmediatePreloads: boolean,
+		_runImmediatePreloads: boolean,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
@@ -3502,16 +3511,25 @@ export class RelayBridge {
 				),
 			)
 			.sort((left, right) => left.sequence - right.sequence);
+		const currentLoaderId = preloadScripts.some(
+			(script) => script.params?.runImmediately === true,
+		)
+			? await this.#mainFrameLoaderId(tab.tabId).catch(() => undefined)
+			: undefined;
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
+			const runImmediately =
+				script.params?.runImmediately === true &&
+				script.loaderId !== undefined &&
+				currentLoaderId !== undefined &&
+				script.loaderId !== currentLoaderId;
 			const replayParams =
-				!runImmediatePreloads &&
 				script.params &&
 				typeof script.params === "object" &&
 				"runImmediately" in script.params
 					? {
 							...script.params,
-							runImmediately: false,
+							runImmediately,
 						}
 					: script.params;
 			let result: Record<string, unknown> | undefined;
@@ -3553,8 +3571,19 @@ export class RelayBridge {
 				continue;
 			}
 			current.rootIdentifier = identifier;
+			if (currentLoaderId !== undefined) current.loaderId = currentLoaderId;
 		}
 		this.#scheduleLivePreloadScriptCleanup(tab);
+	}
+
+	async #mainFrameLoaderId(tabId: number): Promise<string | undefined> {
+		const result = (await this.#rpc({
+			op: "send",
+			tabId,
+			method: "Page.getFrameTree",
+		})) as { frameTree?: { frame?: { loaderId?: unknown } } } | undefined;
+		const loaderId = result?.frameTree?.frame?.loaderId;
+		return typeof loaderId === "string" ? loaderId : undefined;
 	}
 
 	#assertExtensionCurrent(expected: RelaySocket | null): void {
