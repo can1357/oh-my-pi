@@ -197,6 +197,7 @@ export class Composer implements TerminalFrameProvider {
 					  };
 		  }
 		| undefined;
+	#lastEditorViewportRow: number | undefined;
 	#historyReplayRequested = false;
 	#headerReplayPending = false;
 	#historyFlush = false;
@@ -288,7 +289,16 @@ export class Composer implements TerminalFrameProvider {
 			if (editorOffset !== undefined) {
 				const vpOffset = Math.max(0, rendered.length - rows);
 				const editorVpRow = editorOffset - vpOffset;
-				this.editor.setRenderedScreenRow(editorVpRow >= 0 ? this.ui.providerViewportTop + editorVpRow : undefined);
+				this.#lastEditorViewportRow = editorVpRow >= 0 ? editorVpRow : undefined;
+				const destructiveReset = this.ui.clearScrollbackOnNextRender;
+				const startTop = destructiveReset ? 0 : Math.min(this.ui.providerViewportTop, Math.max(0, rows - 1));
+				const newTop = Math.max(0, Math.min(startTop, rows - rendered.length));
+				this.editor.setRenderedScreenRow(
+					this.#lastEditorViewportRow !== undefined ? newTop + this.#lastEditorViewportRow : undefined,
+				);
+			} else {
+				this.#lastEditorViewportRow = undefined;
+				this.editor.setRenderedScreenRow(undefined);
 			}
 			return { viewport: rendered.slice(-rows) };
 		}
@@ -316,7 +326,18 @@ export class Composer implements TerminalFrameProvider {
 			const editorRowInComposed = before.length + active.length + offsetInAfter;
 			const vpOffset = Math.max(0, composed.length - rows);
 			const editorVpRow = editorRowInComposed - vpOffset;
-			this.editor.setRenderedScreenRow(editorVpRow >= 0 ? this.ui.providerViewportTop + editorVpRow : undefined);
+			this.#lastEditorViewportRow = editorVpRow >= 0 ? editorVpRow : undefined;
+			const destructiveReset = this.ui.clearScrollbackOnNextRender;
+			const startTop = destructiveReset ? 0 : Math.min(this.ui.providerViewportTop, Math.max(0, rows - 1));
+			const historyCount = history?.rows.length ?? 0;
+			const viewportLen = Math.min(rows, composed.length);
+			const newTop = Math.max(0, Math.min(startTop + historyCount, rows - viewportLen));
+			this.editor.setRenderedScreenRow(
+				this.#lastEditorViewportRow !== undefined ? newTop + this.#lastEditorViewportRow : undefined,
+			);
+		} else {
+			this.#lastEditorViewportRow = undefined;
+			this.editor.setRenderedScreenRow(undefined);
 		}
 		return {
 			history,
@@ -342,6 +363,15 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#offeredHistory = undefined;
 		if (this.#historyReplayRequested) this.#startHistoryReplay();
+	}
+
+	/** Sync the editor screen position once the frame has been physically emitted. */
+	onFrameEmitted(viewportTop: number): void {
+		if (this.#lastEditorViewportRow !== undefined) {
+			this.editor.setRenderedScreenRow(viewportTop + this.#lastEditorViewportRow);
+		} else {
+			this.editor.setRenderedScreenRow(undefined);
+		}
 	}
 
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */

@@ -146,8 +146,10 @@ export interface TerminalFrameProvider {
 	renderResizeFrame?(viewport: ViewportSize): readonly string[];
 	/** Re-offer finalized history after a display reset or resize replay. */
 	beginHistoryReplay?(): void;
-	/** Force every currently eligible finalized prefix to retire before stop. */
+	/** Flush all finalized history batches before TUI shutdown. */
 	beginHistoryFlush?(): void;
+	/** Called after the mutable viewport has been written to the terminal with its authoritative screen top. */
+	onFrameEmitted?(viewportTop: number): void;
 }
 
 export interface TUIStartOptions {
@@ -903,10 +905,21 @@ export class TUI extends Container {
 		if (this.#mouseTracking === enabled) return;
 		this.#mouseTracking = enabled;
 		if (this.#stopped) return;
-		if (!this.#altActive) {
+		if (this.#altActive) {
+			const topOverlay = this.#getTopmostVisibleOverlay();
+			const wantMouseTracking = enabled && topOverlay?.options?.mouseTracking !== false;
+			if (wantMouseTracking !== this.#altMouseTrackingActive) {
+				this.terminal.write(wantMouseTracking ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
+				this.#altMouseTrackingActive = wantMouseTracking;
+			}
+		} else {
 			this.terminal.write(enabled ? NORMAL_MOUSE_TRACKING_ON : NORMAL_MOUSE_TRACKING_OFF);
 			this.#normalMouseTrackingActive = enabled;
 		}
+	}
+
+	get clearScrollbackOnNextRender(): boolean {
+		return this.#clearScrollbackOnNextRender;
 	}
 
 	get providerViewportTop(): number {
@@ -1183,7 +1196,7 @@ export class TUI extends Container {
 		}
 		this.terminal.hideCursor();
 		this.#recordHardwareCursorHidden();
-		if (this.#mouseTracking && !this.#altActive) {
+		if (this.#mouseTracking && !this.#altActive && !this.#inputDeferred) {
 			this.terminal.write(NORMAL_MOUSE_TRACKING_ON);
 			this.#normalMouseTrackingActive = true;
 		}
@@ -1496,6 +1509,10 @@ export class TUI extends Container {
 		if (!this.#inputDeferred || this.#stopped) return;
 		this.#inputDeferred = false;
 		this.terminal.enableInput?.();
+		if (this.#mouseTracking && !this.#altActive && !this.#normalMouseTrackingActive) {
+			this.terminal.write(NORMAL_MOUSE_TRACKING_ON);
+			this.#normalMouseTrackingActive = true;
+		}
 		this.#querySixelSupport();
 		this.#queryCellSize();
 	}
@@ -2593,6 +2610,7 @@ export class TUI extends Container {
 		else this.#recordHardwareCursorHidden();
 		this.#providerWindow = mutablePrepared;
 		this.#providerViewportTop = mutableTop;
+		provider?.onFrameEmitted?.(mutableTop);
 		this.#previousWidth = width;
 		this.#previousHeight = height;
 		this.#resizeBurstGrew = false;
@@ -2632,7 +2650,7 @@ export class TUI extends Container {
 		// modal there; the normal screen and all accounting stay untouched.
 		const topOverlay = this.#getTopmostVisibleOverlay();
 		const wantAlt = topOverlay?.options?.fullscreen === true;
-		const wantMouseTracking = wantAlt && topOverlay.options?.mouseTracking !== false;
+		const wantMouseTracking = this.#mouseTracking && wantAlt && topOverlay.options?.mouseTracking !== false;
 		if (wantAlt && !this.#altActive) {
 			// Enhanced keyboard modes can be buffer-local: re-push the active
 			// modified-key reporting sequence on the freshly entered alternate
