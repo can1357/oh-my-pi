@@ -191,6 +191,66 @@ describe("writeLocalUrlAtomically", () => {
 		});
 	});
 
+	it("migrates inherited owner-controlled Windows local roots to the private DACL", async () => {
+		if (process.platform !== "win32") return;
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const options = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "windows-inherited-root-migration",
+			};
+			await fs.mkdir(localRoot, { recursive: true });
+
+			await writeLocalUrlAtomically("local://migrated.txt", "content", options);
+
+			expect(await Bun.file(path.join(localRoot, "migrated.txt")).text()).toBe("content");
+		});
+	});
+
+	it("rejects foreign-writable Windows local roots before creating a target", async () => {
+		if (process.platform !== "win32") return;
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const localRoot = path.join(artifactsDir, "local");
+			const options = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "windows-foreign-writable-root",
+			};
+			await fs.mkdir(localRoot, { recursive: true });
+			const grant = Bun.spawn(["icacls.exe", localRoot, "/grant", "*S-1-1-0:(OI)(CI)(M)"], {
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "pipe",
+			});
+			const [exitCode, stderr] = await Promise.all([grant.exited, new Response(grant.stderr).text()]);
+			expect(exitCode, stderr).toBe(0);
+
+			await expect(writeLocalUrlAtomically("local://unsafe.txt", "content", options)).rejects.toMatchObject({
+				name: "AtomicLocalWriteError",
+				code: "UNSAFE_PATH",
+				commitState: "NOT_COMMITTED",
+			});
+			expect(await Bun.file(path.join(localRoot, "unsafe.txt")).exists()).toBe(false);
+		});
+	});
+
+	it("allows ordinary Windows target names that only resemble reserved devices", async () => {
+		if (process.platform !== "win32") return;
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			const options = {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "windows-device-lookalikes",
+			};
+			const localRoot = path.join(artifactsDir, "local");
+			for (const name of ["CONTEXT.txt", "COM0", "COM10", ".foo", "bar.com9", "internal space.txt"]) {
+				await writeLocalUrlAtomically(`local://${encodeURIComponent(name)}`, name, options);
+				expect(await Bun.file(path.join(localRoot, name)).text()).toBe(name);
+			}
+		});
+	});
+
 	it("concurrent writers leave one complete payload and no staged files", async () => {
 		await withTempDir(async tempDir => {
 			const artifactsDir = path.join(tempDir, "artifacts");
@@ -266,7 +326,7 @@ describe("writeLocalUrlAtomically", () => {
 				getSessionId: () => "component-grammar",
 			};
 
-			for (const input of [
+			const inputs = [
 				"local://",
 				"local://./trace.md",
 				"local://nested/../trace.md",
@@ -274,7 +334,40 @@ describe("writeLocalUrlAtomically", () => {
 				"local://nested/%00trace.md",
 				"local://nested%5Ctrace.md",
 				"local://%2525252e%2525252e/outside.md",
-			]) {
+			];
+			if (process.platform === "win32") {
+				inputs.push(
+					"local://%43ON.txt",
+					"local://PRN",
+					"local://AUX",
+					"local://NUL.tar.gz",
+					"local://CONIN%24.txt",
+					"local://CONOUT%24",
+					"local://COM1",
+					"local://LPT9",
+					"local://COM%C2%B9.txt",
+					"local://LPT%C2%B3.txt",
+					"local://COM%C2%B2.txt",
+					"local://COM%C2%B3.txt",
+					"local://LPT%C2%B9.txt",
+					"local://LPT%C2%B2.txt",
+					"local://NUL%20.txt",
+					"local://%01",
+					"local://%1f",
+					"local://%3C",
+					"local://%3E",
+					"local://%3A",
+					"local://%22",
+					"local://%7C",
+					"local://%3F",
+					"local://%2A",
+					"local://trailing%20",
+					"local://%20leading",
+					"local://trailing%2E",
+					"local://%2543ON",
+				);
+			}
+			for (const input of inputs) {
 				await expect(writeLocalUrlAtomically(input, "content", options)).rejects.toMatchObject({
 					name: "AtomicLocalWriteError",
 					code: "INVALID_INPUT",
