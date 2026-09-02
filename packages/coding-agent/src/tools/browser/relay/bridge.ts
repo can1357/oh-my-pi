@@ -3195,7 +3195,7 @@ export class RelayBridge {
 				tab.refreshDetachInFlight = false;
 				tab.banned = true;
 				this.#retractTab(tab);
-				this.#detachIfUnheld(tab.tabId);
+				this.#detachIfUnheld(tab.tabId, true);
 				return;
 			}
 			if (!ok) {
@@ -3749,12 +3749,13 @@ export class RelayBridge {
 	 * Release the tab's chrome.debugger attachment once no downstream session
 	 * holds it. Inert while the long-lived registry connection still holds one.
 	 */
-	#detachIfUnheld(tabId: number): void {
+	#detachIfUnheld(tabId: number, reconnectOnFailure = false): void {
 		if (this.#sessionHolders(tabId).length > 0) return;
 		const tab = this.#tabs.get(tabId);
 		if (!tab?.attached) return;
 		if (tab.detaching) return;
 		tab.reattachedAfterDetach = false;
+		const ext = this.#ext;
 		const done = this.#rpc({ op: "detach", tabId })
 			.then(() => {
 				tab.attached = false;
@@ -3771,6 +3772,13 @@ export class RelayBridge {
 					tabId,
 					error: err instanceof Error ? err.message : String(err),
 				});
+				// Recovery already failed and this best-effort cleanup could not
+				// confirm detachment either. Force the extension into its disconnected
+				// orphan-sweep path so a surviving debugger attachment is retried.
+				if (reconnectOnFailure && this.#ext === ext && ext) {
+					ext.close();
+					this.extClosed(ext);
+				}
 			})
 			.finally(() => {
 				if (tab.detaching === done) tab.detaching = null;

@@ -4727,7 +4727,10 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await flush();
 		expect(cdp.messages.find((message) => message.id === cmdId)?.error).toBeDefined();
-		expect(ext2.rpcs("detach").length).toBeGreaterThanOrEqual(2);
+		expect(ext2.pending("detach")).toHaveLength(1);
+		nack(bridge, ext2, "detach", "cleanup detach denied");
+		await flush();
+		expect(ext2.closeCount).toBe(1);
 	});
 
 	it("clears refresh authorization after a recovery reattach so a later user detach is honored", async () => {
