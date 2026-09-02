@@ -165,15 +165,22 @@ var guardDetachments = new Set;
 var attachmentStateEpochs = new Map;
 var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 var recoverableTabIds = new Set;
+var liveOwnedTabIds = new Set;
 var recoverableUpdateGeneration = 0;
 var recoverableStartupMutations = new Set;
 var orphanSweepDeadlineMs = null;
 var connectionGeneration = 0;
 var orphanSweepDeadlineGeneration = 0;
-var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null }).then((stored) => {
+var recoverableReady = chrome.storage.session.get({
+  [RECOVERABLE_TAB_IDS_KEY]: [],
+  [LIVE_OWNED_TAB_IDS_KEY]: [],
+  [ORPHAN_SWEEP_DEADLINE_KEY]: null
+}).then((stored) => {
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
   restoreRecoverableState(recoverableTabIds, ids, recoverableStartupMutations);
+  restoreRecoverableState(liveOwnedTabIds, stored[LIVE_OWNED_TAB_IDS_KEY], recoverableStartupMutations);
   recoverableStartupMutations.clear();
   const deadline = restoreOrphanSweepDeadline(stored[ORPHAN_SWEEP_DEADLINE_KEY], orphanSweepDeadlineGeneration === 0);
   if (deadline !== undefined)
@@ -197,7 +204,8 @@ function updateRecoverable(tabIds, update) {
   update(affectedTabIds);
   const generation = ++recoverableUpdateGeneration;
   const persistCurrent = () => chrome.storage.session.set({
-    [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds]
+    [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+    [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds]
   });
   const immediateWrite = persistCurrent().catch(() => {});
   recoverableUpdates = serializeRecoverableStateUpdate(recoverableUpdates, immediateWrite, () => generation === recoverableUpdateGeneration, persistCurrent);
@@ -205,13 +213,21 @@ function updateRecoverable(tabIds, update) {
 }
 function rememberRecoverable(freshTabIds) {
   return updateRecoverable(freshTabIds, (tabIds) => {
-    for (const tabId of tabIds)
+    for (const tabId of tabIds) {
       recoverableTabIds.add(tabId);
+      liveOwnedTabIds.add(tabId);
+    }
   });
 }
 function forgetRecoverable(tabId) {
   return updateRecoverable(() => [tabId], () => {
     recoverableTabIds.delete(tabId);
+    liveOwnedTabIds.delete(tabId);
+  });
+}
+function forgetLiveOwnership(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    liveOwnedTabIds.delete(tabId);
   });
 }
 async function setOrphanSweepDeadline(deadlineMs) {
@@ -473,7 +489,7 @@ async function buildHello() {
     if (snap)
       snapshots.push(snap);
   }
-  const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
+  const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   const hardwareConcurrency = Number.isInteger(navigator.hardwareConcurrency) && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : undefined;
   return {
@@ -608,7 +624,7 @@ async function reconcileOrphans() {
   const targets = await chrome.debugger.getTargets().catch(() => null);
   if (targets === null)
     return;
-  const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
+  const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
   await trackAttachments(attachedTabIds, () => true, attachmentState);
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
     socketReadyState: relayInitializedReadyState(),
@@ -678,6 +694,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
     return;
   noteAttachmentStateChange(attachmentStateEpochs, source.tabId);
+  forgetLiveOwnership(source.tabId);
   attachmentGuard.untrack(source.tabId);
   const guardMarked = guardDetachments.delete(source.tabId);
   const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
