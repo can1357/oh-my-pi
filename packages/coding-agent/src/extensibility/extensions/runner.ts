@@ -28,6 +28,7 @@ import type {
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderHeadersEvent,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	CompactOptions,
@@ -122,6 +123,52 @@ function handlerTimeoutForEvent(eventType: string): number {
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
+
+/**
+ * Provider credentials, which a `before_provider_headers` handler must not be
+ * able to set, replace, or clear.
+ *
+ * The event's contract says provider auth is generated downstream and is never
+ * visible. Visibility held on its own, but removability did not:
+ * providers disagree about precedence, so a handler writing `Authorization` could
+ * suppress the real credential. OpenAI merges caller headers and then only does
+ * `headers.Authorization ??= …`, so a caller-set value means the API key is never
+ * applied; `google.ts` and the Gemini CLI transport spread caller headers LAST,
+ * straight over the key. Enforcing it at this boundary makes the contract true
+ * for every provider at once, and keeps the guarantee where the promise is made.
+ */
+const PROVIDER_AUTH_HEADERS = new Set([
+	"authorization",
+	"proxy-authorization",
+	"x-api-key",
+	"api-key",
+	"x-goog-api-key",
+]);
+
+/**
+ * Take the handler's edits, except to provider auth: those keys come back exactly
+ * as they were before it ran.
+ *
+ * Reverting rather than blanket-stripping is deliberate. A CALLER may legitimately
+ * have supplied its own `Authorization` in `StreamOptions.headers` (a gateway in
+ * front of the provider, say), and deleting that would break a working setup. Only
+ * the handler's change to those keys is discarded.
+ */
+function withProviderAuthRestored(
+	before: Record<string, string>,
+	after: Record<string, string>,
+): Record<string, string> {
+	const restored: Record<string, string> = {};
+	// Case-insensitively, since a handler can add `Authorization` next to an
+	// existing `authorization` and a plain key comparison would keep both.
+	for (const [key, value] of Object.entries(after)) {
+		if (!PROVIDER_AUTH_HEADERS.has(key.toLowerCase())) restored[key] = value;
+	}
+	for (const [key, value] of Object.entries(before)) {
+		if (PROVIDER_AUTH_HEADERS.has(key.toLowerCase())) restored[key] = value;
+	}
+	return restored;
+}
 
 interface HandlerTimeoutBudget {
 	pause(): void;
@@ -267,8 +314,14 @@ async function raceHandlerWithTimeout<T>(
 		if (settled) return;
 		settled = true;
 		clearTimer();
-		timeoutController.abort(new DOMException(`Handler timed out after ${timeoutMs}ms`, "TimeoutError"));
+		// Settle the timeout BEFORE aborting. Aborting first unblocks anything the
+		// handler is awaiting on the handler signal (a `ctx.ui.*` prompt, say), so
+		// the handler could resume and resolve its own promise while the race is
+		// still undecided. Ordering it this way means the winner never depends on
+		// microtask scheduling: the timeout has already won by the time the handler
+		// learns about it.
 		resolveInterrupt(EXTENSION_HANDLER_TIMEOUT);
+		timeoutController.abort(new DOMException(`Handler timed out after ${timeoutMs}ms`, "TimeoutError"));
 	};
 	const armTimer = () => {
 		if (settled || pauseDepth > 0) return;
@@ -337,6 +390,9 @@ type RunnerEmitEvent = Exclude<
 	| UserBashEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	// Excluded like the other events with a dedicated emitter: this one is raised
+	// by `emitBeforeProviderHeaders`, which gives each handler its own header copy.
+	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| ResourcesDiscoverEvent
@@ -1267,18 +1323,24 @@ export class ExtensionRunner {
 		timeoutMs: number,
 		onFailure?: (kind: "timeout" | "error", message: string) => TResult,
 		outerSignal?: AbortSignal,
+		reportOutcome?: (outcome: "completed" | "timeout" | "aborted" | "error") => void,
 	): Promise<TResult | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
-		// gate without executing the underlying tool. Compose whichever apply.
+		// gate without executing the underlying tool. `before_provider_headers`
+		// passes the caller's signal so a handler cannot pin a provider concurrency
+		// slot past the abort. Compose whichever apply.
 		const sessionStopSignal =
 			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
 				: undefined;
 		const signals = [outerSignal, sessionStopSignal].filter((s): s is AbortSignal => s !== undefined);
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-		if (signal?.aborted) return undefined;
+		if (signal?.aborted) {
+			reportOutcome?.("aborted");
+			return undefined;
+		}
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
 		let handlerResult: TResult | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
@@ -1316,8 +1378,12 @@ export class ExtensionRunner {
 		} finally {
 			registrationScope.closed = true;
 		}
-		if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
+		if (handlerResult === EXTENSION_HANDLER_ABORTED) {
+			reportOutcome?.("aborted");
+			return undefined;
+		}
 		if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
+			reportOutcome?.("timeout");
 			const error = `handler timed out after ${timeoutMs}ms`;
 			logger.warn("Extension handler timed out", {
 				extensionPath: ext.path,
@@ -1332,6 +1398,7 @@ export class ExtensionRunner {
 			return onFailure?.("timeout", error);
 		}
 		if (handlerFailure) {
+			reportOutcome?.("error");
 			const message =
 				handlerFailure.error instanceof Error ? handlerFailure.error.message : String(handlerFailure.error);
 			const stack = handlerFailure.error instanceof Error ? handlerFailure.error.stack : undefined;
@@ -1343,6 +1410,7 @@ export class ExtensionRunner {
 			});
 			return onFailure?.("error", message);
 		}
+		reportOutcome?.("completed");
 		return handlerResult as TResult | undefined;
 	}
 
@@ -1689,6 +1757,69 @@ export class ExtensionRunner {
 		}
 
 		return currentPayload;
+	}
+
+	/**
+	 * `signal` is the caller's request signal, and threading it is load-bearing:
+	 * this runs while the request holds its provider concurrency slot, so a hung
+	 * handler would otherwise pin that slot for the full handler timeout after the
+	 * turn was already aborted. With it, an abort stops the loop and frees the slot.
+	 */
+	async emitBeforeProviderHeaders(
+		headers: Record<string, string>,
+		model?: Model,
+		signal?: AbortSignal,
+	): Promise<Record<string, string>> {
+		const ctx = this.createContext(model);
+		let current: Record<string, string> = { ...headers };
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_provider_headers");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				// Checked per handler, not just once: an abort landing partway through
+				// a chain must stop the remaining handlers too.
+				if (signal?.aborted) return current;
+				// Each handler edits its OWN copy, and the result is snapshotted the moment
+				// the await returns. A handler that ignores its abort signal and outruns the
+				// timeout keeps a reference to `working` — but nothing reads `working` again,
+				// so those late writes cannot reach a later handler or the HTTP request.
+				// Handlers mutate in place; the return value is ignored.
+				const working: Record<string, string> = { ...current };
+				const event: BeforeProviderHeadersEvent = {
+					type: "before_provider_headers",
+					headers: working,
+				};
+				// Only a handler that RAN TO COMPLETION gets its edits. One that throws,
+				// times out, or is aborted is a handler whose work is half-done by
+				// definition — committing that would put a partial update (a timestamp
+				// written but not yet signed, say) on the wire.
+				//
+				// The outcome comes from the timeout helper rather than from a flag this
+				// loop sets when the handler resolves. Those are not the same thing:
+				// after the timeout branch wins, `raceHandlerWithTimeout` still gives the
+				// handler one `Bun.sleep(0)` tick, so a handler finishing exactly on the
+				// boundary would set such a flag while the runner recorded a timeout, and
+				// its edits would ship under a policy that says they did not count.
+				let ranToCompletion = false;
+				await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					undefined,
+					signal,
+					outcome => {
+						ranToCompletion = outcome === "completed";
+					},
+				);
+				if (ranToCompletion) current = withProviderAuthRestored(current, working);
+			}
+		}
+
+		return current;
 	}
 
 	/** Runs response hooks with the model that produced that provider response. */

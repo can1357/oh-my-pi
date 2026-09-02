@@ -294,6 +294,7 @@ Cancelable pre-events:
 - `input`
 - `before_agent_start`
 - `before_provider_request` (may replace provider request payload — the replacement is applied by every provider that fires the hook, which is all of them except `devin-agent`, which does not fire it)
+- `before_provider_headers` — add per-request headers before the provider HTTP call (see [below](#before_provider_headers))
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
@@ -342,6 +343,18 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 
 - `user_bash` (override with `{ result }`)
 - `user_python` (override with `{ result }`)
+
+### `before_provider_headers`
+
+Attach per-request metadata (attribution, tracing, a session id) to the provider call. Handlers mutate `event.headers` in place; the return value is ignored.
+
+Scope is the **caller-supplied** headers (`StreamOptions.headers`), not the provider's assembled map. Additions reach the request as caller headers. Provider auth is generated downstream and is never visible to the handler; edits to credential header names (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) are discarded. A caller's own auth header is left alone. Other added keys follow each provider's existing `StreamOptions.headers` merge — some providers spread caller headers last, so an added `Content-Type` can replace that provider's default. `after_provider_response` carries response status and response headers, not the request headers that were sent.
+
+Each handler gets its own copy, and only one that runs to completion has its edits applied — throwing, timing out, or being aborted contributes nothing. Handlers run once the request holds its per-provider concurrency slot, so a request aborted while queued never runs them.
+
+**Fires once per request, not once per HTTP attempt.** One provider request can produce several outbound attempts — an auth-refresh retry re-enters `streamSimple` with a new key, and transport-level retries re-send — and every attempt carries the headers from the single hook invocation. Attribution and tracing metadata is per-request, so reuse is the wanted behaviour; a value that must be minted next to each individual attempt, such as a nonce or a signature, cannot be expressed through this event.
+
+**Known limitation — WebSocket transports.** With `providers.openaiWebsockets` enabled, the OpenAI Codex transport reuses an open socket whenever auth matches, and WebSocket frames carry no per-request HTTP headers. A header added on a request that reuses a socket therefore never reaches the provider, even though the handler ran. Forcing a reconnect when non-auth headers change is not a fix: per-request metadata differs on every request, so it would reconnect on every request and defeat the reuse. There is no request-header echo on this path: `after_provider_response` reports response status and response headers only.
 
 ### `resources_discover`
 

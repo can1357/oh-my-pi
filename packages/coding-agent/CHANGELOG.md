@@ -357,6 +357,15 @@
 
 ### Added
 
+- Added the `before_provider_headers` extension event for attaching per-request attribution or tracing headers to provider calls; provider-generated headers such as auth stay out of scope ([#8046](https://github.com/can1357/oh-my-pi/pull/8046) by [@svperfecta](https://github.com/svperfecta)).
+- Added an explicit append-only transcript declaration and width-independent stable-row API for components that can guarantee an immutable history prefix across later updates.
+- Added `:img` read selector to rasterize local SVG/SVGZ files for vision input.
+- Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
+- Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
+- Added `q` shortcut to exit the git TUI
+- Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
+- Compressed single-child directory chains in the sidebar tree view
+- Split pure additions (new/untracked files) into their own list below tracked changes in each git TUI file section, separated by a rule; addition rows drop the redundant status letter and deleted files render struck through
 - Added append-only transcript declarations and stable-row APIs for components with immutable history prefixes.
 - Added the `:img` read selector to rasterize local SVG and SVGZ files for vision input.
 - Added side-by-side image and SVG previews to `omp git`, including Git LFS object resolution and clear placeholders for unavailable or unsupported binary content.

@@ -747,6 +747,19 @@ export interface BeforeProviderRequestEvent {
 	payload: unknown;
 }
 
+/**
+ * Fired before the provider HTTP call, carrying the CALLER-SUPPLIED request
+ * headers (`StreamOptions.headers`). Handlers mutate `headers` in place; the
+ * return value is ignored. Additions reach the request as caller headers.
+ * Provider auth is assembled downstream and is never exposed; handler edits to
+ * credential header names are discarded. Other keys follow each provider's
+ * `StreamOptions.headers` merge. See `docs/extensions.md` for the full contract.
+ */
+export interface BeforeProviderHeadersEvent {
+	type: "before_provider_headers";
+	headers: Record<string, string>;
+}
+
 /** Fired after a provider response is received, before its stream body is consumed. */
 export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
@@ -1070,6 +1083,7 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
@@ -1259,6 +1273,7 @@ export interface ExtensionAPI {
 		event: "before_provider_request",
 		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,
 	): void;
+	on(event: "before_provider_headers", handler: ExtensionHandler<BeforeProviderHeadersEvent>): void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;

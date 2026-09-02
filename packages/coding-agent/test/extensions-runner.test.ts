@@ -776,6 +776,282 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("before_provider_headers", () => {
+		it("lets handlers add, overwrite and delete headers in place", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-added"] = "1";
+						event.headers["x-existing"] = "overwritten";
+						delete event.headers["x-removed"];
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-mutate.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({
+				"x-existing": "original",
+				"x-removed": "gone",
+				"x-untouched": "kept",
+			});
+			expect(headers).toEqual({ "x-added": "1", "x-existing": "overwritten", "x-untouched": "kept" });
+		});
+
+		// Review found a real race: a handler that ignores its abort signal keeps a
+		// reference to the header object after the timeout stops awaiting it, and can
+		// then write into the map on its way to the HTTP request. Each handler now
+		// works on its own copy, snapshotted the moment the await returns.
+		it("discards writes from a handler that outruns its timeout", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						await Bun.sleep(60);
+						event.headers["x-late"] = "escaped";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-late.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			testSetExtensionHandlerTimeoutMs(5);
+			try {
+				const headers = await runner.emitBeforeProviderHeaders({ "x-original": "kept" });
+				expect(headers).toEqual({ "x-original": "kept" });
+				// The handler is still running here; give it time to attempt its write and
+				// confirm the map we already returned is unaffected.
+				await Bun.sleep(80);
+				expect(headers).toEqual({ "x-original": "kept" });
+			} finally {
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("threads each handler's result into the next, in load order", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-chain"] = (event.headers["x-chain"] ?? "") + "ext1";
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-chain"] = (event.headers["x-chain"] ?? "") + "-ext2";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-1.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "headers-2.ts"), extCode2);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({});
+			expect(headers["x-chain"]).toBe("ext1-ext2");
+		});
+
+		// This event runs while the request holds its provider concurrency slot, so a
+		// hung handler must not pin that slot past an abort. Without the signal the
+		// call blocks for the whole handler timeout and the slot goes with it.
+		it("stops the handler chain when the request is aborted", async () => {
+			const hang = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-first"] = "ran";
+						await Bun.sleep(5000);
+					});
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-second"] = "ran";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-1-hang.ts"), hang);
+			fs.writeFileSync(path.join(extensionsDir, "headers-2-after.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 20);
+			const startedAt = Date.now();
+			const headers = await runner.emitBeforeProviderHeaders({}, undefined, controller.signal);
+			const elapsed = Date.now() - startedAt;
+
+			// Returns on the abort rather than on the hung handler or the timeout.
+			expect(elapsed).toBeLessThan(1000);
+			// The abort also stops the handlers that had not run yet.
+			expect(headers["x-second"]).toBeUndefined();
+		});
+
+		// The contract says provider auth is not removable. Providers disagree about
+		// precedence (OpenAI's `Authorization ??=` means a caller-set value wins;
+		// `google.ts` spreads caller headers last), so without this a handler could
+		// suppress the real credential.
+		it("discards handler edits to provider auth headers", async () => {
+			const authCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["Authorization"] = "Bearer attacker";
+						event.headers["x-goog-api-key"] = "stolen";
+						event.headers["x-trace"] = "kept";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-auth.ts"), authCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			// A caller's own auth header survives; the handler's attempt to change it does not.
+			const headers = await runner.emitBeforeProviderHeaders({ authorization: "Bearer caller-owned" });
+			expect(headers.authorization).toBe("Bearer caller-owned");
+			expect(headers.Authorization).toBeUndefined();
+			expect(headers["x-goog-api-key"]).toBeUndefined();
+			// Everything else the handler set still lands.
+			expect(headers["x-trace"]).toBe("kept");
+		});
+
+		// A handler that throws partway has half-written its edits by definition;
+		// committing them would put an incomplete update on the wire (a timestamp
+		// written but not yet signed, say).
+		it("discards edits from a handler that throws partway", async () => {
+			const partialCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-partial"] = "half-written";
+						throw new Error("failed after writing");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-partial.ts"), partialCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({ "x-original": "kept" });
+			expect(headers).toEqual({ "x-original": "kept" });
+		});
+
+		it("runs no handler at all when the signal is already aborted", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-ran"] = "yes";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-preaborted.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const headers = await runner.emitBeforeProviderHeaders({ "x-in": "1" }, undefined, AbortSignal.abort());
+			expect(headers).toEqual({ "x-in": "1" });
+		});
+
+		it("keeps earlier edits after a handler throws", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async (event) => {
+						event.headers["x-kept"] = "yes";
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("before_provider_headers", async () => {
+						throw new Error("headers failed");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers-ok.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "headers-throw.ts"), extCode2);
+
+			const result = await loadTestExtensions();
+			const errors: ExtensionError[] = [];
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			runner.onError(error => errors.push(error));
+
+			const headers = await runner.emitBeforeProviderHeaders({});
+			expect(headers["x-kept"]).toBe("yes");
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.event).toBe("before_provider_headers");
+			expect(errors[0]?.error).toContain("headers failed");
+		});
+
+		it("returns the headers untouched when nothing subscribes", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect(runner.hasHandlers("before_provider_headers")).toBe(false);
+			expect(await runner.emitBeforeProviderHeaders({ "x-a": "1" })).toEqual({ "x-a": "1" });
+		});
+	});
+
 	describe("after_provider_response", () => {
 		it("calls handlers with response metadata and reports handler errors without throwing", async () => {
 			const eventsPath = path.join(tempDir.path(), "after-provider-response-events.jsonl");
