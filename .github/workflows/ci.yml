@@ -291,24 +291,46 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
+         - id: published_addon_capability
+           name: Check published atomic-write capability
+           if: ${{ github.event_name == 'pull_request' && needs.native_changes.outputs.native-touched != 'true' }}
+           shell: bash
+           run: |
+              set -euo pipefail
+              missing=false
+              for addon in \
+                "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
+                "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"; do
+                if node - "$addon" <<'EOF'
+              const addon = require(process.argv[2]);
+              if (typeof addon.atomicLocalWrite !== "function") process.exit(3);
+              EOF
+                then
+                  :
+                else
+                  status=$?
+                  if [ "$status" -eq 3 ]; then missing=true; else exit "$status"; fi
+                fi
+              done
+              echo "atomic-local-write-missing=$missing" >> "$GITHUB_OUTPUT"
          - name: Report native artifact source
            if: github.event_name == 'pull_request'
            shell: bash
            run: |
-              if [ "${{ needs.native_changes.outputs.native-touched }}" = "true" ]; then
-                echo "::notice title=Fresh candidate native addons::Downstream TypeScript shards consume fresh Linux host artifacts from this PR."
+              if [ "${{ needs.native_changes.outputs.native-touched }}" = "true" ] || [ "${{ steps.published_addon_capability.outputs.atomic-local-write-missing }}" = "true" ]; then
+                echo "::notice title=Fresh candidate native addons::Downstream TypeScript shards consume fresh Linux host artifacts because the PR changed native callers or the published leaf lacks atomicLocalWrite."
               else
-                echo "::notice title=Published native addons::No native/caller change was detected; downstream TypeScript shards retain the published-leaf fast path."
+                echo "::notice title=Published native addons::No native/caller change was detected and both published leaves expose atomicLocalWrite."
               fi
 
          # ---- candidate path: full Linux set on main/release; host pair on touched PRs ----
          - id: cache
-           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true'
+           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true' || steps.published_addon_capability.outputs.atomic-local-write-missing == 'true'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
          - name: Build candidate native addons
-           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true'
+           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true' || steps.published_addon_capability.outputs.atomic-local-write-missing == 'true'
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -344,7 +366,7 @@ jobs:
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true'
+           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true' || steps.published_addon_capability.outputs.atomic-local-write-missing == 'true'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before
