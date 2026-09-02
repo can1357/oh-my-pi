@@ -3958,10 +3958,12 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extMessage(
 			ext2,
 			JSON.stringify({
-				t: "cdpEvent",
-				tabId: 1,
-				method: "Runtime.executionContextCreated",
-				params: { context: { id: 404 } },
+				t: "tabUpdated",
+				tab: tab({
+					tabId: 1,
+					groupId: -1,
+					url: "https://example.com/after-recovery-navigation",
+				}),
 			}),
 		);
 		await waitFor(

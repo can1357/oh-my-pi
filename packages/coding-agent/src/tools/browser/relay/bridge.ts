@@ -377,6 +377,8 @@ class TabState {
 	runtimeGeneration = 0;
 	/** Increments whenever Chrome reports a newly created JavaScript context. */
 	contextGeneration = 0;
+	/** URL observed before an extension outage, for navigation-aware recovery. */
+	recoveryStartUrl: string | null = null;
 	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
 	restoring: Promise<void> | null = null;
 	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
@@ -608,6 +610,7 @@ export class RelayBridge {
 		this.#extInfo = null;
 		this.#rejectPendingExtensionRpcs(new Error("relay extension disconnected"));
 		for (const tab of this.#tabs.values()) {
+			if (tab.recoveryStartUrl === null) tab.recoveryStartUrl = tab.url;
 			if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 			tab.attached = false;
 			tab.attaching = null;
@@ -3188,6 +3191,7 @@ export class RelayBridge {
 		const ext = this.#ext;
 		let refreshedRoot = false;
 		const contextGenerationBeforeRecovery = tab.contextGeneration;
+		const urlBeforeRecovery = tab.recoveryStartUrl ?? tab.url;
 		const restoring = (async () => {
 			let ok: boolean;
 			try {
@@ -3263,7 +3267,8 @@ export class RelayBridge {
 						keepPageSessions,
 						ext,
 						refreshedRoot &&
-							tab.contextGeneration !== contextGenerationBeforeRecovery,
+							(tab.contextGeneration !== contextGenerationBeforeRecovery ||
+								tab.url !== urlBeforeRecovery),
 					);
 				} catch (err) {
 					// A replacement keeps the journal pending. Its hello restarts the
@@ -3287,6 +3292,7 @@ export class RelayBridge {
 				}
 				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
+				tab.recoveryStartUrl = null;
 			}
 			// The user can cancel the debugger attachment while the final replay RPC
 			// is in flight: #onTabDetached then bans the tab and retracts its
