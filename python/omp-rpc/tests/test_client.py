@@ -876,8 +876,8 @@ FORWARD_COMPAT_SERVER = textwrap.dedent(
 )
 
 
-# Answers `steer` and `clear_queue` from the optional fields it received, so a
-# client-side assertion on the result also pins what went over the wire.
+# Answers steering/queue commands from their optional fields and validates the
+# two abort wire shapes so client assertions pin the exact envelopes.
 ACTIVE_TURN_SERVER = textwrap.dedent(
     """
     import json
@@ -895,16 +895,26 @@ ACTIVE_TURN_SERVER = textwrap.dedent(
         flush=True,
     )
 
+    abort_count = 0
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
         if not raw_line:
             continue
         command = json.loads(raw_line)
         command_type = command["type"]
+        success = True
         if command_type == "steer":
             data = {"accepted": command.get("activeTurnOnly") is not True}
         elif command_type == "clear_queue":
             data = {"steering": 1 if command.get("forInterrupt") else 0, "followUp": 0}
+        elif command_type == "abort":
+            abort_count += 1
+            success = (
+                "clearQueue" not in command
+                if abort_count == 1
+                else command.get("clearQueue") is True
+            )
+            data = {}
         else:
             data = {}
         print(
@@ -913,7 +923,8 @@ ACTIVE_TURN_SERVER = textwrap.dedent(
                     "id": command.get("id"),
                     "type": "response",
                     "command": command_type,
-                    "success": True,
+                    "success": success,
+                    **({} if success else {"error": "unexpected abort wire shape"}),
                     "data": data,
                 }
             ),
@@ -1665,6 +1676,10 @@ class RpcClientTests(unittest.TestCase):
                 ClearQueueResult(steering=1, follow_up=0),
             )
 
+            # Plain abort remains fieldless; the atomic form sends literal true.
+            client.abort()
+            client.abort(clear_queue=True)
+
     def test_pre_capability_server_reports_no_features_and_accepts_steers(self) -> None:
         with self.make_client(server=LEGACY_STEER_SERVER) as client:
             self.assertEqual(client.server_features, ServerFeatures())
@@ -1709,13 +1724,15 @@ class RpcClientTests(unittest.TestCase):
             {},
             "not-an-object",
         ]:
-            with self.subTest(features=bad):
-                with self.make_client(
+            with (
+                self.subTest(features=bad),
+                self.make_client(
                     server=UNSUPPORTED_CAPABILITY_SERVER,
                     env={"PI_BAD_FEATURE": json.dumps(bad)},
-                ) as client:
-                    self.assertEqual(client.server_features, ServerFeatures())
-                    self.assertIsNone(client.server_features.active_turn_steering)
+                ) as client,
+            ):
+                self.assertEqual(client.server_features, ServerFeatures())
+                self.assertIsNone(client.server_features.active_turn_steering)
 
 
 HANGING_SERVER = textwrap.dedent(

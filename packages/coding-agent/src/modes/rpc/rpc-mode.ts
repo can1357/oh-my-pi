@@ -119,6 +119,14 @@ export type RpcSessionChangeResult =
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
+export type RpcAbortSession = Pick<AgentSession, "abort" | "clearQueue">;
+
+/** Clear interrupt queues and start abort before yielding back to the input loop. */
+export async function handleRpcAbort(session: RpcAbortSession, clearQueue: boolean): Promise<void> {
+	if (clearQueue) session.clearQueue({ forInterrupt: true });
+	await session.abort({ reason: USER_INTERRUPT_LABEL });
+}
+
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
@@ -1175,12 +1183,9 @@ export async function runRpcMode(
 				return success(id, "follow_up");
 			}
 
-			// `forInterrupt` is the Esc-then-abort shape: it also drops hidden non-user
-			// steers so `abort`'s stranded-queue drain cannot restart the very run the
-			// host is interrupting. Clearing for any other reason (editor restore)
-			// leaves it off and keeps those messages queued for a continuing stream.
-			// clearQueue() replaces both queues synchronously, so a host that awaits
-			// this response before sending `abort` cannot race the drain.
+			// Standalone clearing remains useful for editor restore. A final interrupt
+			// uses `abort.clearQueue` instead: separate commands leave a round-trip gap
+			// where extensions can enqueue work that abort's stranded-queue drain restarts.
 			case "clear_queue": {
 				const cleared = session.clearQueue({ forInterrupt: command.forInterrupt === true });
 				return success(id, "clear_queue", {
@@ -1190,7 +1195,7 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await handleRpcAbort(session, command.clearQueue === true);
 				return success(id, "abort");
 			}
 

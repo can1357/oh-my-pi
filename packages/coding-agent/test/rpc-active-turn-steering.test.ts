@@ -2,13 +2,12 @@
  * Wire contract for active-turn steering.
  *
  * A host that drives a session over RPC cannot see the turn boundary the way the
- * TUI can, so two commands exist for it:
+ * TUI can, so two opt-in command fields close its races:
  *  - `steer` with `activeTurnOnly: true` answers `data.accepted`, rejecting when
  *    no turn is live at the server's enqueue boundary instead of seeding the idle
  *    queue (which auto-drains into an unrequested turn).
- *  - `clear_queue` with `forInterrupt: true` is acknowledged only after the
- *    queues have been replaced, so a following `abort` is not undone by the
- *    server's stranded-queue drain.
+ *  - `abort` with `clearQueue: true` synchronously replaces the queues and starts
+ *    abort in one serialized command, leaving no inter-command enqueue gap.
  *
  * Both are gated by `ready.features.activeTurnSteering === 1`, which the server
  * advertises in the v1 ready frame — before and independently of any v2
@@ -22,6 +21,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { handleRpcAbort, type RpcAbortSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const CLI_DIR = path.join(import.meta.dir, "..");
@@ -123,12 +123,56 @@ describe("RPC active-turn steering (real server)", () => {
 		expect(state.queuedMessageCount).toBe(0);
 	}, 30000);
 
-	test("acknowledges clear_queue for interrupt with the cleared counts", async () => {
+	test("accepts atomic abort-with-clear and standalone queue inspection", async () => {
 		using client = createClient();
 		await client.start();
 
 		expect(await client.clearQueue({ forInterrupt: true })).toEqual({ steering: 0, followUp: 0 });
+		await client.abort({ clearQueue: true });
 	}, 30000);
+});
+
+describe("RPC atomic abort handler", () => {
+	test("starts clear and abort synchronously before control can enqueue between them", async () => {
+		const releaseAbort = Promise.withResolvers<void>();
+		const operations: string[] = [];
+		const session = {
+			clearQueue: options => {
+				operations.push(`clear:${options?.forInterrupt === true}`);
+				return { steering: [], followUp: [] };
+			},
+			abort: async () => {
+				operations.push("abort:start");
+				await releaseAbort.promise;
+				operations.push("abort:end");
+			},
+		} satisfies RpcAbortSession;
+
+		const aborting = handleRpcAbort(session, true);
+		operations.push("caller:enqueue-opportunity");
+
+		// Both server operations start in the same synchronous command turn. A
+		// separate clear_queue request would return control before abort:start.
+		expect(operations).toEqual(["clear:true", "abort:start", "caller:enqueue-opportunity"]);
+
+		releaseAbort.resolve();
+		await aborting;
+		expect(operations).toEqual(["clear:true", "abort:start", "caller:enqueue-opportunity", "abort:end"]);
+	});
+
+	test("preserves plain abort without clearing queues", async () => {
+		let cleared = false;
+		const session = {
+			clearQueue: () => {
+				cleared = true;
+				return { steering: [], followUp: [] };
+			},
+			abort: async () => {},
+		} satisfies RpcAbortSession;
+
+		await handleRpcAbort(session, false);
+		expect(cleared).toBe(false);
+	});
 });
 
 describe("RPC active-turn steering (client mirror)", () => {
@@ -235,5 +279,17 @@ describe("RPC active-turn steering (client mirror)", () => {
 		expect(await client.clearQueue({ forInterrupt: true })).toEqual({ steering: 2, followUp: 1 });
 
 		expect(server.received.map(command => command.forInterrupt)).toEqual([undefined, true]);
+	});
+
+	test("sends queue clearing in the abort command only when requested", async () => {
+		const server = createFakeRpcServer({ ...READY_V1, features: { activeTurnSteering: 1 } }, command => ok(command));
+		using client = new RpcClient({ spawn: () => server.process });
+		await client.start();
+
+		await client.abort();
+		await client.abort({ clearQueue: true });
+
+		expect(server.received.map(command => command.clearQueue)).toEqual([undefined, true]);
+		expect(server.received.map(command => command.type)).toEqual(["abort", "abort"]);
 	});
 });

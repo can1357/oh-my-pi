@@ -34,7 +34,7 @@ export type RpcCommand =
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[]; activeTurnOnly?: true }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "clear_queue"; forInterrupt?: boolean }
-	| { id?: string; type: "abort" }
+	| { id?: string; type: "abort"; clearQueue?: true }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
@@ -150,7 +150,8 @@ export interface RpcPromptResultFrame {
  *  still reads them.
  *
  *  - `activeTurnSteering: 1` — `steer` honors `activeTurnOnly` and answers with
- *    `data.accepted`, and `clear_queue` is available with `forInterrupt`. */
+ *    `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` is
+ *    available with `forInterrupt`. */
 export interface RpcServerFeatures {
 	activeTurnSteering?: 1;
 }

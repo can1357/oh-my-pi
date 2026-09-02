@@ -144,7 +144,7 @@
 - Rewinding to a user message (double-Escape, `/branch`) now branches within the current session — the old path stays reachable in `/tree` — instead of forking a child session; `/rewind` is an alias for `/branch` ([#10565](https://github.com/can1357/oh-my-pi/pull/10565) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 ### Added
 
-- RPC hosts can now steer only a live turn and make an interrupt final. The ready frame advertises `features.activeTurnSteering: 1`; `steer` accepts `activeTurnOnly: true` and answers `data.accepted`, rejecting without touching the queues when no turn is running at the enqueue boundary; and the new `clear_queue` command (with `forInterrupt: true`) is acknowledged only after the queues are replaced, so a following `abort` is not undone by the stranded-queue drain. Hosts that omit the new fields keep the previous behavior.
+- RPC hosts can now steer only a live turn and make an interrupt final. The ready frame advertises `features.activeTurnSteering: 1`; `steer` accepts `activeTurnOnly: true` and answers `data.accepted`, rejecting without touching the queues when no turn is running at the enqueue boundary; `abort` accepts `clearQueue: true` to clear interrupt queues atomically before aborting; and the new standalone `clear_queue` command supports queue inspection and editor restore. Hosts that omit the new fields keep the previous behavior.
 
 ### Fixed
 

@@ -1205,10 +1205,9 @@ class RpcClient:
     def clear_queue(self, *, for_interrupt: bool = False) -> ClearQueueResult:
         """Drop queued messages, reporting how many user-authored ones were dropped.
 
-        `for_interrupt` also drops hidden non-user steers, so a following
-        `abort()` cannot be undone by the server's stranded-queue drain
-        restarting the interrupted run. Requires
-        `server_features.active_turn_steering == 1`.
+        `for_interrupt` also drops hidden non-user steers. Use
+        `abort(clear_queue=True)` for a final interrupt; separate `clear_queue()`
+        and `abort()` calls leave an enqueue gap between commands.
         """
         return parse_clear_queue_result(
             self._request(
@@ -1226,8 +1225,9 @@ class RpcClient:
             images=list(images) if images is not None else None,
         )
 
-    def abort(self) -> None:
-        self._request("abort")
+    def abort(self, *, clear_queue: bool = False) -> None:
+        """Abort, optionally clearing all interrupt queues atomically first."""
+        self._request("abort", clearQueue=True if clear_queue else None)
 
     def abort_and_prompt(
         self, message: str, *, images: Sequence[ImageContent] | None = None
