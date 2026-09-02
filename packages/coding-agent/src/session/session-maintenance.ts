@@ -725,13 +725,19 @@ export class SessionMaintenance {
 		// runs before we disconnect/abort the active agent operation below.
 		const compactMode = options?.mode ? findCompactMode(options.mode) : undefined;
 		// Modes that produce no LLM summary (snapcompact) have nothing to focus.
-		// Reject focus text loudly so programmatic callers don't silently lose
-		// instructions (the slash path pre-validates via parseCompactArgs).
-		// `internalGuidance` counts the same way — plan-mode approval never
-		// combines with a rejects-focus mode, but reject early if a caller ever
-		// wires it up so we don't silently drop the directive on the snapcompact
-		// fallback (issue #4359).
-		if (compactMode?.rejectsFocus && (customInstructions || options?.internalGuidance)) {
+		// Reject user focus text loudly so callers never silently lose it (the
+		// slash path pre-validates via parseCompactArgs).
+		//
+		// `internalGuidance` is different in kind and must not be conflated with
+		// it: user focus is a demand the operator would notice being dropped,
+		// while guidance is harness-synthesized advice for a summary that may or
+		// may not run. Plan-mode approval rides its distillation prompt through
+		// this channel (issue #4359), so treating it as focus would disqualify
+		// every no-summary method on the compact-before-execute path. Dropping it
+		// when no summary runs is defined behavior: snapcompact keeps the plan
+		// discussion as frames the model reads back, and the approved plan is
+		// re-injected from its pinned reference path regardless of method.
+		if (compactMode?.rejectsFocus && customInstructions) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
 		}
 		let methods: CompactionMethod[] = [];
@@ -773,10 +779,7 @@ export class SessionMaintenance {
 					continue;
 				}
 				if (method === "snapcompact") {
-					if (
-						explicitSnapcompact ||
-						(!customInstructions && !options?.internalGuidance && activeModel.input.includes("image"))
-					) {
+					if (explicitSnapcompact || (!customInstructions && activeModel.input.includes("image"))) {
 						selectedMethod = method;
 						selectedMethodIndex = index;
 						break;
