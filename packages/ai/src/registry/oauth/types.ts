@@ -77,6 +77,8 @@ export interface OAuthController {
 	onProgress?(message: string): void;
 	onManualCodeInput?(): Promise<string>;
 	onPrompt?(prompt: OAuthPrompt): Promise<string>;
+	/** Provider-specific non-interactive login method selected by an embedding host. */
+	authMethod?: string;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
 }

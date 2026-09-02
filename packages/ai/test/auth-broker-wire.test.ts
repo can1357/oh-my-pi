@@ -359,6 +359,50 @@ describe("auth-broker wire surface", () => {
 		]);
 	});
 
+	test("rechecks Meta OAuth upload support before every upload", async () => {
+		const requests: Array<{ method: string; url: string }> = [];
+		let capabilityChecks = 0;
+		const changingFetch: typeof fetch = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const method = init?.method ?? "GET";
+				const url = String(input);
+				requests.push({ method, url });
+				if (url.endsWith("/v1/capabilities/meta-oauth-transport-key")) {
+					capabilityChecks++;
+					return Promise.resolve(
+						capabilityChecks === 1
+							? Response.json({ ok: true, version: "current" })
+							: Response.json({ error: "not found" }, { status: 404 }),
+					);
+				}
+				return Promise.resolve(Response.json({ entries: [] }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({
+			url: "http://changing-broker.invalid",
+			token,
+			fetchImpl: changingFetch,
+			maxRetries: 0,
+		});
+		const credential = {
+			type: "oauth" as const,
+			access: "meta-access",
+			refresh: "meta-refresh",
+			expires: Date.now() + 3_600_000,
+			apiKey: "LLM|subscription-key",
+			accountId: "meta-account",
+		};
+
+		await client.uploadCredential("meta", credential);
+		await expect(client.uploadCredential("meta", credential)).rejects.toThrow("upgrade the broker");
+		expect(requests).toEqual([
+			{ method: "GET", url: "http://changing-broker.invalid/v1/capabilities/meta-oauth-transport-key" },
+			{ method: "POST", url: "http://changing-broker.invalid/v1/credential" },
+			{ method: "GET", url: "http://changing-broker.invalid/v1/capabilities/meta-oauth-transport-key" },
+		]);
+	});
+
 	test("rejects missing or empty Meta OAuth transport keys before mutating broker state", async () => {
 		await storage!.set("meta", {
 			type: "api_key",

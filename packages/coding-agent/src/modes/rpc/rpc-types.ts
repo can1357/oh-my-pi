@@ -90,7 +90,7 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string; authMethod?: string };
 
 // ============================================================================
 // RPC State

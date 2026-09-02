@@ -139,7 +139,6 @@ export class AuthBrokerClient {
 	readonly #timeoutMs: number;
 	readonly #maxRetries: number;
 	readonly #fetch: typeof fetch;
-	#metaOAuthUploadSupported: boolean | undefined;
 
 	constructor(opts: AuthBrokerClientOptions) {
 		this.#baseUrl = opts.url.replace(/\/+$/, "");
@@ -405,25 +404,18 @@ export class AuthBrokerClient {
 	}
 
 	async #requireMetaOAuthUploadSupport(provider: string, signal?: AbortSignal): Promise<void> {
-		if (this.#metaOAuthUploadSupported === true) return;
-		if (this.#metaOAuthUploadSupported === false) {
-			throw new AuthBrokerError(
-				`Auth broker does not support ${provider} OAuth transport keys; upgrade the broker before using this login`,
-				{ status: 400 },
-			);
-		}
 		try {
 			await this.#request<HealthzResponse>("GET", "/v1/capabilities/meta-oauth-transport-key", {
 				schema: "healthzResponseSchema",
 				signal,
 			});
-			this.#metaOAuthUploadSupported = true;
 		} catch (error) {
 			if (error instanceof AuthBrokerError && error.status === 404) {
-				this.#metaOAuthUploadSupported = false;
 				throw new AuthBrokerError(
 					`Auth broker does not support ${provider} OAuth transport keys; upgrade the broker before using this login`,
-					{ status: 400, body: error.body, cause: error },
+					{
+						status: 400,
+					},
 				);
 			}
 			throw error;

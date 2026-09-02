@@ -3025,6 +3025,7 @@ export class AuthStorage {
 			onProgress: ctrl.onProgress,
 			onPrompt: ctrl.onPrompt,
 			onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
+			authMethod: ctrl.authMethod,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
 		});
@@ -4645,7 +4646,18 @@ export class AuthStorage {
 		const targetIndex = this.#getStoredCredentials(provider).findIndex(
 			entry => entry.id === targetCredentialId && entry.credential.type === credentialType,
 		);
-		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
+		const result = this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
+		if (result.switched || credentialType !== "oauth" || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) {
+			return result;
+		}
+		const apiKeyRouting = this.#credentialBlockRouting(provider, "api_key", options?.modelId);
+		const hasPaygFallback = this.#getCredentialsForProvider(provider).some(
+			(credential, index) =>
+				credential.type === "api_key" &&
+				credential.source === "login" &&
+				!this.#isCredentialBlocked(provider, apiKeyRouting.providerKey, index, apiKeyRouting.siblingBlockScopes),
+		);
+		return hasPaygFallback ? { switched: true } : result;
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -4896,6 +4908,7 @@ export class AuthStorage {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
+		allowBlockedFallback = true,
 	): Promise<OAuthResolutionResult | undefined> {
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
@@ -5135,9 +5148,11 @@ export class AuthStorage {
 
 		const passes: Array<{ allowBlocked: boolean; enforcePlanRequirement: boolean }> = [
 			{ allowBlocked: false, enforcePlanRequirement },
-			{ allowBlocked: true, enforcePlanRequirement },
 		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false });
+		if (allowBlockedFallback) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement });
+			if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false });
+		}
 
 		for (const pass of passes) {
 			for (const candidate of candidates) {
@@ -5159,6 +5174,7 @@ export class AuthStorage {
 						rankingContext,
 						blockScope,
 						blockScopes,
+						allowBlockedFallback,
 					},
 				);
 				if (resolved) return resolved;
@@ -5429,6 +5445,8 @@ export class AuthStorage {
 			blockScopes?: readonly string[];
 			/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 			allowFallback?: boolean;
+			/** Whether a recursive selector may retry credentials blocked by quota or transient failure. */
+			allowBlockedFallback?: boolean;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
 		const {
@@ -5443,6 +5461,7 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			allowBlockedFallback = true,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -5601,12 +5620,16 @@ export class AuthStorage {
 					errorMsg,
 				);
 				if (outcome === "peer-rotated") {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					if (allowFallback) {
+						return this.#resolveOAuthSelection(provider, sessionId, options, allowBlockedFallback);
+					}
 					return undefined;
 				}
 				if (outcome === "cas-lost") return undefined;
 				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					if (allowFallback) {
+						return this.#resolveOAuthSelection(provider, sessionId, options, allowBlockedFallback);
+					}
 				}
 			} else {
 				// Block temporarily for transient failures (5 minutes)
@@ -5742,7 +5765,12 @@ export class AuthStorage {
 			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options);
 			if (loginApiKey) return loginApiKey;
 		}
-		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
+		const allowBlockedOAuthFallback =
+			!usesOAuthMintedApiKeyWithDirectApiKey(provider) ||
+			!this.#getCredentialsForProvider(provider).some(
+				credential => credential.type === "api_key" && credential.source === "login",
+			);
+		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options, allowBlockedOAuthFallback);
 		if (oauthResolved) {
 			return oauthResolved.apiKey;
 		}

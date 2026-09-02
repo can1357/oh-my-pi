@@ -66,6 +66,22 @@ describe("Meta login", () => {
 		expect(authorization).toBe("Bearer meta-test-key");
 	});
 
+	test("accepts a non-interactive Meta login method without prompting for the choice", async () => {
+		const prompts: string[] = [];
+		const apiKey = await loginMeta({
+			authMethod: "api-key",
+			onAuth: () => {},
+			onPrompt: async prompt => {
+				prompts.push(prompt.message);
+				return " meta-rpc-key ";
+			},
+			fetch: () => Promise.resolve(Response.json({ data: [{ id: "muse-spark-1.2" }] })),
+		});
+
+		expect(apiKey).toBe("meta-rpc-key");
+		expect(prompts).toEqual(["Paste your Meta Model API key"]);
+	});
+
 	test("uses one provider for Muse subscriptions and Model API keys", () => {
 		expect(
 			getOAuthProviders()
@@ -107,6 +123,46 @@ describe("Meta login", () => {
 				}),
 			).toBe(true);
 			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key-b");
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("falls back to a PAYG login after the preferred Muse subscription exhausts its quota", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "api_key",
+					key: "LLM|payg-key",
+					source: "login",
+					authorizedAt: 1,
+				},
+				{
+					type: "oauth",
+					access: "meta-account-access",
+					refresh: "meta-account-refresh",
+					expires: Date.now() + 3_600_000,
+					apiKey: "LLM|subscription-key",
+					authorizedAt: 2,
+				},
+			]);
+			const sessionId = "muse-quota-fallback";
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
+
+			expect(
+				await storage.rotateSessionCredential("meta", sessionId, {
+					apiKey: "LLM|subscription-key",
+					error: Object.assign(
+						new Error('{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}'),
+						{ status: 429 },
+					),
+				}),
+			).toBe(true);
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
 		} finally {
 			storage.close();
 		}

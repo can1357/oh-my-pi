@@ -1524,6 +1524,8 @@ export async function runRpcMode(
 							authEmitted = true;
 							output({
 								type: "extension_ui_request",
+								// Provider-specific hosts can bypass pre-auth choice prompts
+								// through the login command's authMethod field.
 								id: Snowflake.next() as string,
 								method: "open_url",
 								url: info.url,
@@ -1534,6 +1536,7 @@ export async function runRpcMode(
 						onProgress: message => {
 							uiCtx.notify(message, "info");
 						},
+						authMethod: command.authMethod,
 						onPrompt: async prompt => {
 							if (!authEmitted) {
 								// onPrompt called before any auth URL — provider requires

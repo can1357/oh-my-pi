@@ -927,9 +927,11 @@ export class RpcClient {
 		options?: {
 			onOpenUrl?: (url: string, instructions?: string, launchUrl?: string) => void;
 			onManualCodeInput?: (prompt: { title: string; placeholder?: string }) => string | Promise<string>;
+			/** Provider-specific non-interactive method, e.g. `muse` or `api-key` for Meta. */
+			authMethod?: string;
 		},
 	): Promise<{ providerId: string }> {
-		const { onManualCodeInput, onOpenUrl } = options ?? {};
+		const { authMethod, onManualCodeInput, onOpenUrl } = options ?? {};
 		const listener =
 			onOpenUrl || onManualCodeInput
 				? (req: RpcExtensionUIRequest) => {
@@ -957,7 +959,7 @@ export class RpcClient {
 				: undefined;
 		if (listener) this.#extensionUiListeners.add(listener);
 		try {
-			const response = await this.#send({ type: "login", providerId }, 600_000);
+			const response = await this.#send({ type: "login", providerId, authMethod }, 600_000);
 			return this.#getData<{ providerId: string }>(response);
 		} finally {
 			if (listener) this.#extensionUiListeners.delete(listener);
