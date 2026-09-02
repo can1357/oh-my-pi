@@ -704,6 +704,15 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 	if (matchedModel.provider.toLowerCase() === provider) {
 		return false;
 	}
+	// A cross-provider exact-id match on a provider that has no bundled
+	// catalog at all is a user-configured custom provider (models.json /
+	// models.yml): the user wrote this literal id explicitly, so resolving
+	// it is stated intent rather than an aggregator shadow, and the lock
+	// must not fire (#8800). Bundled providers (e.g. OpenRouter) keep the
+	// lock below unchanged.
+	if (getBundledModels(matchedModel.provider.toLowerCase() as GeneratedProvider).length === 0) {
+		return false;
+	}
 	// Case-insensitive on both halves: the surrounding matcher lowercases the
 	// selector before comparing ids, so the lock must not evaporate on case
 	// variance (catalog provider keys are lowercase; model ids may not be).
