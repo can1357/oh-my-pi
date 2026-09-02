@@ -2,7 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { reset as resetCapabilities } from "../capability";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { loadSlashCommands } from "../extensibility/slash-commands";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
@@ -876,7 +878,18 @@ async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): 
 	const src = discoverTitleSystemPromptFile(cwd);
 	const p = await resolvePromptInput(src, "title system prompt");
 	runtime.session.setTitleSystemPrompt(p);
-	await runtime.session.refreshSkillsAndCommands();
+	resetCapabilities();
+	// Slash commands only — no `refreshSkillsAndCommands()` here:
+	// `runtime.reloadPlugins()` below refreshes skills in every implementation
+	// (RPC `reloadPluginState`, ACP `#reloadPluginState`, TUI
+	// `reloadTuiPluginState`), and `refreshSkills` emits `resources_discover`
+	// (reason "reload") — refreshing skills here too ran every reload handler
+	// twice per `/move`.
+	const cmds = await loadSlashCommands({
+		cwd,
+		extensionRoots: runtime.session.effectiveExtensionRoots,
+	});
+	runtime.session.setSlashCommands(cmds);
 	await runtime.refreshCommands?.();
 	await runtime.reloadPlugins();
 }

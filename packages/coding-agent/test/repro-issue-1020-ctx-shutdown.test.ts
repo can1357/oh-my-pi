@@ -39,6 +39,7 @@ async function createHost(initializeUi: boolean) {
 		syncComposerShape() {},
 		session: {
 			extensionRunner: runner,
+			discoverStartupSkillPaths: async () => {},
 			get isStreaming() {
 				return state.streaming;
 			},
