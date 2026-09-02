@@ -6749,7 +6749,7 @@ export class AuthStorage {
 		const promise = (async () => {
 			this.#bumpGeneration("credential-refresh-start");
 			try {
-				return await this.#forceRefreshCredentialByIdUnshared(id, signal);
+				return await this.#forceRefreshCredentialByIdUnshared(id);
 			} catch (error) {
 				this.#bumpGeneration("credential-refresh-failure");
 				throw error;

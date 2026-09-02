@@ -255,6 +255,78 @@ describe("Meta login", () => {
 		}
 	});
 
+	test("persists a rotated Muse grant when its caller cancels during key minting", async () => {
+		const keyRequestStarted = Promise.withResolvers<void>();
+		const keyResponse = Promise.withResolvers<Response>();
+		let fetchCalls = 0;
+		const fetchImpl: FetchImpl = (_input, init) => {
+			fetchCalls++;
+			if (fetchCalls === 1) {
+				return Promise.resolve(
+					Response.json({
+						access_token: "refreshed-meta-access",
+						refresh_token: "rotated-meta-refresh",
+						expires_in: 3_600,
+					}),
+				);
+			}
+			keyRequestStarted.resolve();
+			const signal = init?.signal;
+			if (!signal) return keyResponse.promise;
+			if (signal.aborted) return Promise.reject(signal.reason);
+			const aborted = Promise.withResolvers<Response>();
+			const onAbort = () => aborted.reject(signal.reason);
+			signal.addEventListener("abort", onAbort, { once: true });
+			return Promise.race([keyResponse.promise, aborted.promise]).finally(() => {
+				signal.removeEventListener("abort", onAbort);
+			});
+		};
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+			refreshOAuthCredential: (_provider, _credentialId, credential, signal) =>
+				refreshMetaMuseToken(credential, fetchImpl, signal),
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "oauth",
+					access: "expired-meta-access",
+					refresh: "old-meta-refresh",
+					expires: 0,
+					apiKey: "LLM|stale-subscription-key",
+					accountId: "meta-account",
+				},
+			]);
+			const oauth = storage.listStoredCredentials("meta")[0];
+			if (!oauth) throw new Error("expected Muse OAuth credential");
+			const controller = new AbortController();
+			const cancelledRefresh = storage.forceRefreshCredentialById(oauth.id, controller.signal);
+			await keyRequestStarted.promise;
+
+			controller.abort();
+			await expect(cancelledRefresh).rejects.toThrow("aborted");
+
+			keyResponse.resolve(
+				Response.json({
+					api_key: "LLM|fresh-subscription-key",
+					user_id: "meta-account",
+					is_subs_active: true,
+				}),
+			);
+			await storage.forceRefreshCredentialById(oauth.id);
+			expect(storage.listStoredCredentials("meta")[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "refreshed-meta-access",
+				refresh: "rotated-meta-refresh",
+				apiKey: "LLM|fresh-subscription-key",
+			});
+			expect(fetchCalls).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+
 	test("persists both Meta login sources and prefers the latest login", async () => {
 		using tempDir = TempDir.createSync("@omp-meta-login-");
 		const dbPath = tempDir.join("auth.db");
