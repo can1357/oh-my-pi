@@ -8991,6 +8991,7 @@ export class AgentSession {
 	 * @param targetId The entry ID to navigate to
 	 * @param options.summarize Whether user wants to summarize abandoned branch
 	 * @param options.customInstructions Custom instructions for summarizer
+	 * @param options.allowCurrentLeafUserMessage Opts into treating a current-leaf user message as an editable rewind target
 	 * @returns Result with editorText/editorImages (if user message) and cancelled status
 	 */
 	async navigateTree(
@@ -8998,6 +8999,12 @@ export class AgentSession {
 		options: {
 			summarize?: boolean;
 			customInstructions?: string;
+			/**
+			 * Allows a current-leaf user message to be treated as an editable
+			 * rewind target. Without this opt-in, navigating to the current user
+			 * leaf remains a no-op for public callers.
+			 */
+			allowCurrentLeafUserMessage?: boolean;
 			/**
 			 * Opts into the two-phase `ask` toolResult re-answer protocol
 			 * (issue #5642): set only by the interactive `/tree` selector, which
@@ -9059,17 +9066,21 @@ export class AgentSession {
 			targetEntry.message.toolName === "ask";
 		const targetIsUserMessage = targetEntry.type === "message" && targetEntry.message.role === "user";
 
-		// No-op if already at target — except for a user message, which always
-		// rewinds PAST itself (leaf → parent, text → editor), so a leaf user
-		// prompt (turn aborted before any assistant reply) is still a real move
-		// — and except mid-flight through the `ask` re-answer protocol (issue
-		// #5642): a probe or completion call can legitimately target the
-		// *current* leaf (e.g. the user interrupted right after answering
-		// `ask`, before a follow-up assistant message landed, or another caller
-		// navigated straight onto the ask result), and must still return
-		// `reopenAsk` / branch the new answer instead of silently reporting a
-		// no-op (chatgpt-codex review on #5895).
-		if (targetId === oldLeafId && !targetIsUserMessage && !(options.allowAskReopen && targetIsAskResult)) {
+		// No-op if already at target — except an explicitly opted-in current-leaf
+		// user message, which rewinds PAST itself (leaf → parent, text → editor)
+		// so a leaf user prompt (turn aborted before any assistant reply) is still
+		// a real move — and except mid-flight through the `ask` re-answer protocol
+		// (issue #5642): a probe or completion call can legitimately target the
+		// *current* leaf (e.g. the user interrupted right after answering `ask`,
+		// before a follow-up assistant message landed, or another caller navigated
+		// straight onto the ask result), and must still return `reopenAsk` / branch
+		// the new answer instead of silently reporting a no-op (chatgpt-codex review
+		// on #5895).
+		if (
+			targetId === oldLeafId &&
+			!(targetIsUserMessage && options.allowCurrentLeafUserMessage) &&
+			!(options.allowAskReopen && targetIsAskResult)
+		) {
 			return { cancelled: false };
 		}
 

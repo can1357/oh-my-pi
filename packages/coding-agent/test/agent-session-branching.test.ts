@@ -204,6 +204,64 @@ describe("AgentSession branch title metadata", () => {
 	});
 });
 
+describe("AgentSession current-leaf user navigation", () => {
+	it("keeps current-leaf user navigation a no-op by default", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Earlier message",
+				timestamp: Date.now(),
+			});
+			ctx.sessionManager.appendMessage(assistantMsg("Earlier response"));
+			const targetId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Current draft",
+				timestamp: Date.now(),
+			});
+
+			expect(ctx.sessionManager.getLeafId()).toBe(targetId);
+
+			const result = await ctx.session.navigateTree(targetId);
+
+			expect(result).toEqual({ cancelled: false });
+			expect(ctx.sessionManager.getLeafId()).toBe(targetId);
+			expect(result.editorText).toBeUndefined();
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("moves to the user message parent and restores its draft when opted in", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Earlier message",
+				timestamp: Date.now(),
+			});
+			const parentId = ctx.sessionManager.appendMessage(assistantMsg("Earlier response"));
+			const targetId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Current draft",
+				timestamp: Date.now(),
+			});
+
+			expect(ctx.sessionManager.getLeafId()).toBe(targetId);
+
+			const result = await ctx.session.navigateTree(targetId, { allowCurrentLeafUserMessage: true });
+
+			expect(result).toMatchObject({
+				editorText: "Current draft",
+				cancelled: false,
+			});
+			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+});
+
 describe("AgentSession historical image prompts", () => {
 	it("returns the selected images when branching from a user prompt", async () => {
 		const ctx = await createTestSession({ inMemory: true });
@@ -277,30 +335,6 @@ describe("AgentSession historical image prompts", () => {
 
 			expect(result.editorText).toBe("plain text turn");
 			expect(result.editorImages).toBeUndefined();
-		} finally {
-			await ctx.cleanup();
-		}
-	});
-
-	it("rewinds past a user prompt that is the current leaf", async () => {
-		// A turn aborted before any assistant reply leaves the user prompt as
-		// the leaf; rewinding to it must still move the leaf to its parent and
-		// hand the prompt back, not report a no-op.
-		const ctx = await createTestSession({ inMemory: true });
-		try {
-			ctx.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
-			const parentId = ctx.sessionManager.appendMessage(assistantMsg("reply"));
-			const leafId = ctx.sessionManager.appendMessage({
-				role: "user",
-				content: "aborted prompt",
-				timestamp: Date.now(),
-			});
-			expect(ctx.sessionManager.getLeafId()).toBe(leafId);
-
-			const result = await ctx.session.navigateTree(leafId);
-
-			expect(result).toMatchObject({ editorText: "aborted prompt", cancelled: false });
-			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
 		} finally {
 			await ctx.cleanup();
 		}

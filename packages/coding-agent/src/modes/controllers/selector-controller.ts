@@ -1332,13 +1332,11 @@ export class SelectorController {
 	}
 
 	/**
-	 * Complete an esc-esc rewind in place via `navigateTree`: the session tree
-	 * keeps the old path as a sibling branch instead of forking a child
-	 * session. A user-message target rewinds PAST itself (leaf moves to its
-	 * parent) and its text replaces the editor draft, so it is a real move
-	 * even when it is the current leaf; every other target lands the leaf on
-	 * the entry. `done` closes the fullscreen selector after the transcript is
-	 * rebuilt so the alternate screen never flashes a stale transcript.
+	 * Complete an esc-esc rewind: user-message targets either create a child
+	 * session or use the in-file tree flow, depending on the configured action.
+	 * Every other target lands the leaf on the entry via `navigateTree`.
+	 * `done` closes the fullscreen selector after the transcript is rebuilt so
+	 * the alternate screen never flashes a stale transcript.
 	 */
 	async #rewindFromTranscript(entryId: string, done: () => void): Promise<void> {
 		const entry = this.ctx.sessionManager.getEntry(entryId);
@@ -1346,17 +1344,49 @@ export class SelectorController {
 			done();
 			return;
 		}
+		const userMessageAction = settings.get("rewindUserMessageAction");
 
-		const isUserTarget = entry.message.role === "user";
+		if (entry.message.role === "user" && userMessageAction === "new-session") {
+			// Branching rewinds to a strict prefix of the rendered transcript:
+			// the selected user message and everything after it are dropped.
+			// Capture the boundary before branch() so the tail can be dropped
+			// in place when it never reached native scrollback.
+			const branchMessage = entry.message;
+			const result = await this.ctx.session.branch(entryId);
+			if (result.cancelled) {
+				// Hook cancelled the branch
+				done();
+				return;
+			}
+			// A leaf that moved past the branch point (e.g. a session_branch
+			// hook persisted entries) invalidates the prefix assumption.
+			// Root branches (parentId null) start a fresh session file and may
+			// leave pre-message components stale — always replay those.
+			const fastRewind =
+				entry.parentId != null &&
+				this.ctx.sessionManager.getLeafId() === entry.parentId &&
+				this.ctx.truncateTranscriptFromMessage(branchMessage);
+			if (!fastRewind) {
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			}
+			this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
+			done();
+			this.ctx.showStatus("Branched to new session");
+			return;
+		}
 		const realLeafId = this.ctx.sessionManager.getLeafId();
-		if (entryId === realLeafId && !isUserTarget) {
+		const isCurrentSessionUserTarget = entry.message.role === "user" && userMessageAction === "current-session";
+		if (entryId === realLeafId && !isCurrentSessionUserTarget) {
 			done();
 			this.ctx.showStatus("Already at this point");
 			return;
 		}
 		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
 		try {
-			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+			const result = await this.ctx.session.navigateTree(entryId, {
+				summarize: false,
+				...(isCurrentSessionUserTarget ? { allowCurrentLeafUserMessage: true } : {}),
+			});
 			if (result.cancelled) {
 				done();
 				this.ctx.showStatus("Navigation cancelled");
@@ -1370,7 +1400,7 @@ export class SelectorController {
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			}
 			await this.ctx.reloadTodos();
-			if (result.editorText && (isUserTarget || !this.ctx.editor.getText().trim())) {
+			if (result.editorText && (isCurrentSessionUserTarget || !this.ctx.editor.getText().trim())) {
 				this.ctx.editor.setDraft(result.editorText, result.editorImages);
 			}
 			done();

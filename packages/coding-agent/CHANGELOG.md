@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a separate setting to choose whether rewinding a user prompt branches within the current session or creates a child session.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed
