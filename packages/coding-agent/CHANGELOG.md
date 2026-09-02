@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Serper as a Google-backed web search provider, including direct answers, knowledge graph sources, organic results, recency filters, and related queries.
 ### Fixed
 
 - Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.

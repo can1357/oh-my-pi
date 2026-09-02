@@ -387,13 +387,13 @@ modelRoles:
 
 Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
 
-## Twenty-three backends. _One tool the agent already knows_.
+## Twenty-four backends. _One tool the agent already knows_.
 
-`web_search` is built in, not bolted on. `auto` walks a twenty-three-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
+`web_search` is built in, not bolted on. `auto` walks a twenty-four-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
 
 ### Search providers
 
-Twenty-three backends. Pin one, or let `auto` walk the chain in order.
+Twenty-four backends. Pin one, or let `auto` walk the chain in order.
 
 | provider     | auth                                      |
 | ------------ | ----------------------------------------- |
@@ -420,6 +420,7 @@ Twenty-three backends. Pin one, or let `auto` walk the chain in order.
 | `google`     | no key (browser)                          |
 | `ecosia`     | no key (browser)                          |
 | `mojeek`     | no key (browser)                          |
+| `serper`     | `SERPER_API_KEY`                          |
 | `public`     | no key (all of the above, consolidated)   |
 
 Exa also accepts a stored API key through `/login exa`; explicit keyless selection uses the public MCP fallback.

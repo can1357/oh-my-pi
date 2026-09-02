@@ -1,15 +1,12 @@
-// Lazy registry of web search providers.
+// Registry of web search providers.
 //
-// Each provider is loaded on first use; importing this module loads zero
-// provider implementations. Provider modules are heavy (each pulls in
-// fetch/parse/format helpers) and only one — at most — is needed per session,
-// so eager construction was wasted work at startup.
-//
-// Provider modules are loaded lazily; display metadata lives in types.ts so UI
-// listings can share it without importing provider implementations.
+// Existing provider implementations are loaded on first use. Their modules are
+// heavy, so eager construction would waste startup work. New providers follow
+// the repository's top-level import rule.
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { SearchProvider } from "./providers/base";
+import { SerperProvider } from "./providers/serper";
 import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
 
 export type { SearchParams } from "./providers/base";
@@ -22,8 +19,13 @@ interface ProviderMeta {
 	load: () => Promise<SearchProvider>;
 }
 
-/** Lazy factories. Each `load()` dynamic-imports its provider module on first call. */
+/** Provider factories. Existing adapters preserve their lazy import behavior. */
 const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
+	serper: {
+		id: "serper",
+		label: SEARCH_PROVIDER_LABELS.serper,
+		load: async () => new SerperProvider(),
+	},
 	perplexity: {
 		id: "perplexity",
 		label: SEARCH_PROVIDER_LABELS.perplexity,

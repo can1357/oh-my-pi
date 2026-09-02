@@ -98,6 +98,22 @@ export function toSearchSources(
 }
 
 /**
+ * Canonical deduplication key for search result URLs. Search engines commonly
+ * disagree on `www.`, trailing slashes, and fragments for the same page.
+ */
+export function canonicalSearchUrlKey(rawUrl: string): string {
+	try {
+		const url = new URL(rawUrl);
+		const host = url.hostname.toLowerCase().replace(/^www\./, "");
+		let path = url.pathname;
+		if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+		return `${host}${path}${url.search}`;
+	} catch {
+		return rawUrl;
+	}
+}
+
+/**
  * Quota/auth signals across providers. Telemetry on 15.1.7/15.1.8 showed users
  * hitting credit-exhaustion and 401/402/403 responses that were surfaced as
  * raw HTTP error text. Map those into compact, provider-tagged messages so

@@ -57,6 +57,7 @@ import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
 import { qwenPortalProvider } from "./qwen-portal";
 import { sakanaProvider } from "./sakana";
+import { serperProvider } from "./serper";
 import { siliconflowProvider } from "./siliconflow";
 import { siliconflowCnProvider } from "./siliconflow-cn";
 import { syntheticProvider } from "./synthetic";
@@ -147,6 +148,7 @@ const ALL = [
 	zenmuxProvider,
 	opencodeZenProvider,
 	opencodeGoProvider,
+	serperProvider,
 	yoloAutoProvider,
 	tavilyProvider,
 	kagiProvider,

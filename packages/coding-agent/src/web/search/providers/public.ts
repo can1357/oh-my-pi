@@ -5,7 +5,7 @@ import { SearchProviderError } from "../types";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { withHardTimeout } from "./utils";
+import { canonicalSearchUrlKey, withHardTimeout } from "./utils";
 
 /**
  * Credential-free engines the Public Web aggregate fans out to. Order is the
@@ -58,27 +58,10 @@ interface MergedSource {
 	order: number;
 }
 
-/**
- * Canonical dedup key for a result URL: case-normalized host without a
- * leading `www.`, path without a trailing slash, query preserved, fragment
- * dropped. Engines disagree on exactly these variations for the same page.
- */
-function dedupKey(rawUrl: string): string {
-	try {
-		const url = new URL(rawUrl);
-		const host = url.hostname.toLowerCase().replace(/^www\./, "");
-		let path = url.pathname;
-		if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-		return `${host}${path}${url.search}`;
-	} catch {
-		return rawUrl;
-	}
-}
-
 /** Merge one engine's ranked sources into the accumulator map. */
 function mergeSources(merged: Map<string, MergedSource>, sources: readonly SearchSource[]): void {
 	for (const [rank, source] of sources.entries()) {
-		const key = dedupKey(source.url);
+		const key = canonicalSearchUrlKey(source.url);
 		const existing = merged.get(key);
 		if (!existing) {
 			merged.set(key, { source: { ...source }, engines: 1, bestRank: rank, order: merged.size });

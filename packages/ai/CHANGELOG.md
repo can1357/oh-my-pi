@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Serper API-key authentication via `/login serper` or `SERPER_API_KEY`.
 ### Fixed
 
 - Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.

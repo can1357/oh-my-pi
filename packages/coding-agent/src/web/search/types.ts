@@ -82,6 +82,7 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "Mojeek",
 		description: "Credential-free browser-backed scrape of Mojeek's independent index",
 	},
+	{ value: "serper", label: "Serper", description: "Google Search results via SERPER_API_KEY or /login serper" },
 	{
 		value: "public",
 		label: "Public Web",
