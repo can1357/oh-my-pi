@@ -485,6 +485,24 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
+	/**
+	 * Reactive blocks land under `counter:<backend>`, so healing has to resolve
+	 * that scope back to its own counter rows. Reading the counter out of the
+	 * scope keeps this free of model ids and of a hard-coded backend list — the
+	 * counter key is whatever the catalog mapped the request's model to.
+	 *
+	 * Mirrors the request scoper's legacy fallback: an endpoint that publishes
+	 * only `default` rows would otherwise narrow to nothing, and an empty scope
+	 * reads as "unknown", pinning the block until its original expiry.
+	 */
+	scopeLimitsForBlockScope(report, blockScope) {
+		if (!blockScope.startsWith("counter:")) return undefined;
+		const counterKey = blockScope.slice("counter:".length);
+		if (!counterKey || counterKey === "unknown") return undefined;
+		const backendLimits = getAntigravityCounterLimits(report, counterKey);
+		if (backendLimits.length > 0) return backendLimits;
+		return getAntigravityCounterLimits(report, "default");
+	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo
 	// entries from `daily-cloudcode-pa.googleapis.com`.

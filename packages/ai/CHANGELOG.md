@@ -5,6 +5,7 @@
 ### Fixed
 
 - Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
+- A rate-limit block on an OAuth account now lifts as soon as a live usage report shows that account has headroom again, instead of only when the provider's `retry-after` expires. Anthropic answers a Fable/Mythos 429 with a `retry-after` that can point at the weekly reset, which previously stranded an account with free quota for over a day and pushed every Claude turn onto a fallback provider.
 
 ## [18.1.2] - 2026-09-01
 

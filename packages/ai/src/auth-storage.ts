@@ -441,7 +441,11 @@ export interface AuthCredentialStore {
 	deleteCredentialBlocks?(credentialId: number): void;
 	/** Prune rows with blocked_until_ms <= nowMs. */
 	cleanExpiredCredentialBlocks?(nowMs: number): void;
-	/** List non-expired blocks for broker snapshots. */
+	/**
+	 * List non-expired blocks for broker snapshots and scoped reconciliation.
+	 * A store that persists scoped blocks SHOULD implement this; point lookup
+	 * alone cannot rediscover a provider-defined scope after process restart.
+	 */
 	listCredentialBlocks?(credentialIds: readonly number[]): StoredCredentialBlock[];
 	tryAcquireCredentialRefreshLease?(credentialId: number, owner: string, expiresAtMs: number): boolean;
 	getCredentialRefreshLeaseExpiresAt?(credentialId: number): number | undefined;
@@ -1782,6 +1786,20 @@ export class AuthStorage {
 			return undefined;
 		}
 		return blockedUntil;
+	}
+
+	/** Scopes this credential currently holds a live in-memory block under. */
+	#listInMemoryBlockScopes(providerKey: string, credentialIndex: number): string[] {
+		const prefix = `${providerKey}\0`;
+		const nowMs = Date.now();
+		const scopes: string[] = [];
+		for (const key of this.#credentialBackoff.keys()) {
+			if (!key.startsWith(prefix)) continue;
+			if (this.#getCredentialBlockedUntilForKey(key, credentialIndex, nowMs) !== undefined) {
+				scopes.push(key.slice(prefix.length));
+			}
+		}
+		return scopes;
 	}
 
 	#readPersistedCredentialBlock(
@@ -3393,8 +3411,14 @@ export class AuthStorage {
 
 		const now = Date.now();
 		const cached = forceRefresh ? undefined : this.#usageCache.get<UsageReport | null>(cacheKey);
-		// Fresh cache hit: return whatever's there (success or null fallback).
+		// Fresh cache hit: return whatever's there (success or null fallback). A
+		// cached report is still evidence, so it reconciles too — a block that
+		// outlived its cause otherwise survives in any process whose every read is
+		// a cache hit, and a warm shared cache makes that the norm for short-lived
+		// runs. Healing keeps its own freshness guard, so a block newer than the
+		// report cannot be cleared by it.
 		if (cached && cached.expiresAt > now) {
+			if (cached.value) this.#reconcileUsageBlock(request, cached.value);
 			return cached.value;
 		}
 
@@ -3404,6 +3428,11 @@ export class AuthStorage {
 		if (inFlight) return inFlight;
 		const promise = (async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			// Healing one account invalidates the provider cache and advances the
+			// epoch. Sibling fetches already in flight are still fresh evidence:
+			// reconcile before the epoch guard so the first healed block cannot
+			// suppress every later account in the same parallel batch.
+			if (report !== null) this.#reconcileUsageBlock(request, report);
 			if (usageCacheEpoch !== this.#usageCacheEpoch) return report;
 			const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
 			if (report !== null) {
@@ -3414,7 +3443,6 @@ export class AuthStorage {
 				// times decorrelate within a few cycles.
 				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
 				this.#recordUsageHistory(request, report);
-				this.#reconcileCodexUsageBlock(request, report);
 				return report;
 			}
 			// Failure: apply a short jittered cool-down so the credential doesn't
@@ -3903,7 +3931,7 @@ export class AuthStorage {
 			if (storeHook) {
 				const report = await storeHook(provider, credential, options?.signal);
 				if (report) {
-					this.#reconcileCodexUsageBlock(
+					this.#reconcileUsageBlock(
 						this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
 						report,
 					);
@@ -4036,9 +4064,12 @@ export class AuthStorage {
 					planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
 				}
 
-				if (provider === "openai-codex") {
-					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
-				}
+				// The fetch above runs reconciliation, so re-read: a block the report
+				// just healed must not still report `depleted` here. The SDK and turn
+				// recovery use this preflight ahead of credential selection, so a
+				// stale read fails a recovered account closed before selection ever
+				// gets its own chance to heal it.
+				blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				if (blockedUntil !== undefined) {
 					return {
 						credentialId: entry.id,
@@ -4178,7 +4209,7 @@ export class AuthStorage {
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
 			const reports = await raceUsageWithSignal(shared, options?.signal);
-			if (shouldReconcileStoreHookReports && reports) this.#reconcileCodexUsageBlocksFromReports(reports);
+			if (shouldReconcileStoreHookReports && reports) this.#reconcileUsageBlocksFromReports(reports);
 			return reports;
 		}
 		if (!this.#usageProviderResolver && this.#runtimeUsageProviderOverrides.size === 0) return null;
@@ -4717,7 +4748,12 @@ export class AuthStorage {
 		const nowMs = Date.now();
 		const { strategy } = args;
 		const ranked: RankedOAuthCandidate[] = [];
-		// Pre-fetch usage reports in parallel for non-blocked credentials.
+		// Pre-fetch usage reports in parallel. Blocked credentials are probed too:
+		// the fetch runs live-usage reconciliation, so a block that outlived its
+		// cause is cleared before this very selection reads it back. Without the
+		// probe healing only reaches processes that poll usage on their own (the
+		// TUI widget), and print mode, subagents, and the gateway stay pinned to a
+		// stale block until it expires.
 		// Wrap with a timeout so slow/429'd fetches don't indefinitely block
 		// credential selection — better to pick a credential without usage data
 		// than to hang the agent waiting for rate-limited usage endpoints.
@@ -4734,7 +4770,7 @@ export class AuthStorage {
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
-				if (blockedUntil !== undefined && args.provider === "openai-codex") {
+				if (blockedUntil !== undefined) {
 					usage = await this.#getUsageReport(args.provider, selection.credential, {
 						...args.options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -4767,13 +4803,21 @@ export class AuthStorage {
 		timer.unref?.();
 		const usageResults = await Promise.race([usagePromise, timeoutSignal.promise]).then(result => {
 			clearTimeout(timer);
-			return (
-				result ??
-				args.order.map(idx => {
-					const selection = args.credentials[idx];
-					return selection ? { selection, usage: null, usageChecked: false, blockedUntil: undefined } : null;
-				})
-			);
+			if (result) return result;
+			// Timeout. Blocked credentials are probed now, so a slow probe can be
+			// what trips this — re-read the block instead of reporting every
+			// candidate unblocked and handing the turn to a capped account.
+			return args.order.map(idx => {
+				const selection = args.credentials[idx];
+				if (!selection) return null;
+				const blockedUntil = this.#getCredentialBlockedUntil(
+					args.provider,
+					args.providerKey,
+					selection.index,
+					args.blockScopes ?? args.blockScope,
+				);
+				return { selection, usage: null, usageChecked: false, blockedUntil };
+			});
 		});
 
 		for (let orderPos = 0; orderPos < usageResults.length; orderPos += 1) {
@@ -6162,27 +6206,45 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Self-heal a stale Codex usage-limit block: when a fresh live usage report
-	 * says the account is allowed and below every reported limit, drop the
-	 * persisted and in-memory `openai-codex:oauth` blocks so credential selection
-	 * can re-include recovered seats before a stale block naturally expires.
+	 * Self-heal a stale usage-limit block: when a fresh live usage report says
+	 * the account is below every limit the block's scope gates, drop the
+	 * persisted and in-memory blocks so credential selection can re-include
+	 * recovered seats before a stale block naturally expires. Providers hand out
+	 * `retry-after` values that can outlive the cap they describe (Anthropic
+	 * routinely answers a Fable 429 with the account's weekly reset), so expiry
+	 * alone is not a safe release condition.
 	 */
 	/**
+	 * Narrow a report to the meters a credential-wide block actually gates.
+	 * Judging that block against the raw report would let a meter the strategy
+	 * never gates on — a display-only or feature quota such as Z.AI's `zread` —
+	 * hold the credential blocked for ordinary requests until expiry.
+	 */
+	#scopeUsageReportToCredentialGating(
+		report: UsageReport,
+		strategy: CredentialRankingStrategy | undefined,
+	): UsageReport {
+		if (!strategy) return report;
+		const limits =
+			strategy.scopeLimitsForCredentialBlock?.(report) ?? strategy.scopeLimits?.(report, {}) ?? report.limits;
+		if (limits.length === report.limits.length) return report;
+		return { ...report, limits };
+	}
+
+	/**
 	 * Narrow a usage report to the limits a backoff scope covers, so a scope is
-	 * judged only by the meters it gates. A legacy scope that meant "block
-	 * everything" keeps the whole report.
+	 * judged only by the meters it gates.
 	 */
 	#scopeUsageReportToBlockScope(
 		report: UsageReport,
 		blockScope: string | undefined,
 		strategy: CredentialRankingStrategy | undefined,
 	): UsageReport {
-		if (!blockScope || !strategy?.scopeLimits || !strategy.blockScopes) return report;
-		// Find a request context whose scope set leads with this scope; its scoped
-		// limits are the ones this block gates.
-		const modelId = blockScope === "spark" ? "gpt-5.3-codex-spark" : "gpt-5.3-codex";
-		if (strategy.blockScopes({ modelId })[0] !== blockScope) return report;
-		const scopedLimits = strategy.scopeLimits(report, { modelId });
+		if (!blockScope) return this.#scopeUsageReportToCredentialGating(report, strategy);
+		// The strategy owns the mapping from its own persisted scope to the limits
+		// that scope gates; an unmapped scope is a catch-all and keeps the report.
+		const scopedLimits = strategy?.scopeLimitsForBlockScope?.(report, blockScope);
+		if (!scopedLimits) return report;
 		const meterStates = report.metadata?.meterStates;
 		const meterState =
 			meterStates !== null && typeof meterStates === "object"
@@ -6231,37 +6293,80 @@ export class AuthStorage {
 		}
 	}
 
-	#isHealthyCodexUsageReport(report: UsageReport): boolean {
-		if (report.provider !== "openai-codex") return false;
+	/**
+	 * True when a live report proves the credential has headroom for the scope it
+	 * describes. A provider that publishes an explicit verdict (Codex meter
+	 * states) must say allowed and not limit-reached. One that only publishes
+	 * counters must account for every row the scope gates: a row carrying `used`
+	 * with no cap (Kimi does this) yields no fraction and is not "exhausted"
+	 * either, so one healthy weekly row beside an unreadable 5-hour row would
+	 * otherwise clear the block and hand the turn straight back to a credential
+	 * whose short window may still be spent.
+	 */
+	#isHealthyUsageReport(report: UsageReport): boolean {
 		const metadata = report.metadata;
-		if (metadata?.allowed !== true || metadata.limitReached !== false) return false;
+		if (metadata && ("allowed" in metadata || "limitReached" in metadata)) {
+			if (metadata.allowed !== true || metadata.limitReached !== false) return false;
+		} else if (
+			report.limits.length === 0 ||
+			!report.limits.every(limit => limit.status === "ok" || resolveUsedFraction(limit) !== undefined)
+		) {
+			return false;
+		}
 		return !this.#isUsageLimitReached(report.limits);
 	}
 
-	#reconcileCodexUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
+	/** Scopes this credential currently holds a live persisted block under. */
+	#listPersistedBlockScopes(credentialId: number, providerKey: string): string[] | undefined {
+		if (this.#persistedBlockStoreDamaged) return undefined;
+		const listCredentialBlocks = this.#store.listCredentialBlocks?.bind(this.#store);
+		if (!listCredentialBlocks) return undefined;
+		try {
+			return listCredentialBlocks([credentialId])
+				.filter(block => block.providerKey === providerKey && block.blockScope.length > 0)
+				.map(block => block.blockScope);
+		} catch (err) {
+			if (this.#handlePersistedBlockStoreError(err)) return undefined;
+			logger.debug("Failed to list credential blocks for reconciliation", { err, credentialId, providerKey });
+			return undefined;
+		}
+	}
+
+	#reconcileUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const credentialIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
 		if (credentialIndex < 0) return;
-		// Mirror selection: consult the same strategy scope `markUsageLimitReached`
-		// persists under, else a scoped block is invisible here and never healed.
 		// Reconciliation has no request context, so it cannot know which scope a
-		// block was written under. Heal every scope the strategy can produce, plus
-		// any legacy scope it still lists, or a block persisted under one scope
-		// stays invisible here forever.
+		// block was written under. Enumerate the scopes the credential actually
+		// holds, persisted or in memory. That makes an Antigravity
+		// `counter:<backend>` block and a future Claude `tier:<family>` block
+		// healable without maintaining a second model-family registry here.
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		const blockScopes =
-			strategy?.blockScopes?.() ?? [strategy?.blockScope?.({})].filter(scope => scope !== undefined);
-		const scopesToHeal = blockScopes.length > 0 ? blockScopes : [undefined];
+		const persistedScopes = this.#listPersistedBlockScopes(credentialId, providerKey);
+		const inMemoryScopes = this.#listInMemoryBlockScopes(providerKey, credentialIndex);
+		// Preserve the pre-existing strategy fallback for custom stores that can
+		// point-read blocks but cannot enumerate them. Built-in SQLite and remote
+		// stores enumerate, so dynamic tier/counter scopes come from actual rows.
+		const fallbackScopes =
+			persistedScopes === undefined
+				? (strategy?.blockScopes?.() ?? [strategy?.blockScope?.({})].filter(scope => scope !== undefined))
+				: [];
+		if (
+			(persistedScopes?.length ?? 0) === 0 &&
+			inMemoryScopes.length === 0 &&
+			fallbackScopes.length === 0 &&
+			this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex) === undefined
+		) {
+			return;
+		}
+		const scopesToHeal = new Set<string | undefined>([
+			...(persistedScopes ?? []),
+			...inMemoryScopes,
+			...fallbackScopes,
+			undefined,
+		]);
 		for (const blockScope of scopesToHeal) {
-			this.#healCodexUsageBlockScope(
-				provider,
-				providerKey,
-				credentialId,
-				credentialIndex,
-				blockScope,
-				report,
-				strategy,
-			);
+			this.#healUsageBlockScope(provider, providerKey, credentialId, credentialIndex, blockScope, report, strategy);
 		}
 	}
 
@@ -6273,7 +6378,7 @@ export class AuthStorage {
 	 * would then delete every scope including a block that is still valid. So
 	 * each scope is evaluated against its own limits and cleared on its own.
 	 */
-	#healCodexUsageBlockScope(
+	#healUsageBlockScope(
 		provider: Provider,
 		providerKey: string,
 		credentialId: number,
@@ -6283,7 +6388,7 @@ export class AuthStorage {
 		strategy: CredentialRankingStrategy | undefined,
 	): void {
 		const scopedReport = this.#scopeUsageReportToBlockScope(report, blockScope, strategy);
-		if (!this.#isHealthyCodexUsageReport(scopedReport)) return;
+		if (!this.#isHealthyUsageReport(scopedReport)) return;
 		const blockedUntilMs = this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScope);
 		if (blockedUntilMs === undefined) return;
 		// `/usage` can lag the request path that just returned 429. Fresh local or
@@ -6303,7 +6408,22 @@ export class AuthStorage {
 			return;
 		}
 		this.#clearCredentialBlockScope(provider, credentialId, credentialIndex, providerKey, blockScope);
-		logger.info("Cleared stale Codex usage-limit block after healthy live usage report", {
+		// A store may refuse the scoped delete — the broker protocol has no scoped
+		// deletion, so RemoteAuthCredentialStore keeps the row and the next
+		// snapshot restores it. The in-memory backoff is still gone, but claiming
+		// the block was cleared would send anyone debugging that case down the
+		// wrong path.
+		const persistedAfterClear = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope ?? "");
+		if (persistedAfterClear !== undefined) {
+			logger.debug("Live usage report healed a block the credential store would not drop", {
+				credentialId,
+				provider,
+				blockScope,
+				persistedBlockedUntilMs: persistedAfterClear,
+			});
+			return;
+		}
+		logger.info("Cleared stale usage-limit block after healthy live usage report", {
 			credentialId,
 			provider,
 			blockScope,
@@ -6311,46 +6431,79 @@ export class AuthStorage {
 		});
 	}
 
-	#reconcileCodexUsageBlock(request: UsageRequestDescriptor, report: UsageReport): void {
-		if (request.provider !== "openai-codex") return;
+	#reconcileUsageBlock(request: UsageRequestDescriptor, report: UsageReport): void {
 		const credentialId = this.#findStoredCredentialIdForUsageCredential(request.provider, request.credential);
 		if (credentialId === undefined) return;
-		this.#reconcileCodexUsageBlockForCredential(request.provider, credentialId, report);
+		this.#reconcileUsageBlockForCredential(request.provider, credentialId, report);
 	}
 
-	#findStoredCredentialIdsForUsageReport(report: UsageReport): number[] {
-		if (report.provider !== "openai-codex") return [];
+	#findStoredCredentialIdsForUsageReport(report: UsageReport, sameOrgReportCount: number): number[] {
 		const email = this.#getUsageReportMetadataValue(report, "email")?.toLowerCase();
 		const accountId = (
 			this.#getUsageReportMetadataValue(report, "accountId") ?? this.#getUsageReportScopeAccountId(report)
 		)?.toLowerCase();
-		if (!email && !accountId) return [];
+		// One Anthropic login can own several organization subscriptions, each a
+		// separate row with its own quota. Email and account id alone would let a
+		// healthy org's report clear an exhausted sibling org's block.
+		const orgId = this.#getUsageReportMetadataValue(report, "orgId")?.toLowerCase();
+		const projectId = this.#getUsageReportMetadataValue(report, "projectId")?.toLowerCase();
+		if (!email && !accountId && !orgId && !projectId) return [];
 		const matches: number[] = [];
 		for (const entry of this.#getStoredCredentials(report.provider)) {
 			const credential = entry.credential;
 			if (credential.type !== "oauth") continue;
+			// Organization presence is itself an identity gate: a report
+			// attributed to one subscription must not heal an org-less legacy row,
+			// and an unattributed aggregate must not heal an org-scoped row. Mirror
+			// RemoteAuthCredentialStore.usageReportMatchesCredential.
+			const credentialOrg = credential.orgId?.trim().toLowerCase();
+			if (credentialOrg !== orgId) continue;
+			// Every remaining identity dimension present on BOTH sides must agree
+			// — account ids can be workspace-wide and one email can span projects,
+			// so a single-dimension match can cross-link siblings. Org uniqueness
+			// is a complete match only for an org-only credential; if the row has
+			// a base identity, the report must carry and match one of its fields.
 			const credentialEmail = credential.email?.trim().toLowerCase();
 			const credentialAccountId = credential.accountId?.trim().toLowerCase();
-			// Every identity dimension present on BOTH sides must agree — the
-			// account id is shared workspace-wide and one email can span
-			// workspaces, so a single-dimension match can cross-link siblings.
-			const emailComparable = Boolean(email && credentialEmail);
-			const accountComparable = Boolean(accountId && credentialAccountId);
-			if (!emailComparable && !accountComparable) continue;
-			if (emailComparable && credentialEmail !== email) continue;
-			if (accountComparable && credentialAccountId !== accountId) continue;
+			const credentialProjectId = credential.projectId?.trim().toLowerCase();
+			const dimensions: Array<[string | undefined, string | undefined]> = [
+				[email, credentialEmail],
+				[accountId, credentialAccountId],
+				[projectId, credentialProjectId],
+			];
+			const hasCredentialBaseIdentity = Boolean(credentialEmail || credentialAccountId || credentialProjectId);
+			let comparable = orgId !== undefined && sameOrgReportCount === 1 && !hasCredentialBaseIdentity;
+			let mismatched = false;
+			for (const [reported, stored] of dimensions) {
+				if (!reported || !stored) continue;
+				comparable = true;
+				if (reported !== stored) {
+					mismatched = true;
+					break;
+				}
+			}
+			if (!comparable || mismatched) continue;
 			matches.push(entry.id);
 		}
 		return matches;
 	}
 
-	#reconcileCodexUsageBlocksFromReports(reports: UsageReport[]): void {
+	#reconcileUsageBlocksFromReports(reports: UsageReport[]): void {
+		const reportsByProviderOrg = new Map<string, number>();
+		for (const report of reports) {
+			const orgId = this.#getUsageReportMetadataValue(report, "orgId")?.toLowerCase();
+			if (!orgId) continue;
+			const key = `${report.provider}\0${orgId}`;
+			reportsByProviderOrg.set(key, (reportsByProviderOrg.get(key) ?? 0) + 1);
+		}
 		const reconciled = new Set<number>();
 		for (const report of reports) {
-			for (const credentialId of this.#findStoredCredentialIdsForUsageReport(report)) {
+			const orgId = this.#getUsageReportMetadataValue(report, "orgId")?.toLowerCase();
+			const sameOrgReportCount = orgId ? (reportsByProviderOrg.get(`${report.provider}\0${orgId}`) ?? 0) : 0;
+			for (const credentialId of this.#findStoredCredentialIdsForUsageReport(report, sameOrgReportCount)) {
 				if (reconciled.has(credentialId)) continue;
 				reconciled.add(credentialId);
-				this.#reconcileCodexUsageBlockForCredential(report.provider, credentialId, report);
+				this.#reconcileUsageBlockForCredential(report.provider, credentialId, report);
 			}
 		}
 	}

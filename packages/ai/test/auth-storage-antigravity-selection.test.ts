@@ -9,6 +9,7 @@
  * credentials and could pin a session to the exhausted account.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +20,7 @@ import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usa
 import { removeWithRetries } from "../../utils/src/temp";
 
 const HOUR_MS = 60 * 60 * 1000;
+const RECONCILE_GRACE_MS = 5 * 60_000;
 
 type AntigravityWindowSpec = {
 	counter: "google" | "anthropic" | "openai" | "default";
@@ -257,5 +259,68 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		const fresh = counts.get("api-acct-fresh") ?? 0;
 		const loaded = counts.get("api-acct-loaded") ?? 0;
 		expect(fresh).toBeGreaterThan(loaded);
+	});
+
+	// Antigravity persists reactive blocks as `counter:<backend>`, a scope no
+	// context-free strategy call can name. Reconciliation therefore enumerates the
+	// scopes the credential actually holds; without that the account stays
+	// excluded until the original retry-after expires even though live usage says
+	// the counter recovered.
+	test("clears a persisted Antigravity counter block once its own counter recovers", async () => {
+		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {
+			throw new Error("test setup failed");
+		}
+		await authStorage.set("google-antigravity", [
+			{ type: "oauth", ...createCredential("acct-blocked", "proj-blocked", "blocked@example.com") },
+			{ type: "oauth", ...createCredential("acct-other", "proj-other", "other@example.com") },
+		]);
+		const blockedRow = store
+			.listAuthCredentials("google-antigravity")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-blocked");
+		if (!blockedRow) throw new Error("expected blocked credential row");
+
+		store.upsertCredentialBlock({
+			credentialId: blockedRow.id,
+			providerKey: "google-antigravity:oauth",
+			blockScope: "counter:google",
+			blockedUntilMs: Date.now() + 24 * HOUR_MS,
+		});
+		// A fresh block gets one usage-cache window of grace before a healthy report
+		// may clear it. Age it so this test exercises healing, not the guard.
+		const blockDb = new Database(path.join(tempDir, "agent.db"));
+		try {
+			blockDb
+				.prepare("UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ?")
+				.run(Math.floor((Date.now() - RECONCILE_GRACE_MS - 1000) / 1000), blockedRow.id);
+		} finally {
+			blockDb.close();
+		}
+		store.cleanExpiredCredentialBlocks?.(Date.now() + RECONCILE_GRACE_MS);
+		usageByAccount.set(
+			"acct-blocked",
+			createAntigravityReport({
+				accountId: "acct-blocked",
+				projectId: "proj-blocked",
+				windows: [
+					{ counter: "google", usedFraction: 0.1, resetInMs: 20 * HOUR_MS },
+					// A sibling counter still at its cap must not keep the recovered
+					// Gemini counter's block alive.
+					{ counter: "anthropic", usedFraction: 1, resetInMs: 20 * HOUR_MS },
+				],
+			}),
+		);
+		usageByAccount.set(
+			"acct-other",
+			createAntigravityReport({
+				accountId: "acct-other",
+				projectId: "proj-other",
+				windows: [{ counter: "google", usedFraction: 1, resetInMs: 20 * HOUR_MS }],
+			}),
+		);
+
+		expect(
+			await authStorage.getApiKey("google-antigravity", "session-antigravity-heal", { modelId: "gemini-3-flash" }),
+		).toBe("api-acct-blocked");
+		expect(store.getCredentialBlock(blockedRow.id, "google-antigravity:oauth", "counter:google")).toBeUndefined();
 	});
 });
