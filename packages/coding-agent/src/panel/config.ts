@@ -191,6 +191,16 @@ function parsePanelRole(value: unknown, path: string): PanelRole {
 		if (typeof record.distinctFamilies !== "boolean") {
 			throw new PanelConfigError(`${path}.distinctFamilies`, "must be a boolean");
 		}
+		// Tighten-only: a `personas` role may adopt cross-family independence, but
+		// an `independent` role cannot trade its diversity claim away. Otherwise
+		// the setting would be a documented switch for defeating the invariant
+		// that makes an independent panel worth running.
+		if (record.distinctFamilies === false && strategy === "independent") {
+			throw new PanelConfigError(
+				`${path}.distinctFamilies`,
+				"cannot be false for an independent role; use the personas strategy when repeated families are intended",
+			);
+		}
 		distinctFamilies = record.distinctFamilies;
 	}
 
@@ -333,12 +343,15 @@ export function validateResolvedPanelRole(
 	});
 
 	const requireDistinct = role.distinctFamilies ?? role.strategy === "independent";
+	// A single-seat lineup makes no diversity claim: there is nothing for a
+	// second family to differ from, so an unknown lineage is not load-bearing.
+	const claimsDiversity = (requireDistinct && members.length > 1) || role.minFamilies !== undefined;
 	const families = new Set<string>();
 	for (const member of members) {
 		if (member.family.length === 0) {
 			// Fail closed: an unknown lineage cannot be counted toward diversity,
 			// so it must not silently satisfy a distinctness or floor requirement.
-			if (requireDistinct || role.minFamilies !== undefined) {
+			if (claimsDiversity) {
 				throw new PanelConfigError(
 					`${rolePath}.members[${member.index}]`,
 					"resolved member has no known model family",
