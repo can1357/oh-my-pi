@@ -35,6 +35,17 @@ export function serializeRecoverableStateUpdate(
 	});
 }
 
+export function restoreRecoverableState(
+	target: Set<number>,
+	storedIds: unknown,
+	isCurrent: boolean,
+): void {
+	if (!isCurrent || !Array.isArray(storedIds)) return;
+	for (const id of storedIds) {
+		if (typeof id === "number") target.add(id);
+	}
+}
+
 export function snapshotAttachmentState(epochs: Map<number, number>, tabIds: number[]): Map<number, number> {
 	const snapshot = new Map<number, number>();
 	for (const tabId of tabIds) snapshot.set(tabId, epochs.get(tabId) ?? 0);

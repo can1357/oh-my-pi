@@ -3,6 +3,7 @@ import {
 	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	restoreRecoverableState,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
@@ -90,5 +91,14 @@ describe("attachment-state", () => {
 		await pending;
 
 		expect(persisted).toEqual([[]]);
+	});
+
+	it("does not restore a stale startup snapshot after ownership changed", () => {
+		const current = new Set<number>();
+		restoreRecoverableState(current, [1], false);
+		expect([...current]).toEqual([]);
+
+		restoreRecoverableState(current, [2, "invalid"], true);
+		expect([...current]).toEqual([2]);
 	});
 });

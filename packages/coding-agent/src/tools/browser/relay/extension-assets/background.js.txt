@@ -73,6 +73,14 @@ function serializeRecoverableStateUpdate(previousUpdate, immediateWrite, isCurre
     await persistCurrent().catch(() => {});
   });
 }
+function restoreRecoverableState(target, storedIds, isCurrent) {
+  if (!isCurrent || !Array.isArray(storedIds))
+    return;
+  for (const id of storedIds) {
+    if (typeof id === "number")
+      target.add(id);
+  }
+}
 function snapshotAttachmentState(epochs, tabIds) {
   const snapshot = new Map;
   for (const tabId of tabIds)
@@ -150,23 +158,18 @@ var attachmentStateEpochs = new Map;
 var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var recoverableTabIds = new Set;
+var recoverableUpdateGeneration = 0;
 var orphanSweepDeadlineMs = null;
 var connectionGeneration = 0;
 var orphanSweepDeadlineGeneration = 0;
 var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null }).then((stored) => {
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
-  if (Array.isArray(ids)) {
-    for (const id of ids) {
-      if (typeof id === "number")
-        recoverableTabIds.add(id);
-    }
-  }
+  restoreRecoverableState(recoverableTabIds, ids, recoverableUpdateGeneration === 0);
   const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
   if (typeof deadline === "number" && Number.isFinite(deadline))
     orphanSweepDeadlineMs = deadline;
 }).catch(() => {});
 var recoverableUpdates = recoverableReady;
-var recoverableUpdateGeneration = 0;
 var orphanSweepDeadlineUpdates = recoverableReady;
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;

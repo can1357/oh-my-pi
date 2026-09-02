@@ -19,6 +19,7 @@ import {
 	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	restoreRecoverableState,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
@@ -70,6 +71,7 @@ const relayInitiatedDetachTabs = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const recoverableTabIds = new Set<number>();
+let recoverableUpdateGeneration = 0;
 let orphanSweepDeadlineMs: number | null = null;
 // Bumped on every relay disconnect. maybeRunOrphanSweep snapshots this before it
 // yields to the alarms/storage APIs so a reconnect+disconnect cycle that arms a
@@ -81,18 +83,19 @@ const recoverableReady = chrome.storage.session
 	.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null })
 	.then((stored) => {
 		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
-		if (Array.isArray(ids)) {
-			for (const id of ids) {
-				if (typeof id === "number") recoverableTabIds.add(id);
-			}
-		}
+		// A user detach can arrive before this startup read resolves. Never merge
+		// that stale snapshot after an in-memory ownership mutation has occurred.
+		restoreRecoverableState(
+			recoverableTabIds,
+			ids,
+			recoverableUpdateGeneration === 0,
+		);
 		const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
 		if (typeof deadline === "number" && Number.isFinite(deadline))
 			orphanSweepDeadlineMs = deadline;
 	})
 	.catch(() => {});
 let recoverableUpdates: Promise<void> = recoverableReady;
-let recoverableUpdateGeneration = 0;
 let orphanSweepDeadlineUpdates: Promise<void> = recoverableReady;
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
