@@ -164,7 +164,6 @@ describe("Agent", () => {
 	it("finds an immediate advisor steer behind ordinary steering in all mode", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
-		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
@@ -195,7 +194,7 @@ describe("Agent", () => {
 				{ content: ["done"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			steeringMode: "all",
@@ -211,7 +210,6 @@ describe("Agent", () => {
 		const toolSchema = type({});
 		const release = Promise.withResolvers<void>();
 		let started = false;
-		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
 			name: "wait",
 			label: "Wait",
@@ -230,7 +228,7 @@ describe("Agent", () => {
 				{ content: ["done"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			interruptMode: "wait",
@@ -249,7 +247,6 @@ describe("Agent", () => {
 		const toolSchema = type({});
 		const release = Promise.withResolvers<void>();
 		let started = false;
-		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
 			name: "wait",
 			label: "Wait",
@@ -274,7 +271,7 @@ describe("Agent", () => {
 				{ content: ["advisor handled"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			steeringMode: "one-at-a-time",

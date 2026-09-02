@@ -1147,7 +1147,7 @@ export class Agent {
 	}
 
 	#notifySteeringWaiters(immediate = true): void {
-		for (const waiter of [...this.#steeringWaiters]) {
+		for (const waiter of this.#steeringWaiters) {
 			if (!waiter.immediateOnly || immediate) waiter.resolve();
 		}
 	}
