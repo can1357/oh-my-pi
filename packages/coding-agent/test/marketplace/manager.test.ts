@@ -12,6 +12,7 @@ import {
 	readMarketplacesRegistry,
 	writeMarketplacesRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -158,6 +159,42 @@ describe("MarketplaceManager", () => {
 			expect(list[0].sourceUri).toBe(movedDir);
 		} finally {
 			removeSyncWithRetries(movedDir);
+		}
+	});
+
+	it("addMarketplace force repoint with git source → restores the old cache when the registry write fails", async () => {
+		const cloneWithMarker = (marker: string) => async (_url: string, targetDir: string) => {
+			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
+			fs.writeFileSync(
+				path.join(targetDir, ".claude-plugin", "marketplace.json"),
+				JSON.stringify({ name: "git-marketplace", owner: { name: "x" }, plugins: [] }),
+			);
+			fs.writeFileSync(path.join(targetDir, "MARKER"), marker);
+		};
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(cloneWithMarker("old"));
+		try {
+			await ctx.manager.addMarketplace("owner/old-repo");
+			const cacheDir = path.join(ctx.tmpDir, "cache", "marketplaces", "git-marketplace");
+			expect(fs.readFileSync(path.join(cacheDir, "MARKER"), "utf8")).toBe("old");
+
+			// The registry lives directly in tmpDir; a read-only tmpDir blocks its
+			// atomic temp-file write while the cache tree below stays writable.
+			cloneSpy.mockImplementation(cloneWithMarker("new"));
+			fs.chmodSync(ctx.tmpDir, 0o555);
+			try {
+				await expect(ctx.manager.addMarketplace("owner/new-repo", { force: true })).rejects.toThrow();
+			} finally {
+				fs.chmodSync(ctx.tmpDir, 0o755);
+			}
+
+			// Old cache restored, registry still names the old source, no stray backups.
+			expect(fs.readFileSync(path.join(cacheDir, "MARKER"), "utf8")).toBe("old");
+			const list = await ctx.manager.listMarketplaces();
+			expect(list).toHaveLength(1);
+			expect(list[0].sourceUri).toBe("owner/old-repo");
+			expect(fs.readdirSync(path.dirname(cacheDir))).toEqual(["git-marketplace"]);
+		} finally {
+			cloneSpy.mockRestore();
 		}
 	});
 

@@ -112,10 +112,22 @@ export class MarketplaceManager {
 			throw new Error(`Marketplace "${catalog.name}" already exists`);
 		}
 
-		// Promote the temp clone now that the duplicate check has passed. The
-		// promotion removes whatever is at the target, so a repoint replaces the
-		// old catalog rather than merging into it.
+		// Promote the temp clone now that the duplicate check has passed. When
+		// repointing, the old cache is set aside rather than deleted so a failed
+		// catalog/registry write below can restore it — otherwise the registry
+		// would still name the old source while discovery reads the new clone.
+		const finalDir = path.join(this.#opts.marketplacesCacheDir, catalog.name);
+		let backupDir: string | undefined;
 		if (clonePath) {
+			if (replacing) {
+				const candidate = `${finalDir}.bak-${Date.now()}`;
+				try {
+					await fs.rename(finalDir, candidate);
+					backupDir = candidate;
+				} catch {
+					// No cached directory to preserve (registry entry without a cache).
+				}
+			}
 			await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
 		}
 
@@ -126,9 +138,6 @@ export class MarketplaceManager {
 			expandTilde(path.join(this.#opts.marketplacesCacheDir, catalog.name, "marketplace.json")),
 		);
 
-		// Persist the fetched catalog so subsequent reads don't require re-fetching.
-		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
-
 		const now = new Date().toISOString();
 		const entry: MarketplaceRegistryEntry = {
 			name: catalog.name,
@@ -138,9 +147,24 @@ export class MarketplaceManager {
 			addedAt: now,
 			updatedAt: now,
 		};
-
 		const updated = upsertMarketplaceEntry(reg, entry);
-		await writeMarketplacesRegistry(this.#opts.marketplacesRegistryPath, updated);
+
+		try {
+			// Persist the fetched catalog so subsequent reads don't require re-fetching.
+			await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+			await writeMarketplacesRegistry(this.#opts.marketplacesRegistryPath, updated);
+		} catch (err) {
+			if (backupDir) {
+				// Put the old cache back so the still-unchanged registry keeps
+				// pointing at a repository that exists.
+				await fs.rm(finalDir, { recursive: true, force: true }).catch(() => {});
+				await fs.rename(backupDir, finalDir).catch(() => {});
+			}
+			throw err;
+		}
+		if (backupDir) {
+			await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
+		}
 
 		logger.debug(replacing ? "Marketplace repointed" : "Marketplace added", { name: catalog.name, sourceType });
 		// Read back rather than returning `entry`: a repoint keeps the original
