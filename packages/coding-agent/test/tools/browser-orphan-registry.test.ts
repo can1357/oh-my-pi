@@ -10,13 +10,16 @@
  *  - this process's own targets are never reaped (a live session keeps its tabs);
  *  - a conservative grace window keeps a just-crashed owner's fresh records;
  *  - confirmed closures are removed, while transient failures remain durable
- *    and are retried on the next reap.
+ *    and are retried on the next reap;
+ *  - when `browser.target()` cannot open a CDP session (relay has no
+ *    browser-type target), a matching page is still closed via `_targetId`.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
 import {
+	closeCdpTarget,
 	collectOrphanTargets,
 	forgetSharedTarget,
 	reapOrphanSharedTargets,
@@ -214,5 +217,51 @@ describe("orphan-registry — reap", () => {
 		expect(retryCount).toBe(1);
 		expect(retryClosed).toEqual(["retry-later"]);
 		expect(await Bun.file(path.join(registryDir(scope), `${dead}.json`)).exists()).toBe(false);
+	});
+});
+
+describe("orphan-registry — closeCdpTarget relay fallback", () => {
+	it("closes a matching page when browser.target() cannot open a CDP session", async () => {
+		let closed = false;
+		const page = {
+			isClosed: () => closed,
+			close: async () => {
+				closed = true;
+			},
+		};
+		const browser = {
+			target: () => {
+				throw new Error("No target exists for browser");
+			},
+			targets: () => [
+				{
+					_targetId: "other",
+					page: async () => page,
+				},
+				{
+					_targetId: "TAB1",
+					page: async () => page,
+				},
+			],
+		} as unknown as Browser;
+
+		expect(await closeCdpTarget(browser, "TAB1")).toBe(true);
+		expect(closed).toBe(true);
+	});
+
+	it("returns false when no target matches and no CDP session exists", async () => {
+		const browser = {
+			target: () => {
+				throw new Error("No target exists for browser");
+			},
+			targets: () => [
+				{
+					_targetId: "other",
+					page: async () => null,
+				},
+			],
+		} as unknown as Browser;
+
+		expect(await closeCdpTarget(browser, "TAB1")).toBe(false);
 	});
 });

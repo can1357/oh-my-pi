@@ -137,9 +137,47 @@ async function claimTab(
 	cdp: FakeCdpSocket,
 	connId: number,
 	tabId: number,
+	owner?: string,
 ): Promise<void> {
 	const sessionId = await attachPage(bridge, ext, cdp, connId, tabId);
-	bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget" }));
+	bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget", params: { owner } }));
+	await flush();
+}
+
+function cdpError(cdp: FakeCdpSocket): { code: number; message: string } | undefined {
+	for (let i = cdp.messages.length - 1; i >= 0; i--) {
+		const error = cdp.messages[i]!.error;
+		if (!error || typeof error !== "object") continue;
+		const rec = error as Record<string, unknown>;
+		if (typeof rec.code !== "number" || typeof rec.message !== "string") continue;
+		return { code: rec.code, message: rec.message };
+	}
+	return undefined;
+}
+
+function targetInfoChanged(cdp: FakeCdpSocket, from = 0): Array<{ targetId: string; ompClaimedBy?: string }> {
+	const out: Array<{ targetId: string; ompClaimedBy?: string }> = [];
+	for (const msg of cdp.messages.slice(from)) {
+		if (msg.method !== "Target.targetInfoChanged") continue;
+		const params = msg.params;
+		if (!params || typeof params !== "object" || !("targetInfo" in params)) continue;
+		const info = params.targetInfo;
+		if (!info || typeof info !== "object") continue;
+		const rec = info as Record<string, unknown>;
+		if (typeof rec.targetId !== "string") continue;
+		out.push({
+			targetId: rec.targetId,
+			ompClaimedBy: typeof rec.ompClaimedBy === "string" ? rec.ompClaimedBy : undefined,
+		});
+	}
+	return out;
+}
+
+async function enableDiscover(bridge: RelayBridge, cdp: FakeCdpSocket, connId: number): Promise<void> {
+	bridge.cdpMessage(
+		connId,
+		JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }),
+	);
 	await flush();
 }
 
@@ -860,5 +898,142 @@ describe("RelayBridge attachment release", () => {
 				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual([]);
+	});
+});
+
+describe("RelayBridge exclusive claims", () => {
+	it("rejects a second connection claiming a tab held by another owner", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await claimTab(bridge, ext, holder, holderConn, 1, "omp:111:main");
+		expect(ext.rpcs("group")).toHaveLength(1);
+
+		const other = new FakeCdpSocket();
+		const otherConn = bridge.cdpConnected(other);
+		await claimTab(bridge, ext, other, otherConn, 1, "omp:222:main");
+		const error = cdpError(other);
+		expect(error?.code).toBe(-32050);
+		expect(error?.message).toContain("omp:111:main");
+		expect(ext.rpcs("group")).toHaveLength(1);
+		expect(ext.rpcs("ungroup")).toHaveLength(0);
+		expect(bridge.listTargets().find(t => t.id === "PAGE1")?.claimedBy).toBe("omp:111:main");
+	});
+
+	it("transfers the claim when a new connection uses the same owner", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const oldWorker = new FakeCdpSocket();
+		const oldConn = bridge.cdpConnected(oldWorker);
+		await claimTab(bridge, ext, oldWorker, oldConn, 1, "omp:111:main");
+		ack(bridge, ext, "group", { grouped: { "1": 42 } });
+		await flush();
+
+		const newWorker = new FakeCdpSocket();
+		const newConn = bridge.cdpConnected(newWorker);
+		await claimTab(bridge, ext, newWorker, newConn, 1, "omp:111:main");
+		expect(cdpError(newWorker)).toBeUndefined();
+		expect(ext.rpcs("ungroup")).toHaveLength(0);
+
+		// Old connection no longer holds the tab: closing the new holder ungroups.
+		bridge.cdpClosed(newConn);
+		expect(ext.rpcs("ungroup")).toHaveLength(1);
+		expect(ext.rpcs("ungroup")[0]!.tabIds).toEqual([1]);
+	});
+
+	it("OMP.releaseTarget { owner } frees the tab for a later connection", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const first = new FakeCdpSocket();
+		const firstConn = bridge.cdpConnected(first);
+		await claimTab(bridge, ext, first, firstConn, 1, "alice");
+		ack(bridge, ext, "group", { grouped: { "1": 42 } });
+		await flush();
+
+		const sessionId = first.attachedSessions().at(-1);
+		bridge.cdpMessage(
+			firstConn,
+			JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.releaseTarget", params: { owner: "alice" } }),
+		);
+		await flush();
+		expect(ext.rpcs("ungroup")).toHaveLength(1);
+		expect(ext.rpcs("ungroup")[0]!.tabIds).toEqual([1]);
+
+		const third = new FakeCdpSocket();
+		const thirdConn = bridge.cdpConnected(third);
+		await claimTab(bridge, ext, third, thirdConn, 1, "carol");
+		expect(cdpError(third)).toBeUndefined();
+		expect(ext.rpcs("group").length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("announces ompClaimedBy on claim and clears it when the holder disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const watchers = [new FakeCdpSocket(), new FakeCdpSocket()] as const;
+		const watcherConns = watchers.map(socket => bridge.cdpConnected(socket));
+		for (let i = 0; i < watchers.length; i++) {
+			await enableDiscover(bridge, watchers[i]!, watcherConns[i]!);
+		}
+
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const marks = watchers.map(socket => socket.messages.length);
+		await claimTab(bridge, ext, holder, holderConn, 1, "omp:111:main");
+
+		for (let i = 0; i < watchers.length; i++) {
+			const changed = targetInfoChanged(watchers[i]!, marks[i]);
+			expect(changed.filter(e => e.targetId === "TAB1" && e.ompClaimedBy === "omp:111:main")).not.toHaveLength(0);
+			expect(changed.filter(e => e.targetId === "PAGE1" && e.ompClaimedBy === "omp:111:main")).not.toHaveLength(0);
+		}
+
+		const closeMarks = watchers.map(socket => socket.messages.length);
+		bridge.cdpClosed(holderConn);
+		for (let i = 0; i < watchers.length; i++) {
+			const changed = targetInfoChanged(watchers[i]!, closeMarks[i]);
+			expect(changed.filter(e => e.targetId === "TAB1" && e.ompClaimedBy === undefined)).not.toHaveLength(0);
+			expect(changed.filter(e => e.targetId === "PAGE1" && e.ompClaimedBy === undefined)).not.toHaveLength(0);
+		}
+	});
+
+	it("Target.createTarget then OMP.claimTarget { owner } reports ompClaimedBy as the owner", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const watcher = new FakeCdpSocket();
+		const watcherConn = bridge.cdpConnected(watcher);
+		await enableDiscover(bridge, watcher, watcherConn);
+
+		const driver = new FakeCdpSocket();
+		const driverConn = bridge.cdpConnected(driver);
+		bridge.cdpMessage(
+			driverConn,
+			JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: { url: "https://example.com/" } }),
+		);
+		ack(bridge, ext, "createTab", { tab: tab({ tabId: 9 }) });
+		await flush();
+
+		const mark = watcher.messages.length;
+		await claimTab(bridge, ext, driver, driverConn, 9, "omp:9:main");
+		const changed = targetInfoChanged(watcher, mark);
+		expect(changed.filter(e => e.targetId === "TAB9" && e.ompClaimedBy === "omp:9:main")).not.toHaveLength(0);
+		expect(changed.filter(e => e.targetId === "PAGE9" && e.ompClaimedBy === "omp:9:main")).not.toHaveLength(0);
+		expect(bridge.listTargets().find(t => t.id === "PAGE9")?.claimedBy).toBe("omp:9:main");
+	});
+
+	it("listTargets returns claimedBy for the held tab", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await claimTab(bridge, ext, cdp, connId, 1, "omp:111:main");
+		const listed = bridge.listTargets();
+		expect(listed.find(t => t.id === "PAGE1")?.claimedBy).toBe("omp:111:main");
+		expect(listed.find(t => t.id === "PAGE2")?.claimedBy).toBeUndefined();
 	});
 });

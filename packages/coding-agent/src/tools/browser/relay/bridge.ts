@@ -66,6 +66,7 @@ interface TargetInfo {
 	url: string;
 	attached: boolean;
 	canAccessOpener: boolean;
+	ompClaimedBy?: string;
 }
 
 class CdpConnection {
@@ -74,7 +75,7 @@ class CdpConnection {
 	/** Minted pseudo-sessions owned by this connection. */
 	readonly sessions = new Map<string, SessionRef>();
 	/** Tabs this connection claimed as drive targets (`OMP.claimTarget` / `Target.createTarget`). */
-	readonly claims = new Set<number>();
+	readonly claims = new Map<number, string | undefined>();
 
 	constructor(
 		readonly id: number,
@@ -92,6 +93,9 @@ class CdpConnection {
 
 /** Transport replacement is retryable and must not permanently ban a tab. */
 class ExtensionReplacedError extends Error {}
+
+/** Exclusive drive-claim conflict: another omp session already owns this tab. */
+class TabClaimedError extends Error {}
 
 class TabState {
 	url: string;
@@ -157,6 +161,7 @@ const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chro
 const RPC_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
+const CDP_ERROR_TAB_CLAIMED = -32050;
 
 function tabTargetId(tabId: number): string {
 	return `TAB${tabId}`;
@@ -234,7 +239,14 @@ export class RelayBridge {
 		const out: Array<Record<string, string>> = [];
 		for (const tab of this.#tabs.values()) {
 			if (!this.#eligible(tab)) continue;
-			out.push({ id: pageTargetId(tab.tabId), type: "page", title: tab.title, url: tab.url });
+			const claimedBy = this.#claimedBy(tab.tabId);
+			out.push({
+				id: pageTargetId(tab.tabId),
+				type: "page",
+				title: tab.title,
+				url: tab.url,
+				...(claimedBy !== undefined ? { claimedBy } : {}),
+			});
 		}
 		return out;
 	}
@@ -370,11 +382,14 @@ export class RelayBridge {
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
 		// connection holds sessions on every tab without driving any of them.
-		for (const tabId of conn.claims) {
-			const tab = this.#tabs.get(tabId);
-			if (tab) this.#syncTabGrouping(tab);
-		}
+		const claimedTabIds = [...conn.claims.keys()];
 		conn.claims.clear();
+		for (const tabId of claimedTabIds) {
+			const tab = this.#tabs.get(tabId);
+			if (!tab) continue;
+			this.#syncTabGrouping(tab);
+			this.#announceInfoChanged(tab);
+		}
 		// Drop the debugger (and its infobar) from tabs nobody drives anymore.
 		for (const tabId of touched) this.#detachIfUnheld(tabId);
 		this.#log("cdp client closed", { conn: connId });
@@ -541,7 +556,33 @@ export class RelayBridge {
 		// Relay-private claim: the omp tab worker marks the page it was spawned
 		// to drive. Never forwarded — real Chrome rejects the unknown method.
 		if (msg.method === "OMP.claimTarget") {
-			this.#claimTab(conn, tabId);
+			const owner = typeof msg.params?.owner === "string" ? msg.params.owner : undefined;
+			try {
+				this.#claimTab(conn, tabId, owner);
+			} catch (err) {
+				if (err instanceof TabClaimedError) {
+					this.#replyError(conn, msg, err.message, CDP_ERROR_TAB_CLAIMED);
+					return;
+				}
+				throw err;
+			}
+			this.#reply(conn, msg, {});
+			return;
+		}
+		if (msg.method === "OMP.releaseTarget") {
+			const owner = typeof msg.params?.owner === "string" ? msg.params.owner : undefined;
+			if (owner === undefined) {
+				conn.claims.delete(tabId);
+			} else {
+				for (const other of this.#conns.values()) {
+					if (other.claims.get(tabId) === owner) other.claims.delete(tabId);
+				}
+			}
+			const tab = this.#tabs.get(tabId);
+			if (tab) {
+				this.#syncTabGrouping(tab);
+				this.#announceInfoChanged(tab);
+			}
 			this.#reply(conn, msg, {});
 			return;
 		}
@@ -561,18 +602,46 @@ export class RelayBridge {
 
 	/**
 	 * Record `conn` as a driver of the tab and reconcile grouping. Claims are
-	 * explicit (worker adoption or tab creation) rather than inferred from
-	 * command traffic: target discovery scans every page with the same
-	 * commands a driver sends, so inference would sweep all tabs.
+	 * exclusive: a second connection may take over only when it presents the
+	 * same owner (recycled tab worker). Target discovery scans every page with
+	 * the same commands a driver sends, so inference from traffic would sweep
+	 * all tabs.
 	 */
-	#claimTab(conn: CdpConnection, tabId: number): void {
+	#claimTab(conn: CdpConnection, tabId: number, owner?: string): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
-		if (!conn.claims.has(tabId)) {
-			conn.claims.add(tabId);
-			this.#log("tab claimed", { conn: conn.id, tabId });
+		const holder = this.#claimHolder(tabId);
+		if (!holder) {
+			conn.claims.set(tabId, owner);
+		} else if (holder.conn === conn) {
+			conn.claims.set(tabId, owner ?? holder.owner);
+		} else if (owner !== undefined && holder.owner === owner) {
+			holder.conn.claims.delete(tabId);
+			conn.claims.set(tabId, owner);
+		} else {
+			throw new TabClaimedError(
+				`Tab ${tabId} (${tab.url}) is already driven by omp session ${holder.owner ?? "(unnamed)"}`,
+			);
 		}
+		this.#log("tab claimed", { conn: conn.id, tabId });
 		this.#syncTabGrouping(tab);
+		this.#announceInfoChanged(tab);
+	}
+
+	/** First connection that currently claims `tabId`, if any. */
+	#claimHolder(tabId: number): { conn: CdpConnection; owner: string | undefined } | null {
+		for (const conn of this.#conns.values()) {
+			if (!conn.claims.has(tabId)) continue;
+			return { conn, owner: conn.claims.get(tabId) };
+		}
+		return null;
+	}
+
+	/** Holder's owner token, `"omp"` when held unnamed, omitted when free. */
+	#claimedBy(tabId: number): string | undefined {
+		const holder = this.#claimHolder(tabId);
+		if (!holder) return undefined;
+		return holder.owner ?? "omp";
 	}
 
 	/** True while any downstream connection claims the tab as its drive target. */
@@ -693,7 +762,7 @@ export class RelayBridge {
 				const result = (await this.#rpc({ op: "createTab", url })) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab);
 				// Creating a tab is an explicit act of driving it.
-				this.#claimTab(conn, result.tab.tabId);
+				this.#claimTab(conn, result.tab.tabId, undefined);
 				this.#reply(conn, msg, { targetId: pageTargetId(result.tab.tabId) });
 				return;
 			}
@@ -896,11 +965,16 @@ export class RelayBridge {
 			return;
 		}
 		if (eligible && tab.announced) {
-			for (const conn of this.#conns.values()) {
-				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
-			}
+			this.#announceInfoChanged(tab);
+		}
+	}
+
+	#announceInfoChanged(tab: TabState): void {
+		if (!tab.announced) return;
+		for (const conn of this.#conns.values()) {
+			if (!conn.discover) continue;
+			this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#tabInfo(tab, tab.attached) });
+			this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
 		}
 	}
 
@@ -1120,6 +1194,7 @@ export class RelayBridge {
 	}
 
 	#tabInfo(tab: TabState, attached: boolean): TargetInfo {
+		const ompClaimedBy = this.#claimedBy(tab.tabId);
 		return {
 			targetId: tabTargetId(tab.tabId),
 			type: "tab",
@@ -1127,10 +1202,12 @@ export class RelayBridge {
 			url: tab.url || "about:blank",
 			attached,
 			canAccessOpener: false,
+			...(ompClaimedBy !== undefined ? { ompClaimedBy } : {}),
 		};
 	}
 
 	#pageInfo(tab: TabState, attached: boolean): TargetInfo {
+		const ompClaimedBy = this.#claimedBy(tab.tabId);
 		return {
 			targetId: pageTargetId(tab.tabId),
 			type: "page",
@@ -1138,6 +1215,7 @@ export class RelayBridge {
 			url: tab.url || "about:blank",
 			attached,
 			canAccessOpener: false,
+			...(ompClaimedBy !== undefined ? { ompClaimedBy } : {}),
 		};
 	}
 

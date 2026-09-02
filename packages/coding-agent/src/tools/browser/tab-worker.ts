@@ -545,6 +545,10 @@ function redactUrlCredentials(url: string): string {
 
 class RequestInterceptionCleanupError extends ToolError {}
 
+export class RelayTabClaimedError extends ToolError {
+	override readonly name = "RelayTabClaimedError";
+}
+
 interface RunPageScope {
 	page: Page;
 	cleanup(): Promise<void>;
@@ -1096,6 +1100,13 @@ export class WorkerCore {
 				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
 				if (payload.emulateViewport !== false) await applyViewport(this.#page, payload.viewport);
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
+			} else if (payload.targetId === null) {
+				const page = await this.#browser.newPage();
+				this.#page = page;
+				this.#transport.send({ type: "page-created", targetId: await targetIdForPage(page) });
+				await this.#claimRelayTarget(page, payload.claimOwner);
+				this.#observeDialogs();
+				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			} else {
 				const target = await this.#findAttachedTarget(payload.targetId);
 				// Post-timeout recycle: unblock the target BEFORE adopting the page — an open
@@ -1105,7 +1116,7 @@ export class WorkerCore {
 				const page = await target.page();
 				if (!page) throw new ToolError(`Target ${payload.targetId} is no longer available on the attached browser`);
 				this.#page = page;
-				await this.#claimRelayTarget(page);
+				await this.#claimRelayTarget(page, payload.claimOwner);
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
@@ -1119,11 +1130,13 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
-			// A failed headless init leaves the worker's page orphaned in the shared
-			// browser (the supervisor retries with a fresh worker), so close it before
-			// reporting. Attach mode adopts an existing target — never close it.
+			// A failed headless init, or a relay open that created its own tab,
+			// leaves the worker's page orphaned (the supervisor retries with a
+			// fresh worker), so close it before reporting. Adopted attach targets
+			// must not be closed.
 			const page = this.#page;
-			if (payload.mode === "headless" && page && !page.isClosed()) {
+			const createdOwnPage = payload.mode === "headless" || (payload.mode === "attach" && payload.targetId === null);
+			if (createdOwnPage && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -1144,15 +1157,18 @@ export class WorkerCore {
 	 * relay adds it to the per-window "omp" tab group. Best-effort: plain CDP
 	 * backends (real Chrome, cmux) reject the relay-private method.
 	 */
-	async #claimRelayTarget(page: Page): Promise<void> {
+	async #claimRelayTarget(page: Page, owner?: string): Promise<void> {
 		let session: CDPSession | undefined;
 		try {
 			session = await page.createCDPSession();
 			// Puppeteer's protocol map cannot express the relay-private method; the
 			// send signature is otherwise identical.
-			const raw = session as unknown as { send(method: string): Promise<unknown> };
-			await raw.send("OMP.claimTarget");
-		} catch {
+			const raw = session as unknown as { send(method: string, params?: { owner: string }): Promise<unknown> };
+			await raw.send("OMP.claimTarget", owner ? { owner } : undefined);
+		} catch (err) {
+			if (err && typeof err === "object" && "code" in err && typeof err.code === "number" && err.code === -32050) {
+				throw new RelayTabClaimedError(err instanceof Error ? err.message : String(err));
+			}
 			// Not the omp relay; nothing to claim.
 		} finally {
 			await session?.detach().catch(() => undefined);

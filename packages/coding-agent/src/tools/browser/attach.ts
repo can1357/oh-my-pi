@@ -5,7 +5,7 @@ import type { Socket } from "bun";
 import type { Browser, Page } from "puppeteer-core";
 import { ToolError, throwIfAborted } from "../tool-errors";
 
-const ATTACH_TARGET_SKIP_PATTERN =
+export const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
 
 /**

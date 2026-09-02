@@ -59,7 +59,12 @@ export type WorkerInitPayload =
 			mode: "attach";
 			browserWSEndpoint: string;
 			safeDir: string;
-			targetId: string;
+			/**
+			 * null: create a new tab in the connected browser (relay `open` with `url` and no `target`); `url` is then required
+			 */
+			targetId: string | null;
+			/** relay drive-owner token; forwarded in `OMP.claimTarget` / `OMP.releaseTarget` */
+			claimOwner?: string;
 			dialogs?: "accept" | "dismiss";
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
