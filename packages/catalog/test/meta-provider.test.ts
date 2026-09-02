@@ -112,7 +112,7 @@ describe("Meta Model API provider", () => {
 		expect(options.staticModels).toEqual(META_MUSE_STATIC_MODELS);
 	});
 
-	test("refreshes the team-enabled Muse Spark roster with family-safe defaults", async () => {
+	test("refreshes every team-enabled Meta model with Muse Spark family defaults", async () => {
 		let requestedUrl = "";
 		let authorization = "";
 		const options = metaModelManagerOptions({
@@ -137,9 +137,11 @@ describe("Meta Model API provider", () => {
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 		const models = await options.fetchDynamicModels?.();
 		expect(models?.map(model => model.id)).toEqual([
+			"muse-image-1.0",
 			"muse-spark-1.3",
 			"muse-spark-1.3-contributor",
 			"muse-spark-1.4-preview",
+			"muse-voice-transcribe-1.0",
 		]);
 		const byId = new Map(models?.map(model => [model.id, model]));
 		expect(byId.get("muse-spark-1.3")).toMatchObject({

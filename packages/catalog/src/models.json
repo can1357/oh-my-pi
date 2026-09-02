@@ -73030,8 +73030,12 @@
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-adaptive",
@@ -73097,8 +73101,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"premiumMultiplier": 0.33,
 			"thinking": {
@@ -73164,8 +73172,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 32000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-budget-effort",
@@ -73230,8 +73242,12 @@
 			"contextWindow": 168000,
 			"maxTokens": 32000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"premiumMultiplier": 3,
 			"thinking": {
@@ -73296,8 +73312,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 32000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-adaptive",
@@ -73363,8 +73383,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-adaptive",
@@ -73430,8 +73454,12 @@
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-adaptive",
@@ -73497,8 +73525,12 @@
 			"contextWindow": 216000,
 			"maxTokens": 16000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "budget",
@@ -73563,8 +73595,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 32000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "budget",
@@ -73629,8 +73665,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 32000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-adaptive",
@@ -73693,8 +73733,12 @@
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "anthropic-adaptive",
@@ -73760,8 +73804,12 @@
 			"contextWindow": 128000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -73856,8 +73904,12 @@
 			"contextWindow": 128000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -73952,7 +74004,12 @@
 			"contextWindow": 128000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -74045,8 +74102,12 @@
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -74144,8 +74205,12 @@
 			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -74245,8 +74310,12 @@
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -74346,8 +74415,12 @@
 			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -74447,8 +74520,12 @@
 			"contextWindow": 128000,
 			"maxTokens": 16384,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -74537,7 +74614,12 @@
 			"contextWindow": 128000,
 			"maxTokens": 4096,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"premiumMultiplier": 0,
 			"requiresGlyphTokenization": false,
@@ -74621,7 +74703,12 @@
 			"contextWindow": 128000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -74713,8 +74800,12 @@
 			"contextWindow": 264000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -74806,7 +74897,12 @@
 			"contextWindow": 264000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -74898,7 +74994,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -74990,7 +75091,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75084,7 +75190,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75174,8 +75285,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75267,8 +75382,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75360,8 +75479,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75453,8 +75576,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75546,8 +75673,12 @@
 			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"premiumMultiplier": 0.33,
 			"thinking": {
@@ -75640,8 +75771,12 @@
 			"contextWindow": 400000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75733,8 +75868,12 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75827,8 +75966,12 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -75921,8 +76064,12 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -76015,8 +76162,12 @@
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -76109,8 +76260,12 @@
 			"contextWindow": 500000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -76204,8 +76359,12 @@
 			"contextWindow": 500000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -76298,7 +76457,12 @@
 			"contextWindow": 192000,
 			"maxTokens": 64000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"premiumMultiplier": 0.25,
 			"thinking": {
@@ -76394,8 +76558,12 @@
 			"contextWindow": 256000,
 			"maxTokens": 32000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -76494,8 +76662,12 @@
 			"contextWindow": 1048576,
 			"maxTokens": 131072,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"compat": {
 				"supportsStore": false,
@@ -76602,8 +76774,12 @@
 			"contextWindow": 256000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -76694,8 +76870,12 @@
 			"contextWindow": 256000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -76786,8 +76966,12 @@
 			"contextWindow": 400000,
 			"maxTokens": 128000,
 			"headers": {
-				"User-Agent": "opencode/1.3.15",
-				"X-GitHub-Api-Version": "2026-06-01"
+				"User-Agent": "copilot/1.0.82",
+				"Editor-Version": "copilot/1.0.82",
+				"Copilot-Integration-Id": "copilot-developer-cli",
+				"Copilot-Harness-Id": "copilot-sdk",
+				"Openai-Intent": "conversation-agent",
+				"X-GitHub-Api-Version": "2026-08-01"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -78105,7 +78289,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -78197,7 +78381,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "effort",
@@ -78289,7 +78473,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "effort",
@@ -78381,7 +78565,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 200000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "effort",
@@ -78473,7 +78657,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -78565,7 +78749,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -78657,7 +78841,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -78749,7 +78933,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -78841,7 +79025,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "effort",
@@ -78933,7 +79117,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "effort",
@@ -79025,7 +79209,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -79117,7 +79301,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -79732,7 +79916,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048575,
+			"contextWindow": 1048576,
 			"maxTokens": 1048576,
 			"thinking": {
 				"mode": "effort",
@@ -79822,7 +80006,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1048756,
 			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
@@ -79914,7 +80098,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1050000,
 			"maxTokens": 65530,
 			"identity": {
 				"class": "gemini",
@@ -79996,7 +80180,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1048756,
 			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
@@ -80546,7 +80730,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 256000,
+			"contextWindow": 262144,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -80723,7 +80907,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 196608,
+			"contextWindow": 204800,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -80811,7 +80995,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 196608,
+			"contextWindow": 204800,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -80900,7 +81084,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
@@ -81632,7 +81816,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
@@ -81720,7 +81904,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 65536,
+			"contextWindow": 262144,
 			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
@@ -81809,7 +81993,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -81899,7 +82083,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 400000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -81989,7 +82173,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 400000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -82079,7 +82263,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 409600,
+			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -82186,7 +82370,6 @@
 				"revision": "5.5.0"
 			},
 			"requiresGlyphTokenization": false,
-			"contextPromotionTarget": "gmi-cloud/openai/gpt-5.4",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -82241,6 +82424,7 @@
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
 			},
+			"contextPromotionTarget": "gmi-cloud/openai/gpt-5.4",
 			"supportsComputerUse": false
 		},
 		"openai/gpt-5.6-luna": {
@@ -82698,7 +82882,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262141,
+			"contextWindow": 262144,
 			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
@@ -82787,7 +82971,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262128,
+			"contextWindow": 262144,
 			"maxTokens": 262144,
 			"identity": {
 				"class": "qwen",
@@ -83479,7 +83663,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 500000,
 			"thinking": {
 				"mode": "effort",
@@ -83568,7 +83752,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": null,
 			"maxTokens": null,
 			"identity": {
 				"class": "qwen",
@@ -83648,7 +83832,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 500000,
 			"identity": {
 				"class": "qwen",
@@ -83729,7 +83913,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048575,
+			"contextWindow": 1000000,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -83819,7 +84003,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048575,
+			"contextWindow": 1000000,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -83909,7 +84093,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -83999,7 +84183,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 256000,
+			"contextWindow": 262144,
 			"maxTokens": 256000,
 			"thinking": {
 				"mode": "effort",
@@ -84264,7 +84448,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1048576,
 			"maxTokens": 64000,
 			"thinking": {
 				"mode": "effort",
@@ -84353,7 +84537,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 2000000,
+			"contextWindow": 500000,
 			"maxTokens": 500000,
 			"thinking": {
 				"mode": "effort",
@@ -84444,7 +84628,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 2000000,
+			"contextWindow": 500000,
 			"maxTokens": 500000,
 			"identity": {
 				"class": "xai",
@@ -84524,7 +84708,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1050000,
+			"contextWindow": 1048576,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -84613,7 +84797,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1050000,
+			"contextWindow": 1048576,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -84702,7 +84886,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 202752,
+			"contextWindow": 204800,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -84791,7 +84975,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 202752,
+			"contextWindow": 200000,
 			"maxTokens": 200000,
 			"identity": {
 				"class": "glm",
@@ -84871,7 +85055,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 202752,
+			"contextWindow": 204800,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -85255,6 +85439,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85300,6 +85485,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85337,6 +85523,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85376,6 +85563,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85415,6 +85603,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85454,6 +85643,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85493,6 +85683,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85541,6 +85732,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85597,6 +85789,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85653,6 +85846,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85708,6 +85902,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85764,6 +85959,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85820,6 +86016,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85876,6 +86073,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85932,6 +86130,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -85990,6 +86189,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86046,6 +86246,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86103,6 +86304,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86153,6 +86355,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86199,6 +86402,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86249,6 +86453,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86298,6 +86503,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86347,6 +86553,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86396,6 +86603,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86443,6 +86651,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86490,6 +86699,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86539,6 +86749,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86588,6 +86799,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86637,6 +86849,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86685,6 +86898,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86734,6 +86948,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -86781,6 +86996,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86828,6 +87044,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86883,6 +87100,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86938,6 +87156,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -86985,6 +87204,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87022,6 +87242,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87067,6 +87288,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87113,6 +87335,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87157,6 +87380,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87202,6 +87426,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87248,6 +87473,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87292,6 +87518,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87337,6 +87564,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87395,6 +87623,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": true,
 				"ccaLegacyParametersSchema": true,
 				"multimodalFunctionResponse": false,
@@ -87446,6 +87675,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": true,
 				"ccaLegacyParametersSchema": true,
 				"multimodalFunctionResponse": false,
@@ -87502,6 +87732,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": true,
 				"ccaLegacyParametersSchema": true,
 				"multimodalFunctionResponse": false,
@@ -87552,6 +87783,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": true,
 				"ccaLegacyParametersSchema": true,
 				"multimodalFunctionResponse": false,
@@ -87607,6 +87839,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87656,6 +87889,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87704,6 +87938,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -87769,6 +88004,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -87823,6 +88059,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -87862,6 +88099,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -87912,6 +88150,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -87970,6 +88209,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88034,6 +88274,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88091,6 +88332,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88148,6 +88390,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88205,6 +88448,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88253,6 +88497,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -88288,6 +88533,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -88323,6 +88569,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -88362,6 +88609,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -88418,6 +88666,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -88468,6 +88717,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -88517,6 +88767,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88565,6 +88816,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88614,6 +88866,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -88661,6 +88914,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": true,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89406,6 +89660,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -89462,6 +89717,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -89519,6 +89775,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -89568,6 +89825,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89617,6 +89875,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89664,6 +89923,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89711,6 +89971,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89760,6 +90021,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89809,6 +90071,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89858,6 +90121,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89906,6 +90170,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -89955,6 +90220,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -90002,6 +90268,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -90049,6 +90316,7 @@
 			"compat": {
 				"supportsFunctionPartId": false,
 				"requiresSkipThoughtSignature": false,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": false,
@@ -150434,6 +150702,83 @@
 		}
 	},
 	"meta": {
+		"muse-image-1.0": {
+			"id": "muse-image-1.0",
+			"name": "muse-image-1.0",
+			"api": "openai-responses",
+			"provider": "meta",
+			"baseUrl": "https://api.meta.ai/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": null,
+			"maxTokens": null,
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"compat": {
+				"supportsDeveloperRole": false,
+				"supportsStrictMode": false,
+				"supportsReasoningEffort": true,
+				"supportsLongPromptCacheRetention": false,
+				"supportsPromptCacheBreakpoints": false,
+				"strictResponsesPairing": false,
+				"supportsImageDetailOriginal": true,
+				"supportsReasoningSummary": true,
+				"supportsAllTurnsReasoningContext": false,
+				"requiresReasoningOffJuiceInstruction": false,
+				"stripImageInput": false,
+				"reasoningEffortMap": {},
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresAssistantContentForToolCalls": false,
+				"isOpenRouterHost": false,
+				"isVercelGatewayHost": false,
+				"wireModelIdMode": "raw",
+				"alwaysSendMaxTokens": false,
+				"supportsObfuscationOptOut": false,
+				"officialEndpoint": false,
+				"harmonyLeakMitigation": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false
+			},
+			"supportsComputerUse": false
+		},
 		"muse-spark-1.1": {
 			"id": "muse-spark-1.1",
 			"name": "Muse Spark 1.1",
@@ -150893,6 +151238,83 @@
 				"supportsReasoningEffort": true,
 				"includeEncryptedReasoning": true
 			}
+		},
+		"muse-voice-transcribe-1.0": {
+			"id": "muse-voice-transcribe-1.0",
+			"name": "muse-voice-transcribe-1.0",
+			"api": "openai-responses",
+			"provider": "meta",
+			"baseUrl": "https://api.meta.ai/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": null,
+			"maxTokens": null,
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"compat": {
+				"supportsDeveloperRole": false,
+				"supportsStrictMode": false,
+				"supportsReasoningEffort": true,
+				"supportsLongPromptCacheRetention": false,
+				"supportsPromptCacheBreakpoints": false,
+				"strictResponsesPairing": false,
+				"supportsImageDetailOriginal": true,
+				"supportsReasoningSummary": true,
+				"supportsAllTurnsReasoningContext": false,
+				"requiresReasoningOffJuiceInstruction": false,
+				"stripImageInput": false,
+				"reasoningEffortMap": {},
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresAssistantContentForToolCalls": false,
+				"isOpenRouterHost": false,
+				"isVercelGatewayHost": false,
+				"wireModelIdMode": "raw",
+				"alwaysSendMaxTokens": false,
+				"supportsObfuscationOptOut": false,
+				"officialEndpoint": false,
+				"harmonyLeakMitigation": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false
+			},
+			"supportsComputerUse": false
 		}
 	},
 	"minimax": {
@@ -276885,6 +277307,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -276931,6 +277354,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -276979,6 +277403,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -277028,6 +277453,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -277077,6 +277503,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -277126,6 +277553,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -277174,6 +277602,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -277223,6 +277652,7 @@
 			"compat": {
 				"supportsFunctionPartId": true,
 				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignatureOnFirstFunctionCall": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -369578,9 +370008,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.1875,
-				"output": 0.625,
-				"cacheRead": 0.0375,
+				"input": 0.125,
+				"output": 0.4375,
+				"cacheRead": 0.025,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,

@@ -905,8 +905,10 @@ export type ResolvedDevinCompat = Required<DevinCompat>;
 export interface GoogleCompat {
 	/** Whether functionCall/functionResponse parts carry the `id` field. */
 	supportsFunctionPartId?: boolean;
-	/** Whether replayed thinking parts must be skipped when they carry no signature. */
+	/** Add the bypass sentinel to every unsigned Gemini function call. */
 	requiresSkipThoughtSignature?: boolean;
+	/** Add the bypass sentinel when a Gemini turn's first function call is unsigned. */
+	requiresSkipThoughtSignatureOnFirstFunctionCall?: boolean;
 	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
 	dropUnsignedThinking?: boolean;
 	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */

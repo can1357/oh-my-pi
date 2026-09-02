@@ -195,7 +195,11 @@ function normalizeQuotaInfos(info: AntigravityModelInfo): AntigravityQuotaInfo[]
 		...(info.modelProvider ? { modelProvider: info.modelProvider } : {}),
 	};
 	const addInfo = (value: AntigravityQuotaInfo, tier?: string, windowDescriptor?: AntigravityWindowDescriptor) => {
-		results.push({ ...source, ...withWindowDescriptor(value, windowDescriptor), ...(tier ? { tier } : {}) });
+		results.push({
+			...source,
+			...withWindowDescriptor(value, windowDescriptor),
+			...(tier ? { tier } : {}),
+		});
 	};
 	const addValue = (
 		value: AntigravityQuotaInfo | AntigravityQuotaInfo[] | undefined,
@@ -340,7 +344,15 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 			const key = `${counterKey}|${tierKey}|${windowId}`;
 			const existing = deduped.get(key);
 			if (!existing) {
-				deduped.set(key, { amount, window, tier: quotaInfo.tier, tierKey, windowId, counterName, counterKey });
+				deduped.set(key, {
+					amount,
+					window,
+					tier: quotaInfo.tier,
+					tierKey,
+					windowId,
+					counterName,
+					counterKey,
+				});
 				continue;
 			}
 			// Merge: keep the entry with fraction data for the bar, but
@@ -378,8 +390,22 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 		}
 	}
 
+	// Autocomplete models (`tab_*`, internal `chat_*`) report a bare
+	// `{ remainingFraction: 1 }` with no reset time on the Google counter. When
+	// the metered Gemini window is exhausted, Google reports only the weekly
+	// reset, so that unmetered entry no longer merges into a daily sibling and
+	// would surface as a phantom "Daily 0%" beside "Weekly 100%". A counter with
+	// any windowed entry keeps only its windowed entries.
+	const meteredCounters = new Set<string>();
+	for (const entry of deduped.values()) {
+		if (entry.window?.resetsAt !== undefined) meteredCounters.add(`${entry.counterKey}|${entry.tierKey}`);
+	}
+
 	const limits: UsageLimit[] = [];
 	for (const entry of deduped.values()) {
+		if (entry.window?.resetsAt === undefined && meteredCounters.has(`${entry.counterKey}|${entry.tierKey}`)) {
+			continue;
+		}
 		const label = entry.counterName ? `Usage (${entry.counterName})` : "Usage";
 		limits.push({
 			id: `${params.provider}:${entry.counterKey}:${entry.tierKey}:${entry.windowId}`,
@@ -484,6 +510,21 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 	blockScope(context) {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
+	},
+	// One scope per backend counter the report covers, judged by that
+	// counter's own windows. A 429 can carry a retry-after at the weekly reset
+	// while Google restores the quota days earlier; the next `/usage` fetch
+	// then lifts the block instead of the account idling until the clock runs out.
+	healableBlockScopes(report) {
+		const counterKeys = new Set<string>();
+		for (const limit of report.limits) {
+			const counterKey = limit.id.split(":")[1];
+			if (counterKey) counterKeys.add(counterKey.toLowerCase());
+		}
+		return [...counterKeys].map(counterKey => ({
+			blockScope: `counter:${counterKey}`,
+			limits: getAntigravityCounterLimits(report, counterKey),
+		}));
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them
 	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo

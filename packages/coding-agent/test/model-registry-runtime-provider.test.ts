@@ -150,7 +150,15 @@ describe("ModelRegistry runtime provider registration", () => {
 				const url = String(input);
 				if (url === "https://api.meta.ai/v1/models") {
 					authorization = new Headers(init?.headers).get("Authorization") ?? "";
-					return Promise.resolve(Response.json({ data: [{ id: "muse-spark-1.3-contributor" }] }));
+					return Promise.resolve(
+						Response.json({
+							data: [
+								{ id: "muse-spark-1.3-contributor" },
+								{ id: "muse-image-1.0" },
+								{ id: "muse-voice-transcribe-1.0" },
+							],
+						}),
+					);
 				}
 				return Promise.reject(new Error(`network disabled for ${url}`));
 			},
@@ -159,7 +167,11 @@ describe("ModelRegistry runtime provider registration", () => {
 		await oauthRegistry.refreshProvider("meta", "online");
 
 		expect(authorization).toBe("Bearer LLM|subscription-catalog-key");
-		expect(getProviderModels(oauthRegistry, "meta").map(model => model.id)).toEqual(["muse-spark-1.3-contributor"]);
+		expect(
+			getProviderModels(oauthRegistry, "meta")
+				.map(model => model.id)
+				.sort(),
+		).toEqual(["muse-image-1.0", "muse-spark-1.3-contributor", "muse-voice-transcribe-1.0"]);
 	});
 
 	test("validates provider config before mutating custom API state", () => {

@@ -762,6 +762,7 @@ export class AgentSession {
 
 	#resetPromptMaintenanceState(): void {
 		this.#recovery.resetForNewPrompt();
+		this.#maintenance.resetForNewPrompt();
 		this.#yieldTerminationPending = false;
 	}
 
@@ -3309,6 +3310,13 @@ export class AgentSession {
 					await emitAgentEndNotification({ willContinue: true });
 					return;
 				}
+			} else if (this.#recovery.handleMalformedFunctionCallStop(msg)) {
+				// A malformed call with committed text cannot be replayed, but it
+				// never executed anything either: keep the turn and continue with a
+				// corrective reminder rather than stopping on a pinned error.
+				maintenanceRoute("malformed-function-call-handled");
+				await emitAgentEndNotification({ willContinue: true });
+				return;
 			} else if (this.#recovery.isHardErrorFallbackEligible(msg)) {
 				// A non-retryable hard error on a model covered by a configured
 				// fallback chain: retrying the SAME model is pointless, but a

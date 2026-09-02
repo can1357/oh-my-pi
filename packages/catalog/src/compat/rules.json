@@ -41,6 +41,7 @@
 		"providers/gitlab-duo.kdl",
 		"providers/gmi-cloud.kdl",
 		"providers/google-antigravity.kdl",
+		"providers/google-gemini-cli.kdl",
 		"providers/google-vertex.kdl",
 		"providers/google.kdl",
 		"providers/groq.kdl",
@@ -4701,7 +4702,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:93",
+				"source": "classes/gemini.kdl:94",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4719,7 +4720,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:99",
+				"source": "classes/gemini.kdl:100",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",
@@ -8249,7 +8250,23 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:11",
+				"source": "providers/google-antigravity.kdl:13",
+				"class": "gemini",
+				"providers": [
+					"google-antigravity"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "3.0.0"
+					}
+				],
+				"wire": {
+					"requiresSkipThoughtSignatureOnFirstFunctionCall": true
+				}
+			},
+			{
+				"source": "providers/google-antigravity.kdl:17",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -8277,7 +8294,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:21",
+				"source": "providers/google-antigravity.kdl:27",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -8295,7 +8312,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:27",
+				"source": "providers/google-antigravity.kdl:33",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -8316,7 +8333,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:33",
+				"source": "providers/google-antigravity.kdl:39",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8336,7 +8353,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:37",
+				"source": "providers/google-antigravity.kdl:43",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8351,7 +8368,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:41",
+				"source": "providers/google-antigravity.kdl:47",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8367,7 +8384,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:46",
+				"source": "providers/google-antigravity.kdl:52",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8383,6 +8400,22 @@
 						"low": 1001
 					},
 					"mode": "budget"
+				}
+			},
+			{
+				"source": "providers/google-gemini-cli.kdl:8",
+				"class": "gemini",
+				"providers": [
+					"google-gemini-cli"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "3.0.0"
+					}
+				],
+				"wire": {
+					"requiresSkipThoughtSignatureOnFirstFunctionCall": true
 				}
 			},
 			{
