@@ -537,6 +537,10 @@ async function runRpc(msg, socket) {
         relayInitiatedDetachTabs.delete(msg.tabId);
         throw error;
       }
+    case "forgetRecovery":
+      attachmentGuard.untrack(msg.tabId);
+      await forgetRecoverable(msg.tabId);
+      return {};
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
@@ -597,6 +601,7 @@ function scheduleReconnect() {
   setTimeout(() => void connect(), delay);
 }
 async function reconcileOrphans() {
+  await recoverableReady;
   const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
     ...attachmentStateEpochs.keys()
   ]);

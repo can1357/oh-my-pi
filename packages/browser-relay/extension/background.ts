@@ -720,6 +720,10 @@ async function runRpc(
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
+		case "forgetRecovery":
+			attachmentGuard.untrack(msg.tabId);
+			await forgetRecoverable(msg.tabId);
+			return {};
 		case "send":
 			return await chrome.debugger.sendCommand(
 				msg.sessionId
@@ -805,6 +809,9 @@ function scheduleReconnect(): void {
  * reclaims the surviving `chrome.debugger` infobar.
  */
 async function reconcileOrphans(): Promise<void> {
+	// Ownership is persisted across MV3 worker restarts. Load it before filtering
+	// getTargets so startup cannot discard a surviving extension attachment.
+	await recoverableReady;
 	// Snapshot every known epoch before awaiting getTargets so a detach that
 	// lands during the await bumps the epoch past this baseline and is filtered
 	// out of the re-track. The attached tab set is only known after getTargets,

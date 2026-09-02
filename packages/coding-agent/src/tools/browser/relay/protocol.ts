@@ -23,6 +23,7 @@ export interface TabSnapshot {
 export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
+	| { op: "forgetRecovery"; tabId: number }
 	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { op: "createTab"; url: string }
 	| { op: "removeTab"; tabId: number }

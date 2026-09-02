@@ -753,7 +753,19 @@ export class RelayBridge {
 				}
 				continue;
 			}
-			if (holders.length === 0) continue;
+			if (holders.length === 0) {
+				if (hasRecoveryMetadata && recoverableNow.has(tab.tabId)) {
+					void this.#rpc({ op: "forgetRecovery", tabId: tab.tabId }).catch(
+						(err) => {
+							this.#log("failed to release unheld recovery marker", {
+								tabId: tab.tabId,
+								error: err instanceof Error ? err.message : String(err),
+							});
+						},
+					);
+				}
+				continue;
+			}
 			// A relay-initiated detach can trigger a same-socket hello before the
 			// original recovery task receives its detach RPC result. That task already
 			// owns the reattach and journal replay; starting another here would replay

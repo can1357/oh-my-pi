@@ -579,6 +579,19 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
 	});
 
+	it("releases an unattached recovery marker with no downstream holders", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+
+		connect(bridge, ext, [tab({ tabId: 1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [1],
+		});
+		await flush();
+
+		expect(ext.rpcs("forgetRecovery").map((rpc) => rpc.tabId)).toEqual([1]);
+	});
+
 	it("retries inherited debugger attachment cleanup after detach RPC failure", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
