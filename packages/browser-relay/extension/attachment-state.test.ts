@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	consumeRelayInitiatedDetach,
+	createRetryableLoader,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
@@ -19,7 +20,9 @@ describe("attachment-state", () => {
 
 		noteAttachmentStateChange(epochs, 22);
 
-		expect(filterFreshAttachmentState(epochs, snapshot, tabIds)).toEqual([11, 33]);
+		expect(filterFreshAttachmentState(epochs, snapshot, tabIds)).toEqual([
+			11, 33,
+		]);
 	});
 
 	it("drops every tab when the caller freshness gate is already invalid", () => {
@@ -119,5 +122,27 @@ describe("attachment-state", () => {
 			"browser relay recovery state failed to load",
 		);
 		expect(() => requireRecoveryStateLoaded(true)).not.toThrow();
+	});
+
+	it("retries a transient startup load failure and then caches success", async () => {
+		const first = Promise.withResolvers<number>();
+		const second = Promise.withResolvers<number>();
+		let attempts = 0;
+		const load = createRetryableLoader(() => {
+			attempts++;
+			return attempts === 1 ? first.promise : second.promise;
+		});
+
+		const sharedFirst = load();
+		expect(load()).toBe(sharedFirst);
+		first.reject(new Error("storage unavailable"));
+		await expect(sharedFirst).rejects.toThrow("storage unavailable");
+
+		const retry = load();
+		expect(attempts).toBe(2);
+		second.resolve(42);
+		await expect(retry).resolves.toBe(42);
+		expect(load()).toBe(retry);
+		expect(attempts).toBe(2);
 	});
 });

@@ -70,6 +70,14 @@ export function shouldProceedWithOrphanSweep(
 	);
 }
 
+export async function runAfterStartupReconciliation(
+	reconcile: () => Promise<unknown>,
+	runSweep: () => Promise<void>,
+): Promise<void> {
+	await reconcile();
+	await runSweep();
+}
+
 export function orphanSweepAlarmDelayMinutes(
 	deadlineMs: number,
 	nowMs: number,
@@ -98,12 +106,14 @@ export function serializeOrphanSweepDeadlineUpdate(
 	persist: () => Promise<unknown>,
 	repairStaleAlarm: () => void,
 ): Promise<void> {
-	return previousUpdate.catch(() => {}).then(async () => {
-		await alarmUpdate.catch(() => {});
-		if (!isCurrent()) {
-			repairStaleAlarm();
-			return;
-		}
-		await persist().catch(() => {});
-	});
+	return previousUpdate
+		.catch(() => {})
+		.then(async () => {
+			await alarmUpdate.catch(() => {});
+			if (!isCurrent()) {
+				repairStaleAlarm();
+				return;
+			}
+			await persist().catch(() => {});
+		});
 }

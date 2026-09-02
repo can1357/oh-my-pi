@@ -88,6 +88,20 @@ function requireRecoveryStateLoaded(loaded) {
   if (!loaded)
     throw new Error("browser relay recovery state failed to load");
 }
+function createRetryableLoader(load) {
+  let pending = null;
+  return () => {
+    if (pending)
+      return pending;
+    const attempt = load().catch((error) => {
+      if (pending === attempt)
+        pending = null;
+      throw error;
+    });
+    pending = attempt;
+    return attempt;
+  };
+}
 function snapshotAttachmentState(epochs, tabIds) {
   const snapshot = new Map;
   for (const tabId of tabIds)
@@ -114,6 +128,10 @@ function shouldRunOrphanSweep(state) {
 }
 function shouldProceedWithOrphanSweep(state) {
   return state.disconnected && state.hasTrackedAttachments && !state.connectionReplaced;
+}
+async function runAfterStartupReconciliation(reconcile, runSweep) {
+  await reconcile();
+  await runSweep();
 }
 function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
   return Math.max((deadlineMs - nowMs) / 60000, 0.01);
@@ -177,7 +195,7 @@ var recoverableStartupMutations = new Set;
 var orphanSweepDeadlineMs = null;
 var connectionGeneration = 0;
 var orphanSweepDeadlineGeneration = 0;
-var recoverableReady = chrome.storage.session.get({
+var loadRecoverableState = createRetryableLoader(() => chrome.storage.session.get({
   [RECOVERABLE_TAB_IDS_KEY]: [],
   [LIVE_OWNED_TAB_IDS_KEY]: [],
   [ORPHAN_SWEEP_DEADLINE_KEY]: null
@@ -190,9 +208,10 @@ var recoverableReady = chrome.storage.session.get({
   if (deadline !== undefined)
     orphanSweepDeadlineMs = deadline;
   return true;
-}).catch(() => false);
-var recoverableUpdates = recoverableReady.then(() => {});
-var orphanSweepDeadlineUpdates = recoverableReady.then(() => {});
+}));
+var initialRecoverableReady = loadRecoverableState();
+var recoverableUpdates = initialRecoverableReady.catch(() => {});
+var orphanSweepDeadlineUpdates = initialRecoverableReady.catch(() => {});
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;
   invalidateHelloRefresh();
@@ -258,7 +277,7 @@ async function setOrphanSweepDeadline(deadlineMs) {
   await orphanSweepDeadlineUpdates;
 }
 async function maybeScheduleOrphanSweep(forceDisconnected = false) {
-  requireRecoveryStateLoaded(await recoverableReady);
+  requireRecoveryStateLoaded(await loadRecoverableState());
   await recoverableUpdates;
   const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
   if (nextDeadlineMs !== orphanSweepDeadlineMs)
@@ -487,7 +506,7 @@ function invalidateHelloRefresh() {
     helloRefresh.dirty = true;
 }
 async function buildHello() {
-  requireRecoveryStateLoaded(await recoverableReady);
+  requireRecoveryStateLoaded(await loadRecoverableState());
   await recoverableUpdates;
   const [tabs, targets] = await snapshotAfterPendingOperationsSettle(() => pendingOperationGeneration, () => [...pendingAttaches, ...pendingDetaches], () => Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]));
   const snapshots = [];
@@ -624,8 +643,7 @@ function scheduleReconnect() {
   setTimeout(() => void connect(), delay);
 }
 async function reconcileOrphans() {
-  if (!await recoverableReady)
-    return;
+  await loadRecoverableState();
   const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
     ...attachmentStateEpochs.keys()
   ]);
@@ -644,6 +662,7 @@ async function reconcileOrphans() {
   }
   await setOrphanSweepDeadline(null);
 }
+var ensureStartupReconciled = createRetryableLoader(reconcileOrphans);
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
     return;
@@ -738,8 +757,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     connect();
     return;
   }
-  if (alarm.name === ORPHAN_SWEEP_ALARM)
-    maybeRunOrphanSweep();
+  if (alarm.name === ORPHAN_SWEEP_ALARM) {
+    runAfterStartupReconciliation(ensureStartupReconciled, maybeRunOrphanSweep).catch(() => {});
+  }
 });
 chrome.storage.onChanged.addListener((_changes, areaName) => {
   if (areaName !== "local")
@@ -759,5 +779,5 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.runtime.onSuspend.addListener(() => {
   scheduleOrphanSweepBeforeSuspend();
 });
-reconcileOrphans();
+ensureStartupReconciled().catch(() => {});
 connect();

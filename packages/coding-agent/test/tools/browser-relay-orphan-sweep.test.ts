@@ -4,6 +4,7 @@ import {
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
 	restoreOrphanSweepDeadline,
+	runAfterStartupReconciliation,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -189,5 +190,22 @@ describe("browser relay orphan sweep scheduling", () => {
 		expect(restoreOrphanSweepDeadline(31_000, false)).toBeUndefined();
 		expect(restoreOrphanSweepDeadline(31_000, true)).toBe(31_000);
 		expect(restoreOrphanSweepDeadline(null, true)).toBeNull();
+	});
+
+	it("waits for startup ownership reconciliation before consuming an alarm", async () => {
+		const startup = deferred<void>();
+		let swept = false;
+		const run = runAfterStartupReconciliation(
+			() => startup.promise,
+			async () => {
+				swept = true;
+			},
+		);
+
+		await Promise.resolve();
+		expect(swept).toBe(false);
+		startup.resolve();
+		await run;
+		expect(swept).toBe(true);
 	});
 });

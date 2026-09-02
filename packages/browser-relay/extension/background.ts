@@ -17,6 +17,7 @@ import type {
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import {
 	consumeRelayInitiatedDetach,
+	createRetryableLoader,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
@@ -31,6 +32,7 @@ import {
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
 	restoreOrphanSweepDeadline,
+	runAfterStartupReconciliation,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -85,37 +87,41 @@ let orphanSweepDeadlineMs: number | null = null;
 // letting it cancel the new grace period and detach the just-lost live session.
 let connectionGeneration = 0;
 let orphanSweepDeadlineGeneration = 0;
-const recoverableReady = chrome.storage.session
-	.get({
-		[RECOVERABLE_TAB_IDS_KEY]: [],
-		[LIVE_OWNED_TAB_IDS_KEY]: [],
-		[ORPHAN_SWEEP_DEADLINE_KEY]: null,
-	})
-	.then((stored) => {
-		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
-		// A user detach can arrive before this startup read resolves. Never merge
-		// that stale snapshot after an in-memory ownership mutation has occurred.
-		restoreRecoverableState(
-			recoverableTabIds,
-			ids,
-			recoverableStartupMutations,
-		);
-		restoreRecoverableState(
-			liveOwnedTabIds,
-			stored[LIVE_OWNED_TAB_IDS_KEY],
-			recoverableStartupMutations,
-		);
-		recoverableStartupMutations.clear();
-		const deadline = restoreOrphanSweepDeadline(
-			stored[ORPHAN_SWEEP_DEADLINE_KEY],
-			orphanSweepDeadlineGeneration === 0,
-		);
-		if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
-		return true;
-	})
-	.catch(() => false);
-let recoverableUpdates: Promise<void> = recoverableReady.then(() => {});
-let orphanSweepDeadlineUpdates: Promise<void> = recoverableReady.then(() => {});
+const loadRecoverableState = createRetryableLoader(() =>
+	chrome.storage.session
+		.get({
+			[RECOVERABLE_TAB_IDS_KEY]: [],
+			[LIVE_OWNED_TAB_IDS_KEY]: [],
+			[ORPHAN_SWEEP_DEADLINE_KEY]: null,
+		})
+		.then((stored) => {
+			const ids = stored[RECOVERABLE_TAB_IDS_KEY];
+			// A user detach can arrive before this startup read resolves. Never merge
+			// that stale snapshot after an in-memory ownership mutation has occurred.
+			restoreRecoverableState(
+				recoverableTabIds,
+				ids,
+				recoverableStartupMutations,
+			);
+			restoreRecoverableState(
+				liveOwnedTabIds,
+				stored[LIVE_OWNED_TAB_IDS_KEY],
+				recoverableStartupMutations,
+			);
+			recoverableStartupMutations.clear();
+			const deadline = restoreOrphanSweepDeadline(
+				stored[ORPHAN_SWEEP_DEADLINE_KEY],
+				orphanSweepDeadlineGeneration === 0,
+			);
+			if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
+			return true;
+		}),
+);
+const initialRecoverableReady = loadRecoverableState();
+let recoverableUpdates: Promise<void> = initialRecoverableReady.catch(() => {});
+let orphanSweepDeadlineUpdates: Promise<void> = initialRecoverableReady.catch(
+	() => {},
+);
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 	pendingOperationGeneration++;
@@ -165,16 +171,22 @@ function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
 }
 
 function forgetRecoverable(tabId: number): Promise<void> {
-	return updateRecoverable(() => [tabId], () => {
-		recoverableTabIds.delete(tabId);
-		liveOwnedTabIds.delete(tabId);
-	});
+	return updateRecoverable(
+		() => [tabId],
+		() => {
+			recoverableTabIds.delete(tabId);
+			liveOwnedTabIds.delete(tabId);
+		},
+	);
 }
 
 function forgetLiveOwnership(tabId: number): Promise<void> {
-	return updateRecoverable(() => [tabId], () => {
-		liveOwnedTabIds.delete(tabId);
-	});
+	return updateRecoverable(
+		() => [tabId],
+		() => {
+			liveOwnedTabIds.delete(tabId);
+		},
+	);
 }
 
 async function setOrphanSweepDeadline(
@@ -220,7 +232,7 @@ async function setOrphanSweepDeadline(
 async function maybeScheduleOrphanSweep(
 	forceDisconnected = false,
 ): Promise<void> {
-	requireRecoveryStateLoaded(await recoverableReady);
+	requireRecoveryStateLoaded(await loadRecoverableState());
 	await recoverableUpdates;
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
 	if (nextDeadlineMs !== orphanSweepDeadlineMs)
@@ -634,7 +646,7 @@ async function buildHello(): Promise<
 	// too. Wait until the pending attach/detach set stays stable through the
 	// target snapshot; otherwise a same-socket refresh can still capture stale
 	// attached state, clear `tab.attaching`, and trigger a second recovery attach.
-	requireRecoveryStateLoaded(await recoverableReady);
+	requireRecoveryStateLoaded(await loadRecoverableState());
 	await recoverableUpdates;
 	const [tabs, targets] = await snapshotAfterPendingOperationsSettle(
 		() => pendingOperationGeneration,
@@ -837,7 +849,7 @@ function scheduleReconnect(): void {
 async function reconcileOrphans(): Promise<void> {
 	// Ownership is persisted across MV3 worker restarts. Load it before filtering
 	// getTargets so startup cannot discard a surviving extension attachment.
-	if (!(await recoverableReady)) return;
+	await loadRecoverableState();
 	// Snapshot every known epoch before awaiting getTargets so a detach that
 	// lands during the await bumps the epoch past this baseline and is filtered
 	// out of the re-track. The attached tab set is only known after getTargets,
@@ -878,6 +890,11 @@ async function reconcileOrphans(): Promise<void> {
 	}
 	await setOrphanSweepDeadline(null);
 }
+
+// An orphan-sweep alarm can be the event that wakes a fresh MV3 worker. Keep a
+// shared, retryable startup barrier so the alarm cannot inspect the guard before
+// persisted ownership has been loaded and reconciled into it.
+const ensureStartupReconciled = createRetryableLoader(reconcileOrphans);
 
 async function connect(): Promise<void> {
 	if (
@@ -1021,7 +1038,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 		void connect();
 		return;
 	}
-	if (alarm.name === ORPHAN_SWEEP_ALARM) void maybeRunOrphanSweep();
+	if (alarm.name === ORPHAN_SWEEP_ALARM) {
+		void runAfterStartupReconciliation(
+			ensureStartupReconciled,
+			maybeRunOrphanSweep,
+		).catch(() => {});
+	}
 });
 
 chrome.storage.onChanged.addListener((_changes, areaName) => {
@@ -1050,5 +1072,5 @@ chrome.runtime.onSuspend.addListener(() => {
 	scheduleOrphanSweepBeforeSuspend();
 });
 
-void reconcileOrphans();
+void ensureStartupReconciled().catch(() => {});
 void connect();

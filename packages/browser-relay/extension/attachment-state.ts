@@ -1,4 +1,7 @@
-export function noteAttachmentStateChange(epochs: Map<number, number>, tabId: number): void {
+export function noteAttachmentStateChange(
+	epochs: Map<number, number>,
+	tabId: number,
+): void {
 	epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
 
@@ -64,7 +67,26 @@ export function requireRecoveryStateLoaded(loaded: boolean): void {
 	if (!loaded) throw new Error("browser relay recovery state failed to load");
 }
 
-export function snapshotAttachmentState(epochs: Map<number, number>, tabIds: number[]): Map<number, number> {
+/** Share one load attempt, cache success, and allow a rejected attempt to retry. */
+export function createRetryableLoader<T>(
+	load: () => Promise<T>,
+): () => Promise<T> {
+	let pending: Promise<T> | null = null;
+	return () => {
+		if (pending) return pending;
+		const attempt = load().catch((error: unknown) => {
+			if (pending === attempt) pending = null;
+			throw error;
+		});
+		pending = attempt;
+		return attempt;
+	};
+}
+
+export function snapshotAttachmentState(
+	epochs: Map<number, number>,
+	tabIds: number[],
+): Map<number, number> {
 	const snapshot = new Map<number, number>();
 	for (const tabId of tabIds) snapshot.set(tabId, epochs.get(tabId) ?? 0);
 	return snapshot;
@@ -75,5 +97,7 @@ export function filterFreshAttachmentState(
 	snapshot: Map<number, number>,
 	tabIds: number[],
 ): number[] {
-	return tabIds.filter(tabId => (epochs.get(tabId) ?? 0) === (snapshot.get(tabId) ?? 0));
+	return tabIds.filter(
+		(tabId) => (epochs.get(tabId) ?? 0) === (snapshot.get(tabId) ?? 0),
+	);
 }
