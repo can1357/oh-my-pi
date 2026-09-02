@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { sliceWithWidth, visibleWidth } from "@oh-my-pi/pi-tui";
@@ -9,9 +9,14 @@ const STALE_MS = 24 * 60 * 60 * 1000;
 
 let flowCounter = 0;
 
+// One chain for every write this process issues: `persistLoginUrl` appends,
+// `loginUrlWritesSettled` awaits. Flows are rare and the payload is one line,
+// so serializing them costs nothing.
+let pendingWrites: Promise<void> = Promise.resolve();
+
 /**
- * Persist the authorization URL to a per-flow file and return its path, or
- * undefined when it could not be written.
+ * Start persisting the authorization URL to a per-flow file and return that
+ * file's path immediately.
  *
  * This is the byte-exact copy path that depends on nothing the terminal may or
  * may not support. A multi-row URL selected out of a full-screen frame carries
@@ -20,33 +25,51 @@ let flowCounter = 0;
  * are byte-exact but optional terminal features. Reading a short path that fits
  * one row works everywhere, including over SSH.
  *
- * Per-flow filename (pid plus an in-process counter): two omp processes with
- * concurrent OAuth flows would otherwise overwrite each other, and a second
- * flow in the same process would repoint the first panel's advertised command
- * at a URL whose `state` no longer matches. Files from dead processes are
- * removed once they are a day old. Mode 600: the URL carries only public
- * OAuth parameters, but there is no reason to share them.
+ * The write itself is fire-and-forget: every caller sits inside an OAuth
+ * `onAuth` callback on the render path, and a slow or network-backed agent dir
+ * must not stall the frame that shows the URL. The path is deterministic (pid
+ * plus an in-process counter), so the advertised command is correct before the
+ * write lands; the write is done long before a human can copy and run it. A
+ * failed write is logged, and the advertised `cat`/`type` then reports the
+ * missing file — the URL itself is still on screen either way.
+ *
+ * Per-flow filename: two omp processes with concurrent OAuth flows would
+ * otherwise overwrite each other, and a second flow in the same process would
+ * repoint the first panel's advertised command at a URL whose `state` no
+ * longer matches. Files from dead processes are removed once they are a day
+ * old. Mode 600: the URL carries only public OAuth parameters, but there is
+ * no reason to share them.
  */
-export function persistLoginUrl(url: string): string | undefined {
+export function persistLoginUrl(url: string): string {
 	const dir = getAgentDir();
 	const file = path.join(dir, `${FILE_PREFIX}${process.pid}-${++flowCounter}.txt`);
+	pendingWrites = pendingWrites.then(() => writeAndSweep(dir, file, url));
+	return file;
+}
+
+/** Resolves once every write issued by `persistLoginUrl` so far has settled. */
+export function loginUrlWritesSettled(): Promise<void> {
+	return pendingWrites;
+}
+
+async function writeAndSweep(dir: string, file: string, url: string): Promise<void> {
 	try {
-		fs.mkdirSync(dir, { recursive: true });
-		fs.writeFileSync(file, `${url}\n`, { mode: 0o600 });
+		await fs.mkdir(dir, { recursive: true });
+		await fs.writeFile(file, `${url}\n`, { mode: 0o600 });
 	} catch (error) {
 		logger.warn("Failed to persist login URL", {
 			path: file,
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return undefined;
+		return;
 	}
 	// Best-effort sweep of siblings left by dead processes.
 	try {
-		for (const name of fs.readdirSync(dir)) {
+		for (const name of await fs.readdir(dir)) {
 			if (!name.startsWith(FILE_PREFIX) || !name.endsWith(".txt") || name === path.basename(file)) continue;
 			const sibling = path.join(dir, name);
 			try {
-				if (Date.now() - fs.statSync(sibling).mtimeMs > STALE_MS) fs.unlinkSync(sibling);
+				if (Date.now() - (await fs.stat(sibling)).mtimeMs > STALE_MS) await fs.unlink(sibling);
 			} catch {
 				// A sibling that vanished mid-sweep or cannot be statted is not our problem.
 			}
@@ -54,7 +77,6 @@ export function persistLoginUrl(url: string): string | undefined {
 	} catch {
 		// The write above succeeded; a failed sweep must not cost the copy path.
 	}
-	return file;
 }
 
 /**

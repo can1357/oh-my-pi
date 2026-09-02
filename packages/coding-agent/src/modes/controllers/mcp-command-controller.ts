@@ -968,20 +968,20 @@ export class MCPCommandController {
 						{
 							// Byte-exact copy path: a wrapped selection carries row breaks
 							// and padding, and OSC 52/OSC 8 are optional terminal features.
+							// The write is fire-and-forget; the command derives from the
+							// deterministic path, so it renders now.
 							const urlFile = persistLoginUrl(info.url);
-							if (urlFile) {
-								block.addChild(
-									new WidthAwareText(
-										contentWidth =>
-											wrapCommandRow(
-												theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`),
-												contentWidth,
-											).join("\n"),
-										1,
-										0,
-									),
-								);
-							}
+							block.addChild(
+								new WidthAwareText(
+									contentWidth =>
+										wrapCommandRow(
+											theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`),
+											contentWidth,
+										).join("\n"),
+									1,
+									0,
+								),
+							);
 						}
 						this.ctx.ui.requestRender();
 					},
@@ -2479,9 +2479,7 @@ export class MCPCommandController {
 					: theme.fg("muted", "Browser launch disabled by BROWSER=none. Log in at the URL below."),
 				theme.fg("dim", "Authorize URL:"),
 				theme.fg("accent", session.authUrl),
-				...(smitheryUrlFile
-					? wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(smitheryUrlFile)}`), contentWidth)
-					: []),
+				...wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(smitheryUrlFile)}`), contentWidth),
 				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
 				"",
 			].join("\n"),

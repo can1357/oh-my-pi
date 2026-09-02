@@ -103,20 +103,17 @@ export class LoginDialogComponent extends OverlayPanel {
 		// selection carries row breaks and padding, and OSC 52/OSC 8 are optional.
 		// The command row wraps byte-complete by column: plain `Text` word-wraps
 		// and swallows the space at each break, displaying a path that does not
-		// exist when the agent dir carries spaces.
+		// exist when the agent dir carries spaces. The write is fire-and-forget;
+		// the command derives from the deterministic path, so it renders now.
 		const urlFile = persistLoginUrl(url);
-		if (urlFile) {
-			this.#contentContainer.addChild(
-				new WidthAwareText(
-					contentWidth =>
-						wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), contentWidth).join(
-							"\n",
-						),
-					0,
-					0,
-				),
-			);
-		}
+		this.#contentContainer.addChild(
+			new WidthAwareText(
+				contentWidth =>
+					wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), contentWidth).join("\n"),
+				0,
+				0,
+			),
+		);
 
 		// Open browser (best-effort). `false` means BROWSER=none suppressed the
 		// launch: say so, or the provider's "a browser window should open"

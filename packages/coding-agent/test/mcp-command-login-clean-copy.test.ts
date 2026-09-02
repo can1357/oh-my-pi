@@ -12,7 +12,7 @@ import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controller
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { loginUrlCopyCommand } from "@oh-my-pi/pi-coding-agent/utils/login-url";
+import { loginUrlCopyCommand, loginUrlWritesSettled } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import * as openModule from "@oh-my-pi/pi-coding-agent/utils/open";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -115,6 +115,9 @@ describe("mcp-command-controller clean-copy rendering", () => {
 	});
 
 	afterEach(async () => {
+		// A persisted-URL write still in flight would re-create the temp agent
+		// dir after the removal below.
+		await loginUrlWritesSettled();
 		while (openAuthStores.length > 0) openAuthStores.pop()?.close();
 		vi.restoreAllMocks();
 		setProjectDir(originalProjectDir);
@@ -150,6 +153,8 @@ describe("mcp-command-controller clean-copy rendering", () => {
 
 		await controller.handle("/mcp reauth envserver");
 
+		// The persisted-URL write is fire-and-forget off the render path.
+		await loginUrlWritesSettled();
 		const urlFileName = (await fs.readdir(agentDir)).find(name => name.startsWith("login-url-"));
 		expect(urlFileName).toBeDefined();
 		const expected = `Clean copy: ${loginUrlCopyCommand(path.join(agentDir, urlFileName as string))}`;
@@ -179,6 +184,7 @@ describe("mcp-command-controller clean-copy rendering", () => {
 		await controller.handle("/mcp smithery-login");
 
 		expect(showStatus).toHaveBeenCalledWith("Smithery API key saved.");
+		await loginUrlWritesSettled();
 		const urlFileName = (await fs.readdir(agentDir)).find(name => name.startsWith("login-url-"));
 		expect(urlFileName).toBeDefined();
 		const expected = `Clean copy: ${loginUrlCopyCommand(path.join(agentDir, urlFileName as string))}`;

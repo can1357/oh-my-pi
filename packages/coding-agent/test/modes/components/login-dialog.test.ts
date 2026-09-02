@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LoginDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/login-dialog";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { loginUrlCopyCommand } from "@oh-my-pi/pi-coding-agent/utils/login-url";
+import { loginUrlCopyCommand, loginUrlWritesSettled } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import * as openModule from "@oh-my-pi/pi-coding-agent/utils/open";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -22,7 +22,10 @@ beforeAll(async () => {
 	await initTheme();
 });
 
-afterEach(() => {
+afterEach(async () => {
+	// A persisted-URL write still in flight would re-create the temp dir
+	// after the rm below.
+	await loginUrlWritesSettled();
 	settings.clearOverride("tui.hyperlinks");
 	vi.restoreAllMocks();
 	if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
@@ -59,7 +62,7 @@ describe("LoginDialogComponent", () => {
 	// word-wraps the clean-copy row and swallows the space at each break, so a
 	// spaced agent dir displayed a command whose path does not exist. The row
 	// wraps byte-complete by column instead.
-	it("keeps the clean-copy command byte-complete across wrapped rows", () => {
+	it("keeps the clean-copy command byte-complete across wrapped rows", async () => {
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "login dialog spaced agent dir "));
 		vi.spyOn(piUtils, "getAgentDir").mockReturnValue(tmp);
 		vi.spyOn(openModule, "openPath").mockImplementation(() => true);
@@ -67,6 +70,8 @@ describe("LoginDialogComponent", () => {
 		const dialog = new LoginDialogComponent(tui, "google-antigravity", () => {});
 
 		dialog.showAuth("https://auth.example.com/oauth/authorize?state=narrow");
+		// The persisted-URL write is fire-and-forget off the render path.
+		await loginUrlWritesSettled();
 		const urlFileName = fs.readdirSync(tmp).find(name => name.startsWith("login-url-"));
 		expect(urlFileName).toBeDefined();
 		const expected = `Clean copy: ${loginUrlCopyCommand(path.join(tmp, urlFileName as string))}`;

@@ -8,7 +8,7 @@ import { SignInTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/s
 import type { SetupSceneHost } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { loginUrlCopyCommand } from "@oh-my-pi/pi-coding-agent/utils/login-url";
+import { loginUrlCopyCommand, loginUrlWritesSettled } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import type { Component } from "@oh-my-pi/pi-tui";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
@@ -263,6 +263,8 @@ describe("SignInTab", () => {
 			}
 			tab.handleInput("\n");
 
+			// The persisted-URL write is fire-and-forget off the render path.
+			await loginUrlWritesSettled();
 			const urlFileName = fs.readdirSync(agentDir).find(name => name.startsWith("login-url-"));
 			expect(urlFileName).toBeDefined();
 			const expected = `Clean copy: ${loginUrlCopyCommand(path.join(agentDir, urlFileName as string))}`;
@@ -282,6 +284,8 @@ describe("SignInTab", () => {
 			tab.dispose();
 			loginGate.resolve();
 			await loginGate.promise;
+			// A write still in flight would re-create the dir after the rm.
+			await loginUrlWritesSettled();
 			fs.rmSync(agentDir, { recursive: true, force: true });
 		}
 	});

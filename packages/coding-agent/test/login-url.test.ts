@@ -1,9 +1,14 @@
+import { $ } from "bun";
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "@oh-my-pi/pi-coding-agent/utils/login-url";
+import {
+	loginUrlCopyCommand,
+	loginUrlWritesSettled,
+	persistLoginUrl,
+	wrapCommandRow,
+} from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 // Redirected per test: writing to the real agent dir would overwrite or delete
@@ -20,7 +25,9 @@ function setPlatform(value: NodeJS.Platform): void {
 	Object.defineProperty(process, "platform", { value, configurable: true });
 }
 
-afterEach(() => {
+afterEach(async () => {
+	// A write still in flight would re-create the temp dir after the rm below.
+	await loginUrlWritesSettled();
 	// The spy must not outlive the temp dir it points at.
 	vi.restoreAllMocks();
 	if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
@@ -29,29 +36,35 @@ afterEach(() => {
 });
 
 describe("persistLoginUrl", () => {
-	it("writes the URL byte-exact to a per-flow path, mode 600", () => {
+	it("writes the URL byte-exact to a per-flow path, mode 600", async () => {
 		const dir = useTempAgentDir();
 		const url = `https://auth.example.com/oauth/authorize?code_challenge=${"B".repeat(43)}&state=${"s".repeat(64)}`;
-		const returned = persistLoginUrl(url) as string;
+		const returned = persistLoginUrl(url);
 		// Per-process pid plus per-flow counter: neither a concurrent omp login
 		// nor a later flow in this process may overwrite an advertised file.
 		expect(path.dirname(returned)).toBe(dir);
 		expect(path.basename(returned)).toMatch(new RegExp(`^login-url-${process.pid}-\\d+\\.txt$`));
+		// The write must not block the caller: it runs inside OAuth `onAuth`
+		// callbacks on the render path. Synchronously after the call the file
+		// cannot exist yet — a regression to sync IO makes this line fail.
+		expect(fs.existsSync(returned)).toBe(false);
+		await loginUrlWritesSettled();
 		// Byte-exact: the whole point is that no terminal artifact touches it.
 		expect(fs.readFileSync(returned, "utf8")).toBe(`${url}\n`);
 		expect(fs.statSync(returned).mode & 0o777).toBe(0o600);
 	});
 
-	it("gives each flow its own file so an earlier copy command keeps its URL", () => {
+	it("gives each flow its own file so an earlier copy command keeps its URL", async () => {
 		useTempAgentDir();
-		const first = persistLoginUrl("https://x.test/first") as string;
-		const second = persistLoginUrl("https://x.test/second") as string;
+		const first = persistLoginUrl("https://x.test/first");
+		const second = persistLoginUrl("https://x.test/second");
 		expect(second).not.toBe(first);
+		await loginUrlWritesSettled();
 		expect(fs.readFileSync(first, "utf8")).toBe("https://x.test/first\n");
 		expect(fs.readFileSync(second, "utf8")).toBe("https://x.test/second\n");
 	});
 
-	it("sweeps day-old files from dead processes, keeps fresh ones", () => {
+	it("sweeps day-old files from dead processes, keeps fresh ones", async () => {
 		const dir = useTempAgentDir();
 		const stale = path.join(dir, "login-url-99999.txt");
 		const fresh = path.join(dir, "login-url-88888.txt");
@@ -61,6 +74,7 @@ describe("persistLoginUrl", () => {
 		fs.utimesSync(stale, dayAgo, dayAgo);
 
 		persistLoginUrl("https://x.test/a");
+		await loginUrlWritesSettled();
 
 		expect(() => fs.statSync(stale)).toThrow();
 		expect(fs.readFileSync(fresh, "utf8")).toBe("new\n");
@@ -79,7 +93,7 @@ describe("loginUrlCopyCommand (posix)", () => {
 		expect(loginUrlCopyCommand("/tmp/agent dir/login-url-1.txt")).toBe("cat '/tmp/agent dir/login-url-1.txt'");
 	});
 
-	it("keeps ~ outside the quotes when a home path needs quoting", () => {
+	it("keeps ~ outside the quotes when a home path needs quoting", async () => {
 		if (process.platform === "win32") return;
 		const home = os.homedir();
 		// The tilde must stay outside the single quotes to expand; the rest of
@@ -90,13 +104,13 @@ describe("loginUrlCopyCommand (posix)", () => {
 			"cat ~/'o'\\''brien $(x)/login-url-1.txt'",
 		);
 		// The advertised word must actually resolve under tilde expansion: echo
-		// it through a real shell with HOME pointed at a temp dir.
+		// it through a real shell with HOME pointed at a temp dir. (`sh` on
+		// purpose — the command is advertised to the user's POSIX shell, not to
+		// Bun Shell's interpreter.)
 		const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "login-url-home-"));
 		try {
 			const word = cmd.slice("cat ".length);
-			const resolved = execFileSync("sh", ["-c", `printf %s ${word}`], {
-				env: { ...process.env, HOME: fakeHome },
-			}).toString();
+			const resolved = await $`sh -c ${`printf %s ${word}`}`.env({ ...process.env, HOME: fakeHome }).text();
 			expect(resolved).toBe(`${fakeHome}/.omp agent/login-url-1.txt`);
 		} finally {
 			fs.rmSync(fakeHome, { recursive: true, force: true });
@@ -156,8 +170,14 @@ describe("loginUrlCopyCommand (win32)", () => {
 });
 
 describe("wrapCommandRow", () => {
-	it("returns a fitting row untouched", () => {
-		expect(wrapCommandRow("cat ~/.omp/agent/login-url-1.txt", 44)).toEqual(["cat ~/.omp/agent/login-url-1.txt"]);
+	it("wraps exactly at the width boundary, never one column early", () => {
+		const cmd = "cat ~/.omp/agent/login-url-1.txt";
+		// A command exactly as wide as the row must stay on one row: an
+		// off-by-one here wraps every borderline command for no reason.
+		expect(wrapCommandRow(cmd, cmd.length)).toEqual([cmd]);
+		// One column narrower must wrap, and both rows together must carry
+		// every byte of the command.
+		expect(wrapCommandRow(cmd, cmd.length - 1)).toEqual([cmd.slice(0, -1), cmd.slice(-1)]);
 	});
 
 	it("keeps every byte when a break lands on a space", () => {
