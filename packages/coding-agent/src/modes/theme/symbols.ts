@@ -1325,7 +1325,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.review": "rev",
 	"tool.inspectImage": "[i]",
 	"tool.goal": "(o)",
-	"tool.irc": "irc",
+	"tool.irc": "#",
 	"tool.delete": "rm",
 	"tool.move": "mv",
 };
