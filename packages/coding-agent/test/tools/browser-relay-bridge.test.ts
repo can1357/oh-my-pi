@@ -3914,6 +3914,100 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it.each(["remove", "retry"] as const)(
+		"forces a fresh root when the navigation preload %s loses its result",
+		async interruptedMutation => {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId: pageSession,
+					method: "Page.addScriptToEvaluateOnNewDocument",
+					params: {
+						source: "window.__relayInjected = true;",
+						runImmediately: true,
+					},
+				}),
+			);
+			await waitFor(() =>
+				ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
+			);
+			ack(bridge, ext, "send", {
+				frameTree: { frame: { loaderId: "loader-before" } },
+			});
+			await waitFor(() =>
+				ext
+					.pending("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			);
+			ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+			await flush();
+
+			bridge.extClosed(ext);
+			const ext2 = new FakeExtSocket();
+			connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+				recoverableTabIds: [1],
+			});
+			await waitFor(() => ext2.pending("attach").length === 1);
+			ack(bridge, ext2, "attach");
+			await waitFor(() =>
+				ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
+			);
+			ack(bridge, ext2, "send", {
+				frameTree: { frame: { loaderId: "loader-before" } },
+			});
+			await waitFor(() =>
+				ext2
+					.pending("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			);
+			ack(bridge, ext2, "send", { identifier: "root-script-replayed" });
+			await waitFor(() =>
+				ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
+			);
+			ack(bridge, ext2, "send", {
+				frameTree: { frame: { loaderId: "loader-after-navigation" } },
+			});
+			await waitFor(() =>
+				ext2
+					.pending("send")
+					.some((rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
+			);
+			if (interruptedMutation === "retry") {
+				ack(bridge, ext2, "send");
+				await waitFor(() =>
+					ext2
+						.pending("send")
+						.some(
+							(rpc) =>
+								rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
+								(rpc.params as { runImmediately?: boolean } | undefined)
+									?.runImmediately === true,
+						),
+				);
+			}
+			bridge.extClosed(ext2);
+			await flush();
+
+			const ext3 = new FakeExtSocket();
+			connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+				attachedTabIds: [1],
+				recoverableTabIds: [1],
+			});
+			await waitFor(
+				() => ext3.pending("detach").length === 1,
+				`fresh-root detach after interrupted navigation preload ${interruptedMutation}`,
+			);
+		},
+	);
+
 	it("reruns immediate preload scripts on a forced fresh root", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
