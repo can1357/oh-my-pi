@@ -1509,8 +1509,33 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text);
+  font-family: inherit;
   font-size: 12px;
   padding: 6px 10px;
+}
+
+/* Prevent iOS from zooming the viewport when a search input receives focus
+   (mirrors the .stats-select coarse-pointer treatment). */
+@media (pointer: coarse) {
+  .stats-trace-input {
+    font-size: 16px;
+  }
+}
+
+/* Native clear button is a dark glyph in WebKit; keep it visible in the dark
+   theme by inverting it (no-op in light). */
+.stats-trace-input::-webkit-search-cancel-button {
+  filter: invert(1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .stats-trace-input::-webkit-search-cancel-button {
+    filter: none;
+  }
+}
+
+[data-theme="light"] .stats-trace-input::-webkit-search-cancel-button {
+  filter: none;
 }
 
 .stats-trace-input:focus-visible {
@@ -1530,6 +1555,11 @@
   color: var(--muted);
   cursor: pointer;
   user-select: none;
+}
+
+/* Brand-tint the native checkbox instead of leaving the browser default. */
+.stats-trace-check input[type="checkbox"] {
+  accent-color: var(--accent);
 }
 
 .stats-trace-icon-btn {
