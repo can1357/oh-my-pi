@@ -2075,12 +2075,35 @@ export class RelayBridge {
 						continue;
 					}
 					this.#assertExtensionCurrent(expectedExt);
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: command.method,
-						params: command.params,
-					});
+					try {
+						await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							method: command.method,
+							params: command.params,
+						});
+					} catch (err) {
+						// A transport swap must abort the loop so every queued change
+						// survives for the replacement hello. A normal CDP failure only
+						// invalidates the attempted key; keep draining unrelated cleanup.
+						if (isExtensionTransportInterrupted(err)) throw err;
+						this.#assertExtensionCurrent(expectedExt);
+						const failed = tab.pendingSubscriptionReconcile.find(
+							(candidate) => candidate.key === change.key,
+						);
+						if (failed && subscriptionChangeEquals(failed, queued)) {
+							tab.pendingSubscriptionReconcile =
+								tab.pendingSubscriptionReconcile.filter(
+									(candidate) => candidate.key !== change.key,
+								);
+						}
+						this.#log("live subscription cleanup entry failed", {
+							tabId: tab.tabId,
+							key: change.key,
+							error: err instanceof Error ? err.message : String(err),
+						});
+						continue;
+					}
 					this.#assertExtensionCurrent(expectedExt);
 					const after = tab.pendingSubscriptionReconcile.find(
 						(candidate) => candidate.key === change.key,

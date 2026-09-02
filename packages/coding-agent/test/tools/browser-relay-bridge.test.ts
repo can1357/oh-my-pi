@@ -2352,6 +2352,61 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
+	it("retains later live subscription cleanups after one RPC fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.setInterceptFileChooserDialog",
+				params: { enabled: true },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(
+			() => ext.pending("send").length === 1,
+			"first live cleanup",
+		);
+		expect(ext.pending("send")[0]).toMatchObject({ method: "Fetch.disable" });
+		nack(bridge, ext, "send", "Fetch cleanup rejected");
+
+		await waitFor(
+			() => ext.pending("send").length === 1,
+			"later live cleanup after an earlier failure",
+		);
+		expect(ext.pending("send")[0]).toMatchObject({
+			method: "Page.setInterceptFileChooserDialog",
+			params: { enabled: false },
+		});
+		ack(bridge, ext, "send");
+		await flush();
+	});
+
 	it("reapplies the latest surviving live root subscription when an orphaned in-flight setter completes", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
