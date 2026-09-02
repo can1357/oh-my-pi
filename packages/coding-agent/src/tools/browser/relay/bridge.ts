@@ -3166,10 +3166,12 @@ export class RelayBridge {
 		// reconciliation, so a `false` here is a retryable transport swap — not a
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
+		let refreshedRoot = false;
 		const restoring = (async () => {
 			let ok: boolean;
 			try {
-				ok = tab.forceFreshRootBeforeReplay
+				refreshedRoot = tab.forceFreshRootBeforeReplay;
+				ok = refreshedRoot
 					? await this.#refreshRootForRecovery(tab, ext)
 					: !attach || (await this.#ensureAttached(tab));
 			} catch (err) {
@@ -3234,7 +3236,12 @@ export class RelayBridge {
 			}
 			if (tab.restorePending) {
 				try {
-					await this.#restorePreservedSubscriptions(tab, keepPageSessions, ext);
+					await this.#restorePreservedSubscriptions(
+						tab,
+						keepPageSessions,
+						ext,
+						refreshedRoot,
+					);
 				} catch (err) {
 					// A replacement keeps the journal pending. Its hello restarts the
 					// complete replay even when Chrome still reports the root attached,
@@ -3387,6 +3394,7 @@ export class RelayBridge {
 		tab: TabState,
 		conns: CdpConnection[],
 		expectedExt: RelaySocket | null,
+		refreshedRoot: boolean,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
@@ -3468,6 +3476,7 @@ export class RelayBridge {
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
 			const replayParams =
+				!refreshedRoot &&
 				script.params &&
 				typeof script.params === "object" &&
 				"runImmediately" in script.params

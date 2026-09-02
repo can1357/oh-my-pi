@@ -3893,6 +3893,71 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("reruns immediate preload scripts on a forced fresh root", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: {
+					source: "window.__relayInjected = true;",
+					runImmediately: true,
+				},
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		// Lose a mutating result so recovery must detach and establish a fresh root.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Fetch.enable",
+			}),
+		);
+		await waitFor(
+			() => ext.pending("send").some((rpc) => rpc.method === "Fetch.enable"),
+			"ambiguous root mutation",
+		);
+		bridge.extClosed(ext);
+		await flush();
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.pending("detach").length === 1);
+		ack(bridge, ext2, "detach");
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() =>
+				ext2
+					.pending("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"immediate preload replay on fresh root",
+		);
+		const replay = ext2
+			.pending("send")
+			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toEqual({
+			source: "window.__relayInjected = true;",
+			runImmediately: true,
+		});
+	});
+
 	it("replays preserved preload scripts on a fresh root after a replacement loses the replay result", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
