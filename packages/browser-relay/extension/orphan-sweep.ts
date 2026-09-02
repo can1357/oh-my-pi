@@ -76,3 +76,24 @@ export function orphanSweepAlarmDelayMinutes(
 ): number {
 	return Math.max((deadlineMs - nowMs) / 60_000, 0.01);
 }
+
+/**
+ * Finish an alarm mutation before persisting its matching deadline. Deadline
+ * updates are queued so an older clear cannot write `null` after a newer arm.
+ */
+export function serializeOrphanSweepDeadlineUpdate(
+	previousUpdate: Promise<void>,
+	alarmUpdate: Promise<unknown>,
+	isCurrent: () => boolean,
+	persist: () => Promise<unknown>,
+	repairStaleAlarm: () => void,
+): Promise<void> {
+	return previousUpdate.catch(() => {}).then(async () => {
+		await alarmUpdate.catch(() => {});
+		if (!isCurrent()) {
+			repairStaleAlarm();
+			return;
+		}
+		await persist().catch(() => {});
+	});
+}

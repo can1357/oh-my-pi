@@ -3,9 +3,15 @@ import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
+	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "../../../browser-relay/extension/orphan-sweep";
+
+function deferred<T>() {
+	const { promise, resolve } = Promise.withResolvers<T>();
+	return { promise, resolve };
+}
 
 describe("browser relay orphan sweep scheduling", () => {
 	it("starts the grace deadline when tracked attachments first become orphaned", () => {
@@ -143,5 +149,38 @@ describe("browser relay orphan sweep scheduling", () => {
 				connectionReplaced: true,
 			}),
 		).toBe(false);
+	});
+
+	it("does not persist a stale clear over a newer deadline", async () => {
+		const clear = deferred<void>();
+		const persisted: Array<number | null> = [];
+		const repaired: number[] = [];
+		let generation = 1;
+		let pending = serializeOrphanSweepDeadlineUpdate(
+			Promise.resolve(),
+			clear.promise,
+			() => generation === 1,
+			async () => {
+				persisted.push(null);
+			},
+			() => repaired.push(31_000),
+		);
+
+		generation = 2;
+		pending = serializeOrphanSweepDeadlineUpdate(
+			pending,
+			Promise.resolve(),
+			() => generation === 2,
+			async () => {
+				persisted.push(31_000);
+			},
+			() => repaired.push(31_000),
+		);
+
+		clear.resolve();
+		await pending;
+
+		expect(repaired).toEqual([31_000]);
+		expect(persisted).toEqual([31_000]);
 	});
 });

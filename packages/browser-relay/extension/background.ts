@@ -24,6 +24,7 @@ import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
+	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
@@ -72,6 +73,7 @@ let orphanSweepDeadlineMs: number | null = null;
 // fresh grace deadline during the await can veto the stale sweep instead of
 // letting it cancel the new grace period and detach the just-lost live session.
 let connectionGeneration = 0;
+let orphanSweepDeadlineGeneration = 0;
 const recoverableReady = chrome.storage.session
 	.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null })
 	.then((stored) => {
@@ -87,6 +89,7 @@ const recoverableReady = chrome.storage.session
 	})
 	.catch(() => {});
 let recoverableUpdates: Promise<void> = recoverableReady;
+let orphanSweepDeadlineUpdates: Promise<void> = recoverableReady;
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 	pendingOperationGeneration++;
@@ -123,17 +126,41 @@ function forgetRecoverable(tabId: number): Promise<void> {
 async function setOrphanSweepDeadline(
 	deadlineMs: number | null,
 ): Promise<void> {
+	const generation = ++orphanSweepDeadlineGeneration;
 	orphanSweepDeadlineMs = deadlineMs;
+	let alarmUpdate: Promise<unknown> = Promise.resolve();
 	if (deadlineMs === null) {
-		await chrome.alarms.clear(ORPHAN_SWEEP_ALARM).catch(() => {});
+		// Start the clear immediately: onSuspend cannot rely on work deferred to a
+		// promise continuation. The serialized completion below prevents this
+		// clear from later persisting null over a newer deadline.
+		alarmUpdate = chrome.alarms.clear(ORPHAN_SWEEP_ALARM);
 	} else {
 		chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
 			delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now()),
 		});
 	}
-	await chrome.storage.session
-		.set({ [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs })
-		.catch(() => {});
+	orphanSweepDeadlineUpdates = serializeOrphanSweepDeadlineUpdate(
+		orphanSweepDeadlineUpdates,
+		alarmUpdate,
+		() => generation === orphanSweepDeadlineGeneration,
+		() =>
+			chrome.storage.session.set({
+				[ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs,
+			}),
+		() => {
+			// A stale clear may have raced a newer create in Chrome. Re-arm the
+			// current deadline as well as suppressing the stale storage write.
+			if (orphanSweepDeadlineMs !== null) {
+				chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
+					delayInMinutes: orphanSweepAlarmDelayMinutes(
+						orphanSweepDeadlineMs,
+						Date.now(),
+					),
+				});
+			}
+		},
+	);
+	await orphanSweepDeadlineUpdates;
 }
 
 async function maybeScheduleOrphanSweep(
