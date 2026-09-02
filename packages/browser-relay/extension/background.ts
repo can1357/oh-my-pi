@@ -1156,6 +1156,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 		return;
 	}
 	if (alarm.name === ORPHAN_SWEEP_ALARM) {
+		// Apply the alarm's own timestamp before startup reconciliation can observe
+		// a missing persisted value and mistakenly arm a fresh grace period.
+		if (orphanSweepDeadlineMs === null)
+			orphanSweepDeadlineMs = alarm.scheduledTime;
 		void runAfterStartupReconciliation(ensureStartupReconciled, () =>
 			maybeRunOrphanSweep(alarm.scheduledTime),
 		).catch(() => {});

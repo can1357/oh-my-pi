@@ -849,6 +849,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
   if (alarm.name === ORPHAN_SWEEP_ALARM) {
+    if (orphanSweepDeadlineMs === null)
+      orphanSweepDeadlineMs = alarm.scheduledTime;
     runAfterStartupReconciliation(ensureStartupReconciled, () => maybeRunOrphanSweep(alarm.scheduledTime)).catch(() => {});
   }
 });
