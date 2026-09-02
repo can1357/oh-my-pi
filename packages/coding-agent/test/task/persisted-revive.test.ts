@@ -72,6 +72,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 			lastAssistantText === undefined
 				? undefined
 				: { role: "assistant", content: [{ type: "text", text: lastAssistantText }], stopReason: "stop" },
+		discoverStartupSkillPaths: async () => {},
 		extensionRunner,
 	} as unknown as AgentSession;
 	return {

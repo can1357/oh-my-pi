@@ -804,7 +804,11 @@ async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): 
 	const p = await resolvePromptInput(src, "title system prompt");
 	runtime.session.setTitleSystemPrompt(p);
 	resetCapabilities();
-	await runtime.session.refreshSkills();
+	// No direct `refreshSkills()` here: `runtime.reloadPlugins()` below
+	// refreshes skills in every implementation (RPC `reloadPluginState`, ACP
+	// `#reloadPluginState`, TUI `reloadTuiPluginState`), and `refreshSkills`
+	// emits `resources_discover` (reason "reload") — calling it here too ran
+	// every reload handler twice per `/move`.
 	const cmds = await loadSlashCommands({
 		cwd,
 		extensionRoots: runtime.session.effectiveExtensionRoots,

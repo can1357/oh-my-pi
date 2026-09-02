@@ -180,6 +180,13 @@ export interface AgentSessionConfig {
 	skillWarnings?: SkillWarning[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
 	skillsReloadable?: boolean;
+	/**
+	 * A fixed `skills` snapshot was forwarded for perf (subagent inheriting
+	 * its parent's discovery), not to freeze the set: `discoverStartupSkillPaths`
+	 * still merges directories the subagent's own `resources_discover`
+	 * handlers contribute at its own startup into the inherited snapshot.
+	 */
+	mergeDiscoveredSkillPaths?: boolean;
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;

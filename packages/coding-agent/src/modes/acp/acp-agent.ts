@@ -2535,16 +2535,33 @@ export class AcpAgent implements Agent {
 			record.extensionsConfigured = true;
 			return;
 		}
+		// resources_discover and session_start handlers share this action context, so
+		// a handler calling sendMessage/sendUserMessage starts an async session send
+		// that the action itself does not expose a promise for. Track every such
+		// send here so they can be drained before returning — mirrors
+		// `initializeExtensions`'s equivalent queue (runtime-init.ts,
+		// `pendingExtensionSends`), which print/RPC mode use instead of this
+		// direct-wiring path.
+		const pendingExtensionSends: Promise<unknown>[] = [];
+		const drainPendingExtensionSends = async (): Promise<void> => {
+			while (pendingExtensionSends.length > 0) {
+				await Promise.all(pendingExtensionSends.splice(0));
+			}
+		};
 
 		extensionRunner.initialize(
 			{
 				sendMessage: (message, options) => {
-					record.session.sendCustomMessage(message, options).catch((error: unknown) => {
-						logger.warn("ACP extension sendMessage failed", { error });
-					});
+					pendingExtensionSends.push(
+						record.session.sendCustomMessage(message, options).catch((error: unknown) => {
+							logger.warn("ACP extension sendMessage failed", { error });
+						}),
+					);
 				},
 				sendUserMessage: (content, options) => {
-					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+					const sendTask = record.session.sendUserMessage(content, options);
+					this.#trackExtensionUserMessage(record, sendTask);
+					pendingExtensionSends.push(sendTask.catch(() => {}));
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
@@ -2616,6 +2633,22 @@ export class AcpAgent implements Agent {
 			"rpc",
 		);
 		await extensionRunner.emit({ type: "session_start" });
+		// A session_start handler can call sendMessage/sendUserMessage (e.g. to
+		// announce startup state) from the same shared action context as any
+		// other handler; drain those before resources_discover so they land in
+		// order.
+		await drainPendingExtensionSends();
+		// resources_discover fires after `session_start` (extensibility/extensions/types.ts) —
+		// only now are runtime actions wired, so extension-contributed skill directories
+		// are folded into the session's skill snapshot before the first prompt.
+		await record.session.discoverStartupSkillPaths();
+		// A resources_discover handler can likewise call sendMessage/sendUserMessage
+		// (e.g. to announce a discovered directory); the action starts the send but
+		// never exposes its promise, so without this an immediate `session/prompt`
+		// could observe the session as still streaming and race the startup turn.
+		// Drain before returning so every extension-triggered send is settled —
+		// mirrors `initializeExtensions`'s post-discovery drain (runtime-init.ts).
+		await drainPendingExtensionSends();
 		record.extensionsConfigured = true;
 	}
 

@@ -126,6 +126,11 @@ export interface LoadSkillsOptions extends SkillsSettings {
 	 * extensions all survive outside the construction-time invocation scope.
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
+	/**
+	 * Skill directories contributed by extensions via the `resources_discover`
+	 * event (`skillPaths`). Scanned like `customDirectories`; not a settings key.
+	 */
+	extensionDirectories?: string[];
 }
 
 /**
@@ -144,6 +149,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enableAgentsUser = true,
 		enableAgentsProject = true,
 		customDirectories = [],
+		extensionDirectories = [],
 		ignoredSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
@@ -254,39 +260,51 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		}
 	}
 
-	const customDirectoryResults = await Promise.all(
-		customDirectories.map(async dir => {
+	// Explicitly configured directory sources: user settings first, then
+	// extension-contributed (resources_discover). Order matters — first-wins
+	// among configured sources, so settings beat extensions on name collisions.
+	const configuredDirectorySources = [
+		...customDirectories.map(dir => ({ dir, source: "custom:user", providerId: "custom", providerName: "Custom" })),
+		...extensionDirectories.map(dir => ({
+			dir,
+			source: "extension:user",
+			providerId: "extension",
+			providerName: "Extension",
+		})),
+	];
+	const configuredDirectoryResults = await Promise.all(
+		configuredDirectorySources.map(async ({ dir, source, providerId, providerName }) => {
 			const expandedDir = expandTilde(dir);
 			const scanResult = await scanSkillsFromDir(
 				{ cwd, home: os.homedir(), repoRoot: null },
 				{
 					dir: expandedDir,
-					providerId: "custom",
+					providerId,
 					level: "user",
 					requireDescription: true,
 				},
 			);
-			return { expandedDir, scanResult };
+			return { expandedDir, source, providerName, scanResult };
 		}),
 	);
 
-	const allCustomSkills: Array<{ skill: Skill; path: string }> = [];
-	for (const { expandedDir, scanResult } of customDirectoryResults) {
+	const allConfiguredSkills: Array<{ skill: Skill; path: string }> = [];
+	for (const { expandedDir, source, providerName, scanResult } of configuredDirectoryResults) {
 		for (const capSkill of scanResult.items) {
 			if (disabledSkillNames.has(capSkill.name)) continue;
 			if (matchesIgnorePatterns(capSkill.name)) continue;
 			if (!matchesIncludePatterns(capSkill.name)) continue;
-			allCustomSkills.push({
+			allConfiguredSkills.push({
 				skill: {
 					name: capSkill.name,
 					description:
 						typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
 					filePath: capSkill.path,
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-					source: "custom:user",
+					source,
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-					_source: { ...capSkill._source, providerName: "Custom" },
+					_source: { ...capSkill._source, providerName },
 				},
 				path: capSkill.path,
 			});
@@ -294,8 +312,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		collisionWarnings.push(...(scanResult.warnings ?? []).map(message => ({ skillPath: expandedDir, message })));
 	}
 
-	const customRealPaths = await Promise.all(
-		allCustomSkills.map(async ({ path }) => {
+	const configuredRealPaths = await Promise.all(
+		allConfiguredSkills.map(async ({ path }) => {
 			try {
 				return await fs.realpath(path);
 			} catch {
@@ -304,20 +322,20 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		}),
 	);
 
-	for (let i = 0; i < allCustomSkills.length; i++) {
-		const { skill } = allCustomSkills[i];
-		const resolvedPath = customRealPaths[i];
+	for (let i = 0; i < allConfiguredSkills.length; i++) {
+		const { skill } = allConfiguredSkills[i];
+		const resolvedPath = configuredRealPaths[i];
 		if (realPathSet.has(resolvedPath)) continue;
 
 		const existing = skillMap.get(skill.name);
 		if (existing) {
 			// A skill name claimed by a DEFAULT-path provider (e.g.
-			// ~/.claude/skills/<name>) yields to the explicitly configured
-			// skills.customDirectories entry — the user's custom dir is the
-			// higher-priority source (issue #7190). Only same-source custom
+			// ~/.claude/skills/<name>) yields to an explicitly configured source —
+			// skills.customDirectories or an extension's resources_discover dir —
+			// the user opted into those (issue #7190). Only same-tier configured
 			// duplicates keep first-wins.
-			const isCustomExisting = existing.source.startsWith("custom:");
-			if (!isCustomExisting) {
+			const isConfiguredExisting = existing.source.startsWith("custom:") || existing.source.startsWith("extension:");
+			if (!isConfiguredExisting) {
 				skillMap.set(skill.name, skill);
 				realPathSet.add(resolvedPath);
 				continue;
@@ -371,11 +389,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		const resolvedPath = managedRealPaths[i];
 		if (realPathSet.has(resolvedPath)) continue;
 		if (enabledAuthoredNames.has(capSkill.name)) continue; // an enabled authored skill owns this name
-		// Already claimed — e.g. by a custom-directory skill. LOAD-BEARING: custom
-		// dirs never enter `result.all`, so they are absent from `enabledAuthoredNames`
-		// above; this map check is the ONLY veto that lets a custom-dir authored skill
-		// win over a same-named managed one. The custom-dir loop (which populates
-		// skillMap, ~30 lines up) MUST run before this block — do not reorder.
+		// Already claimed — e.g. by a configured-directory skill. LOAD-BEARING:
+		// custom/extension dirs never enter `result.all`, so they are absent from
+		// `enabledAuthoredNames` above; this map check is the ONLY veto that lets a
+		// configured-dir authored skill win over a same-named managed one. The
+		// configured-dir loop (which populates skillMap, ~30 lines up) MUST run
+		// before this block — do not reorder.
 		if (skillMap.has(capSkill.name)) continue;
 		const rawDescription =
 			typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "";

@@ -346,8 +346,15 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 
 ### `resources_discover`
 
-`resources_discover` exists in extension types and `ExtensionRunner`.
-Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemented, but there are no `AgentSession` callsites invoking it in the current codebase.
+Fired once per session, after `session_start`, and again every time `/reload-plugins` runs. Payload: `{ cwd: string; reason: "startup" | "reload" }`. A handler may return `{ skillPaths?: string[]; promptPaths?: string[]; themePaths?: string[] }`; only `skillPaths` currently has a consumer (`promptPaths`/`themePaths` are collected but not yet acted on).
+
+Returned `skillPaths` join skill discovery as an explicitly configured source, scanned the same way as `skills.customDirectories`: `ignoredSkills`/`includeSkills` are honored, entries are deduplicated by real path, and a name collision with a `skills.customDirectories` entry loses to the user's custom directory (extension-contributed directories are the lower-priority configured source).
+
+```ts
+pi.on("resources_discover", (event) => {
+  return { skillPaths: [path.join(myExtensionDir, "skills")] };
+});
+```
 
 ## Tool authoring details
 
