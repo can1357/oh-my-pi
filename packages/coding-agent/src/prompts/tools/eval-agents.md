@@ -1,14 +1,16 @@
 ```
 {{#if py}}
-agent(prompt, *, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema_mode?=None, isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}{{#if perCallModel}}, model?=None{{/if}}) → AgentHandle
+agent(prompt, *, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema_mode?=None, isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}, timeout?=None{{#if perCallModel}}, model?=None{{/if}}) → AgentHandle
 {{else}}
-await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?{{#if evalTools}}, tools?{{/if}}{{#if perCallModel}}, model?{{/if}} }) → AgentHandle
+await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?{{#if evalTools}}, tools?{{/if}}, timeout?{{#if perCallModel}}, model?{{/if}} }) → AgentHandle
 {{/if}}
   Spawns a background subagent and returns immediately.
   - `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}}
   - Handle: `.id`, `.handle` ("agent://<id>"), {{#if py}}`.status`{{else}}`.status()`{{/if}}, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`),
     `.send(message)`, `.cancel()`, `.output()`.
   - Unwaited results auto-deliver like async jobs.
+  - `timeout` caps wall-clock seconds; omitted inherits `task.maxRuntimeMs`, 0 disables, and positive values have a 1 ms minimum.
+  - After `wait()`, `.model` and `.family` report served identity when available.
 {{#if perCallModel}}
   - `model`: one exact `provider/model-id[@upstream][:level]` string for this call only.
     - `@upstream` pins an aggregator route and is part of the model identity.
@@ -32,7 +34,7 @@ await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, m
 {{/if}}
 {{#ifAll py js}}
   - Python: call without `await`; `await agent(…)` returns the final result, not a handle (`await h` = `h.wait()`).
-  - JS: ONE trailing object — `h = await agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}}{{#if perCallModel}}, model{{/if}} })`.
+  - JS: ONE trailing object — `h = await agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}}, timeout{{#if perCallModel}}, model{{/if}} })`.
     - Without `await agent(…)`, `.id`/`.handle` are undefined.
     - Every handle method returns a Promise; `.status` is `await h.status()`.
 {{else}}
@@ -51,6 +53,7 @@ await workpool(agent?, { name?, context?{{#if evalTools}}, tools?{{/if}}{{#if pe
   - Pool name = async job id; results auto-deliver.
   - The first full drain closes the pool: push the whole batch while it is active; next wave → new pool.
   - {{#if waitTool}}Completely blocked? Leave `eval` and call the `wait` tool (not kernel `wait()`); {{/if}}NEVER poll.
+  - `eval.workpool.freshAgents=true` uses a new agent per item.
 {{#if perCallModel}}
   - `model` selects each worker on its first turn; follow-ups reuse that session.
 {{/if}}
