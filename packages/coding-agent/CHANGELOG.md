@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Plan-mode "compact and execute" now snapcompacts on a model that can read frames back, instead of always falling through to a local summary: the plan-distillation prompt it passes internally was treated as user focus instructions, which disqualified snapcompact on every plan approval regardless of the model.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed
