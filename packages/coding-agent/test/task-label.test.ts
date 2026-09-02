@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { generateTaskLabel } from "@oh-my-pi/pi-coding-agent/task/label";
+import { generateTaskLabel, labelEchoesHandle } from "@oh-my-pi/pi-coding-agent/task/label";
 
 function getModelOrThrow(id: string): Model<Api> {
 	const model = getBundledModel("anthropic", id);
@@ -64,5 +64,40 @@ describe("task label generation", () => {
 
 		expect(requestSignal).toBe(controller.signal);
 		expect(await label).toBeNull();
+	});
+
+	it("rejects a generated label that only echoes the spawn handle", async () => {
+		const model = getModelOrThrow("claude-sonnet-4-5");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>AuthLoader</title>" }],
+		} as never);
+
+		const echoed = await generateTaskLabel(
+			"Sleep forty seconds then reply done",
+			createRegistry(model),
+			createSettings(model),
+			"AuthLoader",
+		);
+		expect(echoed).toBeNull();
+
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Sleep then reply done</title>" }],
+		} as never);
+		const labeled = await generateTaskLabel(
+			"Sleep forty seconds then reply done",
+			createRegistry(model),
+			createSettings(model),
+			"AuthLoader",
+		);
+		expect(labeled).toBe("Sleep then reply done");
+	});
+
+	it("treats a case-insensitive Name-N collision as an echoed handle", () => {
+		expect(labelEchoesHandle("AuthLoader-3", "authloader")).toBe(true);
+		expect(labelEchoesHandle("AuthLoader-3", "AuthLoader")).toBe(true);
+		expect(labelEchoesHandle("AuthLoader", "authloader")).toBe(true);
+		expect(labelEchoesHandle("AuthLoader-3", "Migrate users")).toBe(false);
 	});
 });

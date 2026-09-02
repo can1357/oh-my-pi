@@ -75,6 +75,7 @@ function createAsyncSession(
 	let toolCallSeq = 0;
 
 	const emit = (event: AgentSessionEvent) => {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...listeners]) listener(event);
 	};
 
@@ -148,6 +149,8 @@ function createAsyncSession(
 			onPrompt({ text, promptIndex: prompts.length, harness });
 		},
 		waitForIdle: async () => {},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => pendingAsync,
 		getAsyncJobSnapshot: () => ({ running: runningJobs, recent: [] }),
@@ -305,7 +308,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.output).toContain("done");
 	});
 
-	it("returns an aborted result after cleanup grace and waits for every late resource", async () => {
+	it("preserves a successful yield across deferred cleanup and waits for every late resource", async () => {
 		const abortStarted = Promise.withResolvers<void>();
 		const abortGate = Promise.withResolvers<void>();
 		const disposeGate = Promise.withResolvers<void>();
@@ -360,12 +363,12 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		// exercises the deadline/deferred-ownership transition without sleeping.
 
 		const result = await run;
-		expect(result.exitCode).toBe(1);
-		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toBe("cleanup exceeded 0 ms");
-		expect(result.error).toBe(
-			"Task aborted. Cleanup did not finish within 0 ms. This task was not isolated, so its changes may remain in the working directory.",
-		);
+		// The run yielded successfully; a teardown that drains past the cleanup
+		// deadline is handed off asynchronously and MUST NOT overwrite the
+		// successful outcome with an aborted status (issue #9670).
+		expect(result.exitCode).toBe(0);
+		expect(result.aborted).toBe(false);
+		expect(result.abortReason).toBeUndefined();
 		expect(result.output).toContain("yielded output");
 		expect(result.usage?.totalTokens).toBe(7);
 		expect(lateJobId).toBeDefined();

@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/memories";
 import * as memoryStorage from "@oh-my-pi/pi-coding-agent/memories/storage";
 import { getAgentDbPath, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 interface SessionFixture {
 	agentDir: string;
@@ -71,7 +72,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 		"memories.maxRolloutsPerStartup": 16,
 		"memories.threadScanLimit": 64,
 		"memories.phase2HeartbeatSeconds": 1,
-		...(overrides ?? {}),
+		...overrides,
 	});
 	const model = createModel();
 	const modelRegistry = createModelRegistry(model);
@@ -141,8 +142,8 @@ describe("memories runtime", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		process.env.XDG_DATA_HOME = savedXdgData;
-		process.env.XDG_STATE_HOME = savedXdgState;
+		restoreEnvValue("XDG_DATA_HOME", savedXdgData);
+		restoreEnvValue("XDG_STATE_HOME", savedXdgState);
 	});
 
 	test("startup gating follows memory.backend and skips subagents", async () => {
@@ -442,8 +443,8 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		process.env.XDG_DATA_HOME = savedXdgData;
-		process.env.XDG_STATE_HOME = savedXdgState;
+		restoreEnvValue("XDG_DATA_HOME", savedXdgData);
+		restoreEnvValue("XDG_STATE_HOME", savedXdgState);
 	});
 
 	test("returns undefined for missing or empty summaries", async () => {

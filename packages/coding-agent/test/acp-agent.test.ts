@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
@@ -39,6 +41,7 @@ import type {
 	Validator,
 } from "@oh-my-pi/pi-utils/acp";
 import {
+	RequestError,
 	zForkSessionResponse,
 	zLoadSessionResponse,
 	zNewSessionResponse,
@@ -147,6 +150,8 @@ class FakeAgentSession {
 	waitForIdleBlocker: (() => Promise<void>) | undefined;
 	asyncJobDrain: ((options?: { timeoutMs?: number }) => Promise<boolean>) | undefined;
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
+	retryResult = false;
+	retryCalls = 0;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -246,6 +251,11 @@ class FakeAgentSession {
 		}
 		this.isStreaming = false;
 		return true;
+	}
+
+	async retry(): Promise<boolean> {
+		this.retryCalls++;
+		return this.retryResult;
 	}
 
 	async waitForIdle(): Promise<void> {
@@ -426,11 +436,15 @@ function holdPromptStreaming(session: FakeAgentSession): () => void {
 	return () => finishPrompt();
 }
 
+type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
+	setToolUIContextSpies: SetToolUIContextSpy[];
+	sessionFactoryOptions: Array<{ interactivePrompts?: boolean } | undefined>;
 	cwdA: string;
 	cwdB: string;
 	findSession(sessionId: string): FakeAgentSession | undefined;
@@ -467,7 +481,12 @@ afterEach(async () => {
 });
 
 async function createHarness(
-	options: { elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse> } = {},
+	options: {
+		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
+		clientCapabilities?: ClientCapabilities;
+		/** Runs before a notification is recorded, so a test can delay one delivery. */
+		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
 	cleanupRoots.push(root);
@@ -483,8 +502,13 @@ async function createHarness(
 	const updates: SessionNotification[] = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
+	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
+	const sessionFactoryOptions: Array<{ interactivePrompts?: boolean } | undefined> = [];
 	const connection = {
 		sessionUpdate: async (notification: SessionNotification) => {
+			// Only await when a hook is configured: `await undefined` would insert a
+			// microtask before the push and perturb ordering-sensitive tests.
+			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
 		},
 		unstable_createElicitation: options.elicitationHandler
@@ -496,19 +520,22 @@ async function createHarness(
 
 	const initialSession = new FakeAgentSession(cwdA);
 	sessions.push(initialSession);
-	const factory = async (cwd: string): Promise<AgentSession> => {
+	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		const setToolUIContext = vi.fn();
 		sessions.push(session);
-		return session as unknown as AgentSession;
+		setToolUIContextSpies.push(setToolUIContext);
+		sessionFactoryOptions.push(factoryOptions);
+		return { session: session as unknown as AgentSession, setToolUIContext };
 	};
 
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
-	if (options.elicitationHandler) {
-		// Drive `initialize` so the agent caches `clientCapabilities.elicitation.form`
-		// and `#requestAcpPlanApprovalChoice` actually goes through the elicitation.
+	const clientCapabilities =
+		options.clientCapabilities ?? (options.elicitationHandler ? { elicitation: { form: {} } } : undefined);
+	if (clientCapabilities) {
 		await agent.initialize({
 			protocolVersion: 1,
-			clientCapabilities: { elicitation: { form: {} } },
+			clientCapabilities,
 		} as Parameters<typeof agent.initialize>[0]);
 	}
 
@@ -517,6 +544,8 @@ async function createHarness(
 		updates,
 		abortController,
 		sessions,
+		setToolUIContextSpies,
+		sessionFactoryOptions,
 		cwdA,
 		cwdB,
 		findSession: (sessionId: string) => sessions.find(session => session.sessionId === sessionId),
@@ -1749,6 +1778,7 @@ describe("ACP agent", () => {
 				: [],
 		);
 		expect(names).toContain("fast");
+		expect(names).toContain("retry");
 		expect(names).toContain("force");
 		expect(names).toContain("skill:sample");
 		expect(names).not.toContain("settings");
@@ -1757,7 +1787,7 @@ describe("ACP agent", () => {
 		expect(names).not.toContain("loop");
 		expect(names).not.toContain("login");
 		expect(names).not.toContain("new");
-		expect(names).not.toContain("handoff");
+		expect(names).toContain("handoff");
 		expect(names).not.toContain("fork");
 		expect(names).not.toContain("btw");
 		expect(names).not.toContain("drop");
@@ -2018,6 +2048,131 @@ describe("ACP agent", () => {
 			await firstPrompt;
 		} finally {
 			unblockIdle();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("streams the retried turn inside the /retry prompt turn", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.retryResult = true;
+
+		let emitted = false;
+		session.waitForIdleBlocker = async () => {
+			// One-shot: `#waitForAcpPromptIdle` calls `session.waitForIdle()` again
+			// while handling the retried turn's own `agent_end`, so an unguarded
+			// blocker would re-enter and recurse forever.
+			if (emitted) return;
+			emitted = true;
+			const assistantMessage = makeAssistantMessage("Recovered answer.");
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: assistantMessage,
+					assistantMessageEvent: { type: "text_delta", delta: "Recovered answer." },
+				} as AgentSessionEvent);
+			}
+			session.sessionManager.appendMessage(assistantMessage);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistantMessage] } as AgentSessionEvent);
+			}
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/retry" }],
+		});
+
+		expect(response.stopReason).toBe("end_turn");
+		expect(session.retryCalls).toBe(1);
+
+		const chunkTexts = harness.updates
+			.filter(
+				update =>
+					update.sessionId === created.sessionId &&
+					update.update.sessionUpdate === "agent_message_chunk" &&
+					update.update.content.type === "text",
+			)
+			.map(update => (update.update as { content: { type: "text"; text: string } }).content.text);
+		expect(chunkTexts).toEqual(["Retrying the last failed turn.", "Recovered answer."]);
+
+		expect(session.waitForIdleCalls).toBeGreaterThanOrEqual(1);
+		expectAcpNotifications(harness.updates);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("drains in-flight ACP event handlers before closing a /retry turn with no agent_end", async () => {
+		// `AgentSession.#emit()` does not await listeners, so a retried turn's
+		// update can still be in delivery once the session reports idle. When the
+		// scheduled continuation never emits `agent_end` (e.g. a generation
+		// mismatch skips it), `#runPromptOrCommand`'s trailing `#finishPrompt` is
+		// what closes the turn — so the turn-holding hook must drain
+		// `record.promptEventHandlers` first or the response overtakes its chunk.
+		const deliveryBlocked = Promise.withResolvers<void>();
+		const deliveryRelease = Promise.withResolvers<void>();
+		let held = false;
+		const harness = await createHarness({
+			sessionUpdateHook: async notification => {
+				if (
+					held ||
+					notification.update.sessionUpdate !== "agent_message_chunk" ||
+					notification.update.content.type !== "text" ||
+					notification.update.content.text !== "Recovered answer."
+				) {
+					return;
+				}
+				held = true;
+				deliveryBlocked.resolve();
+				await deliveryRelease.promise;
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.retryResult = true;
+
+		let emitted = false;
+		session.waitForIdleBlocker = async () => {
+			if (emitted) return;
+			emitted = true;
+			// Deliberately no `agent_end`: this exercises the trailing-finishPrompt
+			// path rather than the `#handlePromptEvent` one.
+			const assistantMessage = makeAssistantMessage("Recovered answer.");
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: assistantMessage,
+					assistantMessageEvent: { type: "text_delta", delta: "Recovered answer." },
+				} as AgentSessionEvent);
+			}
+		};
+
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/retry" }],
+		});
+		await deliveryBlocked.promise;
+
+		try {
+			const resolvedEarly = await Promise.race([prompt.then(() => true), Bun.sleep(0).then(() => false)]);
+			expect(resolvedEarly).toBe(false);
+
+			deliveryRelease.resolve();
+			const response = await prompt;
+			expect(response.stopReason).toBe("end_turn");
+			expect(
+				harness.updates.some(
+					update =>
+						update.update.sessionUpdate === "agent_message_chunk" &&
+						update.update.content.type === "text" &&
+						update.update.content.text === "Recovered answer.",
+				),
+			).toBe(true);
+		} finally {
+			deliveryRelease.resolve();
 			harness.abortController.abort();
 			await Bun.sleep(0);
 		}
@@ -2308,6 +2463,33 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("maps agent-busy rejections to a typed session_busy error instead of internalError", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Autonomous turns stream without an owning ACP promptTurn, so prompt()'s
+		// implicit-cancel guard never fires. Mirror AgentSession's contract: a
+		// bare prompt while streaming throws AgentBusyError.
+		session.isStreaming = true;
+		session.prompt = async (): Promise<boolean> => {
+			if (session.isStreaming) throw new AgentBusyError();
+			return true;
+		};
+
+		const error = await harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "ping during autonomous turn" }],
+			} as PromptRequest)
+			.catch((reason: unknown) => reason);
+
+		expect(error).toBeInstanceOf(RequestError);
+		const requestError = error as RequestError;
+		expect(requestError.code).toBe(-32003);
+		expect(requestError.message).toContain("already processing");
+		expect(requestError.data).toEqual({ reason: "session_busy", hint: "steer|followUp|wait" });
+	});
+
 	it("keeps closeSession gated while cancel cleanup is pending", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -2436,6 +2618,69 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("settles the prompt turn when a force residual prompt resolves locally (#9206)", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// The residual prompt (e.g. an extension/custom-TS command) is handled
+		// locally: no agent turn starts, so `prompt()` returns false and no
+		// `agent_end` ever fires. The ACP turn must be settled by the trailing
+		// `#finishPrompt`, or the `session/prompt` request never resolves.
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			return false;
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000009",
+			prompt: [{ type: "text", text: "/force bash /local-command" }],
+		} as PromptRequest);
+
+		expectAcpStructure(zPromptResponse, response);
+		expect(response.stopReason).toBe("end_turn");
+		expect(session.forcedToolChoice).toBe("bash");
+		expect(session.promptCalls).toEqual(["/local-command"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("installs the tool UI context when form elicitation is available", async () => {
+		const harness = await createHarness({ clientCapabilities: { elicitation: { form: {} } } });
+		const session = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await harness.agent.prompt({
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "ping" }],
+		} as PromptRequest);
+
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: true }]);
+		expect(harness.setToolUIContextSpies).toHaveLength(1);
+		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledTimes(1);
+		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledWith(
+			expect.objectContaining({ askDialog: expect.any(Function) }),
+			true,
+		);
+
+		await harness.agent.dispose();
+	});
+
+	it("does not install the tool UI context without form elicitation", async () => {
+		const harness = await createHarness({ clientCapabilities: {} });
+		const session = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await harness.agent.prompt({
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "ping" }],
+		} as PromptRequest);
+
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
+		expect(harness.setToolUIContextSpies).toHaveLength(1);
+		expect(harness.setToolUIContextSpies[0]).not.toHaveBeenCalled();
+
+		await harness.agent.dispose();
+	});
+
 	describe("ACP elicitation bridge", () => {
 		const FORM_CAPABILITIES: ClientCapabilities = { elicitation: { form: {} } };
 
@@ -2459,6 +2704,258 @@ describe("ACP agent", () => {
 		): request is Extract<CreateElicitationRequest, { mode: "form" }> {
 			return request.mode === "form";
 		}
+		it("translates a recommended single-choice ask into one form", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0: "Approach B" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-single", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{
+					id: "approach",
+					question: "Which approach?",
+					header: "Choose one",
+					options: [
+						{ label: "Approach A", description: "Faster" },
+						{ label: "Approach B", description: "Safer" },
+					],
+					recommended: 0,
+				},
+			]);
+
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
+			expect(request.message).toBe("Which approach?");
+			expect(request.requestedSchema.required).toBeUndefined();
+			expect(request.requestedSchema.properties.q0).toEqual({
+				type: "string",
+				title: "Which approach?",
+				description: "Choose one",
+				oneOf: [
+					{ const: "Approach A", title: "Approach A", description: "Faster" },
+					{ const: "Approach B", title: "Approach B", description: "Safer" },
+				],
+				default: "Approach A",
+			});
+			expect(request.requestedSchema.properties.q0__other).toEqual({
+				type: "string",
+				title: "Other (type your own)",
+			});
+			expect(result).toEqual({
+				kind: "submit",
+				results: [
+					{
+						id: "approach",
+						question: "Which approach?",
+						options: ["Approach A", "Approach B"],
+						multi: false,
+						selectedOptions: ["Approach B"],
+						customInput: undefined,
+					},
+				],
+			});
+		});
+
+		it("translates a multi-select ask into an array anyOf schema", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0: ["A", "C"] },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-multi", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{
+					id: "features",
+					question: "Which features?",
+					options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+					multi: true,
+				},
+			]);
+
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
+			expect(request.requestedSchema.properties.q0).toEqual({
+				type: "array",
+				title: "Which features?",
+				items: {
+					anyOf: [
+						{ const: "A", title: "A" },
+						{ const: "B", title: "B" },
+						{ const: "C", title: "C" },
+					],
+				},
+			});
+			expect(result?.kind === "submit" ? result.results[0]?.selectedOptions : undefined).toEqual(["A", "C"]);
+		});
+
+		it("accepts a trimmed free-text-only ask response", async () => {
+			const { connection } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0__other: "  widget " },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-other", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{ id: "widget", question: "Which widget?", options: [{ label: "Standard" }] },
+			]);
+
+			expect(result?.kind === "submit" ? result.results[0] : undefined).toMatchObject({
+				selectedOptions: [],
+				customInput: "widget",
+			});
+		});
+		it("treats a single-choice custom answer as exclusive", async () => {
+			const { connection } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0: "Standard", q0__other: "custom" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-exclusive-other", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{ id: "widget", question: "Which widget?", options: [{ label: "Standard" }] },
+			]);
+
+			expect(result?.kind === "submit" ? result.results[0] : undefined).toMatchObject({
+				selectedOptions: [],
+				customInput: "custom",
+			});
+		});
+
+		it("uses only free-text fields for questions without options", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0__other: "single answer", q1__other: "multi answer" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-no-options", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{ id: "single", question: "Single?", options: [] },
+				{ id: "multi", question: "Multi?", options: [], multi: true },
+			]);
+
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
+			expect(Object.keys(request.requestedSchema.properties)).toEqual(["q0__other", "q1__other"]);
+			expect(result?.kind === "submit" ? result.results : undefined).toMatchObject([
+				{ id: "single", selectedOptions: [], customInput: "single answer" },
+				{ id: "multi", selectedOptions: [], customInput: "multi answer" },
+			]);
+		});
+
+		it("drops ask values the client was never offered", async () => {
+			const { connection } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0: "Nonexistent" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-invalid", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([{ id: "choice", question: "Choose", options: [{ label: "Existing" }] }]);
+
+			expect(result?.kind === "submit" ? result.results[0]?.selectedOptions : undefined).toEqual([]);
+		});
+
+		it("packs multiple ask questions into one ordered form", async () => {
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { q0: "PostgreSQL", q1: ["auth", "search"] },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-many", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{
+					id: "storage",
+					question: "Storage?",
+					options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+				},
+				{
+					id: "features",
+					question: "Features?",
+					options: [{ label: "auth" }, { label: "billing" }, { label: "search" }],
+					multi: true,
+				},
+			]);
+
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
+			expect(request.message).toBe("Answer 2 questions");
+			expect(Object.keys(request.requestedSchema.properties)).toEqual(["q0", "q0__other", "q1", "q1__other"]);
+			expect(result?.kind === "submit" ? result.results.map(item => item.id) : undefined).toEqual([
+				"storage",
+				"features",
+			]);
+			expect(result?.kind === "submit" ? result.results.map(item => item.selectedOptions) : undefined).toEqual([
+				["PostgreSQL"],
+				["auth", "search"],
+			]);
+		});
+
+		it("returns undefined when an ask form is cancelled", async () => {
+			const { connection } = createElicitConnection(async () => ({ action: "cancel" }));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-ask-cancel", FORM_CAPABILITIES);
+
+			const result = await ctx.askDialog!([
+				{ id: "choice", question: "Choose", options: [{ label: "A" }, { label: "B" }] },
+			]);
+
+			expect(result).toBeUndefined();
+		});
+		it("returns ordered fallback answers when an ask form times out", async () => {
+			vi.useFakeTimers();
+			try {
+				const { promise: never } = Promise.withResolvers<CreateElicitationResponse>();
+				const { connection } = createElicitConnection(() => never);
+				const ctx = createAcpExtensionUiContext(connection, () => "session-ask-timeout", FORM_CAPABILITIES);
+				const onTimeout = vi.fn();
+
+				const pending = ctx.askDialog!(
+					[
+						{
+							id: "choice",
+							question: "Choose",
+							options: [{ label: "A" }, { label: "B" }],
+							recommended: 1,
+						},
+						{ id: "free-text", question: "Explain", options: [] },
+					],
+					{ timeout: 10, onTimeout },
+				);
+				await Promise.resolve();
+				vi.advanceTimersByTime(10);
+				await Promise.resolve();
+
+				expect(await pending).toEqual({
+					kind: "submit",
+					results: [
+						{
+							id: "choice",
+							question: "Choose",
+							options: ["A", "B"],
+							multi: false,
+							selectedOptions: ["B"],
+							customInput: undefined,
+							timedOut: true,
+						},
+						{
+							id: "free-text",
+							question: "Explain",
+							options: [],
+							multi: false,
+							selectedOptions: [],
+							customInput: undefined,
+							timedOut: true,
+						},
+					],
+				});
+				expect(onTimeout).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 
 		it("translates select to a single-property string-enum elicitation", async () => {
 			const { connection, calls } = createElicitConnection(async () => ({
@@ -2601,6 +3098,9 @@ describe("ACP agent", () => {
 			expect(await ctx.confirm("X", "Y")).toBe(false);
 			expect(await ctx.input("X")).toBeUndefined();
 			expect(await ctx.editor("X")).toBeUndefined();
+			expect(
+				await ctx.askDialog!([{ id: "choice", question: "Choose", options: [{ label: "A" }] }]),
+			).toBeUndefined();
 			expect(calls).toHaveLength(0);
 		});
 

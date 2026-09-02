@@ -390,9 +390,23 @@ describe("github copilot model limits mapping", () => {
 		const model = models.find(candidate => candidate.id === "grok-4.5");
 		expect(model?.api).toBe("openai-responses");
 	});
+	it("routes grok-4.6 to the openai-responses endpoint (#8807)", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "grok-4.6",
+					name: "Grok 4.6",
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "grok-4.6");
+		expect(model?.api).toBe("openai-responses");
+	});
 	for (const migration of [
 		{ id: "mai-code-1-flash-picker", name: "MAI-Code-1-Flash" },
 		{ id: "grok-4.5", name: "Grok 4.5" },
+		{ id: "grok-4.6", name: "Grok 4.6" },
 	]) {
 		it(`refreshes a cached ${migration.name} completion route after the endpoint migration`, async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `pi-ai-copilot-${migration.id}-cache-`));

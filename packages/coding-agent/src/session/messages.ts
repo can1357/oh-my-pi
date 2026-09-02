@@ -38,6 +38,7 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import { titleTextFromSkillPrompt } from "./skill-title-input";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
@@ -163,6 +164,11 @@ function thinkingFromContent(content: unknown): string {
 }
 
 function titleConversationTurnFromMessage(message: AgentMessage): TitleConversationTurn | undefined {
+	if (message.role === "custom") {
+		const text = titleTextFromSkillPrompt(message);
+		if (!text) return undefined;
+		return { role: "user", text };
+	}
 	if (message.role !== "user" && message.role !== "assistant") return undefined;
 	const text = textFromContent(message.content);
 	const thinking = message.role === "assistant" ? thinkingFromContent(message.content) : undefined;
@@ -1091,6 +1097,18 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 /** True for a `/skill:<name>` prompt the user invoked directly (attribution `user`), as opposed to an agent/autoload injection. */
 export function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
 	return message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user";
+}
+
+/**
+ * True for a custom message that initiates a user-attributed turn: a directly
+ * invoked `/skill:` prompt or a writable-collab peer's prompt. Agent redirects,
+ * reminders, and auto-continues are not turn starts.
+ */
+export function isUserTurnInitiator(message: CustomMessage): boolean {
+	return (
+		isUserInvokedSkillPrompt(message) ||
+		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")
+	);
 }
 
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {

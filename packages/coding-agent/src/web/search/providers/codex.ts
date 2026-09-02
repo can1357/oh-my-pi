@@ -15,6 +15,7 @@ import {
 import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
 	getCodexAccountId,
@@ -413,8 +414,8 @@ function resolveCodexSearchTransport(modelRegistry: ModelRegistry | undefined, m
 		baseUrl,
 		url,
 		headers: {
-			...(modelRegistry?.getProviderHeaders("openai-codex") ?? {}),
-			...(registryModel?.headers ?? {}),
+			...modelRegistry?.getProviderHeaders("openai-codex"),
+			...registryModel?.headers,
 		},
 		customEndpoint: url !== resolveCodexResponsesUrl(CODEX_BASE_URL),
 	};
@@ -436,6 +437,7 @@ function buildCodexHeaders(
 	} else {
 		headers.delete(OPENAI_HEADERS.ACCOUNT_ID);
 	}
+	applyCodexResidencyHeader(headers, accessToken);
 	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, CODEX_CLIENT_VERSION);

@@ -15,6 +15,7 @@ export class RingBuffer<T> {
 	 * @param capacity - The maximum number of elements the buffer can hold. Must be positive.
 	 */
 	constructor(public readonly capacity: number) {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		this.#buf = new Array(capacity);
 	}
 

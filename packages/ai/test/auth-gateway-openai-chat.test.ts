@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
-import type { AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	AssistantMessageEventStream,
+	ToolCall,
+} from "@oh-my-pi/pi-ai/types";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -383,6 +388,42 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(finishChunk.choices[0].delta).toEqual({});
 		expect(finishChunk.choices[0].finish_reason).toBe("tool_calls");
 	});
+	it("emits settled tool arguments when the provider streams no argument deltas", async () => {
+		const partial = emptyAssistant();
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-weather",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		};
+		partial.content = [toolCall];
+		const events: AssistantMessageEvent[] = [
+			{ type: "toolcall_start", contentIndex: 0, partial },
+			{ type: "toolcall_end", contentIndex: 0, toolCall, partial },
+			{ type: "done", reason: "toolUse", message: { ...partial, stopReason: "toolUse" } },
+		];
+
+		const payloads = (await collectStream(encodeStream(makeEventStream(events, partial), "cursor/composer-2.5"))).map(
+			parseSseLine,
+		);
+
+		expect(payloads).toContainEqual(
+			expect.objectContaining({
+				choices: [
+					expect.objectContaining({
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									function: { arguments: '{"city":"Paris"}' },
+								},
+							],
+						},
+					}),
+				],
+			}),
+		);
+	});
 
 	it("emits an error envelope when the stream errors", async () => {
 		const partial = emptyAssistant();
@@ -399,6 +440,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		const aborted: unknown[] = [];
 		async function* neverEndingEvents() {
 			await new Promise(() => {});
+			yield undefined as never;
 		}
 		const events = neverEndingEvents() as unknown as AssistantMessageEventStream;
 		(events as { result(): Promise<AssistantMessage> }).result = async () => emptyAssistant();

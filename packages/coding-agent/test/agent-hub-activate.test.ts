@@ -68,7 +68,7 @@ function makeHub(focusAgent: (id: string) => Promise<void>) {
 	return { hub, doneCalls: () => doneCalls, done: done.promise, renderRequested: renderRequested.promise };
 }
 
-const ROSTER_ENTRY_PATTERN = /^(❯| ) (\S+) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+)/u;
+const ROSTER_ENTRY_PATTERN = /^(❯| ) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+) (\S+)/u;
 
 function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: number): string {
 	const cells = hub.render(width).map(raw => {
@@ -130,6 +130,56 @@ describe("Agent hub Enter activation", () => {
 		expect(doneCalls()).toBe(0);
 		const rendered = Bun.stripANSI(hub.render(120).join("\n"));
 		expect(rendered).toContain(message);
+		hub.dispose();
+	});
+
+	it("Enter opens an aborted agent's read-only transcript instead of focusing it", () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: null,
+			status: "aborted",
+		});
+		const focusAgent = vi.fn(async () => {});
+		let viewer: { render(width: number): readonly string[] } | undefined;
+		const showOverlay = vi.fn((component: { render(width: number): readonly string[] }) => {
+			viewer = component;
+			return { hide: () => {} };
+		});
+		const setFocus = vi.fn();
+		const onDone = vi.fn();
+		const hub = new AgentHubOverlayComponent({
+			settings: Settings.isolated(),
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone,
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent,
+			ui: {
+				requestRender: () => {},
+				requestComponentRender: () => {},
+				showOverlay,
+				setFocus,
+			} as never,
+		});
+
+		hub.handleInput("\r");
+
+		expect(focusAgent).not.toHaveBeenCalled();
+		expect(showOverlay).toHaveBeenCalledWith(expect.anything(), {
+			width: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		expect(setFocus).toHaveBeenCalledWith(expect.anything());
+		expect(Bun.stripANSI(viewer!.render(120).join("\n"))).not.toContain("Enter:send");
+		expect(onDone).not.toHaveBeenCalled();
 		hub.dispose();
 	});
 
@@ -205,7 +255,7 @@ describe("Agent hub Enter activation", () => {
 		expect(agents.get("Parent")?.parentId).toBe("Main");
 		expect(agents.get("Child")?.parentId).toBe("Parent");
 		hub.handleInput("t");
-		expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── Child");
+		expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── ○ Child");
 		hub.dispose();
 	});
 
@@ -253,7 +303,7 @@ describe("Agent hub Enter activation", () => {
 		});
 		const workerEntry = renderedRosterEntry(hub, "Worker", 120);
 		expect(workerEntry).toContain("Inspect dependency boundaries and report unsafe coupling.");
-		expect(workerEntry.replace(/\s+/g, " ")).toContain("usage —");
+		expect(workerEntry.replace(/\s+/g, " ")).toContain("usage ·");
 		expect(workerEntry).not.toContain("$0.000");
 		hub.dispose();
 	});

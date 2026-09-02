@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
@@ -55,7 +55,18 @@ describe("azure catalog provider", () => {
 	test("bundled-shape spec (provider id, empty baseUrl) resolves the Azure Responses compat flags", () => {
 		// The deployment host is only known at request time, so detection MUST key
 		// off the provider id, not the (empty) baseUrl.
-		const compat = buildOpenAIResponsesCompat({ provider: "azure", name: "GPT-5", baseUrl: "" });
+		const compat = resolveModelPolicy({
+			id: "gpt-5",
+			name: "GPT-5",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		}).compat;
 		expect(compat.strictResponsesPairing).toBe(true);
 		expect(compat.supportsStrictMode).toBe(true);
 		expect(compat.supportsDeveloperRole).toBe(true);

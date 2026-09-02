@@ -1847,7 +1847,9 @@ pub mod matchers {
 
 				match chars.next() {
 					Some('-') => (ComparisonType::AtLeast, chars.as_str()),
-					Some('/') => (ComparisonType::AnyOf, chars.as_str()),
+					// GNU spells "any of these bits" as /mode; BSD find spells
+					// it +mode. Accept both.
+					Some('/') | Some('+') => (ComparisonType::AnyOf, chars.as_str()),
 					_ => (ComparisonType::Exact, pattern),
 				}
 			}
@@ -1882,7 +1884,7 @@ pub mod matchers {
 			pub fn new(pattern: &str) -> Result<Self, Box<dyn Error>> {
 				let (comparison_type, pattern) = parsing::split_comparison_type(pattern);
 				let file_pattern = parsing::parse_mode(pattern, false)?;
-				let dir_pattern = parsing::parse_mode(pattern, false)?;
+				let dir_pattern = parsing::parse_mode(pattern, true)?;
 				Ok(Self { comparison_type, file_pattern, dir_pattern })
 			}
 
@@ -2686,7 +2688,7 @@ pub mod matchers {
 
 		use std::{error::Error, fmt, str::FromStr};
 
-		use onig::{Regex, RegexOptions, Syntax};
+		use onig::{Regex, RegexOptions, SearchOptions, Syntax};
 
 		use super::{Matcher, MatcherIO, WalkEntry};
 
@@ -2783,9 +2785,15 @@ pub mod matchers {
 
 		impl Matcher for RegexMatcher {
 			fn matches(&self, file_info: &WalkEntry, _: &mut MatcherIO) -> bool {
+				let path = file_info.display_path().to_string_lossy();
+				// `-regex` must match the WHOLE path (POSIX/GNU/BSD), not a
+				// substring: anchor the match at the start of the path and
+				// require it to end at the end of the path (backtracking
+				// retries alternatives that stop short).
 				self
 					.regex
-					.is_match(file_info.display_path().to_string_lossy().as_ref())
+					.match_with_options(path.as_ref(), 0, SearchOptions::SEARCH_OPTION_WHOLE_STRING, None)
+					.is_some()
 			}
 		}
 	}
@@ -2859,6 +2867,8 @@ pub mod matchers {
 			KibiByte,
 			MebiByte,
 			GibiByte,
+			TebiByte,
+			PebiByte,
 		}
 
 		impl FromStr for Unit {
@@ -2872,10 +2882,12 @@ pub mod matchers {
 					"k" => Self::KibiByte,
 					"M" => Self::MebiByte,
 					"G" => Self::GibiByte,
+					"T" => Self::TebiByte,
+					"P" => Self::PebiByte,
 					_ => {
 						return Err(From::from(format!(
-							"Invalid suffix {s} for -size. Only allowed values are <nothing>, b, c, w, k, M or \
-							 G"
+							"Invalid suffix {s} for -size. Only allowed values are <nothing>, b, c, w, k, M, G, \
+							 T or P"
 						)));
 					},
 				})
@@ -2894,6 +2906,8 @@ pub mod matchers {
 				Unit::KibiByte => 10,
 				Unit::MebiByte => 20,
 				Unit::GibiByte => 30,
+				Unit::TebiByte => 40,
+				Unit::PebiByte => 50,
 			};
 			// Skip pointless arithmetic.
 			if bits_to_shift == 0 {
@@ -3111,13 +3125,12 @@ pub mod matchers {
 			}
 		}
 
-		/// This matcher checks whether the file is newer than the file time of any
-		/// combination of two comparison types from the target file's
-		/// `NewerOptionType`.
+		/// This matcher checks whether the X timestamp of the file being
+		/// considered is newer than the Y timestamp of the reference file,
+		/// captured once when the matcher is built (`-newerXY reference`).
 		pub struct NewerOptionMatcher {
-			x_option:                NewerOptionType,
-			y_option:                NewerOptionType,
-			given_modification_time: SystemTime,
+			x_option:       NewerOptionType,
+			reference_time: SystemTime,
 		}
 
 		impl NewerOptionMatcher {
@@ -3125,21 +3138,19 @@ pub mod matchers {
 				let metadata = fs::metadata(host.resolve(path_to_file))?;
 				let x_option = NewerOptionType::from_str(x_option);
 				let y_option = NewerOptionType::from_str(y_option);
-				Ok(Self { x_option, y_option, given_modification_time: metadata.modified()? })
+				let reference_time = y_option.get_file_time(&metadata)?;
+				Ok(Self { x_option, reference_time })
 			}
 
 			fn matches_impl(&self, file_info: &WalkEntry) -> Result<bool, Box<dyn Error>> {
 				let x_option_time = self.x_option.get_file_time(file_info.metadata()?)?;
-				let y_option_time = self.y_option.get_file_time(file_info.metadata()?)?;
 
+				// duration_since returns Err when x_option_time is strictly
+				// newer than the reference time.
 				Ok(self
-					.given_modification_time
+					.reference_time
 					.duration_since(x_option_time)
-					.is_err()
-					&& self
-						.given_modification_time
-						.duration_since(y_option_time)
-						.is_err())
+					.is_err())
 			}
 		}
 
@@ -3149,9 +3160,8 @@ pub mod matchers {
 					Err(e) => {
 						writeln!(
 							&mut matcher_io.host().stderr,
-							"Error getting {:?} and {:?} time for {}: {}",
+							"Error getting {:?} time for {}: {}",
 							self.x_option,
-							self.y_option,
 							file_info.path().to_string_lossy(),
 							e
 						)
@@ -3390,12 +3400,16 @@ pub mod matchers {
 
 		use super::{FileType, Follow, Matcher, MatcherIO, WalkEntry};
 
-		/// This matcher checks the type of the file.
+		/// This matcher checks the type of the file against a list of accepted
+		/// types (GNU findutils 4.9+ accepts comma-separated lists, e.g. `f,d`).
 		pub struct TypeMatcher {
-			file_type: FileType,
+			file_types: Vec<FileType>,
 		}
 
-		fn parse(type_string: &str) -> Result<FileType, Box<dyn Error>> {
+		/// Parses one type letter. `Ok(None)` means the letter is accepted but
+		/// can never match here (BSD `w` — whiteouts don't exist on this
+		/// platform's walk results).
+		fn parse_one(type_string: &str) -> Result<Option<FileType>, Box<dyn Error>> {
 			let file_type = match type_string {
 				"f" => FileType::Regular,
 				"d" => FileType::Directory,
@@ -3404,35 +3418,50 @@ pub mod matchers {
 				"c" => FileType::CharDevice,
 				"p" => FileType::Fifo, // named pipe (FIFO)
 				"s" => FileType::Socket,
+				// w: whiteout (BSD); accepted but never produced by the walker
+				"w" => return Ok(None),
 				// D: door (Solaris)
 				"D" => return Err(From::from(format!("Type argument {type_string} not supported yet"))),
 				_ => return Err(From::from(format!("Unrecognised type argument {type_string}"))),
 			};
-			Ok(file_type)
+			Ok(Some(file_type))
+		}
+
+		fn parse(type_string: &str) -> Result<Vec<FileType>, Box<dyn Error>> {
+			let mut file_types = Vec::new();
+			for part in type_string.split(',') {
+				if part.is_empty() {
+					return Err(From::from(format!("Unrecognised type argument {type_string}")));
+				}
+				if let Some(file_type) = parse_one(part)? {
+					file_types.push(file_type);
+				}
+			}
+			Ok(file_types)
 		}
 
 		impl TypeMatcher {
 			pub fn new(type_string: &str) -> Result<Self, Box<dyn Error>> {
-				let file_type = parse(type_string)?;
-				Ok(Self { file_type })
+				let file_types = parse(type_string)?;
+				Ok(Self { file_types })
 			}
 		}
 
 		impl Matcher for TypeMatcher {
 			fn matches(&self, file_info: &WalkEntry, _: &mut MatcherIO) -> bool {
-				file_info.file_type() == self.file_type
+				self.file_types.contains(&file_info.file_type())
 			}
 		}
 
 		/// Like [TypeMatcher], but toggles whether symlinks are followed.
 		pub struct XtypeMatcher {
-			file_type: FileType,
+			file_types: Vec<FileType>,
 		}
 
 		impl XtypeMatcher {
 			pub fn new(type_string: &str) -> Result<Self, Box<dyn Error>> {
-				let file_type = parse(type_string)?;
-				Ok(Self { file_type })
+				let file_types = parse(type_string)?;
+				Ok(Self { file_types })
 			}
 		}
 
@@ -3450,9 +3479,9 @@ pub mod matchers {
 					.map(FileType::from);
 
 				match file_type {
-					Ok(file_type) if file_type == self.file_type => true,
+					Ok(file_type) if self.file_types.contains(&file_type) => true,
 					// Since GNU find 4.10, ELOOP will match -xtype l
-					Err(e) if self.file_type.is_symlink() && e.is_loop() => true,
+					Err(e) if self.file_types.iter().any(|t| t.is_symlink()) && e.is_loop() => true,
 					_ => false,
 				}
 			}
@@ -3558,7 +3587,7 @@ pub mod matchers {
 	};
 
 	use ::regex::Regex;
-	use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
+	use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 	pub use entry::{FileType, WalkEntry, WalkError};
 	use fs::FileSystemMatcher;
 	use ls::Ls;
@@ -3872,13 +3901,40 @@ pub mod matchers {
 		)))
 	}
 
-	/// This is a function that converts a specific string format into a timestamp.
-	/// It allows converting a time string of
-	/// "(week abbreviation) (date), (year) (time)" to a Unix timestamp.
-	/// such as: "jan 01, 2025 00:00:01" -> 1735689601000
-	/// When (time) is not provided, it will be automatically filled in as 00:00:00
-	/// such as: "jan 01, 2025" = "jan 01, 2025 00:00:00" -> 1735689600000
+	/// Converts a `-newerXt`-style reference time string into a Unix timestamp
+	/// (milliseconds).
+	///
+	/// Accepts, in order:
+	/// - `@N[.N]` seconds since the epoch (GNU extension)
+	/// - RFC 3339 datetimes with an explicit offset, e.g.
+	///   "2026-01-01T00:00:00Z"
+	/// - ISO-style naive dates/datetimes ("2026-01-01",
+	///   "2026-01-01 12:30[:45]", with ` ` or `T` separators), interpreted in
+	///   local time like GNU find
+	/// - "(month abbreviation) (date), (year) (time)" strings, e.g.
+	///   "jan 01, 2025 00:00:01" (time defaults to 00:00:00)
 	fn parse_date_str_to_timestamps(date_str: &str) -> Option<i64> {
+		if let Some(epoch) = date_str.strip_prefix('@')
+			&& let Ok(seconds) = epoch.parse::<f64>()
+		{
+			return Some((seconds * 1000.0) as i64);
+		}
+
+		if let Ok(datetime) = DateTime::parse_from_rfc3339(date_str) {
+			return Some(datetime.timestamp_millis());
+		}
+
+		let naive = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+			.ok()
+			.and_then(|date| date.and_hms_opt(0, 0, 0))
+			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S").ok())
+			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M:%S").ok())
+			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M").ok())
+			.or_else(|| NaiveDateTime::parse_from_str(date_str, "%Y-%m-%dT%H:%M").ok());
+		if let Some(naive) = naive {
+			return Some(Local.from_local_datetime(&naive).earliest()?.timestamp_millis());
+		}
+
 		let regex_pattern =
 			r"^(?P<month_day>\w{3} \d{2})?(?:, (?P<year>\d{4}))?(?: (?P<time>\d{2}:\d{2}:\d{2}))?$";
 		let re = Regex::new(regex_pattern);
@@ -4602,6 +4658,7 @@ fn parse_args(args: &[&str], host: &mut Host) -> Result<ParsedInfo, Box<dyn Erro
 	let mut paths = vec![];
 	let mut i = 0;
 	let mut config = Config::default();
+	let mut extended_regex = false;
 
 	while i < args.len() {
 		match args[i] {
@@ -4611,6 +4668,12 @@ fn parse_args(args: &[&str], host: &mut Host) -> Result<ParsedInfo, Box<dyn Erro
 			"-H" => config.follow = Follow::Roots,
 			"-L" => config.follow = Follow::Always,
 			"-P" => config.follow = Follow::Never,
+			// BSD find leading flags (macOS muscle memory).
+			"-E" => extended_regex = true,
+			// -x is the BSD spelling of -xdev.
+			"-x" => config.same_file_system = true,
+			// -s sorts output lexicographically.
+			"-s" => config.sorted_output = true,
 			"--" => {
 				// End of flags
 				i += 1;
@@ -4634,7 +4697,16 @@ fn parse_args(args: &[&str], host: &mut Host) -> Result<ParsedInfo, Box<dyn Erro
 	if i == paths_start {
 		paths.push(".".to_string());
 	}
-	let matcher = matchers::build_top_level_matcher(&args[i..], &mut config, host)?;
+	let matcher = if extended_regex {
+		// BSD -E selects POSIX extended regular expressions; GNU spells that
+		// -regextype posix-extended, which must precede any -regex/-iregex.
+		let mut expression = Vec::with_capacity(args.len() - i + 2);
+		expression.extend(["-regextype", "posix-extended"]);
+		expression.extend_from_slice(&args[i..]);
+		matchers::build_top_level_matcher(&expression, &mut config, host)?
+	} else {
+		matchers::build_top_level_matcher(&args[i..], &mut config, host)?
+	};
 	if let Some(new_paths) = &config.new_paths {
 		if paths.len() == 1 && paths[0] == "." {
 			paths = new_paths.to_vec();
@@ -4878,9 +4950,9 @@ Early alpha implementation. Currently the only expressions supported are
  -files0-from
  -regex pattern
  -iregex pattern
- -type type_char
-    currently type_char can only be f (for file) or d (for directory)
- -size [+-]N[bcwkMG]
+ -type type_char[,type_char...]
+    type_char is one of f d l b c p s w
+ -size [+-]N[bcwkMGTP]
  -delete
  -prune
  -not
@@ -4897,7 +4969,7 @@ Early alpha implementation. Currently the only expressions supported are
  -ctime [+-]N
  -atime [+-]N
  -mtime [+-]N
- -perm [-/]{{octal|u=rwx,go=w}}
+ -perm [-/+]{{octal|u=rwx,go=w}}
  -newer path_to_file
  -exec[dir] executable [args] [{{}}] [more args] ;
  -sorted
@@ -4940,7 +5012,7 @@ fn rewrite_bsd_invocation(args: &[&str], host: &mut Host) -> Option<Vec<String>>
 	let mut i = 0;
 	while i < rewritten.len() {
 		match rewritten[i].as_str() {
-			"-O0" | "-O1" | "-O2" | "-O3" | "-H" | "-L" | "-P" => i += 1,
+			"-O0" | "-O1" | "-O2" | "-O3" | "-H" | "-L" | "-P" | "-x" | "-s" => i += 1,
 			"--" => {
 				i += 1;
 				break;
@@ -5117,5 +5189,228 @@ mod tests {
 		assert_eq!(code, 0, "stderr: {}", capture.err());
 		assert_eq!(capture.err(), "");
 		assert_eq!(capture.out(), "sub\n");
+	}
+
+	/// Failure mode: `-newerXY ref` compared both X and Y timestamps of the
+	/// CANDIDATE against the reference's mtime, instead of comparing the
+	/// candidate's X timestamp against the reference's Y timestamp.
+	#[cfg(unix)]
+	#[test]
+	fn newer_xy_compares_candidate_x_against_reference_y() {
+		use std::{
+			fs::FileTimes,
+			time::{Duration, SystemTime},
+		};
+
+		let dir = tempfile::tempdir().unwrap();
+		let root = fs::canonicalize(dir.path()).unwrap();
+		let now = SystemTime::now();
+		let old = now - Duration::from_secs(2000);
+		let mid = now - Duration::from_secs(1000);
+
+		let write_with_times = |name: &str, accessed: SystemTime, modified: SystemTime| {
+			let path = root.join(name);
+			fs::write(&path, b"x").unwrap();
+			let file = fs::File::options().write(true).open(&path).unwrap();
+			file
+				.set_times(FileTimes::new().set_accessed(accessed).set_modified(modified))
+				.unwrap();
+		};
+
+		write_with_times("ref", mid, mid);
+		// atime newer than ref's mtime, but mtime older: -neweram must match.
+		// (The old code also demanded a newer mtime and rejected this file.)
+		write_with_times("hit", now, old);
+		// atime older than ref's mtime: -neweram must not match.
+		write_with_times("miss", old, now);
+
+		let (code, capture) = run(
+			&root,
+			&[
+				root.display().to_string(),
+				"-type".into(),
+				"f".into(),
+				"-neweram".into(),
+				"ref".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), format!("{}\n", root.join("hit").display()));
+	}
+
+	/// Failure mode: `-newermt` rejected ISO dates like `2026-01-01` with
+	/// "cannot figure out how to interpret ... as a date or time".
+	#[test]
+	fn newermt_accepts_iso_dates() {
+		let (_dir, root) = fixture();
+		let (code, capture) = run(
+			&root,
+			&[
+				root.display().to_string(),
+				"-name".into(),
+				"a.txt".into(),
+				"-newermt".into(),
+				"2000-01-01".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), format!("{}\n", root.join("a.txt").display()));
+
+		let (code, capture) = run(
+			&root,
+			&[
+				root.display().to_string(),
+				"-newermt".into(),
+				"3000-01-01".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), "");
+	}
+
+	/// Failure mode: BSD `-perm +mode` (any of the bits set) was parsed as an
+	/// exact-mode pattern and failed with a parse error.
+	#[cfg(unix)]
+	#[test]
+	fn perm_plus_mode_matches_any_set_bits() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let (_dir, root) = fixture();
+		fs::set_permissions(root.join("a.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+		fs::set_permissions(root.join("b.md"), fs::Permissions::from_mode(0o644)).unwrap();
+		fs::set_permissions(root.join("c.rs"), fs::Permissions::from_mode(0o600)).unwrap();
+		let (code, capture) = run(
+			&root,
+			&[
+				root.display().to_string(),
+				"-type".into(),
+				"f".into(),
+				"-perm".into(),
+				"+111".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), format!("{}\n", root.join("a.txt").display()));
+	}
+
+	/// Failure mode: GNU `-type f,d` lists were rejected with "Unrecognised
+	/// type argument f,d".
+	#[test]
+	fn type_accepts_comma_separated_list() {
+		let (_dir, root) = fixture();
+		fs::create_dir(root.join("sub")).unwrap();
+		let (code, capture) = run(&root, &[root.display().to_string(), "-type".into(), "f,d".into()]);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		let mut matches: Vec<PathBuf> = capture.out().lines().map(PathBuf::from).collect();
+		matches.sort();
+		assert_eq!(matches, vec![
+			root.clone(),
+			root.join("a.txt"),
+			root.join("b.md"),
+			root.join("c.rs"),
+			root.join("sub"),
+		]);
+	}
+
+	/// Failure mode: BSD `-type w` (whiteout) errored instead of parsing and
+	/// matching nothing.
+	#[test]
+	fn type_w_parses_and_matches_nothing() {
+		let (_dir, root) = fixture();
+		let (code, capture) = run(&root, &[root.display().to_string(), "-type".into(), "w".into()]);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), "");
+	}
+
+	/// Failure mode: `-regex` matched substrings of the path instead of
+	/// requiring the pattern to span the whole path.
+	#[test]
+	fn regex_matches_whole_path_only() {
+		let (_dir, root) = fixture();
+		let (code, capture) =
+			run(&root, &[root.display().to_string(), "-regex".into(), r".*\.rs".into()]);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.out(), format!("{}\n", root.join("c.rs").display()));
+
+		let (code, capture) =
+			run(&root, &[root.display().to_string(), "-regex".into(), r"c\.rs".into()]);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.out(), "");
+	}
+
+	/// Failure mode: an alternation whose shorter branch matches a path prefix
+	/// would win and the full-path match was missed (no backtracking retry).
+	#[test]
+	fn regex_full_match_prefers_longest_alternative() {
+		let (_dir, root) = fixture();
+		let (code, capture) = run(
+			&root,
+			&[
+				root.display().to_string(),
+				"-regextype".into(),
+				"posix-extended".into(),
+				"-regex".into(),
+				r".*/c|.*/c\.rs".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), format!("{}\n", root.join("c.rs").display()));
+	}
+
+	/// Failure mode: `-size` rejected the `T` and `P` suffixes accepted by
+	/// modern GNU and BSD find.
+	#[test]
+	fn size_accepts_t_and_p_suffixes() {
+		let (_dir, root) = fixture();
+		let (code, capture) = run(
+			&root,
+			&[
+				root.display().to_string(),
+				"-type".into(),
+				"f".into(),
+				"-size".into(),
+				"-2T".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		let mut matches: Vec<PathBuf> = capture.out().lines().map(PathBuf::from).collect();
+		matches.sort();
+		assert_eq!(matches, vec![root.join("a.txt"), root.join("b.md"), root.join("c.rs")]);
+
+		let (code, capture) =
+			run(&root, &[root.display().to_string(), "-size".into(), "+1P".into()]);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		assert_eq!(capture.out(), "");
+	}
+
+	/// Failure mode: BSD leading flags `-x` and `-s` were treated as unknown
+	/// predicates and the invocation failed to parse.
+	#[test]
+	fn bsd_leading_flags_x_and_s_parse() {
+		let (_dir, root) = fixture();
+		let (code, capture) = run(
+			&root,
+			&[
+				"-s".into(),
+				"-x".into(),
+				root.display().to_string(),
+				"-type".into(),
+				"f".into(),
+			],
+		);
+		assert_eq!(code, 0, "stderr: {}", capture.err());
+		assert_eq!(capture.err(), "");
+		// -s guarantees lexicographically sorted output.
+		let matches: Vec<PathBuf> = capture.out().lines().map(PathBuf::from).collect();
+		assert_eq!(matches, vec![root.join("a.txt"), root.join("b.md"), root.join("c.rs")]);
 	}
 }

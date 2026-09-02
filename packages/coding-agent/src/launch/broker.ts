@@ -7,7 +7,7 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint } from "./paths";
+import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -1057,6 +1057,10 @@ class DaemonBroker {
 
 	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
+		// A wait observes exactly one launch generation. Automatic or explicit
+		// relaunches reuse the managed record, so polling the record without this
+		// binding can hang past an exit or consume the replacement's output.
+		const boundGeneration = record.generation;
 		await this.#refreshDetached(record);
 		let matched: string | undefined;
 		let pattern: RegExp | undefined;
@@ -1073,7 +1077,10 @@ class DaemonBroker {
 			record.snapshot.readyAt !== undefined ||
 			record.snapshot.state === "ready" ||
 			(record.snapshot.state === "running" && !record.spec.ready);
+		const generationEnded = (): boolean =>
+			record.generation !== boundGeneration || record.snapshot.state === "restarting";
 		const condition = (): boolean => {
+			if (generationEnded()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
 				if (!match) return false;
@@ -1086,6 +1093,13 @@ class DaemonBroker {
 			return readyObserved() || terminalState(record.snapshot.state);
 		};
 		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
+		if (generationEnded()) {
+			const exit = record.snapshot.exitCode === undefined ? "" : ` with exit code ${record.snapshot.exitCode}`;
+			throw new Error(
+				`Daemon ${operation.name} generation ${boundGeneration} exited${exit}; ` +
+					"the wait was rejected instead of continuing against a replacement generation",
+			);
+		}
 		// A for:"ready" wait that woke on a terminal exit without ever observing
 		// readiness is still "not ready" — surface it as timed out so callers and the
 		// renderer don't chain work against a dead process.
@@ -1384,6 +1398,13 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
+	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
+	// dir back to its project (and derive the Windows pipe name) offline.
+	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
+		logger.warn("Failed to record daemon scope metadata", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	});
 	// Reclaim sibling daemon scopes left behind by dead brokers (issue #8674).
 	// Detached and non-throwing so it never delays clients connecting to us.
 	void pruneDeadDaemonRuntimeDirs(runtimeDir).catch(error => {

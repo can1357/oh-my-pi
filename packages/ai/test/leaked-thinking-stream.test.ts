@@ -15,6 +15,7 @@ import { getStreamingPartialJson, setStreamingPartialJson } from "@oh-my-pi/pi-a
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 
 /** Minimal assistant message; `content`/`stopReason` overridden per event. */
 function msg(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -91,6 +92,8 @@ async function nextToolSnapshot(iterator: AsyncIterator<AssistantMessageEvent>):
 		};
 	}
 }
+
+withOfficialAnthropicEndpoint();
 
 describe("wrapLeakedThinkingStream", () => {
 	async function runLeakedText(chunks: readonly string[]): Promise<{

@@ -4,7 +4,7 @@ import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-nativ
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
 import { colorLuma, getCustomThemesDir, logger } from "@oh-my-pi/pi-utils";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
-import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson } from "./loader";
+import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import type { ThemeColor, ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
 import type { Theme } from "./theme-class";
@@ -21,6 +21,7 @@ export {
 } from "./symbols";
 export { Theme } from "./theme-class";
 export {
+	createHighlightStream,
 	getEditorTheme,
 	getMarkdownTheme,
 	getSelectListTheme,
@@ -28,6 +29,7 @@ export {
 	getSymbolTheme,
 	highlightCode,
 	setMarkdownMermaidRendering,
+	warmHighlighter,
 } from "./tui-adapters";
 
 /** Appearance detected via OSC 11 background color query, or undefined if not yet available. */
@@ -112,6 +114,48 @@ function getCurrentThemeOptions(): CreateThemeOptions {
 		colorBlindMode: currentColorBlindMode,
 	};
 }
+function configureTheme(
+	symbolPreset?: SymbolPreset,
+	colorBlindMode?: boolean,
+	darkTheme?: string,
+	lightTheme?: string,
+): string {
+	autoDetectedTheme = true;
+	autoDarkTheme = darkTheme ?? "dark";
+	autoLightTheme = lightTheme ?? "light";
+	currentSymbolPresetOverride = symbolPreset;
+	currentColorBlindMode = colorBlindMode ?? false;
+	const name = getDefaultTheme();
+	currentThemeName = name;
+	return name;
+}
+
+/** Initialize the active theme synchronously before the first terminal paint. */
+export function initThemeSync(
+	symbolPreset?: SymbolPreset,
+	colorBlindMode?: boolean,
+	darkTheme?: string,
+	lightTheme?: string,
+): void {
+	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
+	const options: CreateThemeOptions = {
+		symbolPresetOverride: currentSymbolPresetOverride,
+		colorBlindMode: currentColorBlindMode,
+	};
+	try {
+		theme = loadThemeSync(name, options);
+	} catch (error) {
+		logger.debug("Theme loading failed, falling back to dark theme", { error: String(error) });
+		currentThemeName = "dark";
+		theme = loadThemeSync("dark", options);
+	}
+}
+
+/** Initialize the default theme only when no earlier prepaint initialized one. */
+export async function ensureTheme(): Promise<void> {
+	if (typeof theme !== "undefined") return;
+	await initTheme();
+}
 
 export async function initTheme(
 	enableWatcher: boolean = false,
@@ -120,13 +164,7 @@ export async function initTheme(
 	darkTheme?: string,
 	lightTheme?: string,
 ): Promise<void> {
-	autoDetectedTheme = true;
-	autoDarkTheme = darkTheme ?? "dark";
-	autoLightTheme = lightTheme ?? "light";
-	const name = getDefaultTheme();
-	currentThemeName = name;
-	currentSymbolPresetOverride = symbolPreset;
-	currentColorBlindMode = colorBlindMode ?? false;
+	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
 	try {
 		theme = await loadTheme(name, getCurrentThemeOptions());
 		if (enableWatcher) {

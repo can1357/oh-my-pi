@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAuthStorage, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
+import { writeAuthBrokerSnapshotCache } from "@oh-my-pi/pi-ai/auth-broker/snapshot-cache";
+import type { SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker/types";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -56,6 +58,50 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				token: "yml-token",
 			});
 		});
+	});
+
+	test("starts from a fresh snapshot cache while an unreachable broker revalidates in background", async () => {
+		const token = "cached-token";
+		const url = "http://127.0.0.1:1";
+		const cachePath = path.join(agentDir, "snapshot.enc");
+		const now = Date.now();
+		const snapshot: SnapshotResponse = {
+			generation: 3,
+			generatedAt: now,
+			serverNowMs: now,
+			refresher: {
+				enabled: true,
+				intervalMs: 60_000,
+				skewMs: 300_000,
+				nextSweepInMs: 10_000,
+			},
+			credentials: [
+				{
+					id: 1,
+					provider: "anthropic",
+					credential: { type: "api_key", key: "cached-key" },
+					identityKey: null,
+					rotatesInMs: null,
+				},
+			],
+		};
+		await writeAuthBrokerSnapshotCache({ path: cachePath, token, url, snapshot });
+
+		await withEnv(
+			{
+				...SUPPRESS_AUTH_BROKER_ENV,
+				OMP_AUTH_BROKER_URL: url,
+				OMP_AUTH_BROKER_TOKEN: token,
+			},
+			async () => {
+				const storage = await discoverAuthStorage({ agentDir, cachePath });
+				try {
+					expect(storage.hasAuth("anthropic")).toBeTrue();
+				} finally {
+					storage.close();
+				}
+			},
+		);
 	});
 
 	test("rejects unreadable or malformed account-pool files before connecting", async () => {

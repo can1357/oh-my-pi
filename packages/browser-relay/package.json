@@ -5,7 +5,7 @@
 	"private": true,
 	"description": "Chrome extension that lets the omp browser tool drive your existing tabs (relay server lives in the omp CLI: `omp browser-relay`)",
 	"homepage": "https://omp.sh",
-	"author": "Can Boluk",
+	"author": "Stencil Labs, Inc.",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -14,10 +14,10 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-extension.ts",
-		"check": "biome check . && tsgo -p tsconfig.json --noEmit",
-		"lint": "biome lint .",
-		"fix": "biome check --write --unsafe .",
-		"fmt": "biome format --write ."
+		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && tsgo -p tsconfig.json --noEmit",
+		"lint": "oxlint .",
+		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
+		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:",

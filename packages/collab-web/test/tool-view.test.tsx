@@ -152,3 +152,65 @@ describe("ToolView xd:// dispatches", () => {
 		expect(html).not.toContain("tv-out-title");
 	});
 });
+
+describe("ToolView ask renderer", () => {
+	const questions = [
+		{
+			id: "auth",
+			question: "Which auth method?",
+			options: [{ label: "JWT" }, { label: "OAuth2" }],
+		},
+	];
+
+	it("renders the user-added note from a single-question answer", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="ask"
+				defaultOpen
+				args={{ questions }}
+				result={{
+					content: [{ type: "text", text: "OAuth2 User added note: keep the redirect short-lived" }],
+					details: {
+						question: "Which auth method?",
+						options: ["JWT", "OAuth2"],
+						multi: false,
+						selectedOptions: ["OAuth2"],
+						note: "keep the redirect short-lived",
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain('<span>OAuth2</span>');
+		expect(html).toContain("keep the redirect short-lived");
+	});
+
+	it("renders per-question notes from results[] answers", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="ask"
+				defaultOpen
+				args={{
+					questions: [
+						{ id: "db", question: "Storage backend?", options: [{ label: "SQLite" }, { label: "Postgres" }] },
+						{ id: "cache", question: "Cache?", options: [{ label: "Redis" }, { label: "None" }] },
+					],
+				}}
+				result={{
+					content: [{ type: "text", text: "User answers:" }],
+					details: {
+						results: [
+							{ id: "db", question: "Storage backend?", multi: false, selectedOptions: ["Postgres"], note: "managed instance" },
+							{ id: "cache", question: "Cache?", multi: false, selectedOptions: ["Redis"] },
+						],
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain('<span>Postgres</span>');
+		expect(html).toContain("managed instance");
+		// The cache question answered without a note must not leak the db note.
+		expect(html.match(/managed instance/g)?.length).toBe(1);
+	});
+});

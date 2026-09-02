@@ -180,6 +180,7 @@ export async function callConfiguredCompletion(
 			timeout: opts.timeout,
 			provider: opts.provider,
 			model: opts.model,
+			task: opts.task,
 		});
 		return typeof raw === "string" ? raw : null;
 	}

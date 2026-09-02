@@ -208,7 +208,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * @example
 	 * ```typescript
 	 * transformContext: async (messages) => {
-	 *   if (estimateTokens(messages) > MAX_TOKENS) {
+	 *   if (agent.tokenizer.countMessages(messages) > MAX_TOKENS) {
 	 *     return pruneOldMessages(messages);
 	 *   }
 	 *   return messages;
@@ -759,8 +759,11 @@ export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = an
 ) => Promise<AgentToolResult<TDetails, TParameters>>;
 
 // AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown>
-	extends Tool<TParameters> {
+export interface AgentTool<
+	TParameters extends TSchema = TSchema,
+	TDetails = any,
+	TTheme = unknown,
+> extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */

@@ -41,11 +41,11 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		const daemons = path.join(tempDir.path(), "run", "daemons");
 		await fs.mkdir(daemons, { recursive: true });
 
-		const current = await scope(daemons, "current000000000", { pid: "dead", stale: true });
-		await scope(daemons, "deadstale0000000", { pid: "dead", stale: true });
-		await scope(daemons, "livebroker000000", { pid: process.pid, stale: true });
-		await scope(daemons, "liveclient000000", { clients: [process.pid], stale: true });
-		await scope(daemons, "deadfresh0000000", { pid: "dead" });
+		const current = await scope(daemons, "aaaaaaaaaaaaaaaa", { pid: "dead", stale: true });
+		await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", stale: true });
+		await scope(daemons, "cccccccccccccccc", { pid: process.pid, stale: true });
+		await scope(daemons, "dddddddddddddddd", { clients: [process.pid], stale: true });
+		await scope(daemons, "eeeeeeeeeeeeeeee", { pid: "dead" });
 		// Machine-global daemon container must never be swept as a project scope.
 		await fs.mkdir(path.join(daemons, "global", "some-service"), { recursive: true });
 		await fs.utimes(path.join(daemons, "global"), STALE, STALE);
@@ -53,12 +53,12 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		await pruneDeadDaemonRuntimeDirs(current);
 
 		const remaining = new Set(await fs.readdir(daemons));
-		expect(remaining.has("deadstale0000000")).toBe(false); // pruned
-		expect(remaining.has("current000000000")).toBe(true); // never prunes itself
-		expect(remaining.has("livebroker000000")).toBe(true); // live broker
-		expect(remaining.has("liveclient000000")).toBe(true); // live client presence
-		expect(remaining.has("deadfresh0000000")).toBe(true); // within stale grace
-		expect(remaining.has("global")).toBe(true); // global container skipped
+		expect(remaining.has("bbbbbbbbbbbbbbbb")).toBe(false); // pruned
+		expect(remaining.has("aaaaaaaaaaaaaaaa")).toBe(true); // never prunes itself
+		expect(remaining.has("cccccccccccccccc")).toBe(true); // live broker
+		expect(remaining.has("dddddddddddddddd")).toBe(true); // live client presence
+		expect(remaining.has("eeeeeeeeeeeeeeee")).toBe(true); // within stale grace
+		expect(remaining.has("global")).toBe(true); // non-scope name skipped
 	});
 
 	it("does not sweep sibling machine-global service runtimes", async () => {
@@ -70,6 +70,26 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		await pruneDeadDaemonRuntimeDirs(current);
 
 		expect(await fs.exists(sibling)).toBe(true);
+	});
+
+	it("never sweeps outside the daemons container when a runtime dir is relocated (issue #8721)", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-prune-tmpdir-");
+		// Simulate the smoke test relocating its runtime dir directly under a
+		// shared temp root full of unrelated, aged directories.
+		const fakeTmp = tempDir.path();
+		for (const name of ["tmux-1000", "ssh-XVn1oP", "my-build-tree"]) {
+			await fs.mkdir(path.join(fakeTmp, name, "src"), { recursive: true });
+			await fs.utimes(path.join(fakeTmp, name), STALE, STALE);
+		}
+		const runtimeDir = path.join(fakeTmp, "omp-daemon-smoke-run-xxxx");
+		await fs.mkdir(runtimeDir, { recursive: true });
+
+		await pruneDeadDaemonRuntimeDirs(runtimeDir);
+
+		const remaining = new Set(await fs.readdir(fakeTmp));
+		expect(remaining.has("tmux-1000")).toBe(true);
+		expect(remaining.has("ssh-XVn1oP")).toBe(true);
+		expect(remaining.has("my-build-tree")).toBe(true);
 	});
 
 	it("does nothing when the runtime root does not exist", async () => {

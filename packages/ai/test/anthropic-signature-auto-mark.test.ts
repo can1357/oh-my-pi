@@ -32,6 +32,19 @@ const model: Model<"anthropic-messages"> = buildModel({
 	maxTokens: 8_192,
 });
 
+const prefixModel: Model<"anthropic-messages"> = buildModel({
+	id: "claude-fable-5-1",
+	name: "Claude Fable 5.1",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1_000_000,
+	maxTokens: 128_000,
+});
+
 const priorTurnContext: Context = {
 	messages: [
 		{ role: "user", content: "Summarize README", timestamp: 0 },
@@ -56,6 +69,33 @@ const priorTurnContext: Context = {
 			timestamp: 0,
 		} satisfies AssistantMessage,
 		{ role: "user", content: "Translate to French.", timestamp: 0 },
+	] satisfies Message[],
+};
+
+const prefixBoundContext: Context = {
+	messages: [
+		{ role: "user", content: "Inspect the repository.", timestamp: 0 },
+		{
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "", thinkingSignature: "sig_bound" },
+				{ type: "text", text: "I inspected it." },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: prefixModel.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 0,
+		} satisfies AssistantMessage,
+		{ role: "user", content: "Continue.", timestamp: 0 },
 	] satisfies Message[],
 };
 
@@ -120,6 +160,14 @@ const successEvents = [
 	},
 	{ type: "message_stop" },
 ] as const;
+
+function createPrefixBindingRejection(): Error {
+	const error = new Error(
+		'400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."},"request_id":"req_test"}',
+	);
+	Object.assign(error, { status: 400 });
+	return error;
+}
 
 function successRequest() {
 	const response = new Response(null, { status: 200, headers: { "request-id": "req_ok" } });
@@ -232,6 +280,71 @@ describe("#4297 anthropic-messages runtime signing auto-mark", () => {
 		expect(blocks.find(block => block.type === "thinking")).toBeUndefined();
 		expect(blocks.find(block => block.type === "text")?.text).toContain("Read the file, then summarise.");
 		expect(result.disabledFeatures).toContain("unsigned-thinking-replay");
+	});
+
+	it("remembers prefix-binding drops so later turns avoid another failed request", async () => {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const capturedPayloads: unknown[] = [];
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			attempt += 1;
+			capturedPayloads.push(params);
+			if (attempt === 1) {
+				return {
+					async withResponse() {
+						throw createPrefixBindingRejection();
+					},
+				} as never;
+			}
+			return successRequest() as never;
+		});
+
+		const run = async () => {
+			const stream = streamAnthropic(prefixModel, prefixBoundContext, {
+				apiKey: "sk-ant-test",
+				providerSessionState,
+			});
+			for await (const _ of stream) {
+				/* drain */
+			}
+			return stream.result();
+		};
+
+		expect((await run()).stopReason).toBe("stop");
+		expect(attempt).toBe(2);
+		expect(extractPriorAssistantBlocks(capturedPayloads[0]).some(block => block.type === "thinking")).toBe(true);
+		expect(extractPriorAssistantBlocks(capturedPayloads[1]).some(block => block.type === "thinking")).toBe(false);
+
+		expect((await run()).stopReason).toBe("stop");
+		expect(attempt).toBe(3);
+		expect(extractPriorAssistantBlocks(capturedPayloads[2]).some(block => block.type === "thinking")).toBe(false);
+	});
+
+	it("surfaces prefix-binding errors when the caller requests fail-loud behavior", async () => {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			attempt += 1;
+			return {
+				async withResponse() {
+					throw createPrefixBindingRejection();
+				},
+			} as never;
+		});
+
+		const stream = streamAnthropic(prefixModel, prefixBoundContext, {
+			apiKey: "sk-ant-test",
+			providerSessionState,
+			anthropicPrefixMismatchBehavior: "error",
+		});
+		for await (const _ of stream) {
+			/* drain */
+		}
+		const result = await stream.result();
+
+		expect(attempt).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("bound to a different conversation");
 	});
 
 	it("does not auto-mark on unrelated Anthropic invalid_request_error 400s", async () => {

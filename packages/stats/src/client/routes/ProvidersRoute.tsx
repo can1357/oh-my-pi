@@ -13,6 +13,7 @@ import {
 import {
 	formatCompact,
 	formatCost,
+	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
 	formatRelativeTime,
@@ -69,6 +70,10 @@ export function ProvidersRoute({ active, range, refreshTrigger }: ProvidersRoute
 
 function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) {
 	const grandTotal = useMemo(() => providers.reduce((sum, p) => sum + p.totalTokens, 0), [providers]);
+	const unpricedRequests = useMemo(
+		() => providers.reduce((sum, provider) => sum + provider.unpricedRequests, 0),
+		[providers],
+	);
 
 	const columns: DataTableColumn<ProviderAggregate>[] = [
 		{ key: "provider", header: "Provider", render: p => <span className="font-medium">{p.provider}</span> },
@@ -98,12 +103,24 @@ function ProviderTotalsPanel({ providers }: { providers: ProviderAggregate[] }) 
 			numeric: true,
 			render: p => formatPercent(grandTotal > 0 ? p.totalTokens / grandTotal : 0),
 		},
-		{ key: "cost", header: "Cost", numeric: true, render: p => formatCost(p.totalCost) },
+		{
+			key: "cost",
+			header: "API-equivalent estimate",
+			numeric: true,
+			render: provider => formatEstimatedCost(provider.totalCost, provider.unpricedRequests),
+		},
 		{ key: "tps", header: "Tok/s", numeric: true, render: p => formatTokensPerSecond(p.avgTokensPerSecond) },
 	];
 
 	return (
-		<Panel title="Provider Totals" subtitle="Token, request, and cost totals per provider over the active range">
+		<Panel
+			title="Provider Totals"
+			subtitle={
+				unpricedRequests > 0
+					? `Token, request, and API-equivalent estimates; excludes ${unpricedRequests.toLocaleString()} unpriced subscription request${unpricedRequests === 1 ? "" : "s"}`
+					: "Token, request, and API-equivalent estimates over the active range"
+			}
+		>
 			<DataTable
 				columns={columns}
 				data={providers}
@@ -122,6 +139,10 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 	const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
+	const unpricedRequests = useMemo(
+		() => stats.providers.reduce((sum, provider) => sum + provider.unpricedRequests, 0),
+		[stats.providers],
+	);
 
 	// buildTopNByModelSeries keys on `model`; feed it the provider name so we
 	// get the same top-N + "Other" rollup without a parallel implementation.
@@ -148,7 +169,7 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 			plugins: buildSharedPlugins({
 				chartTheme,
 				showLegend: true,
-				defaultLabel: metric === "tokens" ? "Tokens" : "Cost",
+				defaultLabel: metric === "tokens" ? "Tokens" : "API-equivalent estimate",
 				formatValue,
 				footer: items => {
 					if (items.length < 2) return undefined;
@@ -174,12 +195,16 @@ function ProviderTrendPanel({ stats }: { stats: ProviderDashboardStats }) {
 	return (
 		<Panel
 			title="Burn by Provider"
-			subtitle="Stacked token/cost burn per provider over time"
+			subtitle={
+				metric === "cost" && unpricedRequests > 0
+					? `API-equivalent estimates over time; excludes ${unpricedRequests.toLocaleString()} unpriced subscription request${unpricedRequests === 1 ? "" : "s"}`
+					: "Stacked token or API-equivalent estimate burn over time"
+			}
 			actions={
 				<SegmentedControl
 					options={[
 						{ value: "tokens" as const, label: "Tokens" },
-						{ value: "cost" as const, label: "Cost" },
+						{ value: "cost" as const, label: "API-equivalent estimate" },
 					]}
 					value={metric}
 					onChange={setMetric}
@@ -209,6 +234,7 @@ function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; 
 	const chartTheme = CHART_THEMES[theme];
 
 	const { tokensByHour, peakHour } = useMemo(() => {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const tokens = new Array<number>(24).fill(0);
 		for (const point of hourly) {
 			if (provider !== ALL_PROVIDERS && point.provider !== provider) continue;

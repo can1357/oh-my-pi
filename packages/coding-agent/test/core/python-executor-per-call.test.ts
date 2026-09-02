@@ -122,10 +122,25 @@ describe("executePython (per-call)", () => {
 		using tempDir = TempDir.createSync("@omp-python-executor-per-call-");
 
 		let shutdownCalls = 0;
-		let executeTimeoutMs: number | undefined;
+		const executionStarted = Promise.withResolvers<void>();
+		const abortController = new AbortController();
 		const kernel: KernelStub = {
 			execute: async (_code: string, options?: KernelExecuteOptions) => {
-				executeTimeoutMs = options?.timeoutMs;
+				executionStarted.resolve();
+				const signal = options?.signal;
+				if (!signal) {
+					return {
+						status: "ok",
+						cancelled: false,
+						timedOut: false,
+						stdinRequested: false,
+					};
+				}
+				if (!signal.aborted) {
+					const cancellation = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => cancellation.resolve(), { once: true });
+					await cancellation.promise;
+				}
 				return {
 					status: "ok",
 					cancelled: true,
@@ -140,18 +155,19 @@ describe("executePython (per-call)", () => {
 
 		PythonKernel.start = async () => kernel as unknown as PythonKernel;
 
-		const result = await executePython("sleep(10)", {
+		const resultPromise = executePython("sleep(10)", {
 			kernelMode: "per-call",
 			timeoutMs: 2000,
+			signal: abortController.signal,
 			cwd: tempDir.path(),
 		});
+		await executionStarted.promise;
+		abortController.abort(createCancellationError("TimeoutError", "execution deadline elapsed"));
 
+		const result = await resultPromise;
 		expect(result.cancelled).toBe(true);
 		expect(result.exitCode).toBeUndefined();
-		expect(executeTimeoutMs).toBeGreaterThan(0);
-		expect(executeTimeoutMs).toBeLessThanOrEqual(2000);
-		const expectedSeconds = Math.max(1, Math.round((executeTimeoutMs ?? 0) / 1000));
-		expect(result.output).toContain(`eval cell timed out after ${expectedSeconds}s`);
+		expect(result.output).toContain("eval cell timed out after");
 		expect(shutdownCalls).toBe(1);
 	});
 });

@@ -31,10 +31,10 @@ import {
 	invalidateFsScanAfterRename,
 	invalidateFsScanAfterWrite,
 } from "../../tools/fs-cache-invalidation";
-import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import { ToolError } from "../../tools/tool-errors";
+import type { AppliedEditObserver } from "../blackbox";
 import {
 	ApplyPatchError,
 	type DiffHunk,
@@ -55,7 +55,7 @@ import {
 } from "../normalize";
 import { readEditFileText, serializeEditFileText } from "../read-file";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
-import { pruneOversizedEditSnapshots } from "../snapshot-details";
+import { createEditResult, type EditPreviewSource, toEditToolResult } from "../result";
 import {
 	type ContextLineResult,
 	DEFAULT_FUZZY_THRESHOLD,
@@ -1718,6 +1718,8 @@ export interface ExecutePatchSingleOptions {
 	allowCreateOverwrite?: boolean;
 	writethrough: WritethroughCallback;
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
+	/** Observes a committed content transition before result snapshots are pruned. */
+	onApplied?: AppliedEditObserver;
 }
 
 class LspFileSystem implements FileSystem {
@@ -1833,6 +1835,7 @@ export async function executePatchSingle(
 		allowCreateOverwrite,
 		writethrough,
 		beginDeferredDiagnosticsForPath,
+		onApplied,
 	} = options;
 	const { op: rawOp, rename, diff } = params;
 
@@ -1919,6 +1922,7 @@ export async function executePatchSingle(
 		diff: "",
 		firstChangedLine: undefined,
 	};
+	let previewSource: EditPreviewSource | undefined;
 	if (
 		result.change.type === "update" &&
 		result.change.oldContent !== undefined &&
@@ -1926,27 +1930,15 @@ export async function executePatchSingle(
 	) {
 		const normalizedOld = normalizeToLF(stripBom(result.change.oldContent).text);
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
-		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, {
-			path: result.change.newPath ?? result.change.path,
-		});
+		const path = result.change.newPath ?? result.change.path;
+		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, { path });
+		previewSource = { before: normalizedOld, after: normalizedNew, path };
 	} else if (result.change.type === "create" && result.change.newContent !== undefined) {
 		// The result is authoritative for rendering, so emit the added-content
 		// diff here rather than relying on the call-phase streaming preview.
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
 		diffResult = generateUnifiedDiffString("", normalizedNew, undefined, { path: result.change.path });
-	}
-
-	let resultText: string;
-	switch (result.change.type) {
-		case "create":
-			resultText = `Created ${path}`;
-			break;
-		case "delete":
-			resultText = `Deleted ${path}`;
-			break;
-		case "update":
-			resultText = effectiveRename ? `Updated and moved ${path} to ${effectiveRename}` : `Updated ${path}`;
-			break;
+		previewSource = { before: "", after: normalizedNew, path: result.change.path };
 	}
 
 	let diagnostics = patchFileSystem.getDiagnostics();
@@ -1955,30 +1947,33 @@ export async function executePatchSingle(
 		diagnostics ??= flushedDiagnostics;
 	}
 	const mergedDiagnostics = mergeDiagnosticsWithWarnings(diagnostics, result.warnings ?? []);
-	const meta = outputMeta()
-		.diagnostics(mergedDiagnostics?.summary ?? "", mergedDiagnostics?.messages ?? [])
-		.get();
-
 	const oldText = result.change.type !== "create" ? result.change.oldContent : undefined;
 	const newText = result.change.type !== "delete" ? result.change.newContent : undefined;
-
-	return {
-		content: [{ type: "text", text: resultText }],
-		details: pruneOversizedEditSnapshots({
-			diff: diffResult.diff,
-			// When the patch moves the file, anchor the diff to the destination
-			// path. ACP `ToolCallContent.diff.path` comes from this field, and
-			// clients use it to open or focus the file post-change; pointing at
-			// the (now-deleted) source navigates to nothing.
+	if (oldText !== undefined && newText !== undefined) {
+		await onApplied?.({
 			path: result.change.newPath ?? resolvedPath,
-			firstChangedLine: diffResult.firstChangedLine,
-			diagnostics: mergedDiagnostics,
-			op,
-			move: effectiveRename,
-			sourcePath: result.change.newPath ? resolvedPath : undefined,
-			meta,
-			oldText,
-			newText,
-		}),
-	};
+			prev: oldText,
+			next: newText,
+		});
+	}
+
+	const editResult = createEditResult({
+		displayPath: path,
+		// When the patch moves the file, anchor the diff to the destination
+		// path. ACP `ToolCallContent.diff.path` comes from this field, and
+		// clients use it to open or focus the file post-change; pointing at
+		// the (now-deleted) source navigates to nothing.
+		resultPath: result.change.newPath ?? resolvedPath,
+		diff: diffResult.diff,
+		firstChangedLine: diffResult.firstChangedLine,
+		diagnostics: mergedDiagnostics,
+		op,
+		move: effectiveRename,
+		sourcePath: result.change.newPath ? resolvedPath : undefined,
+		oldText,
+		newText,
+		warnings: result.warnings,
+		previewSource,
+	});
+	return toEditToolResult(editResult);
 }

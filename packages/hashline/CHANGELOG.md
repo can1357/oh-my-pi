@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Improved line-ending normalization performance by avoiding full scan-and-copy operations on files without carriage returns, eliminating stalls on large LF-only files.
+
+## [17.4.0] - 2026-08-20
+
+### Added
+
+- Added an opener-escape landing correction for insertions anchored on a construct's opening line to place shallower sibling constructs after the enclosing block rather than splitting the opener from its body.
+
+### Fixed
+
+- Fixed an issue where single-line replacements echoing attributes or decorators (such as `#[napi]` or `@Injectable()`) could lead to silently duplicated annotations.
+- Increased the default snapshot-store path capacity from 30 to 256 to prevent early tags in wide sessions from aging out and triggering misleading "hash is not from this session" errors.
+
 ## [17.3.3] - 2026-08-14
 
 ### Fixed

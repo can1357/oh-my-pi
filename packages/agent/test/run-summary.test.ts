@@ -45,7 +45,7 @@ class RecordingTracer implements Tracer {
 	startSpan(name: string, options?: SpanOptions, _ctx?: OtelContext): Span {
 		const record: RecordedSpan = {
 			name,
-			attributes: { ...(options?.attributes ?? {}) },
+			attributes: { ...options?.attributes },
 			ended: false,
 			exceptions: [],
 		};

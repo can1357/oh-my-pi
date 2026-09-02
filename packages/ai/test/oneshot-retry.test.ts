@@ -124,6 +124,51 @@ describe("retryTransientCompletion", () => {
 		expect(final.stopReason).toBe("error");
 	});
 
+	it("does not retry an input the model cannot fit", async () => {
+		// A oneshot replays a fixed prompt: the same overflow comes back every
+		// attempt, so the retries only delay the caller's fallback. Observed live
+		// as 10 identical 3M-token compaction summarization calls.
+		let calls = 0;
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(
+					message({
+						stopReason: "error",
+						errorStatus: 400,
+						errorMessage:
+							"invalid_request_error: prompt is too long: 3059586 tokens > 1000000 maximum (raw-http-request=/logs/1787022540720-3o503gxo48bvb.json)",
+					}),
+				);
+			},
+			{ ...fast, maxAttempts: 5 },
+		);
+
+		expect(calls).toBe(1);
+		expect(final.stopReason).toBe("error");
+	});
+
+	it("does not retry a transient-wrapped payload rejection", async () => {
+		let calls = 0;
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(
+					message({
+						stopReason: "error",
+						errorStatus: 413,
+						errorMessage: "Provider returned error: 413 Payload Too Large",
+					}),
+				);
+			},
+			{ ...fast, maxAttempts: 5 },
+		);
+
+		expect(calls).toBe(1);
+		expect(final.stopReason).toBe("error");
+		expect(final.errorMessage).toContain("413");
+	});
+
 	it("does not retry a deterministic llama.cpp tool-call parse failure reported as 500", async () => {
 		let calls = 0;
 		const final = await retryTransientCompletion(

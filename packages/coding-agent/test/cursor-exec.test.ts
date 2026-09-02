@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { create, fromBinary } from "@bufbuild/protobuf";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentEvent, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
@@ -17,14 +16,18 @@ import {
 	McpArgsSchema,
 	ReadArgsSchema,
 	ShellArgsSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
 	createBridgeGrepFactory,
+	cursorMcpPrefersReplaceEdit,
+	normalizeCursorReplaceArgs,
 } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
+
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -56,6 +59,9 @@ function passthroughRunner(seen: string[] = []): ExtensionRunner {
 	return {
 		hasHandlers: () => true,
 		consumeToolCallEmitted: () => false,
+		runScoped<T>(fn: () => T): T {
+			return fn();
+		},
 		emitToolCall: async (event: { toolName: string }) => {
 			seen.push(event.toolName);
 			return undefined;
@@ -327,13 +333,13 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 	});
 
 	it("edits a real file from a pi_edit frame when `edit` is withheld from the model", async () => {
-		// For Cursor the session drops `edit` from the tool registry so the model
-		// is steered to full-file `write`. The native `pi_edit` frame arrives
-		// regardless of the advertised catalog, so the bridge must still reach a
-		// real edit tool through `getEditReplaceTool` — otherwise every modern
-		// edit answers "Tool \"edit\" not available" and the file is untouched.
-		// (Not the `getTool` fallback: that resolver also serves the agent loop's
-		// unadvertised calls, so it stays device-only.)
+		// A restricted roster omits `edit`. Native `pi_edit` still arrives, so
+		// the bridge must reach a real replace-mode tool through
+		// `getEditReplaceTool` — otherwise every modern edit answers
+		// `Tool "edit" not available` and the file is untouched.
+		// (Not the `getTool` fallback: that resolver also serves the agent
+		// loop's unadvertised calls, so it stays device-only.)
+
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		// Build it exactly as the session does. Both bridge callsites go through
@@ -395,13 +401,11 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 	});
 
 	it("runs the replace-mode instance even when the registry still holds another mode", async () => {
-		// The state a session reaches by starting on a non-Cursor provider and
-		// switching to Cursor: `edit` was never deleted from the registry (that
-		// only happens for a session created on Cursor) and the roster is not
-		// rebuilt on switch, so the configured-mode instance is still there.
-		// `executeTool` prefers the map over the `getTool` fallback, so without
-		// an explicit replace-mode accessor every native edit after the switch
-		// fails validation against the wrong schema.
+		// Hashline `edit` stays advertised as MCP. `executeTool` prefers the map
+		// over the `getTool` fallback, so without an explicit replace-mode
+		// accessor every native `pi_edit` fails validation against the hashline
+		// schema.
+
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
 		const session = createTestSession(cwd);
@@ -583,6 +587,134 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 
 		expect(result.isError).toBe(true);
 		expect(await Bun.file(target).exists()).toBe(false);
+	});
+});
+
+describe("Cursor MCP StrReplace fallback", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-strreplace-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("projects CLI and Pi replacement fields onto replace kwargs", () => {
+		expect(
+			normalizeCursorReplaceArgs({ path: "/tmp/n.txt", old_text: "a", new_text: "b", replaceAll: true }),
+		).toEqual({ path: "/tmp/n.txt", old_string: "a", new_string: "b", replace_all: true });
+		expect(normalizeCursorReplaceArgs({ path: "/tmp/n.txt", input: "[n]" })).toEqual({
+			path: "/tmp/n.txt",
+			input: "[n]",
+		});
+	});
+
+	it("routes injected CLI names and replace-shaped edit onto the bridge", () => {
+		expect(cursorMcpPrefersReplaceEdit("StrReplace", { path: "a", old_string: "x", new_string: "y" })).toBe(true);
+		expect(cursorMcpPrefersReplaceEdit("Edit", { path: "a", old_text: "x", new_text: "y" })).toBe(true);
+		expect(cursorMcpPrefersReplaceEdit("edit", { path: "a", old_string: "x", new_string: "y" })).toBe(true);
+		expect(cursorMcpPrefersReplaceEdit("edit", { input: "[a#0000]\nPUT 1.=1:\n+x\n" })).toBe(false);
+		expect(cursorMcpPrefersReplaceEdit("write", { path: "a", old_string: "x", new_string: "y" })).toBe(false);
+	});
+
+	it("edits a file when the server-injected StrReplace name arrives as MCP", async () => {
+		const target = path.join(cwd, "note.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["edit", new EditTool(session)]]),
+			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+		});
+
+		const result = await handlers.mcp({
+			name: "StrReplace",
+			providerIdentifier: "cursor",
+			toolName: "StrReplace",
+			toolCallId: "sr1",
+			args: { path: target, old_string: "beta", new_string: "gamma" },
+			rawArgs: {},
+		});
+
+		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+		expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("")).not.toMatch(
+			/not found|not available/i,
+		);
+	});
+
+	it("runs replace-mode when advertised hashline edit is called with old_string", async () => {
+		const target = path.join(cwd, "note.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const session = createTestSession(cwd);
+		const hashline = new EditTool(session);
+		expect(hashline.mode).not.toBe("replace");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["edit", hashline]]),
+			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+		});
+
+		const result = await handlers.mcp({
+			name: "edit",
+			providerIdentifier: "pi-agent",
+			toolName: "edit",
+			toolCallId: "e-mix",
+			args: { path: target, old_text: "beta", new_text: "gamma" },
+			rawArgs: {},
+		});
+
+		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+		expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("")).not.toMatch(
+			/not found|not available/i,
+		);
+	});
+
+	it("does not run replace-mode for a hashline edit payload", async () => {
+		const session = createTestSession(cwd);
+		let replaceBuilt = 0;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["edit", new EditTool(session)]]),
+			getEditReplaceTool: () => {
+				replaceBuilt++;
+				return createBridgeEditTool(session, passthroughRunner());
+			},
+		});
+
+		await handlers.mcp({
+			name: "edit",
+			providerIdentifier: "pi-agent",
+			toolName: "edit",
+			toolCallId: "e-hl",
+			args: { input: "[missing.txt]\nPUT 1.=1:\n+x\n" },
+			rawArgs: {},
+		});
+
+		expect(replaceBuilt).toBe(0);
+	});
+
+	it("still 404s StrReplace when edit was not granted", async () => {
+		const target = path.join(cwd, "note.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			getEditReplaceTool: () => undefined,
+		});
+
+		const result = await handlers.mcp({
+			name: "StrReplace",
+			providerIdentifier: "cursor",
+			toolName: "StrReplace",
+			toolCallId: "sr-deny",
+			args: { path: target, old_string: "beta", new_string: "gamma" },
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
 	});
 });
 
@@ -1410,6 +1542,26 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
 
 		expect(result.isError).toBe(false);
+		expect(await Bun.file(target).exists()).toBe(false);
+	});
+
+	it("rechecks a live mutation grant after runtime tool activation", async () => {
+		const target = path.join(cwd, "victim.txt");
+		await Bun.write(target, "remove after upgrade");
+		let mutationGranted = false;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: () => mutationGranted,
+		});
+
+		const denied = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-denied", path: target }));
+		expect(denied.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(true);
+
+		mutationGranted = true;
+		const allowed = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-allowed", path: target }));
+		expect(allowed.isError).toBe(false);
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
 

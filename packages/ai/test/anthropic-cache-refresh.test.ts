@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai";
-import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type { CacheControlEphemeral, MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type { CacheRetention, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 
 const CACHE_REFRESH_DELAY_MS = 5 * 60_000 - 15_000;
 const CACHE_TOKENS = 1_200;
@@ -161,6 +162,7 @@ function createFetch(modes: ResponseMode[], capture: FetchCapture): FetchImpl {
 
 interface FinishRequestOptions {
 	anthropicCacheRefresh?: boolean;
+	cacheRetention?: CacheRetention;
 	model?: Model<"anthropic-messages">;
 	sessionId?: string;
 }
@@ -175,6 +177,7 @@ async function finishRequest(
 		fetch,
 		apiKey: "test-anthropic-key",
 		anthropicCacheRefresh: options.anthropicCacheRefresh ?? true,
+		cacheRetention: options.cacheRetention,
 		providerSessionState,
 		sessionId: options.sessionId ?? "cache-refresh-test-session",
 	});
@@ -208,6 +211,8 @@ afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
+
+withOfficialAnthropicEndpoint();
 
 describe("Anthropic prompt-cache refresh", () => {
 	it("replays max_tokens=0 once per interval and stops after three refreshes", async () => {
@@ -284,5 +289,29 @@ describe("Anthropic prompt-cache refresh", () => {
 		expect(capture.bodies[1]?.max_tokens).toBeGreaterThan(0);
 		expect(capture.bodies[1]?.stream).toBe(true);
 		expect(capture.thinkingRefreshAborted).toBe(true);
+	});
+
+	it("skips keep-alive refreshes and emits 1h breakpoints when retention is long", async () => {
+		vi.useFakeTimers();
+		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
+		const fetch = createFetch(["ordinary-write"], capture);
+		const states = createProviderSessionState();
+
+		await finishRequest(fetch, states, { cacheRetention: "long" });
+		vi.advanceTimersByTime(CACHE_REFRESH_DELAY_MS * 2);
+		await Promise.resolve();
+
+		// No zero-output replay was scheduled for the 1h entry.
+		expect(capture.bodies).toHaveLength(1);
+		const blocks = (capture.bodies[0]?.messages ?? []).flatMap(message =>
+			Array.isArray(message.content) ? message.content : [],
+		);
+		const breakpoints = blocks
+			.map(block => ("cache_control" in block ? (block.cache_control ?? undefined) : undefined))
+			.filter((cc): cc is CacheControlEphemeral => cc != null);
+		expect(breakpoints.length).toBeGreaterThan(0);
+		for (const cc of breakpoints) {
+			expect(cc.ttl).toBe("1h");
+		}
 	});
 });

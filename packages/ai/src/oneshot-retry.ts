@@ -102,6 +102,11 @@ function isRetryableOneshotFailure(errorId: number, errorStatus: number | undefi
 	// Replaying the same prompt produces the same malformed output.
 	if (AIError.LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(errorMessage)) return false;
 	if (AIError.is(errorId, AIError.Flag.ContentBlocked)) return false;
+	// A oneshot replays a FIXED prompt, so an input the model cannot fit fails
+	// identically on every attempt. Retrying burns the caller's deadline instead
+	// of reaching the fallback that can actually shrink the input.
+	if (AIError.is(errorId, AIError.Flag.ContextOverflow)) return false;
+	if (AIError.is(errorId, AIError.Flag.PayloadRejected)) return false;
 	return (
 		AIError.isTransientStatus(errorStatus) ||
 		AIError.is(errorId, AIError.Flag.Transient) ||

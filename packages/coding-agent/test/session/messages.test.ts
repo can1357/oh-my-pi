@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
+	buildReplanTitleContext,
 	type CustomMessage,
 	convertToLlm,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
@@ -279,5 +280,60 @@ describe("replaceLlmImagesWithText", () => {
 		]);
 
 		expect(replaceLlmImagesWithText(converted, "[image omitted]")).toBe(converted);
+	});
+});
+
+describe("buildReplanTitleContext", () => {
+	it("titles a user skill invocation from skill args, not the expanded skill body", () => {
+		const skill: CustomMessage<SkillPromptDetails> = {
+			role: "custom",
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content:
+				'[IMPORTANT: User invoked the "implement" skill]\n\nImplement the work described by the user.\n\nUse this skill.',
+			display: true,
+			details: {
+				name: "implement",
+				path: "/tmp/implement/SKILL.md",
+				args: "issues/07-manual-llm.md 创建临时工作树实现",
+				lineCount: 20,
+			},
+			attribution: "user",
+			timestamp: 1,
+		};
+		const context = buildReplanTitleContext([skill, settledAssistant("先读 implement 技能、ticket 07")]);
+
+		expect(context).toContain("07-manual-llm.md");
+		expect(context).toContain("ticket 07");
+		expect(context).not.toContain("Use this skill.");
+		expect(context).not.toContain("IMPORTANT");
+	});
+
+	it("does not feed an autoloaded skill prompt into title context", () => {
+		const skill = customMessage(SKILL_PROMPT_MESSAGE_TYPE, "agent");
+		skill.details = { name: "atomic-commit", path: "/tmp/SKILL.md", lineCount: 1, args: "issues/07-manual-llm.md" };
+
+		expect(buildReplanTitleContext([skill])).toBe("");
+	});
+
+	it("prefers the operator /skill chip over persisted name and args", () => {
+		const skill: CustomMessage<SkillPromptDetails> = {
+			role: "custom",
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "Use this skill.",
+			display: true,
+			details: {
+				name: "implement",
+				path: "/tmp/implement/SKILL.md",
+				args: "issues/07-manual-llm.md",
+				lineCount: 1,
+				__queueChipText: "/skill:implement issues/08-app-settings.md",
+			},
+			attribution: "user",
+			timestamp: 1,
+		};
+		const context = buildReplanTitleContext([skill]);
+
+		expect(context).toContain("08-app-settings.md");
+		expect(context).not.toContain("07-manual-llm.md");
 	});
 });

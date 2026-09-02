@@ -78,7 +78,8 @@ export const launchHelp = {
 			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),
 		"external-thinking": Flags.boolean({
-			description: "Use a private scratchpad while disabling supported GPT, Claude, and Gemini reasoning",
+			description:
+				"Use a private scratchpad while disabling supported GPT, Claude, and Gemini reasoning (at your own risk: providers have flagged this request shape as abuse)",
 		}),
 		hook: Flags.string({ description: "Load a hook/extension file (can be used multiple times)", multiple: true }),
 		extension: Flags.string({

@@ -31,6 +31,19 @@ describe("effort-dial-less reasoner encoding (regression)", () => {
 		expect(getSupportedEfforts(grok43).length).toBeGreaterThan(0);
 	});
 
+	test("xai-oauth/grok-4.6 keeps its effort dial including xhigh", () => {
+		const grok46 = getBundledModel("xai-oauth", "grok-4.6");
+		if (!grok46) throw new Error("xai-oauth/grok-4.6 must be in bundled models.json");
+		expect(grok46.thinking).toBeDefined();
+		expect(getSupportedEfforts(grok46)).toEqual([
+			Effort.Minimal,
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+		]);
+	});
+
 	test("xai-oauth/grok-4.20-0309-reasoning reasons but carries no thinking config", () => {
 		const grokR = getBundledModel("xai-oauth", "grok-4.20-0309-reasoning");
 		if (!grokR) throw new Error("xai-oauth/grok-4.20-0309-reasoning must be in bundled models.json");
@@ -174,6 +187,16 @@ describe("xAI OAuth Responses reasoning payload (regression)", () => {
 			id: "rs_xai_next_turn",
 			encrypted_content: "enc_next_turn",
 		});
+	});
+
+	test("xai-oauth/grok-4.6 sends reasoning.effort xhigh and omits max", () => {
+		const grok46 = getBundledModel<"openai-responses">("xai-oauth", "grok-4.6");
+		if (!grok46) throw new Error("xai-oauth/grok-4.6 must be in bundled models.json");
+
+		const { params } = buildParams(grok46, singleUserContext, { reasoning: Effort.XHigh }, undefined);
+
+		expect(params.reasoning).toEqual({ effort: "xhigh" });
+		expect(getSupportedEfforts(grok46)).not.toContain(Effort.Max);
 	});
 });
 

@@ -33,7 +33,7 @@
  * them also activates (`omp --print --profile work`).
  */
 
-import { isSubcommand } from "../cli-commands";
+import { isSubcommand, LAUNCH_FLAG_COMMANDS } from "../cli-commands";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
 	isUnknownLongValueCandidate,
@@ -42,10 +42,6 @@ import {
 	PROFILE_BOOTSTRAP_BOUNDARY_ARG,
 	STRING_VALUE_FLAGS,
 } from "./flag-tables";
-
-function isProfileBootstrapSubcommand(arg: string): boolean {
-	return arg === "launch" || arg === "acp";
-}
 
 function needsBoundaryAfterGlobalStrip(stripped: readonly string[]): boolean {
 	const previous = stripped[stripped.length - 1];
@@ -222,7 +218,7 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 		// any other token has been forwarded, later subcommand names are launch text.
 		// `launch` and `acp` are explicit spellings of launch-shaped commands, so
 		// global launch flags that follow them must still be extracted.
-		if (canDispatchSubcommand && isSubcommand(arg) && !isProfileBootstrapSubcommand(arg)) {
+		if (canDispatchSubcommand && isSubcommand(arg) && LAUNCH_FLAG_COMMANDS[arg] !== true) {
 			sawSubcommand = true;
 		}
 		canDispatchSubcommand = false;

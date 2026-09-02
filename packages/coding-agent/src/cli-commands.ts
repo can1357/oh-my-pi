@@ -10,7 +10,13 @@
  */
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
 import * as commandHelp from "./cli/command-help";
-import { flagConsumesValue } from "./cli/flag-tables";
+import {
+	EXTENSION_SHADOWABLE_STRING_FLAGS,
+	flagConsumesValue,
+	OPTIONAL_VALUE_FLAGS,
+	STRING_VALUE_FLAGS,
+	VALUELESS_FLAGS,
+} from "./cli/flag-tables";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -96,9 +102,25 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.galleryHelp,
 	},
 	{
+		name: "git",
+		load: () => import("./commands/git").then(m => m.default),
+		help: commandHelp.gitHelp,
+	},
+	{
 		name: "grievances",
 		load: () => import("./commands/grievances").then(m => m.default),
 		help: commandHelp.grievancesHelp,
+	},
+	{
+		name: "images",
+		load: () => import("./commands/images").then(m => m.default),
+		aliases: ["img"],
+		help: commandHelp.imagesHelp,
+	},
+	{
+		name: "if-bench",
+		load: () => import("./commands/if-bench").then(m => m.default),
+		help: commandHelp.ifBenchHelp,
 	},
 	{
 		name: "install",
@@ -119,6 +141,11 @@ export const commands: CommandEntry[] = [
 		name: "plugin",
 		load: () => import("./commands/plugin").then(m => m.default),
 		help: commandHelp.pluginHelp,
+	},
+	{
+		name: "ps",
+		load: () => import("./commands/ps").then(m => m.default),
+		help: commandHelp.psHelp,
 	},
 	{
 		name: "say",
@@ -144,6 +171,11 @@ export const commands: CommandEntry[] = [
 		name: "read",
 		load: () => import("./commands/read").then(m => m.default),
 		help: commandHelp.readHelp,
+	},
+	{
+		name: "render",
+		load: () => import("./commands/render").then(m => m.default),
+		help: commandHelp.renderHelp,
 	},
 	{
 		name: "ssh",
@@ -286,11 +318,53 @@ function leadingSubcommandIndex(argv: string[]): number {
 }
 
 /**
+ * Subcommands that share the launch flag surface, so leading global flags
+ * (`--cwd`, `--model`, `--approval-mode`, …) placed before them are meaningful
+ * and must be forwarded ({@link resolveCliArgv}, #2970). Every other subcommand
+ * parses only its own flags.
+ */
+export const LAUNCH_FLAG_COMMANDS: Record<string, true> = { launch: true, acp: true };
+
+/** Whether `arg` names a flag from the launch surface (bare or `--flag=value`). */
+function isLaunchGlobalFlag(arg: string): boolean {
+	const eq = arg.indexOf("=");
+	const name = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
+	return (
+		STRING_VALUE_FLAGS.has(name) ||
+		OPTIONAL_VALUE_FLAGS.has(name) ||
+		VALUELESS_FLAGS.has(name) ||
+		EXTENSION_SHADOWABLE_STRING_FLAGS.has(name)
+	);
+}
+
+/**
+ * Drop recognized launch-global flags (and any value they consume) from the
+ * leading segment before a hoisted non-launch subcommand. `--cwd` and friends
+ * belong to the launch surface and mean nothing to a subcommand like `update`,
+ * whose strict parser would otherwise reject them with a cryptic
+ * `node:util.parseArgs` error (#8891). Tokens the launch tables don't recognize
+ * are kept, so a subcommand's own leading flags still reach it.
+ */
+function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
+	const kept: string[] = [];
+	for (let index = 0; index < leading.length; index += 1) {
+		const arg = leading[index];
+		if (isLaunchGlobalFlag(arg)) {
+			if (flagConsumesValue(arg, leading[index + 1])) index += 1;
+			continue;
+		}
+		kept.push(arg);
+	}
+	return kept;
+}
+
+/**
  * Decide what the CLI runner should do with raw argv: reject bare reserved
  * management words, pass help/version through untouched, route a recognized
  * subcommand (even behind leading global flags like `--approval-mode=yolo`) to
- * that command with the flags preserved, and forward everything else to
- * `launch` (#2970).
+ * that command, and forward everything else to `launch` (#2970). Leading
+ * launch-global flags are forwarded to launch-shaped commands but stripped for
+ * other subcommands that cannot parse them (#8891).
  */
 export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	const first = argv[0];
@@ -302,12 +376,18 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	if (isSubcommand(first)) return { argv };
 	// A subcommand can hide behind leading global option flags
 	// (`omp --approval-mode=yolo acp`). `run` dispatches strictly on argv[0], so
-	// hoist the subcommand to the front and keep the leading flags as its own
-	// argv; the command's parser then applies them. Genuine launch prompts (no
-	// trailing subcommand) are untouched.
+	// hoist the subcommand to the front. Launch-shaped commands share the launch
+	// flag surface, so their leading flags are forwarded and applied; every other
+	// subcommand parses only its own flags, so launch-global flags placed before
+	// it (`omp --cwd <dir> update`) are stripped rather than forwarded into a
+	// crash (#8891). Genuine launch prompts (no trailing subcommand) are untouched.
 	const subIndex = leadingSubcommandIndex(argv);
 	if (subIndex >= 0) {
-		return { argv: [argv[subIndex], ...argv.slice(0, subIndex), ...argv.slice(subIndex + 1)] };
+		const sub = argv[subIndex];
+		const leading = argv.slice(0, subIndex);
+		const trailing = argv.slice(subIndex + 1);
+		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
+		return { argv: [sub, ...forwardedLeading, ...trailing] };
 	}
 	return { argv: ["launch", ...argv] };
 }

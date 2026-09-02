@@ -10,6 +10,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { withOfficialAnthropicEndpoint } from "./helpers/anthropic-endpoint";
+
+withOfficialAnthropicEndpoint();
 
 describe("/fast targets the current model's service-tier family", () => {
 	let tempDir: TempDir;

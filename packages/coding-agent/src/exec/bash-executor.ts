@@ -4,7 +4,8 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
-import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
@@ -26,6 +27,8 @@ export interface BashExecutorOptions {
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of brush parsing directly. */
 	useUserShell?: boolean;
+	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
+	pty?: BashPtyOptions;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -40,6 +43,14 @@ export interface BashExecutorOptions {
 		originalText: string,
 		info: { filter: string; inputBytes: number; outputBytes: number },
 	) => Promise<string | undefined>;
+}
+
+/** Viewport + raw-output callback enabling the user-shell PTY path (`!` hotkey). */
+export interface BashPtyOptions {
+	cols: number;
+	rows: number;
+	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
+	onChunk: (chunk: string) => void;
 }
 
 export interface BashResult {
@@ -148,6 +159,13 @@ const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
 const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
+// Upper bound on how long a quarantined session's cleanup may pend before the
+// record is force-released. Native cancellation normally settles `runPromise`
+// in ~2s, but a wedged native run (e.g. a grandchild holding the stdout pipe)
+// could otherwise leave the run promise pending for the life of the process,
+// leaking the session key in `brokenShellSessions`/`shellSessionQuarantines`
+// (#10308). The backing timer is unref'd so it never keeps the process alive.
+const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
 
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
@@ -174,15 +192,30 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	interval.unref?.();
 }
 
+/**
+ * A timer promise that resolves after {@link QUARANTINE_CLEANUP_TIMEOUT_MS}.
+ * Used to bound quarantine cleanup; the timer is unref'd so it never keeps the
+ * process alive on its own.
+ */
+function quarantineCleanupDeadline(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, QUARANTINE_CLEANUP_TIMEOUT_MS);
+	timer.unref?.();
+	return promise;
+}
+
 function quarantineShellSession(
 	sessionKey: string,
 	runPromise: Promise<ShellRunResult>,
 	abortCleanupPromise: Promise<void> | undefined,
 ): void {
 	brokenShellSessions.add(sessionKey);
-	const cleanup = abortCleanupPromise
+	const settled = abortCleanupPromise
 		? Promise.allSettled([runPromise, abortCleanupPromise])
 		: Promise.allSettled([runPromise]);
+	// Defensive bound: a never-settling `runPromise` must not pin the quarantine
+	// record for the life of the process (#10308).
+	const cleanup = Promise.race([settled, quarantineCleanupDeadline()]);
 	shellSessionQuarantines.set(sessionKey, cleanup);
 	void cleanup
 		.finally(() => {
@@ -340,6 +373,84 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 	};
 }
 
+/**
+ * Env for the user-shell PTY path: keep the non-interactive guards (pagers,
+ * editors, credential prompts) but restore color — the PTY makes stdout a
+ * TTY, so TERM/NO_COLOR/CI are all that keep tools monochrome.
+ */
+function buildUserShellPtyEnv(
+	shellEnv: Record<string, string>,
+	commandEnv: Record<string, string>,
+): Record<string, string> {
+	const env: Record<string, string> = { ...shellEnv, ...commandEnv, TERM: "xterm-256color" };
+	delete env.NO_COLOR;
+	delete env.CI;
+	return env;
+}
+
+/**
+ * Run a user-shell command on a headless PTY. Interactive zsh/fish startup
+ * (zle, job control, gitstatus) requires a real TTY — piping through the
+ * embedded shell produces `can't change option: zle` noise and colorless
+ * output. Raw bytes stream to `pty.onChunk` for virtual-terminal rendering;
+ * the sink keeps the sanitized capture for the transcript and the model.
+ */
+async function executeUserShellPty(run: {
+	shell: string;
+	args: string[];
+	command: string;
+	cwd: string | undefined;
+	env: Record<string, string>;
+	pty: BashPtyOptions;
+	timeoutMs: number | undefined;
+	signal: AbortSignal | undefined;
+	sink: OutputSink;
+}): Promise<BashResult> {
+	const session = new PtySession();
+	const result = await session.startArgv(
+		{
+			application: run.shell,
+			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
+			cwd: run.cwd,
+			env: run.env,
+			timeoutMs: run.timeoutMs,
+			signal: run.signal,
+			cols: run.pty.cols,
+			rows: run.pty.rows,
+		},
+		(err, chunk) => {
+			if (err || !chunk) return;
+			run.pty.onChunk(chunk);
+			// CRLF → LF for the capture; the sink strips ANSI itself.
+			run.sink.push(chunk.replace(/\r\n?/gu, "\n"));
+		},
+	);
+	if (result.timedOut) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			timedOut: true,
+			...(await run.sink.dump(
+				run.timeoutMs !== undefined
+					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
+					: "Command timed out",
+			)),
+		};
+	}
+	if (result.cancelled) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			...(await run.sink.dump("Command cancelled")),
+		};
+	}
+	return {
+		exitCode: result.exitCode,
+		cancelled: false,
+		...(await run.sink.dump()),
+	};
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
@@ -347,6 +458,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
 	const { shell, args, env: shellEnv, prefix } = shellConfig;
 	const bashShell = isBashShell(shell);
+	// `!` hotkey commands on zsh/fish run in a real PTY: interactive shell
+	// startup (zle, job control, gitstatus) needs a TTY, and tools only emit
+	// color when stdout is one. bash keeps the snapshot + embedded-shell path;
+	// `cd` keeps the persistent shell so the session cwd can follow it.
+	const ptyRequest = options?.pty;
+	const usePty =
+		ptyRequest !== undefined &&
+		options?.useUserShell === true &&
+		!bashShell &&
+		supportsAutoUserShell(shell) &&
+		$env.PI_NO_PTY !== "1" &&
+		!isPersistentShellCdCommand(command);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
@@ -376,12 +499,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
-		onChunk: options?.onChunk,
+		onChunk: usePty ? undefined : options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
-		chunkThrottleMs: options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
+		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
 	});
 
 	// sink.push() is synchronous — buffer management, counters, and onChunk
@@ -398,6 +521,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			cancelled: true,
 			...(await sink.dump("Command cancelled")),
 		};
+	}
+
+	if (usePty && ptyRequest) {
+		const requestedMs = options?.timeout;
+		try {
+			return await executeUserShellPty({
+				shell,
+				args,
+				command: preflight.command,
+				cwd: commandCwd,
+				env: buildUserShellPtyEnv(shellEnv, commandEnv),
+				pty: ptyRequest,
+				timeoutMs: requestedMs === 0 ? undefined : Math.max(1_000, requestedMs ?? 300_000),
+				signal: options?.signal,
+				sink,
+			});
+		} finally {
+			await sink.dispose();
+		}
 	}
 
 	const shellOptions = {
@@ -506,15 +648,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
+			let notice = "Command cancelled";
+			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
+				const seconds = Math.round(deadlineTimeoutMs / 1000);
+				// With an explicit timeout the native shell owns enforcement and
+				// this JS timer is only a backstop. If it still wins, the native
+				// run never returned — any output is stuck in the undrained pipe,
+				// so this is not a confirmed empty run (#10308).
+				notice = nativeOwnsTimeout
+					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
+					: `Command timed out after ${seconds} seconds`;
+			}
 			return {
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
-				...(await sink.dump(
-					winner.kind === "timeout" && deadlineTimeoutMs !== undefined
-						? `Command timed out after ${Math.round(deadlineTimeoutMs / 1000)} seconds`
-						: "Command cancelled",
-				)),
+				...(await sink.dump(notice)),
 			};
 		}
 		if (timeoutTimer) {
