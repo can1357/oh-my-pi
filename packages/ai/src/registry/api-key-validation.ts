@@ -12,6 +12,14 @@ type OpenAICompatibleValidationOptions = {
 	fetch?: FetchImpl;
 	tolerateModelDenied?: boolean;
 };
+type OpenAIResponsesValidationOptions = {
+	provider: string;
+	apiKey: string;
+	baseUrl: string;
+	acceptedErrorCode: string;
+	signal?: AbortSignal;
+	fetch?: FetchImpl;
+};
 type AnthropicCompatibleValidationOptions = {
 	provider: string;
 	apiKey: string;
@@ -114,6 +122,48 @@ export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleVa
 	}
 
 	throw await createApiKeyValidationError(options.provider, response, envelope);
+}
+/**
+ * Validate an API key against an OpenAI-compatible Responses endpoint.
+ *
+ * Treats the caller-provided error code as successful validation because the
+ * provider returns it only after accepting the credentials.
+ */
+export async function validateOpenAIResponsesApiKey(options: OpenAIResponsesValidationOptions): Promise<void> {
+	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	const fetchImpl = options.fetch ?? fetch;
+	const response = await fetchImpl(`${options.baseUrl}/responses`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${options.apiKey}`,
+		},
+		body: "{}",
+		signal,
+	});
+
+	if (response.ok) return;
+	if (response.status === 400) {
+		try {
+			const payload: unknown = await response.clone().json();
+			if (
+				typeof payload === "object" &&
+				payload !== null &&
+				"error" in payload &&
+				typeof payload.error === "object" &&
+				payload.error !== null &&
+				"code" in payload.error &&
+				payload.error.code === options.acceptedErrorCode
+			) {
+				return;
+			}
+		} catch {
+			// Fall through to the provider error with the original response body.
+		}
+	}
+
+	throw await createApiKeyValidationError(options.provider, response);
 }
 
 /**

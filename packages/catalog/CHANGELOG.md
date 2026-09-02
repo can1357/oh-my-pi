@@ -351,6 +351,9 @@
 ### Fixed
 
 - Corrected thinking-effort tiers for deepseek-v4-flash to include the low tier alongside high and max.
+### Added
+
+- Added the `volcengine-agent-plan` provider with a static mixed Responses/Chat catalog, documented model limits and modalities, and PAYG USD reference pricing for Agent Plan text models.
 
 ## [17.2.9] - 2026-08-05
 

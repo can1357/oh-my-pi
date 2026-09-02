@@ -396,6 +396,9 @@
 ### Breaking Changes
 
 - Removed the `zod` dependency and `z`/`ZodType` re-exports. Tool schemas now use `omptype` `type()` schemas, with Zod-style authoring still available via `@oh-my-pi/omptype/zod`.
+### Added
+
+- Added native `volcengine-agent-plan` authentication with dedicated-key login and zero-inference Responses API validation.
 
 ## [17.2.9] - 2026-08-05
 

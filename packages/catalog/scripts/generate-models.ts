@@ -55,6 +55,7 @@ import {
 	resolveZaiApi,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	VOLCENGINE_AGENT_PLAN_STATIC_MODELS,
 	YOLO_AUTO_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import {
@@ -575,6 +576,9 @@ async function generateModels() {
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.
 	allModels.push(...OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS);
+	// Agent Plan has no model-list endpoint; keep its documented text-model
+	// catalog available synchronously on every install.
+	allModels.push(...VOLCENGINE_AGENT_PLAN_STATIC_MODELS);
 	// Seed Anthropic models that are live on the first-party API or in limited
 	// release but that stencil.so has not catalogued yet (e.g. Claude Fable 5 /
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in

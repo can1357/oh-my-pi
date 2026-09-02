@@ -38,6 +38,7 @@ import {
 	isPersonalGitHubCopilotBaseUrl,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { VOLCENGINE_AGENT_PLAN_BASE_URL } from "../wire/volcengine-agent-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -3424,6 +3425,241 @@ export function alibabaCodingPlanModelManagerOptions(
 		config,
 		mapModel: mapWithBundledReference,
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Volcengine Ark Agent Plan
+// ---------------------------------------------------------------------------
+
+type VolcengineAgentPlanApi = "openai-responses" | "openai-completions";
+
+const VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT: OpenAICompat = {
+	supportsDeveloperRole: false,
+};
+
+const VOLCENGINE_AGENT_PLAN_KIMI_COMPAT: OpenAICompat = {
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: true,
+	maxTokensField: "max_completion_tokens",
+	requiresReasoningContentForToolCalls: true,
+};
+
+// USD per million tokens. Non-Doubao cards reuse their first-party PAYG
+// reference rates. Doubao rates normalize Volcengine's public CNY price table
+// for cross-provider comparison; Agent Plan billing itself remains AFP-based.
+const VOLCENGINE_AGENT_PLAN_COST = {
+	"doubao-seed-2.0-mini": { input: 0.03, output: 0.28, cacheRead: 0.01, cacheWrite: 0.0024 },
+	"doubao-seed-2.0-lite": { input: 0.09, output: 0.51, cacheRead: 0.02, cacheWrite: 0.0024 },
+	"doubao-seed-2.1-turbo": { input: 0.442, output: 2.21, cacheRead: 0.0884, cacheWrite: 0 },
+	"doubao-seed-evolving": { input: 0.9, output: 4.5, cacheRead: 0.18, cacheWrite: 0 },
+	"doubao-seed-2.0-code": { input: 0.9, output: 4.48, cacheRead: 0, cacheWrite: 0 },
+	"doubao-seed-2.0-pro": { input: 0.45, output: 2.24, cacheRead: 0.09, cacheWrite: 0.0024 },
+	"deepseek-v4-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	"deepseek-v4-pro": { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
+	"minimax-m2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
+	"minimax-m3": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+	"glm-5.2": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+	"kimi-k2.6": { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
+	"kimi-k2.7-code": { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+	"kimi-k3": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+} as const;
+
+function volcengineAgentPlanModel<TApi extends VolcengineAgentPlanApi>(
+	model: Omit<ModelSpec<TApi>, "provider" | "baseUrl" | "cost"> & {
+		cost: ModelSpec<TApi>["cost"];
+	},
+): ModelSpec<TApi> {
+	return {
+		...model,
+		provider: "volcengine-agent-plan",
+		baseUrl: VOLCENGINE_AGENT_PLAN_BASE_URL,
+	};
+}
+
+export const VOLCENGINE_AGENT_PLAN_STATIC_MODELS: readonly ModelSpec<VolcengineAgentPlanApi>[] = [
+	volcengineAgentPlanModel({
+		id: "ark-code-latest",
+		name: "Ark Code Latest (Auto)",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256_000,
+		maxTokens: 32_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "doubao-seed-2.0-mini",
+		name: "Doubao Seed 2.0 Mini",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-2.0-mini"],
+		contextWindow: 256_000,
+		maxTokens: 128_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "doubao-seed-2.0-lite",
+		name: "Doubao Seed 2.0 Lite",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-2.0-lite"],
+		contextWindow: 256_000,
+		maxTokens: 128_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["deepseek-v4-flash"],
+		contextWindow: 1_024_000,
+		maxTokens: 384_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT, streamIdleTimeoutMs: 300_000 },
+	}),
+	volcengineAgentPlanModel({
+		id: "doubao-seed-2.1-turbo",
+		name: "Doubao Seed 2.1 Turbo",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-2.1-turbo"],
+		contextWindow: 256_000,
+		maxTokens: 256_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "doubao-seed-evolving",
+		name: "Doubao Seed Evolving",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-evolving"],
+		contextWindow: 1_024_000,
+		maxTokens: 256_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "doubao-seed-2.0-code",
+		name: "Doubao Seed 2.0 Code",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-2.0-code"],
+		contextWindow: 256_000,
+		maxTokens: 128_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "doubao-seed-2.0-pro",
+		name: "Doubao Seed 2.0 Pro",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-2.0-pro"],
+		contextWindow: 256_000,
+		maxTokens: 128_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "minimax-m2.7",
+		name: "MiniMax M2.7",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["minimax-m2.7"],
+		contextWindow: 200_000,
+		maxTokens: 128_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "minimax-m3",
+		name: "MiniMax M3",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["minimax-m3"],
+		contextWindow: 1_024_000,
+		maxTokens: 128_000,
+		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
+	}),
+	volcengineAgentPlanModel({
+		id: "glm-5.2",
+		name: "GLM 5.2",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["glm-5.2"],
+		contextWindow: 1_024_000,
+		maxTokens: 128_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT, streamIdleTimeoutMs: 600_000 },
+	}),
+	volcengineAgentPlanModel({
+		id: "glm-latest",
+		name: "GLM Latest",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["glm-5.2"],
+		contextWindow: 1_024_000,
+		maxTokens: 128_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT, streamIdleTimeoutMs: 600_000 },
+	}),
+	volcengineAgentPlanModel({
+		id: "kimi-k2.6",
+		name: "Kimi K2.6",
+		api: "openai-completions",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["kimi-k2.6"],
+		contextWindow: 256_000,
+		maxTokens: 32_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_KIMI_COMPAT, streamIdleTimeoutMs: 300_000 },
+	}),
+	volcengineAgentPlanModel({
+		id: "kimi-k2.7-code",
+		name: "Kimi K2.7 Code",
+		api: "openai-completions",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["kimi-k2.7-code"],
+		contextWindow: 256_000,
+		maxTokens: 32_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_KIMI_COMPAT, streamIdleTimeoutMs: 300_000 },
+	}),
+	volcengineAgentPlanModel({
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["deepseek-v4-pro"],
+		contextWindow: 1_024_000,
+		maxTokens: 384_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT, streamIdleTimeoutMs: 300_000 },
+	}),
+	volcengineAgentPlanModel({
+		id: "kimi-k3",
+		name: "Kimi K3",
+		api: "openai-responses",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: VOLCENGINE_AGENT_PLAN_COST["kimi-k3"],
+		contextWindow: 1_024_000,
+		maxTokens: 128_000,
+		compat: { ...VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT, streamIdleTimeoutMs: 300_000 },
+	}),
+];
+
+export function volcengineAgentPlanModelManagerOptions(): ModelManagerOptions<VolcengineAgentPlanApi> {
+	return {
+		providerId: "volcengine-agent-plan",
+		staticModels: VOLCENGINE_AGENT_PLAN_STATIC_MODELS,
+	};
 }
 
 // ---------------------------------------------------------------------------
