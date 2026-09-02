@@ -1792,12 +1792,33 @@ export class RelayBridge {
 						return;
 					const script = tab.pendingPreloadScriptCleanup[0];
 					this.#assertExtensionCurrent(expectedExt);
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.removeScriptToEvaluateOnNewDocument",
-						params: { identifier: script.rootIdentifier },
-					});
+					try {
+						await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							method: "Page.removeScriptToEvaluateOnNewDocument",
+							params: { identifier: script.rootIdentifier },
+						});
+					} catch (err) {
+						// A transport swap must abort the whole loop so the pending
+						// queue survives for the replacement hello to retry.
+						if (isExtensionTransportInterrupted(err)) throw err;
+						// A single identifier can legitimately fail to remove — e.g. a
+						// stale old-root identifier queued before a recovery replay
+						// minted a fresh one on the new root. Drop only that entry and
+						// keep draining the rest; clearing the entire queue here would
+						// strand later, still-valid cleanups (such as the freshly
+						// replayed script) active without an owner.
+						this.#assertExtensionCurrent(expectedExt);
+						if (tab.pendingPreloadScriptCleanup[0] === script)
+							tab.pendingPreloadScriptCleanup.shift();
+						this.#log("preload script cleanup entry failed", {
+							tabId: tab.tabId,
+							identifier: script.rootIdentifier,
+							error: err instanceof Error ? err.message : String(err),
+						});
+						continue;
+					}
 					this.#assertExtensionCurrent(expectedExt);
 					if (tab.pendingPreloadScriptCleanup[0] === script)
 						tab.pendingPreloadScriptCleanup.shift();
@@ -2102,6 +2123,7 @@ export class RelayBridge {
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
 			case "Input.setInterceptDrags":
+			case "Page.setInterceptFileChooserDialog":
 			case "Network.setExtraHTTPHeaders":
 			case "Network.setBlockedURLs":
 			case "Emulation.setEmulatedMedia":
@@ -3118,7 +3140,14 @@ export class RelayBridge {
 					params: replayParams,
 				})) as Record<string, unknown> | undefined;
 			} catch (err) {
-				if (err instanceof ExtensionReplacedError)
+				// Chrome may have accepted this additive registration before the
+				// socket dropped and the result never reached us. An ordinary
+				// `relay extension disconnected` is just as ambiguous as an
+				// `ExtensionReplacedError` here: replaying on the surviving root
+				// would leave an untracked duplicate registration that runs on every
+				// future document. Force a fresh root before the next replay for any
+				// interrupted transport, not just socket replacement.
+				if (isExtensionTransportInterrupted(err))
 					tab.forceFreshRootBeforeReplay = true;
 				throw err;
 			}

@@ -3655,6 +3655,99 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 	});
 
+	it("replays preserved preload scripts on a fresh root after an ordinary disconnect loses the replay result", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		// First recovery: the extension socket closes ordinarily (not a
+		// replacement) after emitting the replay RPC but before its result is
+		// acked, so the replay rejects with `relay extension disconnected`.
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"ordinary-disconnect recovery attach RPC",
+		);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() =>
+				ext2
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"ordinary-disconnect first replay",
+		);
+		// The socket closes normally: no replacement, just a lost result. Chrome
+		// may already hold the additive registration, so the next replay must
+		// happen on a fresh root instead of the surviving, still-attached one.
+		bridge.extClosed(ext2);
+		await flush();
+
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext3.rpcs("detach").length === 1,
+			"fresh-root detach after ordinary disconnect",
+		);
+		ack(bridge, ext3, "detach");
+		await waitFor(
+			() => ext3.rpcs("attach").length === 1,
+			"fresh-root attach after ordinary disconnect",
+		);
+		ack(bridge, ext3, "attach");
+		await waitFor(
+			() =>
+				ext3
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"preload replay after fresh root following ordinary disconnect",
+		);
+		const replay = ext3
+			.rpcs("send")
+			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toEqual({
+			source: "window.__relayInjected = true;",
+		});
+		// Exactly one registration on the fresh root — no untracked duplicate that
+		// would run on every future document.
+		expect(
+			ext3
+				.rpcs("send")
+				.filter(
+					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+				),
+		).toHaveLength(1);
+		ack(bridge, ext3, "send", { identifier: "root-script-after-fresh-root" });
+		await flush();
+	});
+
 	it("removes preload scripts when their connection closes", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -3711,6 +3804,95 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext, "send");
 		await flush();
 		expect(ext.rpcs("detach")).toHaveLength(0);
+	});
+
+	it("retains later preload cleanups after a stale identifier fails to remove", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+
+		// Register two preload scripts on the same owner so its disconnect queues
+		// two cleanup entries back to back.
+		const firstAddId = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: firstAddId,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__first = true;" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "stale-old-root-script" });
+		await flush();
+
+		const secondAddId = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: secondAddId,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__second = true;" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "valid-fresh-root-script" });
+		await flush();
+
+		// The owner disconnects, queuing cleanup for both identifiers.
+		bridge.cdpClosed(ownerConn);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) =>
+							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
+							(rpc.params as { identifier?: string } | undefined)
+								?.identifier === "stale-old-root-script",
+					),
+			"first (stale) preload cleanup attempt",
+		);
+
+		// The stale old-root identifier fails to remove with an ordinary,
+		// non-transport error. This must not clear the queue: the later valid
+		// cleanup has to still be drained so the freshly replayed script does not
+		// stay active without an owner.
+		nack(bridge, ext, "send", "No script for given id");
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) =>
+							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
+							(rpc.params as { identifier?: string } | undefined)
+								?.identifier === "valid-fresh-root-script",
+					),
+			"later valid preload cleanup after stale failure",
+		);
+		const removeMethods = ext
+			.rpcs("send")
+			.filter(
+				(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
+			)
+			.map(
+				(rpc) => (rpc.params as { identifier?: string } | undefined)?.identifier,
+			);
+		expect(removeMethods).toEqual([
+			"stale-old-root-script",
+			"valid-fresh-root-script",
+		]);
+		ack(bridge, ext, "send");
+		await flush();
 	});
 
 	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
@@ -5484,6 +5666,56 @@ describe("RelayBridge tab grouping", () => {
 			"Emulation.setIdleOverride",
 			"Emulation.clearIdleOverride",
 		]);
+	});
+
+	it("waits for an in-flight file-chooser interception before live owner-loss cleanup", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const id = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id,
+				sessionId: ownerSession,
+				method: "Page.setInterceptFileChooserDialog",
+				params: { enabled: true },
+			}),
+		);
+		await flush();
+		// The enable is in flight (not yet acked) when its owner disconnects.
+		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
+			"Page.setInterceptFileChooserDialog",
+		]);
+
+		bridge.cdpClosed(ownerConn);
+		await flush();
+		// Owner-loss cleanup must wait for the in-flight enable rather than racing
+		// ahead: no clear is issued while the enable is still outstanding.
+		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+			"Page.setInterceptFileChooserDialog",
+		]);
+
+		ack(bridge, ext, "send");
+		await flush();
+		await waitFor(
+			() => ext.rpcs("send").length === 2,
+			"file-chooser cleanup after in-flight owner loss",
+		);
+		// The late success is reconciled: the now-orphaned interception is torn
+		// down so it does not linger enabled on the shared root.
+		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+			"Page.setInterceptFileChooserDialog",
+			"Page.setInterceptFileChooserDialog",
+		]);
+		expect(ext.rpcs("send")[1]!.params).toEqual({ enabled: false });
 	});
 
 	it("clears persistent root setters across Page and Emulation aliases before recovery", async () => {
