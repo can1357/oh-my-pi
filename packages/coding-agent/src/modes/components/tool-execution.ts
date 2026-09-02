@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
+import { hasTaskResultError } from "../../task/render";
 import type { SymbolKey, Theme } from "../../modes/theme/theme";
 import { SYMBOL_PRESETS } from "../../modes/theme/symbols";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -89,6 +90,7 @@ function headerIconStrip(): RegExp {
 // OSC 8 hyperlink span: `ESC ] 8 ; params ; uri (BEL|ST) text ESC ] 8 ; ; (BEL|ST)`.
 // The opener requires a non-empty URI so a stray closer can never match.
 const OSC8_LINK_REGEX = /(\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\))([\s\S]*?)(\x1b\]8;;(?:\x07|\x1b\\))/g;
+const OSC8_OPEN_REGEX = /\x1b]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\)/g;
 
 /**
  * Re-attach every OSC-8 hyperlink from `source` (the renderer's fully styled
@@ -115,9 +117,49 @@ function restoreHyperlinks(row: string, source: string): string {
 			at = out.indexOf(linkedPlain, from);
 			matched = linkedPlain;
 		}
+		if (at === -1) {
+			const linkedPrefix = linkedPlain.endsWith("…") ? linkedPlain.slice(0, -1) : linkedPlain;
+			const prefix = linkedPrefix.slice(0, 3);
+			for (
+				let candidate = out.indexOf(prefix, from);
+				candidate !== -1;
+				candidate = out.indexOf(prefix, candidate + 1)
+			) {
+				let length = 3;
+				while (length < linkedPrefix.length && out[candidate + length] === linkedPrefix[length]) length++;
+				if (out.startsWith("…", candidate + length)) {
+					at = candidate;
+					matched = linkedPrefix.slice(0, length);
+					break;
+				}
+			}
+		}
 		if (at === -1) continue;
 		out = `${out.slice(0, at)}${opener}${matched}${closer}${out.slice(at + matched.length)}`;
 		from = at + opener!.length + matched.length + closer!.length;
+	}
+	// renderOutputBlock may itself truncate a flat header, leaving the OSC-8
+	// opener and a clipped label without its closer. Reuse that surviving target
+	// around its visible prefix rather than dropping the link entirely.
+	for (const openerMatch of source.matchAll(OSC8_OPEN_REGEX)) {
+		const opener = openerMatch[0];
+		const remaining = source.slice(openerMatch.index! + opener.length);
+		if (remaining.includes("\x1b]8;;")) continue;
+		const linkedPlain = stripVTControlCharacters(remaining);
+		const ellipsis = linkedPlain.indexOf("…");
+		const linkedPrefix = (ellipsis === -1 ? linkedPlain : linkedPlain.slice(0, ellipsis)).trimEnd();
+		const prefix = linkedPrefix.slice(0, 3);
+		if (prefix.length < 3) continue;
+		for (let at = out.indexOf(prefix, from); at !== -1; at = out.indexOf(prefix, at + 1)) {
+			let length = 3;
+			while (length < linkedPrefix.length && out[at + length] === linkedPrefix[length]) length++;
+			if (!out.startsWith("…", at + length)) continue;
+			const matched = linkedPrefix.slice(0, length);
+			const closer = "\x1b]8;;\x07";
+			out = `${out.slice(0, at)}${opener}${matched}${closer}${out.slice(at + matched.length)}`;
+			from = at + opener.length + matched.length + closer.length;
+			break;
+		}
 	}
 	return out;
 }
@@ -1107,6 +1149,16 @@ export class ToolExecutionComponent extends Container {
 			this.#ui.requestRender();
 		}
 	}
+	/**
+	 * The custom-tool branch wins when a tool exposes renderer callbacks. A
+	 * built-in such as TaskTool legitimately does so, but delegates its result
+	 * renderer to the registry. Only that case owns the built-in status icon.
+	 */
+	#usesBuiltInResultRenderer(): boolean {
+		if (!this.#renderer) return false;
+		if (!this.#tool?.renderCall && !this.#tool?.renderResult) return true;
+		return this.#tool?.renderResult === this.#renderer.renderResult;
+	}
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0) return [];
@@ -1128,7 +1180,9 @@ export class ToolExecutionComponent extends Container {
 		// the header even for self-framing renderers). Errors stay full-size —
 		// a one-line error hides the message the user needs — and Ctrl+O
 		// (`setExpanded`) restores the complete card.
-		const collapse = this.#isFlat() && !this.#expanded && !(this.#result?.isError && !this.#isBenignSkip());
+		const taskResultError = this.#toolName === "task" && hasTaskResultError(this.#result?.details);
+		const resultIsError = this.#result?.isError === true || taskResultError;
+		const collapse = this.#isFlat() && !this.#expanded && !(resultIsError && !this.#isBenignSkip());
 		if (!collapse) return lines;
 		if (this.#collapsedSource === lines && this.#collapsedLines !== undefined) {
 			return this.#collapsedLines;
@@ -1145,7 +1199,7 @@ export class ToolExecutionComponent extends Container {
 		// Settled success restyles to opencode's dim `<glyph> Tool detail` row;
 		// live calls keep their native styling (spinner/accent) so activity
 		// stays legible, matching opencode's emphasized in-flight rows.
-		if (this.#result !== undefined && !this.#isPartial && !this.#result.isError) {
+		if (this.#result !== undefined && !this.#isPartial && !resultIsError) {
 			const headers = this.#multiFileBoxes.flatMap(box => {
 				if (!(box instanceof Box)) return [];
 				const header = box.render(width).find(line => /\S/.test(line));
@@ -1153,12 +1207,13 @@ export class ToolExecutionComponent extends Container {
 			});
 			const sourceRows = headers.length > 1 ? headers : [first];
 			const glyph = theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search");
+			const usesBuiltInResultRenderer = this.#usesBuiltInResultRenderer();
 			const collapsedRows = sourceRows.slice(0, 8).map(source => {
 				// Tabs are legal in filenames and custom status details; normalize
 				// them before measuring so the advertised single row truncates
 				// predictably instead of wrapping or leaving visual holes.
 				let plain = replaceTabs(stripVTControlCharacters(source)).trim();
-				if (this.#renderer !== undefined && !this.#tool?.renderCall && !this.#tool?.renderResult) {
+				if (usesBuiltInResultRenderer) {
 					plain = plain.replace(headerIconStrip(), "");
 				}
 				const row = ` ${glyph} ${plain}`;

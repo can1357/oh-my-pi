@@ -6,6 +6,8 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
+import { taskToolRenderer } from "@oh-my-pi/pi-coding-agent/task/renderer";
+import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { LayoutMode } from "@oh-my-pi/pi-coding-agent/modes/layout-mode";
 import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
 import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -239,6 +241,36 @@ describe("opencode layout", () => {
 		}
 	});
 
+	it("keeps the OSC-8 link around a truncated collapsed write path", () => {
+		settings.override("tui.hyperlinks", "always");
+		try {
+			const filePath = "src/a-directory-with-a-long-name/example.ts";
+			const resolvedPath = path.resolve("/workspace", filePath);
+			const component = new ToolExecutionComponent(
+				"write",
+				{ file_path: filePath, content: "hello\n" },
+				{ layout: opencode },
+				undefined,
+				ui,
+				process.cwd(),
+			);
+			component.updateResult(
+				{ content: [{ type: "text", text: "Wrote 1 lines" }], details: { resolvedPath } },
+				false,
+			);
+
+			const [row] = component.render(48).filter(line => /\S/.test(stripVTControlCharacters(line)));
+			const open = row!.search(/\x1b]8;[^;]*;/);
+			const close = row!.indexOf("\x1b]8;;", open + 1);
+			expect(open).toBeGreaterThanOrEqual(0);
+			expect(close).toBeGreaterThan(open);
+			expect(row!.slice(open, close)).toContain("src/a");
+			expect(stripVTControlCharacters(row!)).toContain("…");
+		} finally {
+			settings.clearOverride("tui.hyperlinks");
+		}
+	});
+
 	it("keeps both OSC-8 links, in order, in a collapsed rename header", () => {
 		// A rename/move edit header carries two links: source and destination.
 		// The collapse restyle must re-wrap every span, not just the first.
@@ -423,6 +455,75 @@ describe("opencode layout", () => {
 		} finally {
 			setThemeInstance(baseTheme);
 		}
+	});
+
+	it("strips TaskTool's built-in ascii done icon but preserves custom renderer text", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			const taskTool = {
+				name: "task",
+				label: "Task",
+				mergeCallAndResult: true,
+				renderResult: taskToolRenderer.renderResult,
+			};
+			const component = new ToolExecutionComponent(
+				"task",
+				{},
+				{ layout: opencode },
+				taskTool as unknown as AgentTool,
+				ui,
+				process.cwd(),
+			);
+			component.updateResult({ content: [] }, false);
+
+			const [row] = visibleRows(component);
+			expect(row).toBe(" # Task");
+			expect(row).not.toContain("* Task");
+		} finally {
+			setThemeInstance(baseTheme);
+		}
+	});
+
+	it("keeps aggregate task failures expanded", () => {
+		const taskTool = {
+			name: "task",
+			label: "Task",
+			mergeCallAndResult: true,
+			renderResult: taskToolRenderer.renderResult,
+		};
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			totalDurationMs: 0,
+			results: [
+				{
+					index: 0,
+					id: "worker",
+					agent: "task",
+					agentSource: "bundled",
+					task: "fails",
+					exitCode: 1,
+					output: "failure",
+					stderr: "boom",
+					truncated: false,
+					durationMs: 0,
+					tokens: 0,
+					requests: 0,
+				},
+			],
+		};
+		const component = new ToolExecutionComponent(
+			"task",
+			{},
+			{ layout: opencode },
+			taskTool as unknown as AgentTool,
+			ui,
+			process.cwd(),
+		);
+		component.updateResult({ content: [], details }, false);
+
+		expect(visibleRows(component).join("\n")).toContain("failure");
 	});
 
 	it("renders an ascii squeezed settled row through the oc.* marker, not `•`", async () => {
