@@ -550,7 +550,9 @@ async function reconcileOrphans() {
   const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
     ...attachmentStateEpochs.keys()
   ]);
-  const targets = await chrome.debugger.getTargets().catch(() => []);
+  const targets = await chrome.debugger.getTargets().catch(() => null);
+  if (targets === null)
+    return;
   const attachedTabIds = [];
   for (const target of targets) {
     if (target.attached && target.tabId !== undefined) {

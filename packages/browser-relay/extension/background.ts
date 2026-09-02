@@ -763,7 +763,14 @@ async function reconcileOrphans(): Promise<void> {
 	const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
 		...attachmentStateEpochs.keys(),
 	]);
-	const targets = await chrome.debugger.getTargets().catch(() => []);
+	// A getTargets() rejection is not an authoritative "no attachments" answer.
+	// Treating a transient failure as an empty snapshot would fall through to
+	// setOrphanSweepDeadline(null) below and discard the only persisted reclaim
+	// alarm even though debugger attachments may still exist — an MV3 suspension
+	// could then strand the debugging infobar until a later successful pass.
+	// Leave any existing deadline intact and let the next alarm/startup retry.
+	const targets = await chrome.debugger.getTargets().catch(() => null);
+	if (targets === null) return;
 	const attachedTabIds: number[] = [];
 	for (const target of targets) {
 		if (target.attached && target.tabId !== undefined) {
