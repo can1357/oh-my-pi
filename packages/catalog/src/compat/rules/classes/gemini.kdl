@@ -81,6 +81,21 @@ class "gemini" {
 			}
 		}
 	}
+	// Gemini 2.5 Flash-Lite's documented 65,536 output ceiling is exclusive on
+	// Vertex AI: maxOutputTokens=65536 fails with 400 "supported range is from
+	// 1 (inclusive) to 65536 (exclusive)". The 2.5 Flash/Pro siblings accept
+	// 65536 on the same endpoint (Pro does not validate the field at all), so
+	// only the Lite line is clamped. Other hosts are unverified and keep the
+	// documented value.
+	on "google-vertex" {
+		family "lite" {
+			revision ">=2.5 <2.6" {
+				limits-patch {
+					max-tokens 65535
+				}
+			}
+		}
+	}
 
 	revision ">=3" {
 		// Replaces the Google multimodal function-response baseline.
