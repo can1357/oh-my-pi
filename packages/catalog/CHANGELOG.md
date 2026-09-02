@@ -4,11 +4,19 @@
 
 ### Added
 
+- factory-droid: added `claude-fable-5.1` (867K ctx, refusal fallback to Opus 5, `claude_fable_5_1` gate), `glm-5.3` (1.04M ctx, thinking always on, defaults to max effort), and `glm-5.3-flash` from the droid 0.210.0 catalog.
+
+### Removed
+
+- factory-droid: removed the retired `amber-07-09` and `agate-07-11` preview codenames.
+
+
 - Added support for Claude Fable 5.1
 
 ### Changed
 
 - Updated pricing and context limits for various Claude models
+- factory-droid: updated the registry to droid 0.210.0 — client version 0.210.0; dropped the feature gates the CLI deleted in its GA wave (Opus 4.8/5, Sonnet 5, Fable 5, Gemini 3.5–3.7 Flash, GPT-5.6 Sol/Terra/Luna, Grok 4.5/4.6, Kimi K3, GLM-5.2, Nemotron 3 Ultra, DeepSeek V4 Flash); activated the `snowflake` upstream in the Opus 5, GPT-5.5, and GPT-5.6 rotations; repriced DeepSeek V4 Flash (0.176×) and V4 Pro (0.528×, cache reads now metered); recorded the sitewide 60% GPT/Grok promo (expires 2026-09-05).
 
 ### Fixed
 

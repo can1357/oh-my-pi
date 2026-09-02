@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
+import { buildFactoryDroidModel, FACTORY_DROID_MODEL_META } from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
 import type { AssistantMessage, Model } from "../src/types";
@@ -319,5 +319,46 @@ describe("Factory Droid anthropic wire (Claude + MiniMax)", () => {
 		);
 		const blocks = assistant?.content as Array<{ type?: string }>;
 		expect(blocks.map(block => block.type)).toEqual(["text"]);
+	});
+	it("sends the refusal fallback chain and both betas for fable models on the direct anthropic upstream", async () => {
+		const captured: CapturedRequest[] = [];
+		const model = buildModel(buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-fable-5"]!));
+		const result = await streamFactoryDroid(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunks("OK"), ANTHROPIC_EVENTS),
+				reasoning: Effort.High,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		const request = captured[0]!;
+		expect(request.headers["x-api-provider"]).toBe("anthropic");
+		expect(request.body.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		expect(request.headers["anthropic-beta"]).toContain("server-side-fallback-2026-06-01");
+		expect(request.headers["anthropic-beta"]).toContain("fallback-credit-2026-06-01");
+	});
+
+	it("withholds refusal fallbacks on vertex/bedrock rotations, which gate the beta themselves", async () => {
+		const captured: CapturedRequest[] = [];
+		const model = buildModel(buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-fable-5"]!));
+		model.factoryDroidApiProviders = ["vertex_anthropic"];
+		await streamFactoryDroid(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, anthropicChunks("OK"), ANTHROPIC_EVENTS),
+				reasoning: Effort.High,
+			},
+		).result();
+
+		const request = captured[0]!;
+		expect(request.headers["x-api-provider"]).toBe("vertex_anthropic");
+		expect(request.body.fallbacks).toBeUndefined();
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("server-side-fallback-2026-06-01");
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fallback-credit-2026-06-01");
 	});
 });

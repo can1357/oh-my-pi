@@ -486,6 +486,26 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					stripThinkingHistory: !adaptive,
 					effortBeta,
 					fastMode: meta?.fastMode === true,
+					// Native refusal fallbacks (fable entries): on the direct
+					// anthropic upstream the CLI sends fallbacks=[{model}] and the
+					// fallback-credit beta even without a credit token. The
+					// server-side-fallback beta is auto-attached by the transport.
+					...(upstream === "anthropic" && meta?.refusalFallbackModels?.length
+						? {
+								fallbacks: meta.refusalFallbackModels.map(model => ({ model })),
+								betas: ["fallback-credit-2026-06-01"],
+							}
+						: {}),
+					// Native refusal fallbacks (fable entries): on the direct
+					// anthropic upstream the CLI sends fallbacks=[{model}] and the
+					// fallback-credit beta even without a credit token. The
+					// server-side-fallback beta is auto-attached by the transport.
+					...(upstream === "anthropic" && meta?.refusalFallbackModels?.length
+						? {
+								fallbacks: meta.refusalFallbackModels.map(model => ({ model })),
+								betas: ["fallback-credit-2026-06-01"],
+							}
+						: {}),
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					temperature: options?.temperature,
 					toolChoice: options?.toolChoice as "auto" | "any" | "none" | { type: "tool"; name: string } | undefined,

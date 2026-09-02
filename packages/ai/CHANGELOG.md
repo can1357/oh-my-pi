@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- factory-droid: Fable models on the direct anthropic upstream now send the CLI's refusal fallback chain (`fallbacks: [{model: "claude-opus-5"}]` plus the `server-side-fallback`/`fallback-credit` betas), so proxy-side refusals retry against Opus 5 instead of surfacing.
+
 ### Fixed
 
 - Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.

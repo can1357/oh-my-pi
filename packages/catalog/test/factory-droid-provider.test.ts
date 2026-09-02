@@ -219,8 +219,6 @@ describe("Factory Droid catalog", () => {
 			"claude-fable-5",
 			"atlas-07-21",
 			"aster-07-15",
-			"amber-07-09",
-			"agate-07-11",
 			"gpt-5.2",
 			"kimi-k2.5",
 			"kimi-k2.6",
@@ -324,7 +322,14 @@ describe("Factory Droid catalog", () => {
 		// Cache-read-metered models project the relative multiplier through the input rate.
 		const grok = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["grok-4.5"]);
 		expect(grok.cost).toEqual(getBundledModel("xai", "grok-4.5").cost);
-		expect(grok.factoryDroidCredits).toEqual({ input: 0.8, output: 2.4, cacheRead: 0.12 });
+		expect(grok.factoryDroidCredits).toEqual({
+			input: 0.8,
+			output: 2.4,
+			cacheRead: 0.12,
+			promoDiscount: 0.6,
+			promoExpiresAt: "2026-09-05T02:00:00Z",
+			promoLabel: ", 60% Off",
+		});
 
 		// No outputTokenMultiplier -> output billed at the input rate.
 		const opus = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-opus-5"]);
@@ -355,16 +360,16 @@ describe("Factory Droid catalog", () => {
 		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol"].credits).toEqual({
 			input: 2,
 			output: 5,
-			promoDiscount: 0.2,
-			promoExpiresAt: "2026-11-22T00:00:00Z",
-			promoLabel: ", Promo Pricing",
+			promoDiscount: 0.6,
+			promoExpiresAt: "2026-09-05T02:00:00Z",
+			promoLabel: ", 60% Off",
 		});
 		expect(FACTORY_DROID_MODEL_META["gpt-5.6-sol-fast"].credits).toEqual({
 			input: 4,
 			output: 5,
-			promoDiscount: 0.2,
-			promoExpiresAt: "2026-11-22T00:00:00Z",
-			promoLabel: ", Promo Pricing",
+			promoDiscount: 0.6,
+			promoExpiresAt: "2026-09-05T02:00:00Z",
+			promoLabel: ", 60% Off",
 		});
 		expect(FACTORY_DROID_MODEL_META["kimi-k3"].credits).toEqual({
 			input: 1.2,
@@ -395,7 +400,8 @@ describe("Factory Droid catalog", () => {
 		expect(meta.apiProviders).toEqual(["google"]);
 		expect(meta.contextWindow).toBe(1_000_000);
 		expect(meta.maxTokens).toBe(65_536);
-		expect(meta.featureFlag).toBe("gemini_3_7_flash");
+		// GA since droid 0.210.0: the CLI catalog no longer gates it.
+		expect(meta.featureFlag).toBeUndefined();
 		// Not in the bundled catalog: cost degrades to zero, credits carry it.
 		expect(meta.priceRef).toBeUndefined();
 
