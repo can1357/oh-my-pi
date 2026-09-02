@@ -67,6 +67,11 @@ const relayInitiatedDetachTabs = new Set<number>();
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const recoverableTabIds = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
+// Bumped on every relay disconnect. maybeRunOrphanSweep snapshots this before it
+// yields to the alarms/storage APIs so a reconnect+disconnect cycle that arms a
+// fresh grace deadline during the await can veto the stale sweep instead of
+// letting it cancel the new grace period and detach the just-lost live session.
+let connectionGeneration = 0;
 const recoverableReady = chrome.storage.session
 	.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null })
 	.then((stored) => {
@@ -202,6 +207,13 @@ async function maybeRunOrphanSweep(): Promise<void> {
 		await maybeScheduleOrphanSweep();
 		return;
 	}
+	// Capture the connection generation before yielding to the alarms/storage
+	// APIs. A reconnect that delivers a hello and disconnects again while
+	// setOrphanSweepDeadline(null) is in flight arms a brand-new grace deadline;
+	// this stale invocation must not resume and cancel it. The disconnected +
+	// hasTrackedAttachments recheck below cannot catch that case because the new
+	// cycle also ends disconnected with the same tabs still attached.
+	const sweepGeneration = connectionGeneration;
 	await setOrphanSweepDeadline(null);
 	if (
 		!shouldProceedWithOrphanSweep({
@@ -210,6 +222,7 @@ async function maybeRunOrphanSweep(): Promise<void> {
 				openReadyState: WebSocket.OPEN,
 			}),
 			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+			connectionReplaced: connectionGeneration !== sweepGeneration,
 		})
 	) {
 		await maybeScheduleOrphanSweep();
@@ -814,6 +827,10 @@ async function connect(): Promise<void> {
 		if (ws !== socket) return;
 		ws = null;
 		if (helloDeliveredSocket === socket) helloDeliveredSocket = null;
+		// A new disconnect cycle: invalidate any orphan sweep that already yielded
+		// to the alarms/storage APIs so its stale resume cannot cancel the fresh
+		// grace deadline armed below.
+		connectionGeneration++;
 		if (pingTimer !== null) {
 			clearInterval(pingTimer);
 			pingTimer = null;

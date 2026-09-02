@@ -57,12 +57,17 @@ export function shouldRunOrphanSweep(
 export interface OrphanSweepRevalidationState {
 	disconnected: boolean;
 	hasTrackedAttachments: boolean;
+	connectionReplaced: boolean;
 }
 
 export function shouldProceedWithOrphanSweep(
 	state: OrphanSweepRevalidationState,
 ): boolean {
-	return state.disconnected && state.hasTrackedAttachments;
+	return (
+		state.disconnected &&
+		state.hasTrackedAttachments &&
+		!state.connectionReplaced
+	);
 }
 
 export function orphanSweepAlarmDelayMinutes(

@@ -113,18 +113,34 @@ describe("browser relay orphan sweep scheduling", () => {
 			shouldProceedWithOrphanSweep({
 				disconnected: true,
 				hasTrackedAttachments: true,
+				connectionReplaced: false,
 			}),
 		).toBe(true);
 		expect(
 			shouldProceedWithOrphanSweep({
 				disconnected: false,
 				hasTrackedAttachments: true,
+				connectionReplaced: false,
 			}),
 		).toBe(false);
 		expect(
 			shouldProceedWithOrphanSweep({
 				disconnected: true,
 				hasTrackedAttachments: false,
+				connectionReplaced: false,
+			}),
+		).toBe(false);
+	});
+
+	it("vetoes an expired sweep when a reconnect/disconnect cycle replaced the connection", () => {
+		// The stale sweep still sees the relay disconnected with the same tabs
+		// attached — only the connection generation reveals that a fresh grace
+		// period was armed while setOrphanSweepDeadline(null) was in flight.
+		expect(
+			shouldProceedWithOrphanSweep({
+				disconnected: true,
+				hasTrackedAttachments: true,
+				connectionReplaced: true,
 			}),
 		).toBe(false);
 	});

@@ -83,7 +83,7 @@ function shouldRunOrphanSweep(state) {
   return state.deadlineMs !== null && state.disconnected && state.hasTrackedAttachments && state.nowMs >= state.deadlineMs;
 }
 function shouldProceedWithOrphanSweep(state) {
-  return state.disconnected && state.hasTrackedAttachments;
+  return state.disconnected && state.hasTrackedAttachments && !state.connectionReplaced;
 }
 function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
   return Math.max((deadlineMs - nowMs) / 60000, 0.01);
@@ -126,6 +126,7 @@ var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var recoverableTabIds = new Set;
 var orphanSweepDeadlineMs = null;
+var connectionGeneration = 0;
 var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null }).then((stored) => {
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
   if (Array.isArray(ids)) {
@@ -220,13 +221,15 @@ async function maybeRunOrphanSweep() {
     await maybeScheduleOrphanSweep();
     return;
   }
+  const sweepGeneration = connectionGeneration;
   await setOrphanSweepDeadline(null);
   if (!shouldProceedWithOrphanSweep({
     disconnected: orphanSweepSeesRelayDisconnected({
       socketReadyState: relayInitializedReadyState(),
       openReadyState: WebSocket.OPEN
     }),
-    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+    connectionReplaced: connectionGeneration !== sweepGeneration
   })) {
     await maybeScheduleOrphanSweep();
     return;
@@ -593,6 +596,7 @@ async function connect() {
     ws = null;
     if (helloDeliveredSocket === socket)
       helloDeliveredSocket = null;
+    connectionGeneration++;
     if (pingTimer !== null) {
       clearInterval(pingTimer);
       pingTimer = null;
