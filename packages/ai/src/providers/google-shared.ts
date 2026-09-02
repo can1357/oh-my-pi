@@ -255,9 +255,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 							...(model.compat.supportsFunctionPartId ? { id: block.id } : {}),
 						},
 					};
-					if (model.provider === "google-vertex" && part?.functionCall?.id) {
-						delete part.functionCall.id; // Vertex AI GenerateContent rejects 'id' in functionCall parts.
-					}
 					if (effectiveSignature) {
 						part.thoughtSignature = effectiveSignature;
 					}
@@ -307,10 +304,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
-
-			if (model.provider === "google-vertex" && functionResponsePart.functionResponse?.id) {
-				delete functionResponsePart.functionResponse.id; // Vertex AI GenerateContent rejects 'id' in functionResponse parts.
-			}
 
 			// Cloud Code Assist API requires all function responses to be in a single user turn.
 			// Check if the last content is already a user turn with function responses and merge.

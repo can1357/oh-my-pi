@@ -440,12 +440,13 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			params.set("prompt", prompt);
 		}
 		const existingResource = params.get("resource")?.trim();
-		if (existingResource) {
-			// A resource already embedded in the provider's authorization URL is
-			// provider-authored, not OMP's server-URL fallback. Preserve same-host
-			// values here even when the caller marked its separate
-			// `config.resource` as fallback; gateway-hosted MCP servers can use
-			// origin-only or path-scoped values as the token audience.
+		if (this.#resource && !this.config.stripSameOriginResource) {
+			// Protected-resource or authorization-server metadata identifies the
+			// requested audience; a query carried by the endpoint URL does not.
+			params.set("resource", this.#resource);
+		} else if (existingResource) {
+			// An embedded resource outranks OMP's server-URL fallback. Gateway-
+			// hosted MCP servers can use origin-only or path-scoped audiences.
 			const filtered = filterResourceIndicator(resolveResourceUri(existingResource), this.config.authorizationUrl);
 			if (filtered) {
 				this.#resource = filtered;

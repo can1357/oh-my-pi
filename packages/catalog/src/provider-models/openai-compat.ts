@@ -1600,7 +1600,7 @@ export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
 // strings; the chat picker MUST exclude these prefixes or selecting them 400s.
 function withXaiOAuthCompatDefaults(model: ModelSpec<"openai-responses">): ModelSpec<"openai-responses"> {
 	const compat = {
-		...(model.compat ?? {}),
+		...model.compat,
 		includeEncryptedReasoning: model.compat?.includeEncryptedReasoning ?? true,
 		filterReasoningHistory: model.compat?.filterReasoningHistory ?? false,
 		supportsImageDetailOriginal: model.compat?.supportsImageDetailOriginal ?? false,
@@ -1632,7 +1632,7 @@ export function applyXaiResponsesThinkingPolicy(model: ModelSpec<"openai-respons
 	const effortCapable =
 		model.compat?.supportsReasoningEffort ?? resolveModelPolicy(model).compat.supportsReasoningEffort;
 	const compat = {
-		...(model.compat ?? {}),
+		...model.compat,
 		supportsReasoningEffort: effortCapable,
 		omitReasoningEffort: model.compat?.omitReasoningEffort ?? !effortCapable,
 	};
@@ -1671,7 +1671,7 @@ function mergeCuratedIntoModel(
 		curated.supportsReasoningEffort ??
 		resolveModelPolicy({ ...base, id: curated.id, provider: "xai-oauth" }).compat.supportsReasoningEffort;
 	const compat = {
-		...(base.compat ?? {}),
+		...base.compat,
 		includeEncryptedReasoning: base.compat?.includeEncryptedReasoning ?? true,
 		filterReasoningHistory: false,
 		supportsImageDetailOriginal: base.compat?.supportsImageDetailOriginal ?? false,
@@ -3252,7 +3252,7 @@ export function openrouterModelManagerOptions(
 								? topProvider.max_completion_tokens
 								: baseModel.maxTokens,
 						...(!supportsToolChoice && {
-							compat: { ...(baseModel.compat ?? {}), supportsToolChoice: false },
+							compat: { ...baseModel.compat, supportsToolChoice: false },
 						}),
 					};
 				},
@@ -3904,7 +3904,7 @@ export async function fetchLmStudioNativeModelMetadata(
 		try {
 			const response = await fetchImpl(`${nativeBaseUrl}/api/v0/models`, {
 				method: "GET",
-				headers: { Accept: "application/json", ...(options?.headers ?? {}) },
+				headers: { Accept: "application/json", ...options?.headers },
 				signal,
 			});
 			if (!response.ok) {
@@ -6139,7 +6139,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									maxTokens,
 									headers: {
 										...COPILOT_API_HEADERS,
-										...(getProviderReferences().get(defaults.id)?.headers ?? {}),
+										...getProviderReferences().get(defaults.id)?.headers,
 									},
 									...(api === "openai-completions"
 										? {

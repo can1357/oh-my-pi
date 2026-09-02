@@ -588,7 +588,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				...(model.compat.claudeThinkingBetaHeader && model.identity.class === "anthropic" && model.reasoning
 					? { "anthropic-beta": CLAUDE_THINKING_BETA_HEADER }
 					: {}),
-				...(options?.headers ?? {}),
+				...options?.headers,
 			};
 			const requestBodyJson = JSON.stringify(requestBody);
 			rawRequestDump = {

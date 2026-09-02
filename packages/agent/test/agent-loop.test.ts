@@ -20,6 +20,8 @@ import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
@@ -40,6 +42,8 @@ declare module "@oh-my-pi/pi-agent-core/types" {
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
+
+const harmonyMitigationModel = buildModel({ ...getBundledModel("openai-codex", "gpt-5.4") });
 
 describe("agentLoop with AgentMessage", () => {
 	it("should emit events with AgentMessage types", async () => {
@@ -185,7 +189,7 @@ describe("agentLoop with AgentMessage", () => {
 			provider: "openai-codex",
 			responses: [{ content: [leak] }, { content: ["clean retry response"] }],
 		});
-		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+		const config: AgentLoopConfig = { model: harmonyMitigationModel, convertToLlm: identityConverter };
 
 		const events: AgentEvent[] = [];
 		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
@@ -239,6 +243,49 @@ describe("agentLoop with AgentMessage", () => {
 		// retried — a hard-abort would have left `executed` empty and consumed the
 		// "done" response as a clean retry instead.
 		expect(executed).toEqual([leakyArg]);
+		expect(mock.calls).toHaveLength(2);
+	});
+
+	it("dispatches a tool call appended by transformAssistantMessage on a stop turn", async () => {
+		// In-text edit recovery (coding-agent) rewrites a text-only `stop` turn into
+		// a synthetic tool call inside this hook; the loop must scan tool calls
+		// AFTER the transform so the appended call is validated and executed.
+		const toolSchema = type({ input: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { input: string }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.input);
+				return { content: [{ type: "text", text: "ok" }], details: { input: params.input } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [{ content: ["stray payload turn"], stopReason: "stop" }, { content: ["done"] }],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			transformAssistantMessage: message => {
+				const stray = message.content.some(block => block.type === "text" && block.text.includes("stray payload"));
+				if (!stray || message.content.some(block => block.type === "toolCall")) return;
+				message.content.push({
+					type: "toolCall",
+					id: "recovered-1",
+					name: "edit",
+					arguments: { input: "payload" },
+				});
+			},
+		};
+		const messages = await agentLoop([createUserMessage("go")], context, config, undefined, mock.stream).result();
+
+		expect(executed).toEqual(["payload"]);
+		const toolResult = messages.find(m => m.role === "toolResult") as ToolResultMessage | undefined;
+		expect(toolResult?.toolCallId).toBe("recovered-1");
+		// The paired result went back to the provider for a second turn.
 		expect(mock.calls).toHaveLength(2);
 	});
 
@@ -3731,13 +3778,13 @@ describe("agentLoop pre-model-call gate", () => {
 			provider: "openai-codex",
 			responses: [{ content: ["Some prose. analysis to=functions.edit code"] }],
 		});
-		const retryModel = { ...mock.model, id: "retry-model" };
+		const retryModel = { ...harmonyMitigationModel, id: "retry-model" };
 		let gateCalls = 0;
 		let turnEndCalls = 0;
 		let rejectedToolChoices = 0;
 		const config: AgentLoopConfig = {
-			model: mock.model,
-			getModel: () => (gateCalls === 0 ? mock.model : retryModel),
+			model: harmonyMitigationModel,
+			getModel: () => (gateCalls === 0 ? harmonyMitigationModel : retryModel),
 			convertToLlm: identityConverter,
 			beforeModelCall: () => (++gateCalls > 1 ? { stop: true, reason: "over budget" } : undefined),
 			onTurnEnd: () => {
@@ -3778,7 +3825,7 @@ describe("agentLoop pre-model-call gate", () => {
 		const controller = new AbortController();
 		let gateCalls = 0;
 		const config: AgentLoopConfig = {
-			model: mock.model,
+			model: harmonyMitigationModel,
 			convertToLlm: identityConverter,
 			beforeModelCall: async (_context, signal) => {
 				if (++gateCalls === 1) return undefined;

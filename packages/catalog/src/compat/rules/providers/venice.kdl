@@ -1,6 +1,10 @@
 // Provider-wire compat for "venice"; regenerated from the frozen census using deployment contract selectors.
 
 provider "venice" {
+	class "qwen" {
+		// Replaces the Venice Qwen thinking-format branch.
+		thinking-format "openai"
+	}
 	thinking-mode "effort"
 	reasoning-disable-mode "venice-disable-thinking"
 	class "gemini" {

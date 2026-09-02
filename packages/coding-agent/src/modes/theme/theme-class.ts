@@ -523,6 +523,17 @@ export class Theme {
 		};
 	}
 
+	/**
+	 * Dotted rules/verticals for transient selection outlines. Corners come from
+	 * {@link boxRound} — Unicode has no rounded dotted corner glyphs.
+	 */
+	get boxDotted() {
+		return {
+			horizontal: this.#symbols["boxDotted.horizontal"],
+			vertical: this.#symbols["boxDotted.vertical"],
+		};
+	}
+
 	get boxSharp() {
 		return {
 			topLeft: this.#symbols["boxSharp.topLeft"],
@@ -579,6 +590,7 @@ export class Theme {
 			cost: this.#symbols["icon.cost"],
 			subscription: this.#symbols["icon.subscription"],
 			advisor: this.#symbols["icon.advisor"],
+			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
 			omp: this.#symbols["icon.omp"],
 			esc: this.#symbols["icon.esc"],

@@ -258,12 +258,10 @@ async function main(): Promise<void> {
 
 	// Each model is its own concurrent lane; the local worker still serializes
 	// its own lanes internally, but the Ollama lane genuinely runs in parallel.
-	const laneTasks: Promise<BenchLane>[] = [
-		...config.localModels.map(async (model): Promise<BenchLane> => {
-			const samples = await runLocalLane(model, prepared);
-			return { model, transport: "local", samples, summary: summarize(samples) };
-		}),
-	];
+	const laneTasks: Promise<BenchLane>[] = config.localModels.map(async (model): Promise<BenchLane> => {
+		const samples = await runLocalLane(model, prepared);
+		return { model, transport: "local", samples, summary: summarize(samples) };
+	});
 	if (config.ollamaUrl) {
 		const url = config.ollamaUrl;
 		for (const model of config.ollamaModels) {

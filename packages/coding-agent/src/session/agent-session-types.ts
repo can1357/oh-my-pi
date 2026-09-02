@@ -29,7 +29,7 @@ import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
-import type { ExtensionRunner } from "../extensibility/extensions";
+import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
@@ -132,6 +132,20 @@ export interface AgentSessionConfig {
 	 * provenance survive recursive task discovery.
 	 */
 	extensionRoots?: () => EffectiveExtensionRoots;
+	/**
+	 * Parent-imported extension factories rebound to this session's own
+	 * ExtensionAPI. Forwarded by session forks (e.g. `/tan`) so the child
+	 * re-registers the parent's runtime providers before the SDK's
+	 * `syncExtensionSources` prune runs against the shared model registry.
+	 */
+	preparedExtensions?: readonly PreparedExtension[];
+	/**
+	 * Source paths of the parent's loaded extensions. Forwarded alongside
+	 * {@link preparedExtensions} as the fallback the child rebinds from when a
+	 * parent construction path produced no prepared factories (mirrors the task
+	 * subagent forward) — keeps the child from building an empty extension set.
+	 */
+	extensionPaths?: readonly string[];
 	/** Raw SDK `additionalExtensionPaths`; used when no inherited root provider exists. */
 	additionalExtensionPaths?: readonly string[];
 	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
@@ -183,6 +197,8 @@ export interface AgentSessionConfig {
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
+	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
+	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
 	toolRegistry?: Map<string, AgentTool>;
 	/** Creates tools registered only while vibe mode is active. */
@@ -295,6 +311,8 @@ export interface AgentSessionConfig {
 	advisorSharedInstructions?: string;
 	/** Project context rendered for advisor sessions. */
 	advisorContextPrompt?: string;
+	/** Memory backend developer instructions rendered for advisor sessions. */
+	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */

@@ -55,6 +55,11 @@ export interface ThinkingConfig {
 	 */
 	supportsDisplay?: boolean;
 	/**
+	 * Thinking signatures bind each block to its preceding conversation prefix.
+	 * Requests that rewrite the prefix must opt into the provider's drop/error control.
+	 */
+	prefixBinding?: boolean;
+	/**
 	 * Per-effort upstream wire-id routing for collapsed effort-tier variants
 	 * (`compat/collapse.ts`). Keyed by pi effort; `"off"` applies when
 	 * thinking is disabled. Missing keys fall back to `requestModelId ?? id`.
@@ -392,6 +397,8 @@ export interface OpenAICompat {
 	toolStrictMode?: "all_strict" | "none";
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
 	supportsReasoningParams?: boolean;
+	/** Whether Responses requests may include `reasoning.summary`. Default: true except on known incompatible hosts. */
+	supportsReasoningSummary?: boolean;
 	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
@@ -450,6 +457,13 @@ export interface OpenAICompat {
  * that proxy gateways (Vertex AI, AWS Bedrock-style fronts, etc.) reject.
  */
 export interface AnthropicCompat {
+	/** Whether thinking requests may include `context_management` and its beta header. Default: true. */
+	supportsContextManagement?: boolean;
+	/**
+	 * Whether requests may carry `output_config.effort` (and its effort beta
+	 * header). Vertex AI rejects the field/header. Default: true.
+	 */
+	supportsOutputEffort?: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts.
 	 * Set to 0 to disable the inter-event idle watchdog entirely, matching
@@ -478,12 +492,20 @@ export interface AnthropicCompat {
 	supportsLongCacheRetention?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
-	 * `messages` array (Claude Opus 4.8+ and Claude Fable/Mythos 5 on the
-	 * first-party Claude API and Claude Platform on AWS). When unset,
-	 * auto-detected from the model id and base URL. Not available on Bedrock,
-	 * Vertex AI, or Microsoft Foundry.
+	 * `messages` array. When unset, auto-detected from model and deployment policy.
 	 */
 	supportsMidConversationSystem?: boolean;
+	/** Whether turn-scoped system messages accept `clear_at`. */
+	supportsTurnScopedSystem?: boolean;
+	/** Whether tool availability can change through system-message tool references. */
+	supportsMidConversationToolChanges?: boolean;
+	/** Whether effort can change through a per-message `output_config`. */
+	supportsPerMessageEffort?: boolean;
+	/**
+	 * Whether the endpoint accepts `thinking.block_binding` and reports
+	 * `input_transformations` under the thinking-binding-controls beta.
+	 */
+	supportsThinkingBindingControls?: boolean;
 	/**
 	 * Whether the model accepts a forced `tool_choice` (`{ type: "any" }` or
 	 * `{ type: "tool", name }`). Claude Fable/Mythos 5 reject forced tool use
@@ -696,6 +718,10 @@ export interface ResolvedOpenAISharedCompat {
 	stripImageInput: boolean;
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: OpenAICompat["thinkingLoopGuard"];
+	/** Flatten/reject leftover root `anyOf`/`oneOf` unions in strict tool schemas (xAI's function-calling validator 400s on them). */
+	rejectRootObjectUnion: boolean;
+	/** Retry without strict tools when the host rejects a strict grammar as too large (OpenRouter-Anthropic compiled-grammar overflow). */
+	retryWithoutStrictOnGrammarError: boolean;
 }
 
 /**
@@ -712,6 +738,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
+			| "supportsReasoningSummary"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"
@@ -774,6 +801,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		toolStrictMode: ResolvedToolStrictMode;
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
+		/** Send the normalized prompt-cache key as top-level `prompt_cache_key` on chat completions. */
+		supportsPromptCacheKey: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
 		/** Complete alternate view for thinking-engaged requests; swap pointers, never spread. */
 		whenThinking?: ResolvedOpenAICompat;
@@ -803,6 +832,17 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
 	isVercelGatewayHost: boolean;
+	/**
+	 * The configured endpoint is first-party OpenAI (`provider === "openai"` on
+	 * an `api.openai.com` or unset baseUrl). Gates official-only Responses
+	 * behavior: default-on stateful `previous_response_id` chaining and the
+	 * `text.verbosity` field.
+	 */
+	officialEndpoint: boolean;
+	/** Run Harmony-protocol leak detection/mitigation on streamed output. */
+	harmonyLeakMitigation: boolean;
+	/** Responses-surface prompt-cache marker dialect (OpenRouter-Anthropic `cache_control`). */
+	cacheControlFormat?: OpenAICompat["cacheControlFormat"];
 }
 
 /**
@@ -1170,11 +1210,10 @@ export interface Model<TApi extends Api = Api> {
  * vocabulary of `buildModel`. Identical to `Model` except `compat` carries the
  * sparse override shape and nothing is resolved yet.
  */
-export interface ModelSpec<TApi extends Api = Api>
-	extends Omit<
-		Model<TApi>,
-		"compat" | "identity" | "compatConfig" | "requiresGlyphTokenization" | "supportsComputerUseConfig"
-	> {
+export interface ModelSpec<TApi extends Api = Api> extends Omit<
+	Model<TApi>,
+	"compat" | "identity" | "compatConfig" | "requiresGlyphTokenization" | "supportsComputerUseConfig"
+> {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

@@ -1,6 +1,14 @@
 // Model-lineage compat for "mimo"; regenerated from the frozen census using class taxonomy selectors.
 
 class "mimo" {
+	// Replaces Xiaomi token-plan MiMo thinking-format branches.
+	on "xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "xiaomi-token-plan-sgp" {
+		thinking-format "zai"
+	}
+	// Replaces provider-keyed Xiaomi MiMo stream-idle dispatch.
+	on "xiaomi" "xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "xiaomi-token-plan-sgp" {
+		stream-idle-timeout-ms 300000
+	}
 	// MiMo remaps the pi ladder edges (minimal→low, xhigh→high) on every
 	// census host except the Xiaomi first-party endpoints (zai dialect).
 	on "aimlapi" "cline-pass" "deepinfra" "huggingface" "kilo" "nanogpt" "novita" "opencode-go" \

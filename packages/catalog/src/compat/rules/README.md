@@ -194,10 +194,10 @@ The three value shapes are:
 
 - **Scalar**: exactly one KDL boolean, integer, float, or string argument and no children. `#null` is rejected.
 - **Array**: one or more scalar arguments and no children; it resolves to a JSON array.
-- **Object**: no arguments and a child block, including an empty block. Child names are emitted verbatim as JSON keys. Each child is either one scalar or another object; arrays are not representable inside an object payload.
+- **Object**: no arguments and a child block, including an empty block. Child names are kebab-case: an axis-directive spelling compiles to its resolved axis key (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else converts mechanically (`input-threshold` → `inputThreshold`); camelCase names are a compile error. `extra-body` payloads (top-level or nested) are the exception — their child names are literal wire JSON keys copied verbatim (`enable_thinking`). Each child is either one scalar or another object; arrays are not representable inside an object payload.
 
 A rule cannot assign the same resolved axis twice in one block.
-One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`inputThreshold` + `input`/`output`/`cacheRead`/`cacheWrite`) or `inputThreshold` + `multiplier` (with optional `inputThresholdInclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
+One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
 
 ### Precedence and ambiguity
 

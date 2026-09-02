@@ -25,6 +25,7 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 			};
 		},
 		async settleInFlightMessagePersistence() {},
+		activeToolExecutionUpdates: () => [],
 	};
 	return {
 		session: stub as unknown as AgentSession,

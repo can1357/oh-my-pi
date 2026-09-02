@@ -461,14 +461,11 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("does not let a capped empty stop anchor the next context estimate", async () => {
-		const billedEmptyStops = Array.from(
-			{ length: 4 },
-			(): MockResponse => ({
-				content: [],
-				stopReason: "stop",
-				usage: { input: 172_000, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 172_001 },
-			}),
-		);
+		const billedEmptyStops = Array.from({ length: 4 }, (): MockResponse => ({
+			content: [],
+			stopReason: "stop",
+			usage: { input: 172_000, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 172_001 },
+		}));
 		const { session, mock } = await createHarness(billedEmptyStops);
 
 		await expectPromptCompletes(session.prompt("answer from compacted context"));

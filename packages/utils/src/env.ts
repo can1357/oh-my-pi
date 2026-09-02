@@ -36,6 +36,18 @@ export function isMacosMallocStackLoggingEnvName(name: string): boolean {
 	return name === "MallocStackLogging" || name === "MallocStackLoggingNoCompact";
 }
 
+/**
+ * True when running inside a WSL (Windows Subsystem for Linux) distribution.
+ *
+ * WSL reports `linux` for `process.platform`, so the only reliable signal is
+ * the `WSL_DISTRO_NAME`/`WSL_INTEROP` variables the interop layer injects.
+ * Callers use this to translate Windows drive paths to their `/mnt/<drive>`
+ * mounts and to route clipboard access through `powershell.exe`.
+ */
+export function isWsl(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): boolean {
+	return platform === "linux" && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
+}
+
 export function filterProcessEnv(env: Record<string, string | undefined>): Record<string, string> {
 	const result: Record<string, string> = {};
 	for (const key in env) {

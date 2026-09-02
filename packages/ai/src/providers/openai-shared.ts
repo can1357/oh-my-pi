@@ -228,7 +228,7 @@ export function resolveOpenAIRequestSetup(
 		apiKey = $env.OPENAI_API_KEY;
 	}
 	const rawApiKey = apiKey;
-	let headers = { ...(model.headers ?? {}) };
+	let headers = { ...model.headers };
 	if (model.provider === "openrouter") {
 		Object.assign(headers, getOpenRouterHeaders());
 	}
@@ -543,10 +543,6 @@ export function disableStrictToolsForScope(
 ): void {
 	if (!scope) return;
 	state?.strictTools.disabledModelScopes.add(`${scope.provider}:${scope.baseUrl ?? ""}:${scope.modelId}`);
-}
-
-export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean {
-	return model.provider === "openrouter" && model.identity?.class === "anthropic";
 }
 
 /**
@@ -3598,6 +3594,19 @@ type ReasoningOptions = {
 	toolChoice?: unknown;
 };
 
+/**
+ * Resolve the caller's reasoning-summary request against catalog compat.
+ * Hosts that reject `reasoning.summary` get an explicit `null` (wire omission)
+ * whenever reasoning is engaged, so the policy never fills the `"auto"` default.
+ */
+export function resolveReasoningSummaryOption(
+	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
+	options: { reasoning?: string; reasoningSummary?: "auto" | "detailed" | "concise" | null } | undefined,
+): "auto" | "detailed" | "concise" | null | undefined {
+	if (model.compat.supportsReasoningSummary) return options?.reasoningSummary;
+	return options?.reasoning === undefined ? undefined : null;
+}
+
 export interface ApplyResponsesCompatPolicyOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	mapEffort?: (effort: string) => string;
@@ -3691,7 +3700,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{ reasoningSummary: resolveReasoningSummaryOption(model, options), mapEffort },
 	);
 }
 

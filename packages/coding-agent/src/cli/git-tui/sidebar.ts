@@ -339,7 +339,7 @@ export class Sidebar {
 			}
 			// Compress single-child directory chains ("a/b/c" as one row).
 			const compress = (node: TreeDir): void => {
-				for (const [key, child] of [...node.dirs]) {
+				for (const [key, child] of Array.from(node.dirs)) {
 					let merged = child;
 					while (merged.files.length === 0 && merged.dirs.size === 1) {
 						const [only] = merged.dirs.values();

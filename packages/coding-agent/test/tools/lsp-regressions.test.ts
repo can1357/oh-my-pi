@@ -1681,87 +1681,91 @@ describe("lsp regressions", () => {
 			acceptsPublish: false,
 		},
 	]) {
-		it(scenario.name, async () => {
-			const tempDir = TempDir.createSync("@omp-lsp-failed-pull-");
-			try {
-				const targetFile = path.join(tempDir.path(), "Program.cs");
-				await Bun.write(targetFile, "private readonly object _gate = new();\n");
-				const uri = fileToUri(targetFile);
-				const publishedDiagnostic: Diagnostic = {
-					message: "Use System.Threading.Lock",
-					severity: 3,
-					code: "IDE0330",
-					source: "roslyn",
-					range: {
-						start: { line: 0, character: 25 },
-						end: { line: 0, character: 38 },
-					},
-				};
+		it(
+			scenario.name,
+			async () => {
+				const tempDir = TempDir.createSync("@omp-lsp-failed-pull-");
+				try {
+					const targetFile = path.join(tempDir.path(), "Program.cs");
+					await Bun.write(targetFile, "private readonly object _gate = new();\n");
+					const uri = fileToUri(targetFile);
+					const publishedDiagnostic: Diagnostic = {
+						message: "Use System.Threading.Lock",
+						severity: 3,
+						code: "IDE0330",
+						source: "roslyn",
+						range: {
+							start: { line: 0, character: 25 },
+							end: { line: 0, character: 38 },
+						},
+					};
 
-				const fakeServer = installFakeLsp((message, server) => {
-					if (message.method === "initialize") {
-						server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
-					} else if (message.method === "initialized") {
-						server.send({
-							jsonrpc: "2.0",
-							id: "register-diagnostics",
-							method: "client/registerCapability",
-							params: {
-								registrations: [
-									{
-										id: "pull-diagnostics",
-										method: "textDocument/diagnostic",
-										registerOptions: { identifier: "DocumentCompilerSemantic" },
-									},
-								],
-							},
-						});
-					} else if (message.method === "textDocument/diagnostic") {
-						server.send({
-							jsonrpc: "2.0",
-							id: message.id,
-							error: { code: -32800, message: "request failed" },
-						});
-						if (scenario.publish) {
-							setImmediate(() => {
-								server.send({
-									jsonrpc: "2.0",
-									method: "textDocument/publishDiagnostics",
-									params: { uri, diagnostics: [publishedDiagnostic] },
-								});
+					const fakeServer = installFakeLsp((message, server) => {
+						if (message.method === "initialize") {
+							server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+						} else if (message.method === "initialized") {
+							server.send({
+								jsonrpc: "2.0",
+								id: "register-diagnostics",
+								method: "client/registerCapability",
+								params: {
+									registrations: [
+										{
+											id: "pull-diagnostics",
+											method: "textDocument/diagnostic",
+											registerOptions: { identifier: "DocumentCompilerSemantic" },
+										},
+									],
+								},
 							});
+						} else if (message.method === "textDocument/diagnostic") {
+							server.send({
+								jsonrpc: "2.0",
+								id: message.id,
+								error: { code: -32800, message: "request failed" },
+							});
+							if (scenario.publish) {
+								setImmediate(() => {
+									server.send({
+										jsonrpc: "2.0",
+										method: "textDocument/publishDiagnostics",
+										params: { uri, diagnostics: [publishedDiagnostic] },
+									});
+								});
+							}
+						} else if (message.method === "shutdown") {
+							server.send({ jsonrpc: "2.0", id: message.id, result: null });
+						} else if (message.method === "exit") {
+							server.exit(0);
 						}
-					} else if (message.method === "shutdown") {
-						server.send({ jsonrpc: "2.0", id: message.id, result: null });
-					} else if (message.method === "exit") {
-						server.exit(0);
-					}
-				});
-				const serverConfig: ServerConfig = {
-					command: "Microsoft.CodeAnalysis.LanguageServer",
-					fileTypes: ["cs"],
-					rootMarkers: [],
-				};
-				const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path());
-				const diagnostics = waitForDiagnostics(client, uri, {
-					timeoutMs: scenario.acceptsPublish ? 1_000 : 50,
-					settleMs: scenario.settleMs,
-				});
+					});
+					const serverConfig: ServerConfig = {
+						command: "Microsoft.CodeAnalysis.LanguageServer",
+						fileTypes: ["cs"],
+						rootMarkers: [],
+					};
+					const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path());
+					const diagnostics = waitForDiagnostics(client, uri, {
+						timeoutMs: scenario.acceptsPublish ? 1_000 : 50,
+						settleMs: scenario.settleMs,
+					});
 
-				if (scenario.acceptsPublish) {
-					expect(await diagnostics).toEqual([publishedDiagnostic]);
-				} else {
-					await expect(diagnostics).rejects.toThrow("request failed");
+					if (scenario.acceptsPublish) {
+						expect(await diagnostics).toEqual([publishedDiagnostic]);
+					} else {
+						await expect(diagnostics).rejects.toThrow("request failed");
+					}
+					if (scenario.publish) {
+						expect(client.diagnostics.get(uri)?.diagnostics).toEqual([publishedDiagnostic]);
+					}
+					expect(fakeServer.received.map(m => m.method)).toContain("textDocument/diagnostic");
+				} finally {
+					await lspClient.shutdownAll();
+					tempDir.removeSync();
 				}
-				if (scenario.publish) {
-					expect(client.diagnostics.get(uri)?.diagnostics).toEqual([publishedDiagnostic]);
-				}
-				expect(fakeServer.received.map(m => m.method)).toContain("textDocument/diagnostic");
-			} finally {
-				await lspClient.shutdownAll();
-				tempDir.removeSync();
-			}
-		}, 15_000);
+			},
+			15_000,
+		);
 	}
 
 	it("does not reuse stale file diagnostics after another URI publishes", async () => {
@@ -2101,6 +2105,75 @@ describe("lsp regressions", () => {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
+	});
+
+	// TypeScript 7 dropped lib/tsserver.js (typescript-language-server's backend) and
+	// speaks LSP via `tsc --lsp --stdio`; older tsc rejects `--lsp`. Exactly one of the
+	// two servers must survive config loading, chosen from the resolved tsc install.
+	describe("TypeScript server selection", () => {
+		async function writeTypescriptWorkspace(root: string, options: { tsserver: boolean; symlinkTsc: boolean }) {
+			await Bun.write(path.join(root, "package.json"), "{}");
+			const binDir = path.join(root, "node_modules", ".bin");
+			const pkgDir = path.join(root, "node_modules", "typescript");
+			await fs.promises.mkdir(binDir, { recursive: true });
+			await Bun.write(path.join(pkgDir, "package.json"), '{"name":"typescript"}');
+			await Bun.write(path.join(pkgDir, "bin", "tsc"), "");
+			if (options.tsserver) await Bun.write(path.join(pkgDir, "lib", "tsserver.js"), "");
+			if (options.symlinkTsc) {
+				await fs.promises.symlink(path.join("..", "typescript", "bin", "tsc"), path.join(binDir, "tsc"));
+			} else {
+				await Bun.write(path.join(binDir, "tsc"), "");
+			}
+			await Bun.write(path.join(binDir, "typescript-language-server"), "");
+		}
+
+		it("prefers tsc --lsp when the workspace TypeScript ships no tsserver.js", async () => {
+			if (process.platform === "win32") return;
+			const tempDir = TempDir.createSync("@omp-lsp-ts7-");
+			vi.spyOn(Bun, "which").mockReturnValue(null);
+			try {
+				await writeTypescriptWorkspace(tempDir.path(), { tsserver: false, symlinkTsc: true });
+				const config = loadConfig(tempDir.path());
+				expect(Object.keys(config.servers)).toEqual(["typescript-native"]);
+				expect(config.servers["typescript-native"]?.resolvedCommand).toBe(
+					path.join(tempDir.path(), "node_modules", ".bin", "tsc"),
+				);
+				expect(config.servers["typescript-native"]?.args).toEqual(["--lsp", "--stdio"]);
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
+
+		it("keeps typescript-language-server when tsserver.js exists", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-ts5-");
+			vi.spyOn(Bun, "which").mockReturnValue(null);
+			try {
+				await writeTypescriptWorkspace(tempDir.path(), { tsserver: true, symlinkTsc: false });
+				const config = loadConfig(tempDir.path());
+				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
+
+		it("drops tsc --lsp when the tsc install layout is unrecognized", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-ts-unknown-");
+			vi.spyOn(Bun, "which").mockReturnValue(null);
+			try {
+				await Bun.write(path.join(tempDir.path(), "package.json"), "{}");
+				const binDir = path.join(tempDir.path(), "node_modules", ".bin");
+				await fs.promises.mkdir(binDir, { recursive: true });
+				await Bun.write(path.join(binDir, "tsc"), "");
+				await Bun.write(path.join(binDir, "typescript-language-server"), "");
+				const config = loadConfig(tempDir.path());
+				expect(Object.keys(config.servers)).toEqual(["typescript-language-server"]);
+			} finally {
+				vi.restoreAllMocks();
+				tempDir.removeSync();
+			}
+		});
 	});
 
 	it("detects Ruff in Windows virtualenv Scripts directories", async () => {

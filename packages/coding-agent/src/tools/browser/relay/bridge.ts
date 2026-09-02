@@ -331,7 +331,7 @@ export class RelayBridge {
 			seen.add(snap.tabId);
 			this.#onTabUpsert(snap, { silent: true });
 		}
-		for (const tabId of [...this.#tabs.keys()]) {
+		for (const tabId of Array.from(this.#tabs.keys())) {
 			if (!seen.has(tabId)) this.#onTabRemoved(tabId);
 		}
 		for (const tab of this.#tabs.values()) {

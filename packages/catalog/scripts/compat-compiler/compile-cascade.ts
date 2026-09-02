@@ -44,15 +44,34 @@ function scalarValue(node: KdlNodeView, value: KdlScalar): unknown {
 	return value;
 }
 
-/** Nested payload node → JSON: verbatim keys, scalars or deeper objects. */
-function objectValue(children: KdlNodeView[]): Record<string, unknown> {
+/**
+ * Object-payload child name → resolved JSON key. Authored names are
+ * kebab-case; an axis-directive spelling maps to its resolved axis key
+ * (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else
+ * converts mechanically (`input-threshold` → `inputThreshold`).
+ */
+function payloadKey(child: KdlNodeView): string {
+	if (/[A-Z]/.test(child.name)) {
+		throw new CompatCompileError(child.file, child.line, `object payload key \`${child.name}\` must be kebab-case`);
+	}
+	return AXES[child.name]?.key ?? child.name.replace(/-([a-z0-9])/g, (_, first: string) => first.toUpperCase());
+}
+
+/**
+ * Nested payload node → JSON. `verbatim` copies child names as literal wire
+ * keys (`extra-body` payloads); otherwise kebab-case names compile to
+ * camelCase resolved keys, and a nested `extra-body` child switches its
+ * subtree back to verbatim wire keys.
+ */
+function objectValue(children: KdlNodeView[], verbatim: boolean): Record<string, unknown> {
 	const object: Record<string, unknown> = {};
 	for (const child of children) {
 		if (child.props.length > 0) malformed(child);
+		const key = verbatim ? child.name : payloadKey(child);
 		if (child.args.length === 1 && !child.children) {
-			object[child.name] = scalarValue(child, child.args[0]);
+			object[key] = scalarValue(child, child.args[0]);
 		} else if (child.args.length === 0 && child.children) {
-			object[child.name] = objectValue(child.children);
+			object[key] = objectValue(child.children, verbatim || child.name === "extra-body");
 		} else {
 			malformed(child);
 		}
@@ -83,7 +102,7 @@ function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 		}
 		case "object":
 			if (node.args.length > 0 || !node.children) malformed(node);
-			return objectValue(node.children);
+			return objectValue(node.children, axis.verbatimKeys === true);
 	}
 }
 

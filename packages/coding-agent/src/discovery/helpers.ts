@@ -11,6 +11,7 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
@@ -441,13 +442,32 @@ export async function scanSkillsFromDir(
 }
 
 /**
+ * Resolve a placeholder name against `extraEnv`, then the ambient environment.
+ *
+ * Inherited members of either map (`__proto__`, `constructor`, `toString`, …)
+ * are never substitutable: `extraEnv` is consulted by own property only, and
+ * `Bun.env`'s getter falls through to `Object.prototype`, so `${constructor}`
+ * would otherwise stringify into the value as `function Object() { [native
+ * code] }`. Every real variable is a string, so a non-string ambient hit means
+ * the name resolved to a prototype member and counts as unset.
+ */
+function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): string | undefined {
+	if (extraEnv !== undefined && Object.hasOwn(extraEnv, varName)) return extraEnv[varName];
+	const ambient = Bun.env[varName];
+	return typeof ambient === "string" ? ambient : undefined;
+}
+
+/**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
-		if (envValue !== undefined) return envValue;
+		const envValue = lookupEnvValue(varName, extraEnv);
+		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
+		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
+		// (even an empty one) and stays literal when unset.
+		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;
 	});
@@ -564,6 +584,102 @@ export async function loadFilesFromDir<T>(
  */
 export function calculateDepth(cwd: string, targetDir: string, separator: string): number {
 	return cwd.split(separator).length - targetDir.split(separator).length;
+}
+// =============================================================================
+// Standalone context-file walker (AGENTS.md, CLAUDE.md, …)
+// =============================================================================
+
+/**
+ * Compare paths while tolerating Windows drive casing.
+ */
+function samePath(left: string, right: string): boolean {
+	const normalizedLeft = path.resolve(left);
+	const normalizedRight = path.resolve(right);
+	return process.platform === "win32"
+		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+/**
+ * Return whether `child` is at or below `parent`.
+ */
+function isWithin(parent: string, child: string): boolean {
+	const normalizedParent = path.resolve(parent);
+	const normalizedChild = path.resolve(child);
+	const relative = path.relative(
+		process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
+		process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+	);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+/**
+ * Load standalone context files (e.g. AGENTS.md, CLAUDE.md) by walking up from
+ * cwd. Shared across providers whose files live in project root rather than
+ * config directories (which their own providers handle).
+ *
+ * When a repository is nested below the user's home directory, continue past
+ * the Git root to discover workspace-level files, but stop before loading the
+ * home directory's own copy as project context. A repository rooted at the
+ * home directory itself is not "nested below" it, so the home-level file
+ * remains project context.
+ */
+export async function loadStandaloneContextFiles(
+	ctx: LoadContext,
+	providerId: string,
+	fileName: string,
+): Promise<LoadResult<ContextFile>> {
+	const items: ContextFile[] = [];
+	const warnings: string[] = [];
+	const home = path.resolve(ctx.home);
+	const cwd = path.resolve(ctx.cwd);
+	const repoRoot = ctx.repoRoot ? path.resolve(ctx.repoRoot) : null;
+	const filesystemRoot = path.parse(cwd).root;
+	const cwdIsUnderHome = isWithin(home, cwd);
+	const repoIsHome = repoRoot !== null && samePath(home, repoRoot);
+	const repoIsUnderHome = repoRoot !== null && isWithin(home, repoRoot) && !repoIsHome;
+	const scanToHome = repoRoot !== null && cwdIsUnderHome && repoIsUnderHome;
+	const boundary = scanToHome ? home : (repoRoot ?? (cwdIsUnderHome ? home : filesystemRoot));
+	const includeBoundary = repoRoot === null ? cwdIsUnderHome : !samePath(boundary, home) || repoIsHome;
+	const excludeHome = scanToHome;
+
+	let current = cwd;
+	while (true) {
+		const atBoundary = samePath(current, boundary);
+		const atHome = excludeHome && samePath(current, home);
+		if (!(atHome || (atBoundary && !includeBoundary))) {
+			const candidate = path.join(current, fileName);
+			const content = await readFile(candidate);
+
+			// Empty files contribute nothing and must not claim the depth scope:
+			// at a priority tie, an empty first-registered file would shadow a
+			// non-empty sibling (e.g. an empty AGENTS.md shadowing CLAUDE.md).
+			if (content !== null && content !== "") {
+				const parent = path.dirname(candidate);
+				const baseName = parent.split(path.sep).pop() ?? "";
+
+				if (!baseName.startsWith(".")) {
+					const fileDir = path.dirname(candidate);
+					const calculatedDepth = calculateDepth(cwd, fileDir, path.sep);
+
+					items.push({
+						path: candidate,
+						content,
+						level: "project",
+						depth: calculatedDepth,
+						_source: createSourceMeta(providerId, candidate, "project"),
+					});
+				}
+			}
+		}
+		if (atBoundary) break;
+
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+
+	return { items, warnings };
 }
 
 interface ExtensionModuleManifest {

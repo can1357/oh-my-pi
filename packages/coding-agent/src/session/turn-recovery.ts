@@ -20,6 +20,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -1408,7 +1409,7 @@ export class TurnRecovery {
 		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message => definitive.add(message));
 		this.#pendingDiscoveryDeferredValidation = false;
 		let changed = false;
-		for (const message of [...this.#fallbackChainWarnings]) {
+		for (const message of Array.from(this.#fallbackChainWarnings)) {
 			if (definitive.has(message)) continue;
 			const index = this.#host.configWarnings.indexOf(message);
 			if (index !== -1) {
@@ -1515,12 +1516,14 @@ export class TurnRecovery {
 		role: string,
 		currentSelector: string,
 		currentModel: Model | null | undefined = this.#host.model(),
+		options?: { wrapAround?: boolean },
 	): RetryFallbackSelector[] {
 		return findRetryFallbackCandidates(
 			this.#getRetryFallbackResolutionContext(),
 			role,
 			currentSelector,
 			currentModel,
+			options,
 		);
 	}
 
@@ -1775,7 +1778,12 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
-		options?: { pinFallback?: boolean; preserveFailedTurn?: boolean },
+		options?: {
+			excludeProvider?: string;
+			pinFallback?: boolean;
+			preserveFailedTurn?: boolean;
+			wrapAround?: boolean;
+		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const latestAssistant = options?.preserveFailedTurn
@@ -1784,11 +1792,12 @@ export class TurnRecovery {
 					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 				);
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
-			for (const selector of this.findRetryFallbackCandidates(role, currentSelector)) {
+			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
 				// model switch can satisfy neither constraint, so keep retrying the
@@ -2121,6 +2130,10 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		const siblingAvailabilityWaitMs =
+			recordedUsageLimitOutcome?.retryAtMs === undefined
+				? undefined
+				: Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
@@ -2147,12 +2160,8 @@ export class TurnRecovery {
 				// recoverable situation into the provider's multi-hour wait and
 				// trips the fail-fast cap below.
 				usageLimitWaitMs = recordedUsageLimitOutcome.retryAfterMs;
-				if (recordedUsageLimitOutcome.retryAtMs !== undefined) {
-					const siblingWaitMs =
-						Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
-					if (siblingWaitMs < usageLimitWaitMs) {
-						usageLimitWaitMs = siblingWaitMs;
-					}
+				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
+					usageLimitWaitMs = siblingAvailabilityWaitMs;
 				}
 				if (usageLimitWaitMs > delayMs) {
 					delayMs = usageLimitWaitMs;
@@ -2181,6 +2190,27 @@ export class TurnRecovery {
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		const effectiveUsageLimitWaitMs =
+			usageLimitWaitMs ??
+			(siblingAvailabilityWaitMs === undefined
+				? (recordedUsageLimitOutcome?.retryAfterMs ?? parsedRetryAfterMs)
+				: Math.min(
+						recordedUsageLimitOutcome?.retryAfterMs ?? parsedRetryAfterMs ?? Infinity,
+						siblingAvailabilityWaitMs,
+					));
+		const waitForSiblingCredential =
+			siblingAvailabilityWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
+		const longUsageLimitFallback =
+			currentModel !== undefined &&
+			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&
+			retrySettings.maxDelayMs > 0 &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs > retrySettings.maxDelayMs &&
+			/\bGoUsageLimitError\b/.test(errorMessage) &&
+			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
+
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
@@ -2188,14 +2218,17 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
+				!waitForSiblingCredential &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
 					pinFallback: classifierRefusal,
 					preserveFailedTurn,
+					wrapAround: longUsageLimitFallback,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -2299,7 +2332,7 @@ export class TurnRecovery {
 				type: "auto_retry_end",
 				success: false,
 				attempt,
-				finalError: `Provider requested ${delayMs}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+				finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 			});
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();
