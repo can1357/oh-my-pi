@@ -38,11 +38,11 @@ export function serializeRecoverableStateUpdate(
 export function restoreRecoverableState(
 	target: Set<number>,
 	storedIds: unknown,
-	isCurrent: boolean,
+	mutatedTabIds: ReadonlySet<number>,
 ): void {
-	if (!isCurrent || !Array.isArray(storedIds)) return;
+	if (!Array.isArray(storedIds)) return;
 	for (const id of storedIds) {
-		if (typeof id === "number") target.add(id);
+		if (typeof id === "number" && !mutatedTabIds.has(id)) target.add(id);
 	}
 }
 

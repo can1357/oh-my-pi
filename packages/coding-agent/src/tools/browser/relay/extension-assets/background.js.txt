@@ -73,11 +73,11 @@ function serializeRecoverableStateUpdate(previousUpdate, immediateWrite, isCurre
     await persistCurrent().catch(() => {});
   });
 }
-function restoreRecoverableState(target, storedIds, isCurrent) {
-  if (!isCurrent || !Array.isArray(storedIds))
+function restoreRecoverableState(target, storedIds, mutatedTabIds) {
+  if (!Array.isArray(storedIds))
     return;
   for (const id of storedIds) {
-    if (typeof id === "number")
+    if (typeof id === "number" && !mutatedTabIds.has(id))
       target.add(id);
   }
 }
@@ -159,12 +159,15 @@ var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var recoverableTabIds = new Set;
 var recoverableUpdateGeneration = 0;
+var recoverableStateLoaded = false;
+var startupRecoverableMutations = new Set;
 var orphanSweepDeadlineMs = null;
 var connectionGeneration = 0;
 var orphanSweepDeadlineGeneration = 0;
 var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null }).then((stored) => {
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
-  restoreRecoverableState(recoverableTabIds, ids, recoverableUpdateGeneration === 0);
+  restoreRecoverableState(recoverableTabIds, ids, startupRecoverableMutations);
+  recoverableStateLoaded = true;
   const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
   if (typeof deadline === "number" && Number.isFinite(deadline))
     orphanSweepDeadlineMs = deadline;
@@ -180,8 +183,12 @@ function trackPendingDetach(promise) {
   pendingDetaches.add(tracked);
   return tracked;
 }
-function updateRecoverable(update) {
+function updateRecoverable(tabIds, update) {
   update();
+  if (!recoverableStateLoaded) {
+    for (const tabId of tabIds)
+      startupRecoverableMutations.add(tabId);
+  }
   const generation = ++recoverableUpdateGeneration;
   const persistCurrent = () => chrome.storage.session.set({
     [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds]
@@ -191,13 +198,14 @@ function updateRecoverable(update) {
   return recoverableUpdates;
 }
 function rememberRecoverable(freshTabIds) {
-  return updateRecoverable(() => {
-    for (const tabId of freshTabIds())
+  const tabIds = freshTabIds();
+  return updateRecoverable(tabIds, () => {
+    for (const tabId of tabIds)
       recoverableTabIds.add(tabId);
   });
 }
 function forgetRecoverable(tabId) {
-  return updateRecoverable(() => {
+  return updateRecoverable([tabId], () => {
     recoverableTabIds.delete(tabId);
   });
 }

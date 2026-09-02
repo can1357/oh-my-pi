@@ -3252,7 +3252,7 @@ export class RelayBridge {
 					tab.forceFreshRootBeforeReplay = false;
 					tab.restorePending = false;
 					this.#retractTab(tab);
-					this.#detachIfUnheld(tab.tabId);
+					this.#detachIfUnheld(tab.tabId, true);
 					return;
 				}
 				tab.forceFreshRootBeforeReplay = false;

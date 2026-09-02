@@ -95,10 +95,7 @@ describe("attachment-state", () => {
 
 	it("does not restore a stale startup snapshot after ownership changed", () => {
 		const current = new Set<number>();
-		restoreRecoverableState(current, [1], false);
-		expect([...current]).toEqual([]);
-
-		restoreRecoverableState(current, [2, "invalid"], true);
+		restoreRecoverableState(current, [1, 2, "invalid"], new Set([1]));
 		expect([...current]).toEqual([2]);
 	});
 });

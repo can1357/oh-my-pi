@@ -1085,6 +1085,51 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
+	it("reconnects if cleanup after a subscription replay failure also fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Network.enable",
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.pending("attach").length === 1,
+			"subscription recovery attach",
+		);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() => ext2.pending("send").some((rpc) => rpc.method === "Network.enable"),
+			"subscription replay RPC",
+		);
+		nack(bridge, ext2, "send", "replay denied");
+		await waitFor(
+			() => ext2.pending("detach").length === 1,
+			"cleanup detach after replay failure",
+		);
+		nack(bridge, ext2, "detach", "cleanup detach denied");
+		await flush();
+
+		expect(ext2.closeCount).toBe(1);
+	});
+
 	it("cleans up replayed auto-attach state when its owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
