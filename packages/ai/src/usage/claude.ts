@@ -718,11 +718,14 @@ function getClaudeModelKind(context: CredentialRankingContext | undefined): Clau
  * opt-in reserve-health scope (`scopeLimitsForReserve`); credential-wide hard
  * blocks use {@link scopeClaudeLimitsForModelHardBlock} instead.
  */
-function scopeClaudeLimitsForModel(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
-	const kind = getClaudeModelKind(context);
+function scopeClaudeLimitsForKind(report: UsageReport, kind: string | undefined): UsageLimit[] {
 	return report.limits.filter(
 		limit => limit.scope.shared === true || (kind !== undefined && limit.scope.tier === kind),
 	);
+}
+
+function scopeClaudeLimitsForModel(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
+	return scopeClaudeLimitsForKind(report, getClaudeModelKind(context));
 }
 
 /**
@@ -748,11 +751,7 @@ function isConfirmedExhaustedTierRow(limit: UsageLimit, nowMs: number): boolean 
  * while unconfirmed rows remain ranking pressure and opt-in reserve health via
  * scopeClaudeLimitsForModel.
  */
-function scopeClaudeLimitsForModelHardBlock(
-	report: UsageReport,
-	context: CredentialRankingContext | undefined,
-): UsageLimit[] {
-	const kind = getClaudeModelKind(context);
+function scopeClaudeLimitsForKindHardBlock(report: UsageReport, kind: ClaudeModelKind | undefined): UsageLimit[] {
 	const requireConfirmedTierRow = kind === "fable" || kind === "mythos";
 	const nowMs = Date.now();
 	return report.limits.filter(limit => {
@@ -760,6 +759,13 @@ function scopeClaudeLimitsForModelHardBlock(
 		if (kind === undefined || limit.scope.tier !== kind) return false;
 		return !requireConfirmedTierRow || isConfirmedExhaustedTierRow(limit, nowMs);
 	});
+}
+
+function scopeClaudeLimitsForModelHardBlock(
+	report: UsageReport,
+	context: CredentialRankingContext | undefined,
+): UsageLimit[] {
+	return scopeClaudeLimitsForKindHardBlock(report, getClaudeModelKind(context));
 }
 
 function rankingUsedFraction(limit: UsageLimit): number {
@@ -806,6 +812,11 @@ function findClaudeSecondaryLimit(
 		.reduce<UsageLimit | undefined>((selected, limit) => morePressuredLimit(selected, limit, nowMs), undefined);
 }
 
+function claudeTierBlockScope(context: CredentialRankingContext | undefined): string | undefined {
+	const kind = getClaudeModelKind(context);
+	return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
+}
+
 export const claudeRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
@@ -818,14 +829,45 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	// Fable/Mythos weekly cap inside the reserve margin should move the turn to
 	// a healthy candidate rather than serve until 100%.
 	scopeLimitsForReserve: scopeClaudeLimitsForModel,
+	// Opus/Sonnet 429s still use the credential-wide bucket, while their usage
+	// reports can carry tier rows. Preserve every published Claude tier as
+	// evidence when healing that global block; extra-usage/display rows remain
+	// unrelated.
+	scopeLimitsForCredentialBlock(report) {
+		return report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined);
+	},
 	/**
 	 * Fable/Mythos usage-limit errors map to tier-local weekly counters. Scope
 	 * reactive backoff blocks for those tiers, mirroring the per-counter
 	 * precedent in packages/ai/src/usage/google-antigravity.ts:466-497.
 	 */
-	blockScope(context) {
-		const kind = getClaudeModelKind(context);
-		return kind === "fable" || kind === "mythos" ? `tier:${kind}` : undefined;
+	blockScope: claudeTierBlockScope,
+	/**
+	 * Opus/Sonnet requests keep backing off under the credential-wide bucket, so
+	 * a request context yields at most its own tier scope. Context-free healing
+	 * enumerates the blocks that actually exist instead of a family list here.
+	 */
+	blockScopes(context) {
+		const scope = claudeTierBlockScope(context);
+		return scope ? [scope] : [];
+	},
+	/**
+	 * Map a persisted tier scope straight to the limits it gates. Going through a
+	 * synthetic model id would put Anthropic naming back into TypeScript and make
+	 * healing depend on it; the tier is already the fact the scope encodes.
+	 *
+	 * Deliberately NOT the hard-block scoper. Gating hides an unconfirmed tier row
+	 * (100% used but no live reset) because it must not block on a counter that
+	 * lies below the cap; healing has the opposite bias, and hiding that row would
+	 * read "no evidence" as "recovered" and clear the very block the row justifies.
+	 * A report with no row for the tier still heals on the shared windows — the
+	 * provider simply does not publish that counter for the account.
+	 */
+	scopeLimitsForBlockScope(report, blockScope) {
+		if (!blockScope.startsWith("tier:")) return undefined;
+		const tier = blockScope.slice("tier:".length);
+		if (!tier) return undefined;
+		return scopeClaudeLimitsForKind(report, tier);
 	},
 	windowDefaults: { primaryMs: 5 * 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 };

@@ -566,16 +566,19 @@ export const openaiCodexUsageProvider: UsageProvider = {
 // the 5h/weekly chat windows. Scoping the gating set this way keeps an exhausted
 // Spark meter from blocking a normal chat request (and vice versa), instead of
 // OR-ing every window and meter in the report into one provider-wide block.
-function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRankingContext): UsageLimit[] {
-	const isSparkRequest = isCodexSparkRequest(context);
+function scopeCodexLimitsForMeter(report: UsageReport, isSparkMeter: boolean): UsageLimit[] {
 	return report.limits.filter(limit => {
 		if (limit.id === "openai-codex:primary" || limit.id === "openai-codex:secondary") {
-			return !isSparkRequest;
+			return !isSparkMeter;
 		}
 		// Additional metered features have ids of the form `openai-codex:<slug>:<key>`.
 		const slug = limit.id.split(":")[1];
-		return slug === "spark" ? isSparkRequest : false;
+		return slug === "spark" ? isSparkMeter : false;
 	});
+}
+
+function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRankingContext): UsageLimit[] {
+	return scopeCodexLimitsForMeter(report, isCodexSparkRequest(context));
 }
 
 /** True when the requested model spends the separate Spark meter. */
@@ -598,6 +601,12 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 	blockScopes(context) {
 		if (!context) return ["chat", "spark", "shared"];
 		return [isCodexSparkRequest(context) ? "spark" : "chat", "shared"];
+	},
+	// "shared" is deliberately unmapped: it gates every meter, so healing judges
+	// it against the whole report rather than one meter's limits.
+	scopeLimitsForBlockScope(report, blockScope) {
+		if (blockScope !== "chat" && blockScope !== "spark") return undefined;
+		return scopeCodexLimitsForMeter(report, blockScope === "spark");
 	},
 	findWindowLimits(report, context) {
 		const limits = scopeCodexLimitsForRequest(report, context);

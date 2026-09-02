@@ -400,15 +400,30 @@ export interface CredentialRankingStrategy {
 	 */
 	blockScope?(context?: CredentialRankingContext): string | undefined;
 	/**
-	 * Scopes that apply to a request, most specific first. With a context, the
-	 * request's own scope plus any legacy catch-all scope whose blocks still
-	 * apply to everything. Without one — reconciliation runs with no request —
-	 * every scope whose blocks must be healed.
+	 * Scopes that apply to a request, most specific first: the request's own
+	 * scope plus any legacy catch-all scope whose blocks still apply to it.
 	 *
 	 * A provider that scopes backoff by model family must implement this, or a
-	 * block written under one scope is invisible to requests and to healing.
+	 * block written under one scope is invisible to request-time selection.
+	 * Reconciliation separately enumerates the blocks a credential actually
+	 * holds, so this never doubles as a provider model-family registry.
 	 */
 	blockScopes?(context?: CredentialRankingContext): string[];
+	/**
+	 * Limits a credential-wide block actually gates. Falls back to
+	 * {@link scopeLimits} without a request context. Providers whose unscoped
+	 * errors can cover model-tier counters should include those counters here.
+	 */
+	scopeLimitsForCredentialBlock?(report: UsageReport): UsageLimit[];
+	/**
+	 * Limits a persisted block scope actually gates, used to judge whether that
+	 * one block may be healed from a live report. Reconciliation has no request
+	 * context, so a scope that cannot be narrowed is judged against the whole
+	 * report — and one unrelated exhausted counter would then pin it until
+	 * expiry. Return `undefined` for a catch-all scope that really does gate
+	 * everything, or for a scope this strategy does not own.
+	 */
+	scopeLimitsForBlockScope?(report: UsageReport, blockScope: string): UsageLimit[] | undefined;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

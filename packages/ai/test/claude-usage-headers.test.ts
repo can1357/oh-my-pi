@@ -933,6 +933,26 @@ describe("claude ranking strategy", () => {
 		expect(claudeRankingStrategy.blockScope?.({ modelId: "claude-mythos-5" })).toBe("tier:mythos");
 		expect(claudeRankingStrategy.blockScope?.({ modelId: "claude-opus-4-8" })).toBeUndefined();
 		expect(claudeRankingStrategy.blockScope?.({})).toBeUndefined();
+		// Reconciliation enumerates persisted/in-memory blocks directly rather
+		// than using this as a second model-family registry.
+		expect(claudeRankingStrategy.blockScopes?.()).toEqual([]);
+		expect(claudeRankingStrategy.blockScopes?.({ modelId: "claude-mythos-5" })).toEqual(["tier:mythos"]);
+		expect(claudeRankingStrategy.blockScopes?.({ modelId: "claude-opus-4-8" })).toEqual([]);
+		// Healing narrows a persisted scope through the strategy. Unlike gating it
+		// keeps the scope's own tier row — an exhausted counter must veto healing
+		// even when gating would not trust it — while still excluding the sibling
+		// tier, whose exhaustion says nothing about this block. An unmapped scope
+		// is a catch-all and falls back to the whole report.
+		expect(claudeRankingStrategy.scopeLimitsForBlockScope?.(report, "tier:fable")?.map(limit => limit.id)).toEqual([
+			"anthropic:5h",
+			"anthropic:7d",
+			"anthropic:7d:fable",
+		]);
+		expect(claudeRankingStrategy.scopeLimitsForBlockScope?.(report, "tier:future")?.map(limit => limit.id)).toEqual([
+			"anthropic:5h",
+			"anthropic:7d",
+		]);
+		expect(claudeRankingStrategy.scopeLimitsForBlockScope?.(report, "shared")).toBeUndefined();
 	});
 
 	it("uses the Fable weekly cap as secondary when it is more used than the shared weekly cap", () => {
