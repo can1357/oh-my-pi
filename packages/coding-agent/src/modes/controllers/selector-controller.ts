@@ -1332,11 +1332,11 @@ export class SelectorController {
 	}
 
 	/**
-	 * Complete an esc-esc rewind: user-message targets take the branch flow
-	 * (rewind past the prompt, hand its text back as an editor draft); every
-	 * other target lands the leaf on the entry via `navigateTree`. `done`
-	 * closes the fullscreen selector after the transcript is rebuilt so the
-	 * alternate screen never flashes a stale transcript.
+	 * Complete an esc-esc rewind: user-message targets either create a child
+	 * session or use the in-file tree flow, depending on the configured action.
+	 * Every other target lands the leaf on the entry via `navigateTree`.
+	 * `done` closes the fullscreen selector after the transcript is rebuilt so
+	 * the alternate screen never flashes a stale transcript.
 	 */
 	async #rewindFromTranscript(entryId: string, done: () => void): Promise<void> {
 		const entry = this.ctx.sessionManager.getEntry(entryId);
@@ -1344,8 +1344,9 @@ export class SelectorController {
 			done();
 			return;
 		}
+		const userMessageAction = settings.get("rewindUserMessageAction");
 
-		if (entry.message.role === "user") {
+		if (entry.message.role === "user" && userMessageAction === "new-session") {
 			// Branching rewinds to a strict prefix of the rendered transcript:
 			// the selected user message and everything after it are dropped.
 			// Capture the boundary before branch() so the tail can be dropped
@@ -1375,14 +1376,18 @@ export class SelectorController {
 		}
 
 		const realLeafId = this.ctx.sessionManager.getLeafId();
-		if (entryId === realLeafId) {
+		const isCurrentSessionUserTarget = entry.message.role === "user" && userMessageAction === "current-session";
+		if (entryId === realLeafId && !isCurrentSessionUserTarget) {
 			done();
 			this.ctx.showStatus("Already at this point");
 			return;
 		}
 		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
 		try {
-			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+			const result = await this.ctx.session.navigateTree(entryId, {
+				summarize: false,
+				...(isCurrentSessionUserTarget ? { allowCurrentLeafUserMessage: true } : {}),
+			});
 			if (result.cancelled) {
 				done();
 				this.ctx.showStatus("Navigation cancelled");
@@ -1396,7 +1401,7 @@ export class SelectorController {
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			}
 			await this.ctx.reloadTodos();
-			if (result.editorText && !this.ctx.editor.getText().trim()) {
+			if (result.editorText && (isCurrentSessionUserTarget || !this.ctx.editor.getText().trim())) {
 				this.ctx.editor.setDraft(result.editorText, result.editorImages);
 			}
 			done();

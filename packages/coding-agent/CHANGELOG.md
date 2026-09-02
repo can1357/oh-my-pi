@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/rewind` is now an alias for `/branch`, matching the rewind screen's name; a separate setting can keep rewound user prompts as branches of the current session instead of creating child sessions.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

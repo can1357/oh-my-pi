@@ -482,8 +482,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "branch",
+		aliases: ["rewind"],
 		icon: "branch",
-		description: "Create a new branch from a previous message",
+		description: "Open the fullscreen rewind selector",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showUserMessageSelector();
 			runtime.ctx.editor.setText("");

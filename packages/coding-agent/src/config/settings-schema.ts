@@ -2001,6 +2001,29 @@ export const SETTINGS_SCHEMA = {
 				"What pressing Escape twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing",
 		},
 	},
+	rewindUserMessageAction: {
+		type: "enum",
+		values: ["new-session", "current-session"] as const,
+		default: "new-session",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Rewind User Message Action",
+			description: "Where rewinding to a user message goes",
+			options: [
+				{
+					value: "new-session",
+					label: "New Session",
+					description: "Create a child session and restore the selected user message as a draft",
+				},
+				{
+					value: "current-session",
+					label: "Current Session",
+					description: "Rewind within the current session and restore the selected user message as a draft",
+				},
+			],
+		},
+	},
 
 	treeFilterMode: {
 		type: "enum",

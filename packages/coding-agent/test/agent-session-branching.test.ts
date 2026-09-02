@@ -204,6 +204,64 @@ describe("AgentSession branch title metadata", () => {
 	});
 });
 
+describe("AgentSession current-leaf user navigation", () => {
+	it("keeps current-leaf user navigation a no-op by default", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Earlier message",
+				timestamp: Date.now(),
+			});
+			ctx.sessionManager.appendMessage(assistantMsg("Earlier response"));
+			const targetId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Current draft",
+				timestamp: Date.now(),
+			});
+
+			expect(ctx.sessionManager.getLeafId()).toBe(targetId);
+
+			const result = await ctx.session.navigateTree(targetId);
+
+			expect(result).toEqual({ cancelled: false });
+			expect(ctx.sessionManager.getLeafId()).toBe(targetId);
+			expect(result.editorText).toBeUndefined();
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("moves to the user message parent and restores its draft when opted in", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Earlier message",
+				timestamp: Date.now(),
+			});
+			const parentId = ctx.sessionManager.appendMessage(assistantMsg("Earlier response"));
+			const targetId = ctx.sessionManager.appendMessage({
+				role: "user",
+				content: "Current draft",
+				timestamp: Date.now(),
+			});
+
+			expect(ctx.sessionManager.getLeafId()).toBe(targetId);
+
+			const result = await ctx.session.navigateTree(targetId, { allowCurrentLeafUserMessage: true });
+
+			expect(result).toMatchObject({
+				editorText: "Current draft",
+				cancelled: false,
+			});
+			expect(ctx.sessionManager.getLeafId()).toBe(parentId);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+});
+
 describe("AgentSession historical image prompts", () => {
 	it("returns the selected images when branching from a user prompt", async () => {
 		const ctx = await createTestSession({ inMemory: true });
