@@ -53,6 +53,8 @@ When a model has no credentials, `omp` tells you to run `/login` or set the prov
 
 For ClinePass, set `CLINE_API_KEY` or run `/login cline-pass` to open the Cline dashboard and validate a newly created API key. OMP refreshes membership from Cline's public recommended-models endpoint and bundles the current sixteen-model roster with Cline-authored limits, subscription pricing, modalities, and per-model reasoning controls for offline startup. New live ids remain selectable before regeneration, using conservative metadata rather than guessed controls. `omp usage` reports five-hour, weekly, and monthly quota windows. Free-tier models are marked `(free)` and work with the same key on any Cline account; subscription models show API-equivalent reference pricing, while streamed gateway cost remains authoritative for actual billed or discounted usage. Requests mirror Cline CLI client headers and a stable per-session task id, Qwen routes use Cline's prompt-cache shape, and Qwen3.7 Plus maps thinking levels to the gateway's token-budget field.
 
+For openzoo, run `npx openzoo` and nothing else: the proxy at `http://localhost:8402/v1` pays for each call over x402 from a local burner wallet, so there is no account and no key. OMP treats `openzoo` as authenticated out of the box, discovers the live `/v1/models` catalog (per-token pricing and limits come from the proxy; nothing is bundled), and defaults to the `openzoo/auto` router. Set `OPENZOO_BASE_URL` when the proxy runs on another port or behind an openzoo public tunnel URL; only the tunnel URL needs the bearer printed at proxy startup, supplied via `OPENZOO_API_KEY` or `/login openzoo`.
+
 ### Pinning a key in `models.yml`
 
 A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an existing environment variable, that variable's value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout (see [Model and Provider Configuration](./models.md) for the full value syntax).
@@ -148,6 +150,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                |
 | `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                               |
 | `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                        |
+| `openzoo`                        | `OPENZOO_API_KEY` (optional; the local proxy is keyless — any value works)     |
 | `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)            |
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |

@@ -39,6 +39,7 @@
 
 ### Added
 
+- Added the `openzoo` provider: live model discovery from the local x402 pay-per-call proxy (`npx openzoo`, `http://localhost:8402/v1`, overridable with `OPENZOO_BASE_URL`), with per-token pricing and the real attention window taken from the proxy catalog, router aliases collapsed to `openzoo/auto`, and no bundled model list.
 - Added support for Claude Fable 5.1
 
 ### Changed

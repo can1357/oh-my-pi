@@ -63,6 +63,7 @@ import {
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
+import { openzooModelManagerOptions } from "./openzoo";
 import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
@@ -399,6 +400,15 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["OPENROUTER_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => openrouterModelManagerOptions(config),
 		catalogDiscovery: { label: "OpenRouter", allowUnauthenticated: true },
+	},
+	{
+		id: "openzoo",
+		defaultModel: "auto",
+		createModelManagerOptions: (config: ModelManagerConfig) => openzooModelManagerOptions(config),
+		// The local proxy is keyless (it pays per call from its own wallet), and
+		// the live `/v1/models` is the whole catalog: nothing is bundled.
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "qianfan",
