@@ -599,8 +599,11 @@ async function attachTabOperation(tabId, socket) {
     await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(async () => {
       guardDetachments.delete(tabId);
       const targets = await chrome.debugger.getTargets().catch(() => null);
-      if (shouldRetrackAfterDetachFailure(targets, tabId))
+      if (shouldRetrackAfterDetachFailure(targets, tabId)) {
+        attachmentGuard.onDisconnected();
         attachmentGuard.track(tabId);
+        maybeScheduleOrphanSweep(true);
+      }
     });
     throw error;
   }
