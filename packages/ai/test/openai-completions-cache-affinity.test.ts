@@ -25,6 +25,18 @@ const openAI56CompletionsModel: Model<"openai-completions"> = {
 		api: "openai-completions",
 	}).compat,
 };
+const litellmCompletionsModel: Model<"openai-completions"> = {
+	...openAI56CompletionsSpec,
+	api: "openai-completions",
+	provider: "litellm",
+	baseUrl: "https://litellm.example.com/v1",
+	compat: resolveModelPolicy({
+		...openAI56CompletionsSpec,
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "https://litellm.example.com/v1",
+	}).compat,
+};
 
 const emptyUsage: Usage = {
 	input: 0,
@@ -100,6 +112,51 @@ async function captureSimpleRequest(
 	if (!requestHeaders || !body) throw new Error("Expected a serialized Chat Completions request");
 	return { headers: requestHeaders, body };
 }
+
+describe("OpenAI Chat Completions cache affinity header", () => {
+	const cases: Array<{
+		name: string;
+		options: OpenAICompletionsOptions;
+		expectedHeader: string | null;
+	}> = [
+		{
+			name: "uses sessionId when no prompt cache key is provided",
+			options: { sessionId: "session-fallback" },
+			expectedHeader: "session-fallback",
+		},
+		{
+			name: "keeps the prompt cache key stable across a distinct side-channel session",
+			options: { promptCacheKey: "stable-cache-key", sessionId: "side-channel-session" },
+			expectedHeader: "stable-cache-key",
+		},
+		{
+			name: "omits automatic affinity when caching is disabled",
+			options: {
+				promptCacheKey: "disabled-cache-key",
+				sessionId: "disabled-session",
+				cacheRetention: "none",
+			},
+			expectedHeader: null,
+		},
+		{
+			name: "preserves a caller-provided mixed-case affinity header",
+			options: {
+				promptCacheKey: "automatic-cache-key",
+				sessionId: "automatic-session",
+				headers: { "X-Context-ID": "caller-affinity" },
+			},
+			expectedHeader: "caller-affinity",
+		},
+	];
+
+	for (const { name, options, expectedHeader } of cases) {
+		it(name, async () => {
+			const { headers } = await captureRequest(options, litellmCompletionsModel);
+
+			expect(headers.get("x-context-id")).toBe(expectedHeader);
+		});
+	}
+});
 
 describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 	const historicalContext: Context = {

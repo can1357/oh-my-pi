@@ -5,6 +5,7 @@
 ### Fixed
 
 - Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
+- OpenAI-compatible Chat Completions requests now forward supported agent sessions as `metadata.session_id` for tracing, while LiteLLM and compatible opt-in gateways receive the stable prompt-cache identity as `x-context-id` for cache affinity. Caller headers and cache-disabled behavior remain unchanged.
 
 ## [18.1.2] - 2026-09-01
 
@@ -54,7 +55,6 @@
 - Fixed Perplexity email sign-in for accounts protected by authenticator-based two-factor authentication.
 - Fixed Qianfan API-key login validation for keys that cannot access the validation model.
 - Fixed Z.AI browser sign-in to report an occupied callback port before opening the browser.
-- Chat Completions requests now forward the agent session id as `metadata.session_id`, letting OpenAI-compatible gateways associate provider requests with the agent conversation that produced them. Forwarded by default on hosts known to accept the field (first-party OpenAI, Azure OpenAI, and the `litellm` gateway provider); every other endpoint opts in via `compat.supportsMetadata`.
 
 ## [18.0.9] - 2026-08-28
 

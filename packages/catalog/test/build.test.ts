@@ -603,6 +603,16 @@ describe("openai-completions wire-quirk compat detection", () => {
 		expect(resolveModelPolicy(completionsSpec()).compat.dropThinkingWhenReasoningEffort).toBe(false);
 	});
 
+	it("declares the LiteLLM cache-affinity header without changing unknown providers", () => {
+		const litellm = resolveModelPolicy(
+			completionsSpec({ provider: "litellm", baseUrl: "https://litellm.example.com/v1" }),
+		).compat;
+		const custom = resolveModelPolicy(completionsSpec()).compat;
+
+		expect(litellm.promptCacheSessionHeader).toBe("x-context-id");
+		expect(custom.promptCacheSessionHeader).toBeUndefined();
+	});
+
 	it("floors the stream timeout for a loopback litellm proxy without enabling reasoning replay (#4786)", () => {
 		// A litellm proxy on a loopback baseUrl fronts a local llama-server whose
 		// prefill can exceed the 100s default first-event budget on large prompts.
