@@ -174,7 +174,7 @@ function parseMintedKey(
 	identity?: Pick<OAuthCredentials, "accountId" | "email">,
 ): MintedMuseKey {
 	if (response.is_subs_active === false) {
-		throw new AIError.OAuthError("Muse Code subscription is inactive", {
+		throw new AIError.OAuthError("invalid_grant: Muse Code subscription is inactive", {
 			kind: "token-exchange",
 			provider: PROVIDER,
 			status: 403,

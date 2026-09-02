@@ -3,6 +3,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import { describe, expect, test, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
+import { refreshMetaMuseToken } from "@oh-my-pi/pi-ai/registry/oauth/meta-muse";
 import { loginMeta, metaProvider } from "@oh-my-pi/pi-ai/registry/meta";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -194,6 +195,61 @@ describe("Meta login", () => {
 			expect(await storage.peekApiKey("meta")).toBeUndefined();
 			expect(await storage.getApiKey("meta", "discovery")).toBe("LLM|fresh-subscription-key");
 			expect(refreshCalls).toBe(1);
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("disables an inactive Muse subscription after refresh and falls back to PAYG", async () => {
+		let fetchCalls = 0;
+		const fetchImpl: FetchImpl = () => {
+			fetchCalls++;
+			if (fetchCalls === 1) {
+				return Promise.resolve(
+					Response.json({
+						access_token: "refreshed-meta-access",
+						refresh_token: "refreshed-meta-refresh",
+						expires_in: 3_600,
+					}),
+				);
+			}
+			return Promise.resolve(
+				Response.json({
+					api_key: "LLM|inactive-subscription-key",
+					user_id: "meta-account",
+					is_subs_active: false,
+				}),
+			);
+		};
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+			refreshOAuthCredential: (_provider, _credentialId, credential) => refreshMetaMuseToken(credential, fetchImpl),
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "api_key",
+					key: "LLM|payg-key",
+					source: "login",
+					authorizedAt: 1,
+				},
+				{
+					type: "oauth",
+					access: "expired-meta-access",
+					refresh: "meta-refresh",
+					expires: 0,
+					apiKey: "LLM|stale-subscription-key",
+					accountId: "meta-account",
+					authorizedAt: 2,
+				},
+			]);
+			const oauth = storage.listStoredCredentials("meta").find(entry => entry.credential.type === "oauth");
+			if (!oauth) throw new Error("expected Muse OAuth credential");
+
+			expect(await storage.getApiKey("meta", "inactive-subscription-fallback")).toBe("LLM|payg-key");
+			expect(storage.listStoredCredentials("meta").map(entry => entry.credential.type)).toEqual(["api_key"]);
+			expect((await storage.listDisabledCredentials("meta")).map(entry => entry.id)).toEqual([oauth.id]);
 		} finally {
 			storage.close();
 		}
