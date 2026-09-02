@@ -602,18 +602,6 @@ collapse {
 		requires-effort #true
 		default-member "gemini-3-7-flash-medium"
 	}
-	variant-family "devin" "gemini-3-8-flash" name="Gemini 3.8 Flash" {
-		members "gemini-3-8-flash-medium" "gemini-3-8-flash-minimal" "gemini-3-8-flash-low" "gemini-3-8-flash-high"
-		route "minimal" "gemini-3-8-flash-minimal"
-		route "low" "gemini-3-8-flash-low"
-		route "medium" "gemini-3-8-flash-medium"
-		route "high" "gemini-3-8-flash-high"
-		mode "effort"
-		efforts "minimal" "low" "medium" "high"
-		default-level "medium"
-		requires-effort #true
-		default-member "gemini-3-8-flash-medium"
-	}
 	variant-family "devin" "swe-1-7-lightning" name="SWE-1.7 Lightning" {
 		members "swe-1-7-lightning-medium" "swe-1-7-lightning"
 		route "medium" "swe-1-7-lightning-medium"
@@ -682,7 +670,6 @@ collapse {
 	provider-alias "devin" "swe" "swe-1-7-lightning"
 	provider-alias "devin" "claude-haiku-4.5" "claude-haiku-4-5"
 	provider-alias "devin" "gemini-3.7-flash" "gemini-3-7-flash"
-	provider-alias "devin" "gemini-3.8-flash" "gemini-3-8-flash"
 	provider-alias "devin" "glm-5.2" "glm-5-2"
 	provider-alias "devin" "gpt-5.6-luna" "gpt-5-6-luna"
 	provider-alias "devin" "gpt-5.6-sol" "gpt-5-6-sol"
