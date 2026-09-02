@@ -331,7 +331,13 @@ function scheduleOrphanSweepBeforeSuspend(): void {
 	void setOrphanSweepDeadline(nextDeadlineMs);
 }
 
-async function maybeRunOrphanSweep(): Promise<void> {
+async function maybeRunOrphanSweep(alarmScheduledTime?: number): Promise<void> {
+	if (
+		orphanSweepDeadlineMs === null &&
+		typeof alarmScheduledTime === "number" &&
+		Number.isFinite(alarmScheduledTime)
+	)
+		orphanSweepDeadlineMs = alarmScheduledTime;
 	if (
 		!shouldRunOrphanSweep({
 			nowMs: Date.now(),
@@ -1150,9 +1156,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 		return;
 	}
 	if (alarm.name === ORPHAN_SWEEP_ALARM) {
-		void runAfterStartupReconciliation(
-			ensureStartupReconciled,
-			maybeRunOrphanSweep,
+		void runAfterStartupReconciliation(ensureStartupReconciled, () =>
+			maybeRunOrphanSweep(alarm.scheduledTime),
 		).catch(() => {});
 	}
 });

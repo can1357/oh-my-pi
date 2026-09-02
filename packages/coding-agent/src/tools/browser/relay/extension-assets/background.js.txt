@@ -341,7 +341,9 @@ function scheduleOrphanSweepBeforeSuspend() {
   const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
   setOrphanSweepDeadline(nextDeadlineMs);
 }
-async function maybeRunOrphanSweep() {
+async function maybeRunOrphanSweep(alarmScheduledTime) {
+  if (orphanSweepDeadlineMs === null && typeof alarmScheduledTime === "number" && Number.isFinite(alarmScheduledTime))
+    orphanSweepDeadlineMs = alarmScheduledTime;
   if (!shouldRunOrphanSweep({
     nowMs: Date.now(),
     deadlineMs: orphanSweepDeadlineMs,
@@ -847,7 +849,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
   if (alarm.name === ORPHAN_SWEEP_ALARM) {
-    runAfterStartupReconciliation(ensureStartupReconciled, maybeRunOrphanSweep).catch(() => {});
+    runAfterStartupReconciliation(ensureStartupReconciled, () => maybeRunOrphanSweep(alarm.scheduledTime)).catch(() => {});
   }
 });
 chrome.storage.onChanged.addListener((_changes, areaName) => {
