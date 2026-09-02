@@ -144,6 +144,10 @@ describe("openzoo built-in provider", () => {
 		Bun.env.OPENZOO_BASE_URL = "http://localhost:9402/v1";
 		expect(resolveOpenzooBaseUrl()).toBe("http://localhost:9402/v1");
 		expect(resolveOpenzooBaseUrl("https://tunnel.example/v1/")).toBe("https://tunnel.example/v1");
+		// The env fallback is normalized exactly like the explicit path: the
+		// resolved string keys the model cache, so a stray slash must not fork it.
+		Bun.env.OPENZOO_BASE_URL = "https://tunnel.example/v1/";
+		expect(resolveOpenzooBaseUrl()).toBe("https://tunnel.example/v1");
 	});
 
 	test("namespaces the model cache per endpoint", () => {

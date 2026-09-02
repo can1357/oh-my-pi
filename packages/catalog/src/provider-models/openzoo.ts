@@ -40,11 +40,11 @@ export interface OpenzooModelManagerConfig {
  * else the proxy default. Mirrors `LM_STUDIO_BASE_URL` / `LITELLM_BASE_URL`.
  */
 export function resolveOpenzooBaseUrl(baseUrl?: string): string {
-	const explicit = baseUrl?.trim();
-	if (explicit) {
-		return explicit.endsWith("/") ? explicit.slice(0, -1) : explicit;
-	}
-	return getDefaultModelDiscoveryBaseUrl("openzoo") ?? OPENZOO_DEFAULT_BASE_URL;
+	// One normalization for every source. The resolved string is also the
+	// cache-namespace key, so a trailing slash on OPENZOO_BASE_URL must not
+	// spell a different endpoint than the same URL passed explicitly.
+	const raw = baseUrl?.trim() || getDefaultModelDiscoveryBaseUrl("openzoo") || OPENZOO_DEFAULT_BASE_URL;
+	return raw.endsWith("/") ? raw.slice(0, -1) : raw;
 }
 
 function isOpenzooAutoAlias(id: string): boolean {
