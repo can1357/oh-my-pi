@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Browser relay: one omp session drives a tab at a time — `open` with `url` opens its own tab instead of navigating the visible one, `target`/adopt skip tabs another session drives, and the default tab name is private per session ([#<PR>](https://github.com/can1357/oh-my-pi/pull/<PR>) by [@vsolano9](https://github.com/vsolano9))
+- Browser relay: one omp session drives a tab at a time — `open` with `url` opens its own tab instead of navigating the visible one, `target`/adopt skip tabs another session drives, and the default tab name is private per session ([#10579](https://github.com/can1357/oh-my-pi/pull/10579) by [@vsolano9](https://github.com/vsolano9))
 
 ## [18.1.3] - 2026-09-02
 
