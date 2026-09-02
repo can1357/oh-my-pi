@@ -114,10 +114,11 @@ export function resolveStructuredOutputHarnessPolicy(
 	outputSchema: unknown,
 	requestedMode: StructuredSubagentSchemaMode | undefined,
 ): StructuredOutputHarnessPolicy {
-	const { normalized } = normalizeSchema(outputSchema);
-	if (!requiresStructuredOutputHardening || normalized === undefined) {
+	const { normalized, error } = normalizeSchema(outputSchema);
+	if (!requiresStructuredOutputHardening || (normalized === undefined && error === undefined)) {
 		return { mode: requestedMode, failureToolNames: undefined };
 	}
+	if (error) throw new Error(`Invalid strict effective output schema: ${error}`);
 	if (requestedMode !== "strict") {
 		const { error } = buildOutputValidator(outputSchema);
 		if (error) throw new Error(`Invalid strict effective output schema: ${error}`);
@@ -3180,7 +3181,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				subagentSettings,
 			);
-			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const { normalized: normalizedOutputSchema, error: outputSchemaError } = normalizeSchema(outputSchema);
+			if (outputSchemaError) throw new Error(`Invalid output schema: ${outputSchemaError}`);
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,

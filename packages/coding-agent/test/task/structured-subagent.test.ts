@@ -162,6 +162,9 @@ describe("structured subagent primitive", () => {
 		expect(() => executorModule.resolveStructuredOutputHarnessPolicy(true, false, "permissive")).toThrow(
 			"Invalid strict effective output schema",
 		);
+		expect(() => executorModule.resolveStructuredOutputHarnessPolicy(true, "{", "permissive")).toThrow(
+			"Invalid strict effective output schema",
+		);
 		expect(
 			executorModule.isOutputSchemaCorrectionLock({
 				type: "session_init",
