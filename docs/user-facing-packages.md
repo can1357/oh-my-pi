@@ -8,6 +8,7 @@ This page indexes README-only user-facing package CLIs and features that need ro
 - **Exclude explicitly** when a package/crate is internal implementation only; point to the architecture doc that owns it.
 - Package READMEs and manifests remain the source of truth for package-local setup and flags; root docs make the feature discoverable and link to exact source paths.
 - Internal Rust crates remain covered by native architecture docs unless promoted as standalone user-facing commands or APIs. The contributor-facing map lives at [`native-crates.md`](./native-crates.md); today every `crates/*` entry is internal to `@oh-my-pi/pi-natives` and the embedded shell, so [`natives-architecture.md`](./natives-architecture.md) and the surrounding native docs own them.
+- `packages/typescript-edit-benchmark` is private (`private: true`, no standalone bin) fixture tooling for the metaharness edit adapter, so it is excluded here; the monorepo package map at [Architecture](/oh-my-pi/guides/architecture/) owns it.
 
 ## Package CLIs and features
 
@@ -44,16 +45,14 @@ Sources: [`packages/omptype/README.md`](../packages/omptype/README.md), [`packag
 - Runtime behavior: schema calls return the validated value or `type.errors`; `.assert()` returns the value or throws; `.allows()` performs a boolean check.
 - Limits: this is an intentionally focused compatibility surface rather than a complete implementation of every ArkType, TypeBox, or Zod API.
 
-### `packages/typescript-edit-benchmark` — TypeScript edit fixture engine
+### `packages/tui` — terminal UI framework for extensions
 
-Sources: [`packages/typescript-edit-benchmark/package.json`](../packages/typescript-edit-benchmark/package.json), [`packages/typescript-edit-benchmark/src/generate.ts`](../packages/typescript-edit-benchmark/src/generate.ts), [`packages/typescript-edit-benchmark/src/tasks.ts`](../packages/typescript-edit-benchmark/src/tasks.ts), [`packages/typescript-edit-benchmark/src/verify.ts`](../packages/typescript-edit-benchmark/src/verify.ts), and the runner in [`packages/metaharness/adapters/edit/cli.ts`](../packages/metaharness/adapters/edit/cli.ts).
+Sources: [`packages/tui/README.md`](../packages/tui/README.md), [`packages/tui/package.json`](../packages/tui/package.json), [`docs/tui.md`](./tui.md).
 
-- Package: private `@oh-my-pi/typescript-edit-benchmark`; support library with no standalone bin.
-- Feature: generates, loads, formats, and verifies TypeScript mutation fixtures consumed by the metaharness edit adapter.
-- Fixture generation: `bun packages/typescript-edit-benchmark/src/generate.ts --typescript-dir <path> [generator options]` from the repository root.
-- Benchmark execution: `bun run --cwd packages/metaharness bench:edit -- --model <provider/model> [options]`, or launch an `edit` run from the metaharness dashboard/API.
-- Runner inputs include provider/model, thinking level, runs per task, timeouts, concurrency, task IDs, fixture directory or `.tar.gz`, edit strategy, guided mode, retry/turn limits, output path/format, and fixture validation/listing flags.
-- Fixtures contain task metadata, a prompt, input files, and expected files. The runner copies each fixture to an isolated worktree, records optional conversation dumps, and writes Markdown or JSON results.
+- Package: public `@oh-my-pi/pi-tui`; requires Bun 1.3.14 or newer.
+- Feature: terminal UI library with differential rendering for efficient text-based applications; components include Text, Input, Editor, Markdown, SelectList, Loader, and Image.
+- Extension surface: extension authors render custom message types by registering renderers with `pi.registerMessageRenderer(customType, renderer)`; `packages/coding-agent` mounts the resulting components, wires keybindings and theme, and restores editor state. The `Component` contract is `render(width)` plus optional `handleInput`, `invalidate`, and `dispose` hooks.
+- Rendering constraints: components must return width-safe output — measure with `visibleWidth()`, wrap/truncate ANSI-aware text with `wrapTextWithAnsi()`/`truncateToWidth()`, and sanitize external content with `replaceTabs()`.
 
 ### `packages/metaharness` — unified benchmark manager
 

@@ -1,0 +1,93 @@
+---
+const { entry } = Astro.locals.starlightRoute;
+const coverage = entry.data.coverage as 'A' | 'B' | 'C' | undefined;
+
+const LABELS = {
+	A: 'High coverage — comprehensive user-facing surface',
+	B: 'Medium coverage — primary workflows documented',
+	C: 'Low coverage — sketch, see page for status',
+} as const;
+const LEGEND_HREF = '/oh-my-pi/about/coverage/';
+---
+
+<div class="page-title-row">
+	<h1 id="_top">{entry.data.title}</h1>
+	{
+		coverage && (
+			<a
+				class:list={['coverage-badge', `coverage-${coverage.toLowerCase()}`]}
+				href={LEGEND_HREF}
+				aria-label={`${LABELS[coverage]} (opens coverage methodology)`}
+				title={LABELS[coverage]}
+			>
+				<span class="coverage-grade" aria-hidden="true">Docs {coverage}</span>
+				<span class="sr-only">{LABELS[coverage]}</span>
+			</a>
+		)
+	}
+</div>
+
+<style>
+	@layer starlight.core {
+		.page-title-row {
+			display: flex;
+			align-items: baseline;
+			gap: 0.75rem;
+			flex-wrap: wrap;
+		}
+		h1 {
+			margin-top: 1rem;
+			font-size: var(--sl-text-h1);
+			line-height: var(--sl-line-height-headings);
+			font-weight: 600;
+			color: var(--sl-color-white);
+		}
+		.coverage-badge {
+			display: inline-flex;
+			align-items: center;
+			font-size: var(--sl-text-xs);
+			font-weight: 600;
+			padding: 0.15rem 0.55rem;
+			border-radius: 999px;
+			border: 1px solid;
+			white-space: nowrap;
+			text-decoration: none;
+			transition: filter 0.15s ease-out;
+		}
+		.coverage-badge:hover,
+		.coverage-badge:focus-visible {
+			filter: brightness(1.08);
+			outline-offset: 2px;
+		}
+		.coverage-grade {
+			font-variant-numeric: tabular-nums;
+			letter-spacing: 0.01em;
+		}
+		.sr-only {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			padding: 0;
+			margin: -1px;
+			overflow: hidden;
+			clip: rect(0, 0, 0, 0);
+			white-space: nowrap;
+			border: 0;
+		}
+		.coverage-a {
+			color: var(--sl-color-green-high);
+			border-color: var(--sl-color-green);
+			background: var(--sl-color-green-low);
+		}
+		.coverage-b {
+			color: var(--sl-color-orange-high);
+			border-color: var(--sl-color-orange);
+			background: var(--sl-color-orange-low);
+		}
+		.coverage-c {
+			color: var(--sl-color-red-high);
+			border-color: var(--sl-color-red);
+			background: var(--sl-color-red-low);
+		}
+	}
+</style>

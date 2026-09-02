@@ -1,0 +1,73 @@
+---
+title: omp
+description: Documentation for omp, the coding agent with the IDE wired in. Terminal-native, model-agnostic, and extensible through skills, hooks, and MCP.
+template: splash
+hero:
+  tagline: A coding agent with the IDE wired in — terminal-native, model-agnostic, and extensible through skills, hooks, and MCP.
+  image:
+    file: ../../assets/hero.png
+  actions:
+    - text: Get started
+      link: /oh-my-pi/getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/can1357/oh-my-pi
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Where to next?
+
+<CardGrid>
+	<Card title="Getting Started" icon="rocket">
+		Install omp and run your first session — see [Installation](/oh-my-pi/getting-started/installation/).
+	</Card>
+	<Card title="Configuration" icon="setting">
+		Settings, environment variables, keybindings, and themes — see [Settings](/oh-my-pi/configuration/settings/).
+	</Card>
+	<Card title="Models & Providers" icon="star">
+		Connect any of 40+ providers or run local models — see [Providers](/oh-my-pi/models/providers/).
+	</Card>
+	<Card title="Extending omp" icon="puzzle">
+		Extensions, skills, MCP servers, hooks, and custom tools — see [Extensions](/oh-my-pi/extending/extensions/).
+	</Card>
+</CardGrid>
+
+## Common tasks
+
+Skip the journey. Jump straight to the page for what you want to do right now.
+
+<CardGrid>
+	<LinkCard
+		title="Resume a session"
+		description="Pick up where you left off, branch a past turn, or share a session with another machine."
+		href="/oh-my-pi/features/sessions/"
+	/>
+	<LinkCard
+		title="Change the model"
+		description="Switch between roles (default, smol, slow, plan), set fallbacks, or pick a local model."
+		href="/oh-my-pi/models/model-roles/"
+	/>
+	<LinkCard
+		title="Approve tool runs"
+		description="Choose between read-only, workspace-write, and yolo; gate specific tools with a policy."
+		href="/oh-my-pi/configuration/approvals/"
+	/>
+	<LinkCard
+		title="Learn the keybindings"
+		description="The chords that drive the TUI — model cycling, interrupts, the editor, and the slash picker."
+		href="/oh-my-pi/configuration/keybindings/"
+	/>
+	<LinkCard
+		title="Browse slash commands"
+		description="Every built-in /command, what it does, and the arguments it takes."
+		href="/oh-my-pi/reference/slash-commands/"
+	/>
+	<LinkCard
+		title="Find a setting"
+		description="Reference for the documented settings keys — type, default, allowed values."
+		href="/oh-my-pi/reference/configuration/"
+	/>
+</CardGrid>

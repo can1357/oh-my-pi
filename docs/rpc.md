@@ -23,7 +23,7 @@ Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.
 - RPC mode disables automatic session title generation by default to avoid an extra model call.
-- RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
+- RPC host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings (ACP mode host-defaults only the first four groups; the async-job and bash auto-background paths are RPC-only). They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
 - When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, and the process exits with code `0`.
@@ -758,7 +758,8 @@ a message or fall back to `content` for textual error surfacing:
 - Schemes are global to the process; `set_host_uri_schemes` replaces the
   previous set, unregistering anything not in the new list.
 - Schemes are normalized to lowercase before registration.
-- Successful reads require `content`. `contentType` defaults to `text/plain`
+- Reads succeed even without `content`; a missing `content` defaults to the
+  empty string. `contentType` defaults to `text/plain`
   and, when supplied, is `"text/plain"`, `"text/markdown"`, or
   `"application/json"`. A result-level `immutable` overrides the registered
   scheme's value for that read.

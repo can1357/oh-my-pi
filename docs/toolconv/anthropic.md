@@ -25,7 +25,7 @@ Anthropic has no token-level tool delimiters in the public API. The unit is the 
 | Other `stop_reason` | response top level | `"max_tokens"`, `"stop_sequence"`, `"pause_turn"` (long server-tool turn, resend as-is to continue), `"refusal"`, `"sensitive"` (output flagged by safety filters), `"model_context_window_exceeded"` (output truncated at the context window, treated like `max_tokens`). |
 | `id` prefixes | — | Messages `msg_…`; client tool calls `toolu_…`; server tool calls `srvtoolu_…`. |
 
-Streaming adds these SSE events / delta types (full list under [Roles / channels](#roles--channels--turn-structure) and [Tool-call format](#tool-call-format)):
+Streaming adds these SSE events / delta types (full list under [Roles / channels](#roles-channels-turn-structure) and [Tool-call format](#tool-call-format)):
 
 | Streaming item | Shape / meaning |
 | --- | --- |

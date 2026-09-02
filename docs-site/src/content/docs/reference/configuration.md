@@ -1,0 +1,506 @@
+---
+title: Configuration Reference
+description: Reference for the omp settings documented across this site — type, default, and values per key, with links to the user-facing guide.
+coverage: A
+---
+
+This page is a reference for the settings that have a documented user-facing surface in this site. The settings are split into one page per domain; the index below lists every key in alphabetical order with a link to where it lives.
+
+For the workflow and the layered config model, start with [Settings](/oh-my-pi/configuration/settings/). For the exhaustive, generated list of every key the schema accepts, run `omp config list` in a terminal.
+
+Defaults and enum values are taken from the settings schema. Environment-variable and CLI-flag overrides are process-local and never persisted. Keys must match a schema path exactly — there is no shorthand.
+
+::::note
+Several sections in the [Generation](/oh-my-pi/reference/settings/generation/) page use a `Default` of `-1` to mean "use the provider or model default; `omp` does not send that parameter". This applies to every numeric sampling key and to a few integer triggers that opt into the reserve-based default.
+::::
+
+## Settings domains
+
+- [Settings — Models](/oh-my-pi/reference/settings/models/) — `modelRoles`, `cycleOrder`, `enabledModels`, `advisor.*`
+- [Settings — Generation](/oh-my-pi/reference/settings/generation/) — thinking budgets, sampling, provider tiers, retry and fallback
+- [Settings — Tools](/oh-my-pi/reference/settings/tools/) — `tools.approval*`, `computer.*`, `bash.*`, `eval.*`, `lsp.*`, `edit.*`, `read.*`
+- [Settings — Context](/oh-my-pi/reference/settings/context/) — `contextPromotion.*`, `compaction.*`, `memory.*`, `autolearn.*`
+- [Settings — Interface](/oh-my-pi/reference/settings/interface/) — `theme.*`, `statusLine.*`, terminal, TUI hyperlinks
+- [Settings — Interaction](/oh-my-pi/reference/settings/interaction/) — `steeringMode`, `interruptMode`, `ask.*`, `autoResume`
+- [Settings — Providers](/oh-my-pi/reference/settings/providers/) — `providers.*`, `exa.*`, `searxng.*`, `auth.broker.*`
+- [Settings — General](/oh-my-pi/reference/settings/general/) — auth broker, advisor, model and provider ordering, extensions, git, power, prewalk, shell, startup
+- [Settings — Tasks](/oh-my-pi/reference/settings/tasks/) — `task.*`, `plan.*`, `goal.*`, `skills.*`, `commands.*`, `worktree.*`
+
+
+
+## Documented keys (alphabetical)
+This list reflects the schema as of the 2026-08 audit. Run `omp config list` for the current schema.
+
+| Key | Domain |
+| `advisor.enabled` | [Models](/oh-my-pi/reference/settings/models/#advisor) |
+| `advisor.immuneTurns` | [Models](/oh-my-pi/reference/settings/models/#advisor) |
+| `advisor.subagents` | [Models](/oh-my-pi/reference/settings/models/#advisor) |
+| `advisor.syncBacklog` | [Models](/oh-my-pi/reference/settings/models/#advisor) |
+| `ask.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `ask.notify` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `ask.timeout` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `astEdit.enabled` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `astGrep.enabled` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `async.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#async-execution-and-hub) |
+| `async.maxJobs` | [Tools](/oh-my-pi/reference/settings/tools/#async-execution-and-hub) |
+| `async.pollWaitDuration` | [Tools](/oh-my-pi/reference/settings/tools/#async-execution-and-hub) |
+| `auth.broker.token` | [Providers](/oh-my-pi/reference/settings/providers/#auth-broker) |
+| `auth.broker.url` | [Providers](/oh-my-pi/reference/settings/providers/#auth-broker) |
+| `autocompleteMaxVisible` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `autolearn.autoContinue` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `autolearn.enabled` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `autolearn.minToolCalls` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `autoResume` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `bash.autoBackground.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bash.autoBackground.thresholdMs` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bash.direnv` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bash.direnvLoadTimeoutMs` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bash.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bash.patterns` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bashInterceptor.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `bashInterceptor.patterns` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `branchSummary.enabled` | [Context](/oh-my-pi/reference/settings/context/#branch-summaries) |
+| `branchSummary.reserveTokens` | [Context](/oh-my-pi/reference/settings/context/#branch-summaries) |
+| `browser.cdpUrl` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `browser.cmux` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `browser.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `browser.headless` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `browser.relay` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `browser.relayUrl` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `browser.screenshotDir` | [Tools](/oh-my-pi/reference/settings/tools/#browser) |
+| `checkpoint.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `codexResets.autoRedeem` | [Providers](/oh-my-pi/reference/settings/providers/#codex-rate-limit-resets) |
+| `codexResets.keepCredits` | [Providers](/oh-my-pi/reference/settings/providers/#codex-rate-limit-resets) |
+| `codexResets.minBlockedMinutes` | [Providers](/oh-my-pi/reference/settings/providers/#codex-rate-limit-resets) |
+| `codexResets.salvageHorizonHours` | [Providers](/oh-my-pi/reference/settings/providers/#codex-rate-limit-resets) |
+| `collab.displayName` | [Interaction](/oh-my-pi/reference/settings/interaction/#collab) |
+| `collab.relayUrl` | [Interaction](/oh-my-pi/reference/settings/interaction/#collab) |
+| `collab.webUrl` | [Interaction](/oh-my-pi/reference/settings/interaction/#collab) |
+| `colorBlindMode` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `commands.enableClaudeProject` | [Tasks](/oh-my-pi/reference/settings/tasks/#commands) |
+| `commands.enableClaudeUser` | [Tasks](/oh-my-pi/reference/settings/tasks/#commands) |
+| `commands.enableOpencodeProject` | [Tasks](/oh-my-pi/reference/settings/tasks/#commands) |
+| `commands.enableOpencodeUser` | [Tasks](/oh-my-pi/reference/settings/tasks/#commands) |
+| `commit.changelogMaxDiffChars` | [Providers](/oh-my-pi/reference/settings/providers/#commits) |
+| `commit.mapReduceEnabled` | [Providers](/oh-my-pi/reference/settings/providers/#commits) |
+| `commit.mapReduceMaxConcurrency` | [Providers](/oh-my-pi/reference/settings/providers/#commits) |
+| `commit.mapReduceMaxFileTokens` | [Providers](/oh-my-pi/reference/settings/providers/#commits) |
+| `commit.mapReduceMinFiles` | [Providers](/oh-my-pi/reference/settings/providers/#commits) |
+| `commit.mapReduceTimeoutMs` | [Providers](/oh-my-pi/reference/settings/providers/#commits) |
+| `compaction.autoContinue` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.dropUseless` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.enabled` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.handoffSaveToDisk` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.idleEnabled` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.idleThresholdTokens` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.idleTimeoutSeconds` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.keepRecentTokens` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.midTurnEnabled` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.remoteEnabled` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.remoteEndpoint` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.remoteStreamingV2Enabled` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.reserveTokens` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.strategy` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.supersedeReads` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `compaction.thresholdPercent` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.thresholdTokens` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `compaction.v2RetainedMessageBudget` | [Context](/oh-my-pi/reference/settings/context/#compaction-tuning) |
+| `completion.notify` | [Interaction](/oh-my-pi/reference/settings/interaction/#notifications) |
+| `computer.display` | [Tools](/oh-my-pi/reference/settings/tools/#native-computer-use) |
+| `computer.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#native-computer-use) |
+| `computer.maxHeight` | [Tools](/oh-my-pi/reference/settings/tools/#native-computer-use) |
+| `computer.maxWidth` | [Tools](/oh-my-pi/reference/settings/tools/#native-computer-use) |
+| `contextPromotion.enabled` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `cycleOrder` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `debug.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `default` | [Models](/oh-my-pi/reference/settings/models/) |
+| `defaultThinkingLevel` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `dev.autoqa` | [Providers](/oh-my-pi/reference/settings/providers/#developer-reporting) |
+| `dev.autoqaConsent` | [Providers](/oh-my-pi/reference/settings/providers/#developer-reporting) |
+| `dev.autoqaPush.endpoint` | [Providers](/oh-my-pi/reference/settings/providers/#developer-reporting) |
+| `dev.autoqaPush.token` | [Providers](/oh-my-pi/reference/settings/providers/#developer-reporting) |
+| `disabledExtensions` | [General](/oh-my-pi/reference/settings/general/#extensions) |
+| `disabledProviders` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `display.cacheMissMarker` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `display.collapseCompacted` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `display.hideToolActivity` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `display.shimmer` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `display.showTokenUsage` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `display.smoothStreaming` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `doubleEscapeAction` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `edit.blockAutoGenerated` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `edit.enforceSeenLines` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `edit.fuzzyMatch` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `edit.fuzzyThreshold` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `edit.mode` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `edit.streamingAbort` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `emojiAutocomplete` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `enabledModels` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `error.notify` | [Interaction](/oh-my-pi/reference/settings/interaction/#notifications) |
+| `eval.jl` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `eval.js` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `eval.py` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `eval.rb` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `exa.enabled` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `exa.enableResearcher` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `exa.enableSearch` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `exa.enableWebsets` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `exa.searchDelayMs` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `extensions` | [General](/oh-my-pi/reference/settings/general/#extensions) |
+| `features.unexpectedStopDetection` | [Providers](/oh-my-pi/reference/settings/providers/#agent-behavior) |
+| `fetch.enabled` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `followUpMode` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `gc.archive` | [Providers](/oh-my-pi/reference/settings/providers/#session-garbage-collection) |
+| `gc.blobs` | [Providers](/oh-my-pi/reference/settings/providers/#session-garbage-collection) |
+| `gc.coldArchiveAfterDays` | [Providers](/oh-my-pi/reference/settings/providers/#session-garbage-collection) |
+| `gc.retainNewestGlobal` | [Providers](/oh-my-pi/reference/settings/providers/#session-garbage-collection) |
+| `gc.retainNewestPerCwd` | [Providers](/oh-my-pi/reference/settings/providers/#session-garbage-collection) |
+| `gc.wal` | [Providers](/oh-my-pi/reference/settings/providers/#session-garbage-collection) |
+| `generate_image.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `git.enabled` | [General](/oh-my-pi/reference/settings/general/#git) |
+| `github.cache.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#github) |
+| `github.cache.hardTtlSec` | [Tools](/oh-my-pi/reference/settings/tools/#github) |
+| `github.cache.softTtlSec` | [Tools](/oh-my-pi/reference/settings/tools/#github) |
+| `github.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#github) |
+| `glob.enabled` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `goal.continuationModes` | [Tasks](/oh-my-pi/reference/settings/tasks/#modes-plan-goal-and-titles) |
+| `goal.enabled` | [Tasks](/oh-my-pi/reference/settings/tasks/#modes-plan-goal-and-titles) |
+| `goal.statusInFooter` | [Tasks](/oh-my-pi/reference/settings/tasks/#modes-plan-goal-and-titles) |
+| `grep.contextAfter` | [Tools](/oh-my-pi/reference/settings/tools/#search-tools) |
+| `grep.contextBefore` | [Tools](/oh-my-pi/reference/settings/tools/#search-tools) |
+| `grep.enabled` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `hideThinkingBlock` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `hindsight.apiToken` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.apiUrl` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.autoRecall` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.autoRetain` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.bankId` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.bankIdPrefix` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.bankMission` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.debug` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.mentalModelAutoSeed` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.mentalModelMaxRenderChars` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.mentalModelRefreshIntervalMs` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.mentalModelsEnabled` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.recallBudget` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.recallContextTurns` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.recallMaxQueryChars` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.recallMaxTokens` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.recallTimeoutMs` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.recallTypes` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.reflectTimeoutMs` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.requestTimeoutMs` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.retainContext` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.retainEveryNTurns` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.retainMission` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.retainMode` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.retainOverlapTurns` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.retainTimeoutMs` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `hindsight.scoping` | [Context](/oh-my-pi/reference/settings/context/#hindsight-memory-server-bank) |
+| `images.autoResize` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `images.blockImages` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `images.describeForTextModels` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `includeModelInPrompt` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `includeWorkspaceTree` | [Models](/oh-my-pi/reference/settings/models/#prompt-and-context) |
+| `inlineToolDescriptors` | [Models](/oh-my-pi/reference/settings/models/#prompt-and-context) |
+| `inspect_image.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `inspect_image.mode` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `inspect_image.timeoutMs` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `interruptMode` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `irc.timeoutMs` | [Tools](/oh-my-pi/reference/settings/tools/#async-execution-and-hub) |
+| `julia.interpreter` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `launch.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `live.voice` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `loop.mode` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `lsp.diagnosticsDeduplicate` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `lsp.diagnosticsOnEdit` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `lsp.diagnosticsOnWrite` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `lsp.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `lsp.formatOnWrite` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `lsp.lazy` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `lsp.shared` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `magicKeywords.enabled` | [Interaction](/oh-my-pi/reference/settings/interaction/#magic-keywords) |
+| `magicKeywords.orchestrate` | [Interaction](/oh-my-pi/reference/settings/interaction/#magic-keywords) |
+| `magicKeywords.ultrathink` | [Interaction](/oh-my-pi/reference/settings/interaction/#magic-keywords) |
+| `magicKeywords.workflow` | [Interaction](/oh-my-pi/reference/settings/interaction/#magic-keywords) |
+| `marketplace.autoUpdate` | [Interaction](/oh-my-pi/reference/settings/interaction/#startup-and-updates) |
+| `mcp.enableProjectConfig` | [Tools](/oh-my-pi/reference/settings/tools/#mcp) |
+| `mcp.notificationDebounceMs` | [Tools](/oh-my-pi/reference/settings/tools/#mcp) |
+| `mcp.notifications` | [Tools](/oh-my-pi/reference/settings/tools/#mcp) |
+| `mcp.renderMarkdownResults` | [Tools](/oh-my-pi/reference/settings/tools/#mcp) |
+| `memories.enabled` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.fallbackTokenLimit` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.maxRawMemoriesForGlobal` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.maxRolloutAgeDays` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.maxRolloutsPerStartup` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.minRolloutIdleHours` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.phase1InputTokenLimit` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.phase2HeartbeatSeconds` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.phase2LeaseSeconds` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.phase2RetryDelaySeconds` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.rolloutPayloadPercent` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.stage1Concurrency` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.stage1LeaseSeconds` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.stage1RetryDelaySeconds` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.summaryInjectionTokenLimit` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memories.threadScanLimit` | [Context](/oh-my-pi/reference/settings/context/#local-memory-pipeline) |
+| `memory.backend` | [Context](/oh-my-pi/reference/settings/context/#context-compaction-and-memory) |
+| `minP` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `mnemopi.autoRecall` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.autoRetain` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.bank` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.dbPath` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.debug` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.embeddingApiKey` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.embeddingApiUrl` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.embeddingModel` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.embeddingVariant` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.enhancedRecall` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.injectionTokenLimit` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.llmApiKey` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.llmBaseUrl` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.llmMode` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.llmModel` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.noEmbeddings` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.polyphonicRecall` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.proactiveLinking` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.recallContextTurns` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.recallLimit` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.recallMaxQueryChars` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.retainEveryNTurns` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `mnemopi.scoping` | [Context](/oh-my-pi/reference/settings/context/#mnemopi-memory-sqlite) |
+| `model.loopGuard.checkAssistantContent` | [Models](/oh-my-pi/reference/settings/models/#loop-guards) |
+| `model.loopGuard.enabled` | [Models](/oh-my-pi/reference/settings/models/#loop-guards) |
+| `model.loopGuard.toolCallReminder` | [Models](/oh-my-pi/reference/settings/models/#loop-guards) |
+| `model.toolCallLoopGuard.enabled` | [Models](/oh-my-pi/reference/settings/models/#loop-guards) |
+| `model.toolCallLoopGuard.exemptTools` | [Models](/oh-my-pi/reference/settings/models/#loop-guards) |
+| `model.toolCallLoopGuard.threshold` | [Models](/oh-my-pi/reference/settings/models/#loop-guards) |
+| `modelProviderOrder` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `modelRoles` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `modelRoleStorage` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `modelTags` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `omitThinking` | [Models](/oh-my-pi/reference/settings/models/#prompt-and-context) |
+| `paste.largeMenuThreshold` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `personality` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `plan.defaultOnStartup` | [Tasks](/oh-my-pi/reference/settings/tasks/#modes-plan-goal-and-titles) |
+| `plan.enabled` | [Tasks](/oh-my-pi/reference/settings/tasks/#modes-plan-goal-and-titles) |
+| `power.sleepPrevention` | [General](/oh-my-pi/reference/settings/general/#power) |
+| `presencePenalty` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `prewalk.enabled` | [General](/oh-my-pi/reference/settings/general/#prewalk) |
+| `proseOnlyThinking` | [Models](/oh-my-pi/reference/settings/models/#prompt-and-context) |
+| `provider.appendOnlyContext` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.anthropic.serverSideFallback` | [Models](/oh-my-pi/reference/settings/models/#models) |
+| `providers.antigravityEndpoint` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.autoThinkingMaxEffort` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `providers.autoThinkingModel` | [Providers](/oh-my-pi/reference/settings/providers/#tiny-and-background-models) |
+| `providers.fetch` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.fireworksTier` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.imageOrder` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.kimiApiFormat` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.maxInFlightRequests` | [General](/oh-my-pi/reference/settings/general/#models-and-providers) |
+| `providers.memoryModel` | [Providers](/oh-my-pi/reference/settings/providers/#tiny-and-background-models) |
+| `providers.openaiWebsockets` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.openrouterVariant` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.streamFirstEventTimeoutSeconds` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.streamIdleTimeoutSeconds` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.tinyModel` | [Providers](/oh-my-pi/reference/settings/providers/#tiny-and-background-models) |
+| `providers.tinyModelDevice` | [Providers](/oh-my-pi/reference/settings/providers/#tiny-and-background-models) |
+| `providers.tinyModelDtype` | [Providers](/oh-my-pi/reference/settings/providers/#tiny-and-background-models) |
+| `providers.tts` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `providers.unexpectedStopModel` | [Providers](/oh-my-pi/reference/settings/providers/#tiny-and-background-models) |
+| `providers.webSearchExclude` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.webSearchGeminiModel` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.webSearchOrder` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `providers.webSearchTimeoutSeconds` | [Providers](/oh-my-pi/reference/settings/providers/#provider-selection) |
+| `python.interpreter` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `python.kernelMode` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `read.defaultLimit` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.renderMarkdown` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.minBodyLines` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.minCommentLines` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.minTotalLines` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.prose` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.unfoldLimit` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.summarize.unfoldUntil` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `read.toolResultPreview` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `readLineNumbers` | [Tools](/oh-my-pi/reference/settings/tools/#files-editing-and-reading) |
+| `recap.enabled` | [Interaction](/oh-my-pi/reference/settings/interaction/#notifications) |
+| `recap.idleSeconds` | [Interaction](/oh-my-pi/reference/settings/interaction/#notifications) |
+| `repetitionPenalty` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `retry.baseDelayMs` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.enabled` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.fallbackChains` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.fallbackRevertPolicy` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.maxDelayMs` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.maxRetries` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.modelFallback` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.usageAwareFallback` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.usageReservePct` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `retry.usageReservePolicy` | [Generation](/oh-my-pi/reference/settings/generation/#retry-and-fallback) |
+| `ruby.interpreter` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `searxng.basicPassword` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `searxng.basicUsername` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `searxng.categories` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `searxng.endpoint` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `searxng.engines` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `searxng.language` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `searxng.token` | [Providers](/oh-my-pi/reference/settings/providers/#search-integrations) |
+| `secrets.enabled` | [Providers](/oh-my-pi/reference/settings/providers/#secrets) |
+| `security.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `setupVersion` | [General](/oh-my-pi/reference/settings/general/#startup) |
+| `share.redactSecrets` | [Interaction](/oh-my-pi/reference/settings/interaction/#share) |
+| `share.serverUrl` | [Interaction](/oh-my-pi/reference/settings/interaction/#share) |
+| `share.store` | [Interaction](/oh-my-pi/reference/settings/interaction/#share) |
+| `shellMinimizer.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellMinimizer.except` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellMinimizer.legacyFilters` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellMinimizer.maxCaptureBytes` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellMinimizer.only` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellMinimizer.settingsPath` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellMinimizer.sourceOutlineLevel` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `shellPath` | [Tools](/oh-my-pi/reference/settings/tools/#shell-eval-and-lsp) |
+| `showHardwareCursor` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `skills.customDirectories` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enableAgentsProject` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enableAgentsUser` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enableClaudeProject` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enableClaudeUser` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enableCodexUser` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enabled` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enablePiProject` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enablePiUser` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.enableSkillCommands` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.ignoredSkills` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `skills.includeSkills` | [Tasks](/oh-my-pi/reference/settings/tasks/#skills) |
+| `snapcompact.shape` | [Context](/oh-my-pi/reference/settings/context/#snapcompact) |
+| `snapcompact.systemPrompt` | [Context](/oh-my-pi/reference/settings/context/#snapcompact) |
+| `snapcompact.toolResults` | [Context](/oh-my-pi/reference/settings/context/#snapcompact) |
+| `speech.enabled` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `speech.enhanced` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `speech.mode` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `speech.voice` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `speechgen.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `startup.changelogMode` | [Interaction](/oh-my-pi/reference/settings/interaction/#startup-and-updates) |
+| `startup.checkUpdate` | [Interaction](/oh-my-pi/reference/settings/interaction/#startup-and-updates) |
+| `startup.quiet` | [Interaction](/oh-my-pi/reference/settings/interaction/#startup-and-updates) |
+| `startup.setupWizard` | [Interaction](/oh-my-pi/reference/settings/interaction/#startup-and-updates) |
+| `startup.showSplash` | [Interaction](/oh-my-pi/reference/settings/interaction/#startup-and-updates) |
+| `statusLine.compactThinkingLevel` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `statusLine.leftSegments` | [Interface](/oh-my-pi/reference/settings/interface/) |
+| `statusLine.preset` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `statusLine.rightSegments` | [Interface](/oh-my-pi/reference/settings/interface/) |
+| `statusLine.segmentOptions` | [Interface](/oh-my-pi/reference/settings/interface/) |
+| `statusLine.separator` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `statusLine.sessionAccent` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `statusLine.showHookStatus` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `statusLine.transparent` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `steeringMode` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `stt.enabled` | [Interaction](/oh-my-pi/reference/settings/interaction/#speech-to-text) |
+| `stt.language` | [Interaction](/oh-my-pi/reference/settings/interaction/#speech-to-text) |
+| `stt.modelName` | [Interaction](/oh-my-pi/reference/settings/interaction/#speech-to-text) |
+| `stt.submitTrigger` | [Interaction](/oh-my-pi/reference/settings/interaction/#speech-to-text) |
+| `symbolPreset` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `task.agentIdleTtlMs` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.agentModelOverrides` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.agentPrewalk` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.batch` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.disabledAgents` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.eager` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.enableEffort` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.enableLsp` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.isolation.apply` | [Tasks](/oh-my-pi/reference/settings/tasks/#isolation-and-worktrees) |
+| `task.isolation.commits` | [Tasks](/oh-my-pi/reference/settings/tasks/#isolation-and-worktrees) |
+| `task.isolation.merge` | [Tasks](/oh-my-pi/reference/settings/tasks/#isolation-and-worktrees) |
+| `task.isolation.mode` | [Tasks](/oh-my-pi/reference/settings/tasks/#isolation-and-worktrees) |
+| `task.maxConcurrency` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.maxEffort` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.maxRecursionDepth` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.maxRuntimeMs` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.prewalk` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.showResolvedModelBadge` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.softRequestBudget` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `task.softRequestBudgetNotice` | [Tasks](/oh-my-pi/reference/settings/tasks/#subagents) |
+| `tasks.todoClearDelay` | [Tasks](/oh-my-pi/reference/settings/tasks/#todos) |
+| `temperature` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `terminal.showImages` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `terminal.showProgress` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `textVerbosity` | [Models](/oh-my-pi/reference/settings/models/#prompt-and-context) |
+| `theme.dark` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `theme.light` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `thinkingBudgets.high` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `thinkingBudgets.low` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `thinkingBudgets.max` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `thinkingBudgets.medium` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `thinkingBudgets.minimal` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `thinkingBudgets.xhigh` | [Generation](/oh-my-pi/reference/settings/generation/#thinking) |
+| `tier.advisor` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `tier.anthropic` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `tier.google` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `tier.openai` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `tier.subagent` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `title.refreshOnReplan` | [Tasks](/oh-my-pi/reference/settings/tasks/#modes-plan-goal-and-titles) |
+| `todo.eager` | [Tools](/oh-my-pi/reference/settings/tools/#todo) |
+| `todo.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#todo) |
+| `todo.reminders` | [Tools](/oh-my-pi/reference/settings/tools/#todo) |
+| `todo.remindersMax` | [Tools](/oh-my-pi/reference/settings/tools/#todo) |
+| `tools.abortOnFabricatedResult` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.approval` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.approvalMode` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.artifactHeadBytes` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.artifactSpillThreshold` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.artifactTailBytes` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.artifactTailLines` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.format` | [Context](/oh-my-pi/reference/settings/context/#tool-calling-format) |
+| `tools.intentTracing` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.maxTimeout` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.outputMaxColumns` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.xdev` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.xdevDocs` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `tools.xdevInlineDevices` | [Tools](/oh-my-pi/reference/settings/tools/#tools-and-approvals) |
+| `topK` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `topP` | [Generation](/oh-my-pi/reference/settings/generation/#sampling) |
+| `treeFilterMode` | [Interaction](/oh-my-pi/reference/settings/interaction/#interaction) |
+| `tts.localModel` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `tts.localVoice` | [Providers](/oh-my-pi/reference/settings/providers/#voice-and-speech) |
+| `ttsr.builtinRules` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `ttsr.contextMode` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `ttsr.disabledRules` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `ttsr.enabled` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `ttsr.interruptMode` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `ttsr.repeatGap` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `ttsr.repeatMode` | [Context](/oh-my-pi/reference/settings/context/#stream-rules-ttsr) |
+| `tui.codexResetFireworks` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `tui.hyperlinks` | [Interface](/oh-my-pi/reference/settings/interface/#appearance-and-terminal) |
+| `tui.imeSafeCursor` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `tui.maxInlineImageColumns` | [Interface](/oh-my-pi/reference/settings/interface/#inline-images) |
+| `tui.maxInlineImageRows` | [Interface](/oh-my-pi/reference/settings/interface/#inline-images) |
+| `tui.maxInlineImages` | [Interface](/oh-my-pi/reference/settings/interface/#inline-images) |
+| `tui.renderMermaid` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `tui.scrollbackRebuild` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `tui.textSizing` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `tui.tight` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `tui.titleState` | [Interface](/oh-my-pi/reference/settings/interface/#display) |
+| `vault.enabled` | [Tools](/oh-my-pi/reference/settings/tools/#optional-tools) |
+| `web_search.enabled` | [Tools](/oh-my-pi/reference/settings/tools/) |
+| `workspace.additionalDirectories` | [Models](/oh-my-pi/reference/settings/models/#prompt-and-context) |
+| `worktree.base` | [Tasks](/oh-my-pi/reference/settings/tasks/#isolation-and-worktrees) |
+
+## All settings enumerated
+
+Every schema setting is now enumerated key-by-key on the domain pages above; there is no undocumented group remaining. Run `omp config list <prefix>` to inspect the live schema.
+
+## Legacy key migrations
+
+Applied whenever raw settings are loaded (global, project, overlays, and runtime overrides):
+
+| Old | New |
+|---|---|
+| `inspect_image.enabled` boolean | `inspect_image.mode` (`true` → `on`, `false` → `off`) |
+| `queueMode` | `steeringMode` |
+| `ask.timeout` in milliseconds (value `> 1000`) | seconds (divided by 1000) |
+| flat `theme: "<name>"` string | `theme.dark` / `theme.light` (slot chosen by luminance; built-in `light`/`dark` are dropped to use defaults) |
+| `task.isolation.enabled: true/false` | `task.isolation.mode: auto/none` |
+| `task.simple` | removed |
+| legacy `task.isolation.mode` (`worktree`, `fuse-overlay`, `fuse-projfs`) | `rcopy`, `overlayfs`, `projfs` |
+| `lastChangelogVersion` | moved to a marker file and stripped from `config.yml` |
