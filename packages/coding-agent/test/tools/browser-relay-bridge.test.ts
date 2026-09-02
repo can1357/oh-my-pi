@@ -3854,7 +3854,7 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
-	it("reruns immediate preload scripts when guard recovery reattaches a fresh root", async () => {
+	it("does not rerun immediate preload scripts when guard recovery preserves contexts", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3902,7 +3902,7 @@ describe("RelayBridge tab grouping", () => {
 			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
-			runImmediately: true,
+			runImmediately: false,
 		});
 	});
 
@@ -3955,6 +3955,15 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "detach");
 		await waitFor(() => ext2.pending("attach").length === 1);
 		ack(bridge, ext2, "attach");
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Runtime.executionContextCreated",
+				params: { context: { id: 404 } },
+			}),
+		);
 		await waitFor(
 			() =>
 				ext2

@@ -375,6 +375,8 @@ class TabState {
 	rootRuntimeEnabling: Promise<void> | null = null;
 	/** Invalidates an in-flight Runtime enable when the debugger detaches. */
 	runtimeGeneration = 0;
+	/** Increments whenever Chrome reports a newly created JavaScript context. */
+	contextGeneration = 0;
 	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
 	restoring: Promise<void> | null = null;
 	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
@@ -3019,6 +3021,7 @@ export class RelayBridge {
 				typeof params?.executionContextId === "number"
 					? params.executionContextId
 					: undefined;
+			if (createdContextId !== undefined) tab.contextGeneration++;
 			if (createdContextId !== undefined && params)
 				tab.runtimeContexts.set(createdContextId, params);
 			if (destroyedContextId !== undefined)
@@ -3184,6 +3187,7 @@ export class RelayBridge {
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
 		let refreshedRoot = false;
+		const contextGenerationBeforeRecovery = tab.contextGeneration;
 		const restoring = (async () => {
 			let ok: boolean;
 			try {
@@ -3258,7 +3262,8 @@ export class RelayBridge {
 						tab,
 						keepPageSessions,
 						ext,
-						refreshedRoot,
+						refreshedRoot &&
+							tab.contextGeneration !== contextGenerationBeforeRecovery,
 					);
 				} catch (err) {
 					// A replacement keeps the journal pending. Its hello restarts the
@@ -3412,7 +3417,7 @@ export class RelayBridge {
 		tab: TabState,
 		conns: CdpConnection[],
 		expectedExt: RelaySocket | null,
-		refreshedRoot: boolean,
+		runImmediatePreloads: boolean,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
@@ -3494,7 +3499,7 @@ export class RelayBridge {
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
 			const replayParams =
-				!refreshedRoot &&
+				!runImmediatePreloads &&
 				script.params &&
 				typeof script.params === "object" &&
 				"runImmediately" in script.params
