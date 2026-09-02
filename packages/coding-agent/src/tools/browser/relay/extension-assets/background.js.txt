@@ -111,6 +111,11 @@ function shouldProceedWithOrphanSweep(state) {
 function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
   return Math.max((deadlineMs - nowMs) / 60000, 0.01);
 }
+function restoreOrphanSweepDeadline(storedDeadline, isCurrent) {
+  if (!isCurrent)
+    return;
+  return typeof storedDeadline === "number" && Number.isFinite(storedDeadline) ? storedDeadline : null;
+}
 function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurrent, persist, repairStaleAlarm) {
   return previousUpdate.catch(() => {}).then(async () => {
     await alarmUpdate.catch(() => {});
@@ -167,8 +172,8 @@ var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
   restoreRecoverableState(recoverableTabIds, ids, recoverableStartupMutations);
   recoverableStartupMutations.clear();
-  const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
-  if (typeof deadline === "number" && Number.isFinite(deadline))
+  const deadline = restoreOrphanSweepDeadline(stored[ORPHAN_SWEEP_DEADLINE_KEY], orphanSweepDeadlineGeneration === 0);
+  if (deadline !== undefined)
     orphanSweepDeadlineMs = deadline;
 }).catch(() => {});
 var recoverableUpdates = recoverableReady;

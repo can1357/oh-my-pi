@@ -28,6 +28,7 @@ import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
+	restoreOrphanSweepDeadline,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -92,9 +93,11 @@ const recoverableReady = chrome.storage.session
 			recoverableStartupMutations,
 		);
 		recoverableStartupMutations.clear();
-		const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
-		if (typeof deadline === "number" && Number.isFinite(deadline))
-			orphanSweepDeadlineMs = deadline;
+		const deadline = restoreOrphanSweepDeadline(
+			stored[ORPHAN_SWEEP_DEADLINE_KEY],
+			orphanSweepDeadlineGeneration === 0,
+		);
+		if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
 	})
 	.catch(() => {});
 let recoverableUpdates: Promise<void> = recoverableReady;

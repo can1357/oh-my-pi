@@ -77,6 +77,16 @@ export function orphanSweepAlarmDelayMinutes(
 	return Math.max((deadlineMs - nowMs) / 60_000, 0.01);
 }
 
+export function restoreOrphanSweepDeadline(
+	storedDeadline: unknown,
+	isCurrent: boolean,
+): number | null | undefined {
+	if (!isCurrent) return undefined;
+	return typeof storedDeadline === "number" && Number.isFinite(storedDeadline)
+		? storedDeadline
+		: null;
+}
+
 /**
  * Finish an alarm mutation before persisting its matching deadline. Deadline
  * updates are queued so an older clear cannot write `null` after a newer arm.
