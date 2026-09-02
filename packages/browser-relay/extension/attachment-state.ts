@@ -13,6 +13,16 @@ export function consumeRelayInitiatedDetach(
 	return relayMarked && !userDetach;
 }
 
+export function shouldRetrackAfterDetachFailure(
+	targets: ReadonlyArray<{ tabId?: number; attached: boolean }> | null,
+	tabId: number,
+): boolean {
+	return (
+		targets === null ||
+		targets.some((target) => target.tabId === tabId && target.attached)
+	);
+}
+
 export function snapshotAttachmentState(epochs: Map<number, number>, tabIds: number[]): Map<number, number> {
 	const snapshot = new Map<number, number>();
 	for (const tabId of tabIds) snapshot.set(tabId, epochs.get(tabId) ?? 0);

@@ -3,6 +3,7 @@ import {
 	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
 } from "./attachment-state";
 
@@ -42,5 +43,21 @@ describe("attachment-state", () => {
 			true,
 		);
 		expect(markedTabs.has(1)).toBe(false);
+	});
+
+	it("preserves detach retry state when target discovery fails", () => {
+		expect(shouldRetrackAfterDetachFailure(null, 1)).toBe(true);
+		expect(
+			shouldRetrackAfterDetachFailure(
+				[
+					{ tabId: 1, attached: true },
+					{ tabId: 2, attached: false },
+				],
+				1,
+			),
+		).toBe(true);
+		expect(
+			shouldRetrackAfterDetachFailure([{ tabId: 1, attached: false }], 1),
+		).toBe(false);
 	});
 });

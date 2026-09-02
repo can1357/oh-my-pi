@@ -19,6 +19,7 @@ import {
 	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
 } from "./attachment-state";
 import {
@@ -284,10 +285,8 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 					// attachment (and its infobar) would stay orphaned. Re-track only when
 					// the attachment truly survived so a subsequent sweep reclaims it;
 					// otherwise the onDetach listener already forgot it.
-					const targets = await chrome.debugger.getTargets().catch(() => []);
-					if (
-						targets.some((target) => target.tabId === tabId && target.attached)
-					) {
+					const targets = await chrome.debugger.getTargets().catch(() => null);
+					if (shouldRetrackAfterDetachFailure(targets, tabId)) {
 						void trackAttachments([tabId]);
 					}
 				}),
@@ -658,10 +657,8 @@ async function attachTabOperation(
 				// sweep's failure path and re-track only when the attachment truly
 				// survived, so a subsequent sweep reclaims it instead of leaving the
 				// debugger infobar orphaned indefinitely.
-				const targets = await chrome.debugger.getTargets().catch(() => []);
-				if (
-					targets.some((target) => target.tabId === tabId && target.attached)
-				) {
+				const targets = await chrome.debugger.getTargets().catch(() => null);
+				if (shouldRetrackAfterDetachFailure(targets, tabId)) {
 					void trackAttachments([tabId]);
 				}
 			}),
