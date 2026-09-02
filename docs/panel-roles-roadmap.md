@@ -84,7 +84,7 @@ Every `model` is an exact selector or an ordinary model-role reference such as `
 
 A member's `model` may instead be a candidate list in priority order, or carry an ordered `fallbacks` list beside a single primary. Resolution takes the first candidate that resolves to an available, authenticated model, exactly as a prioritized agent `model` list does, and records the winning candidate as `requestedSelector` beside the served `selector`. Writing a list and a separate `fallbacks` key for the same member is rejected as ambiguous.
 
-Two optional role fields make the family policy explicit rather than implied by strategy. `distinctFamilies` overrides the per-strategy default (on for `independent`, off for `personas`), and `minFamilies` sets a floor on distinct resolved families that fails resolution when a lineup collapses below it. A floor larger than the member count is rejected at parse time. Under either rule an unknown family still fails closed.
+Two optional role fields make the family policy explicit rather than implied by strategy. `minFamilies` sets a floor on distinct resolved families that fails resolution when a lineup collapses below it; a floor larger than the member count is rejected at parse time. `distinctFamilies` is tighten-only: a `personas` role may set `true` to demand cross-family independence, while `false` on an `independent` role is rejected, since that strategy's whole claim is one family per seat. Where a lineup does claim diversity, an unknown family fails closed; a single-seat lineup claims none, so an unclassified model resolves.
 
 ```yaml
 panel:
