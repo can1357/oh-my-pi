@@ -102,7 +102,7 @@ describe("family policy", () => {
 		).toThrow(/duplicate resolved model family/);
 	});
 
-	test("an independent role cannot switch distinctness off", () => {
+	test("an unknown role key is rejected rather than silently ignored", () => {
 		expect(() =>
 			parsePanelSettings({
 				roles: {
@@ -114,7 +114,7 @@ describe("family policy", () => {
 				},
 				personas: {},
 			}),
-		).toThrow(/cannot be false for an independent role/);
+		).toThrow(PanelConfigError);
 	});
 
 	test("a personas role with a floor fails when its lineup collapses onto one family", () => {
@@ -148,27 +148,6 @@ describe("family policy", () => {
 		expect(() =>
 			resolvePanelLineup({ context: context([claude, opaque]), roleId: "r", role, taskMode: "answer" }),
 		).toThrow(/no known model family/);
-	});
-
-	test("a personas role can require distinct families", () => {
-		const settings = Settings.isolated({});
-		const role: PanelRole = {
-			strategy: "personas",
-			members: [
-				{ model: "openai/gpt-5.4", persona: "analyst" },
-				{ model: "openai/gpt-5-mini", persona: "reviewer" },
-			],
-			distinctFamilies: true,
-		};
-
-		expect(() =>
-			resolvePanelLineup({
-				context: { settings, modelRegistry: { getAvailable: () => [gpt, gptMini], hasConfiguredAuth: () => true } },
-				roleId: "r",
-				role,
-				taskMode: "answer",
-			}),
-		).toThrow(/duplicate resolved model family/);
 	});
 
 	test("rejects a floor that no lineup of this size could satisfy", () => {
