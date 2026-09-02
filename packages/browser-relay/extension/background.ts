@@ -72,7 +72,9 @@ const attachmentStateEpochs = new Map<number, number>();
 const relayInitiatedDetachTabs = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+const LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 const recoverableTabIds = new Set<number>();
+const liveOwnedTabIds = new Set<number>();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
@@ -83,7 +85,11 @@ let orphanSweepDeadlineMs: number | null = null;
 let connectionGeneration = 0;
 let orphanSweepDeadlineGeneration = 0;
 const recoverableReady = chrome.storage.session
-	.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null })
+	.get({
+		[RECOVERABLE_TAB_IDS_KEY]: [],
+		[LIVE_OWNED_TAB_IDS_KEY]: [],
+		[ORPHAN_SWEEP_DEADLINE_KEY]: null,
+	})
 	.then((stored) => {
 		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
 		// A user detach can arrive before this startup read resolves. Never merge
@@ -91,6 +97,11 @@ const recoverableReady = chrome.storage.session
 		restoreRecoverableState(
 			recoverableTabIds,
 			ids,
+			recoverableStartupMutations,
+		);
+		restoreRecoverableState(
+			liveOwnedTabIds,
+			stored[LIVE_OWNED_TAB_IDS_KEY],
 			recoverableStartupMutations,
 		);
 		recoverableStartupMutations.clear();
@@ -130,6 +141,7 @@ function updateRecoverable(
 	const persistCurrent = (): Promise<unknown> =>
 		chrome.storage.session.set({
 			[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+			[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
 		});
 	const immediateWrite = persistCurrent().catch(() => {});
 	recoverableUpdates = serializeRecoverableStateUpdate(
@@ -143,13 +155,23 @@ function updateRecoverable(
 
 function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
 	return updateRecoverable(freshTabIds, (tabIds) => {
-		for (const tabId of tabIds) recoverableTabIds.add(tabId);
+		for (const tabId of tabIds) {
+			recoverableTabIds.add(tabId);
+			liveOwnedTabIds.add(tabId);
+		}
 	});
 }
 
 function forgetRecoverable(tabId: number): Promise<void> {
 	return updateRecoverable(() => [tabId], () => {
 		recoverableTabIds.delete(tabId);
+		liveOwnedTabIds.delete(tabId);
+	});
+}
+
+function forgetLiveOwnership(tabId: number): Promise<void> {
+	return updateRecoverable(() => [tabId], () => {
+		liveOwnedTabIds.delete(tabId);
 	});
 }
 
@@ -624,7 +646,7 @@ async function buildHello(): Promise<
 	// debuggers too. Only persisted extension-owned ids are safe to advertise as
 	// relay attachments; promoting every attached target would resurrect a user
 	// takeover that onDetach deliberately removed from recovery state.
-	const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
+	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
 		Number.isInteger(navigator.hardwareConcurrency) &&
@@ -831,10 +853,7 @@ async function reconcileOrphans(): Promise<void> {
 	// getTargets includes DevTools and other debugger owners. Reconciliation may
 	// only re-seed attachments already known to this extension; otherwise a
 	// takeover becomes relay-authorized again before buildHello can filter it.
-	const attachedTabIds = extensionOwnedAttachedTabIds(
-		targets,
-		recoverableTabIds,
-	);
+	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
 	await trackAttachments(attachedTabIds, () => true, attachmentState);
 	// Only a socket that has actually delivered a hello owns reconciliation. A
 	// merely OPEN (or CONNECTING) socket may still stall/fail in `buildHello()`
@@ -927,6 +946,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
 	noteAttachmentStateChange(attachmentStateEpochs, source.tabId);
+	// Every detach ends this extension's live debugger ownership immediately. A
+	// guard detach retains separate recovery authorization, while user/relay
+	// detaches clear both sets below.
+	void forgetLiveOwnership(source.tabId);
 	// The attachment is gone (user clicked Cancel, tab navigated to a
 	// non-attachable target, or Chrome tore it down); stop tracking it so a
 	// later orphan sweep never tries to detach a tab we no longer own.
