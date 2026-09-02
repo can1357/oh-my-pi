@@ -3414,7 +3414,7 @@ export class AuthStorage {
 				// times decorrelate within a few cycles.
 				this.#usageCache.set(cacheKey, { value: report, expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter });
 				this.#recordUsageHistory(request, report);
-				this.#reconcileCodexUsageBlock(request, report);
+				this.#reconcileUsageBlock(request, report);
 				return report;
 			}
 			// Failure: apply a short jittered cool-down so the credential doesn't
@@ -3903,10 +3903,7 @@ export class AuthStorage {
 			if (storeHook) {
 				const report = await storeHook(provider, credential, options?.signal);
 				if (report) {
-					this.#reconcileCodexUsageBlock(
-						this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
-						report,
-					);
+					this.#reconcileUsageBlock(this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl), report);
 				}
 				return report;
 			}
@@ -4009,7 +4006,7 @@ export class AuthStorage {
 				const credentialType = entry.credential.type;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
 				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
-				if (blockedUntil !== undefined && provider !== "openai-codex") {
+				if (blockedUntil !== undefined && !this.#supportsUsageBlockReconciliation(provider)) {
 					return {
 						credentialId: entry.id,
 						credentialType,
@@ -4036,7 +4033,7 @@ export class AuthStorage {
 					planEligibilityByCredential.set(entry.id, getOpenAICodexPlanEligibility(report, planRequirement));
 				}
 
-				if (provider === "openai-codex") {
+				if (this.#supportsUsageBlockReconciliation(provider)) {
 					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				}
 				if (blockedUntil !== undefined) {
@@ -4178,7 +4175,7 @@ export class AuthStorage {
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
 			const reports = await raceUsageWithSignal(shared, options?.signal);
-			if (shouldReconcileStoreHookReports && reports) this.#reconcileCodexUsageBlocksFromReports(reports);
+			if (shouldReconcileStoreHookReports && reports) this.#reconcileUsageBlocksFromReports(reports);
 			return reports;
 		}
 		if (!this.#usageProviderResolver && this.#runtimeUsageProviderOverrides.size === 0) return null;
@@ -4734,7 +4731,7 @@ export class AuthStorage {
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
-				if (blockedUntil !== undefined && args.provider === "openai-codex") {
+				if (blockedUntil !== undefined && this.#supportsUsageBlockReconciliation(args.provider)) {
 					usage = await this.#getUsageReport(args.provider, selection.credential, {
 						...args.options,
 						timeoutMs: this.#usageRequestTimeoutMs,
@@ -6161,28 +6158,38 @@ export class AuthStorage {
 		}
 	}
 
+	#supportsUsageBlockReconciliation(provider: string): boolean {
+		return provider === "openai-codex" || provider === "anthropic";
+	}
+
 	/**
-	 * Self-heal a stale Codex usage-limit block: when a fresh live usage report
-	 * says the account is allowed and below every reported limit, drop the
-	 * persisted and in-memory `openai-codex:oauth` blocks so credential selection
-	 * can re-include recovered seats before a stale block naturally expires.
-	 */
-	/**
-	 * Narrow a usage report to the limits a backoff scope covers, so a scope is
-	 * judged only by the meters it gates. A legacy scope that meant "block
-	 * everything" keeps the whole report.
+	 * Narrow a usage report to the meters one persisted backoff scope gates.
+	 * Scoped healing must never let an unrelated healthy meter erase a live
+	 * block.
 	 */
 	#scopeUsageReportToBlockScope(
 		report: UsageReport,
 		blockScope: string | undefined,
 		strategy: CredentialRankingStrategy | undefined,
 	): UsageReport {
-		if (!blockScope || !strategy?.scopeLimits || !strategy.blockScopes) return report;
-		// Find a request context whose scope set leads with this scope; its scoped
-		// limits are the ones this block gates.
-		const modelId = blockScope === "spark" ? "gpt-5.3-codex-spark" : "gpt-5.3-codex";
-		if (strategy.blockScopes({ modelId })[0] !== blockScope) return report;
-		const scopedLimits = strategy.scopeLimits(report, { modelId });
+		const scopeLimits =
+			report.provider === "anthropic" ? strategy?.scopeLimitsForReserve : strategy?.scopeLimits;
+		if (!blockScope || !scopeLimits) return report;
+		let modelId: string | undefined;
+		if (report.provider === "openai-codex") {
+			const blockScopes = strategy?.blockScopes;
+			if (!blockScopes) return report;
+			modelId = blockScope === "spark" ? "gpt-5.3-codex-spark" : "gpt-5.3-codex";
+			if (blockScopes({ modelId })[0] !== blockScope) return report;
+		} else if (report.provider === "anthropic" && blockScope.startsWith("tier:")) {
+			const tier = blockScope.slice("tier:".length);
+			if (tier !== "fable" && tier !== "mythos") return report;
+			modelId = `claude-${tier}-5`;
+		} else {
+			return report;
+		}
+
+		const scopedLimits = scopeLimits(report, { modelId });
 		const meterStates = report.metadata?.meterStates;
 		const meterState =
 			meterStates !== null && typeof meterStates === "object"
@@ -6192,7 +6199,7 @@ export class AuthStorage {
 			...report,
 			limits: scopedLimits,
 			metadata:
-				meterState || blockScope === "spark"
+				report.provider === "openai-codex" && (meterState || blockScope === "spark")
 					? {
 							...report.metadata,
 							allowed: meterState?.allowed,
@@ -6202,14 +6209,7 @@ export class AuthStorage {
 		};
 	}
 
-	/**
-	 * Clear one backoff scope. The in-memory backoff is per scope so it is
-	 * dropped directly; the persisted store deletes a credential's blocks as a
-	 * unit, so it is only purged once no other scope still holds a live block.
-	 * Leaving a persisted row behind is safe: the scope it belongs to is
-	 * unblocked in memory, and the row heals on the pass where its own meter
-	 * recovers.
-	 */
+	/** Clear one exact in-memory and persisted backoff scope. */
 	#clearCredentialBlockScope(
 		provider: string,
 		credentialId: number,
@@ -6231,29 +6231,86 @@ export class AuthStorage {
 		}
 	}
 
-	#isHealthyCodexUsageReport(report: UsageReport): boolean {
-		if (report.provider !== "openai-codex") return false;
-		const metadata = report.metadata;
-		if (metadata?.allowed !== true || metadata.limitReached !== false) return false;
-		return !this.#isUsageLimitReached(report.limits);
+	#isHealthyUsageReportForBlock(report: UsageReport, blockScope: string | undefined): boolean {
+		if (report.provider === "openai-codex") {
+			const metadata = report.metadata;
+			if (metadata?.allowed !== true || metadata.limitReached !== false) return false;
+			return !this.#isUsageLimitReached(report.limits);
+		}
+		if (report.provider !== "anthropic" || report.limits.length === 0) return false;
+		const tier = blockScope?.startsWith("tier:") ? blockScope.slice("tier:".length) : undefined;
+		if (tier && !report.limits.some(limit => limit.scope.tier === tier)) return false;
+		return report.limits.every(limit => {
+			const usedFraction = resolveUsedFraction(limit);
+			return (
+				limit.status !== "unknown" &&
+				usedFraction !== undefined &&
+				Number.isFinite(usedFraction) &&
+				!this.#isUsageLimitExhausted(limit)
+			);
+		});
 	}
 
-	#reconcileCodexUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
+	#credentialBlockReconcilePending(
+		credentialId: number,
+		credentialIndex: number,
+		providerKey: string,
+		blockScope: string | undefined,
+		nowMs: number,
+	): boolean {
+		const scopedBackoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
+		const globalProbeAfterMs = this.#credentialBackoffProbeAfter.get(providerKey)?.get(credentialIndex) ?? 0;
+		const scopedProbeAfterMs = this.#credentialBackoffProbeAfter.get(scopedBackoffKey)?.get(credentialIndex) ?? 0;
+		const storeGlobalProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(credentialId, providerKey, "");
+		const storeScopedProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(
+			credentialId,
+			providerKey,
+			blockScope ?? "",
+		);
+		return Math.max(globalProbeAfterMs, scopedProbeAfterMs, storeGlobalProbeAfterMs, storeScopedProbeAfterMs) > nowMs;
+	}
+
+	#healUsageBlockScope(
+		provider: Provider,
+		providerKey: string,
+		credentialId: number,
+		credentialIndex: number,
+		blockScope: string | undefined,
+		report: UsageReport,
+		strategy: CredentialRankingStrategy | undefined,
+	): void {
+		const scopedReport = this.#scopeUsageReportToBlockScope(report, blockScope, strategy);
+		if (!this.#isHealthyUsageReportForBlock(scopedReport, blockScope)) return;
+		const blockedUntilMs = this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScope);
+		if (blockedUntilMs === undefined) return;
+		// Provider usage can lag the request path that just returned 429. Give a
+		// fresh local or broker-sourced block one full usage-cache window before a
+		// healthy report may clear it.
+		if (this.#credentialBlockReconcilePending(credentialId, credentialIndex, providerKey, blockScope, Date.now())) {
+			return;
+		}
+		this.#clearCredentialBlockScope(provider, credentialId, credentialIndex, providerKey, blockScope);
+		logger.info("Cleared stale usage-limit block after healthy live usage report", {
+			credentialId,
+			provider,
+			blockScope,
+			clearedBlockedUntilMs: blockedUntilMs,
+		});
+	}
+
+	#reconcileUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
+		if (!this.#supportsUsageBlockReconciliation(provider)) return;
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const credentialIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
 		if (credentialIndex < 0) return;
-		// Mirror selection: consult the same strategy scope `markUsageLimitReached`
-		// persists under, else a scoped block is invisible here and never healed.
-		// Reconciliation has no request context, so it cannot know which scope a
-		// block was written under. Heal every scope the strategy can produce, plus
-		// any legacy scope it still lists, or a block persisted under one scope
-		// stays invisible here forever.
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const blockScopes =
-			strategy?.blockScopes?.() ?? [strategy?.blockScope?.({})].filter(scope => scope !== undefined);
+			provider === "anthropic"
+				? ["tier:fable", "tier:mythos"]
+				: (strategy?.blockScopes?.() ?? [strategy?.blockScope?.({})].filter(scope => scope !== undefined));
 		const scopesToHeal = blockScopes.length > 0 ? blockScopes : [undefined];
 		for (const blockScope of scopesToHeal) {
-			this.#healCodexUsageBlockScope(
+			this.#healUsageBlockScope(
 				provider,
 				providerKey,
 				credentialId,
@@ -6265,92 +6322,49 @@ export class AuthStorage {
 		}
 	}
 
-	/**
-	 * Heal one backoff scope against the limits that scope actually covers.
-	 *
-	 * Judging a scope by the whole report is wrong once scopes are per-meter: an
-	 * exhausted Spark meter would keep a recovered chat block alive, and healing
-	 * would then delete every scope including a block that is still valid. So
-	 * each scope is evaluated against its own limits and cleared on its own.
-	 */
-	#healCodexUsageBlockScope(
-		provider: Provider,
-		providerKey: string,
-		credentialId: number,
-		credentialIndex: number,
-		blockScope: string | undefined,
-		report: UsageReport,
-		strategy: CredentialRankingStrategy | undefined,
-	): void {
-		const scopedReport = this.#scopeUsageReportToBlockScope(report, blockScope, strategy);
-		if (!this.#isHealthyCodexUsageReport(scopedReport)) return;
-		const blockedUntilMs = this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScope);
-		if (blockedUntilMs === undefined) return;
-		// `/usage` can lag the request path that just returned 429. Fresh local or
-		// broker-sourced blocks get one usage-cache window before healthy reports may
-		// clear them.
-		const nowMs = Date.now();
-		const scopedBackoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
-		const globalProbeAfterMs = this.#credentialBackoffProbeAfter.get(providerKey)?.get(credentialIndex) ?? 0;
-		const scopedProbeAfterMs = this.#credentialBackoffProbeAfter.get(scopedBackoffKey)?.get(credentialIndex) ?? 0;
-		const storeGlobalProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(credentialId, providerKey, "");
-		const storeScopedProbeAfterMs = this.#readPersistedCredentialBlockReconcileAfter(
-			credentialId,
-			providerKey,
-			blockScope ?? "",
-		);
-		if (Math.max(globalProbeAfterMs, scopedProbeAfterMs, storeGlobalProbeAfterMs, storeScopedProbeAfterMs) > nowMs) {
-			return;
-		}
-		this.#clearCredentialBlockScope(provider, credentialId, credentialIndex, providerKey, blockScope);
-		logger.info("Cleared stale Codex usage-limit block after healthy live usage report", {
-			credentialId,
-			provider,
-			blockScope,
-			clearedBlockedUntilMs: blockedUntilMs,
-		});
-	}
-
-	#reconcileCodexUsageBlock(request: UsageRequestDescriptor, report: UsageReport): void {
-		if (request.provider !== "openai-codex") return;
-		const credentialId = this.#findStoredCredentialIdForUsageCredential(request.provider, request.credential);
-		if (credentialId === undefined) return;
-		this.#reconcileCodexUsageBlockForCredential(request.provider, credentialId, report);
-	}
-
-	#findStoredCredentialIdsForUsageReport(report: UsageReport): number[] {
-		if (report.provider !== "openai-codex") return [];
+	#usageReportMatchesCredential(report: UsageReport, credential: AuthCredential): boolean {
+		if (credential.type !== "oauth") return false;
 		const email = this.#getUsageReportMetadataValue(report, "email")?.toLowerCase();
 		const accountId = (
 			this.#getUsageReportMetadataValue(report, "accountId") ?? this.#getUsageReportScopeAccountId(report)
 		)?.toLowerCase();
-		if (!email && !accountId) return [];
-		const matches: number[] = [];
-		for (const entry of this.#getStoredCredentials(report.provider)) {
-			const credential = entry.credential;
-			if (credential.type !== "oauth") continue;
-			const credentialEmail = credential.email?.trim().toLowerCase();
-			const credentialAccountId = credential.accountId?.trim().toLowerCase();
-			// Every identity dimension present on BOTH sides must agree — the
-			// account id is shared workspace-wide and one email can span
-			// workspaces, so a single-dimension match can cross-link siblings.
-			const emailComparable = Boolean(email && credentialEmail);
-			const accountComparable = Boolean(accountId && credentialAccountId);
-			if (!emailComparable && !accountComparable) continue;
-			if (emailComparable && credentialEmail !== email) continue;
-			if (accountComparable && credentialAccountId !== accountId) continue;
-			matches.push(entry.id);
-		}
-		return matches;
+		const orgId = this.#getUsageReportMetadataValue(report, "orgId")?.toLowerCase();
+		if (!email && !accountId) return false;
+		if (report.provider === "anthropic" && (!orgId || credential.orgId?.trim().toLowerCase() !== orgId)) return false;
+		const credentialEmail = credential.email?.trim().toLowerCase();
+		const credentialAccountId = credential.accountId?.trim().toLowerCase();
+		const emailComparable = Boolean(email && credentialEmail);
+		const accountComparable = Boolean(accountId && credentialAccountId);
+		if (!emailComparable && !accountComparable) return false;
+		if (emailComparable && credentialEmail !== email) return false;
+		if (accountComparable && credentialAccountId !== accountId) return false;
+		return true;
 	}
 
-	#reconcileCodexUsageBlocksFromReports(reports: UsageReport[]): void {
-		const reconciled = new Set<number>();
+	#reconcileUsageBlock(request: UsageRequestDescriptor, report: UsageReport): void {
+		if (request.provider !== report.provider || !this.#supportsUsageBlockReconciliation(request.provider)) return;
+		const credentialId = this.#findStoredCredentialIdForUsageCredential(request.provider, request.credential);
+		if (credentialId === undefined) return;
+		const stored = this.#getStoredCredentials(request.provider).find(entry => entry.id === credentialId);
+		if (!stored || !this.#usageReportMatchesCredential(report, stored.credential)) return;
+		this.#reconcileUsageBlockForCredential(request.provider, credentialId, report);
+	}
+
+	#findStoredCredentialIdsForUsageReport(report: UsageReport): number[] {
+		if (!this.#supportsUsageBlockReconciliation(report.provider)) return [];
+		return this.#getStoredCredentials(report.provider)
+			.filter(entry => this.#usageReportMatchesCredential(report, entry.credential))
+			.map(entry => entry.id);
+	}
+
+	#reconcileUsageBlocksFromReports(reports: UsageReport[]): void {
+		const reconciled = new Set<string>();
 		for (const report of reports) {
 			for (const credentialId of this.#findStoredCredentialIdsForUsageReport(report)) {
-				if (reconciled.has(credentialId)) continue;
-				reconciled.add(credentialId);
-				this.#reconcileCodexUsageBlockForCredential(report.provider, credentialId, report);
+				const key = `${report.provider}:${credentialId}`;
+				if (reconciled.has(key)) continue;
+				reconciled.add(key);
+				this.#reconcileUsageBlockForCredential(report.provider, credentialId, report);
 			}
 		}
 	}

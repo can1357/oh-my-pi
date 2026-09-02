@@ -5,6 +5,7 @@
 ### Fixed
 
 - Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
+- Recovered Anthropic Fable and Mythos OAuth credentials when a fresh, identity-matched usage report shows that a stale tier block is no longer exhausted, matching the existing Codex self-heal without clearing unrelated scopes.
 
 ## [18.1.2] - 2026-09-01
 
