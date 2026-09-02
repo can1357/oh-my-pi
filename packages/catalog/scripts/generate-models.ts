@@ -108,10 +108,9 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
 const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "merge-gateway"]);
 
 export function shouldFetchCatalogProvider(providerId: string, requestedProvider?: string): boolean {
-	return (
-		!DISCOVERY_ONLY_PROVIDERS.has(providerId) &&
-		(!CREDENTIAL_SCOPED_PROVIDERS.has(providerId) || providerId === requestedProvider)
-	);
+	if (DISCOVERY_ONLY_PROVIDERS.has(providerId)) return false;
+	if (requestedProvider !== undefined) return providerId === requestedProvider;
+	return !CREDENTIAL_SCOPED_PROVIDERS.has(providerId);
 }
 
 /**
