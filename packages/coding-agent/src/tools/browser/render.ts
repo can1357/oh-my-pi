@@ -109,8 +109,10 @@ function renderRunCell(
 		render: (width: number): readonly string[] => {
 			const expanded = options.renderContext?.expanded ?? options.expanded;
 			const previewLines = options.renderContext?.previewLines ?? BROWSER_DEFAULT_PREVIEW_LINES;
+			const flat = options.renderContext?.flat === true;
 			const key = new Hasher()
 				.bool(expanded)
+				.bool(flat)
 				.bool(isError)
 				.u32(previewLines)
 				.u32(options.spinnerFrame ?? 0)
@@ -134,6 +136,7 @@ function renderRunCell(
 					codeMaxLines: expanded ? Number.POSITIVE_INFINITY : previewLines,
 					expanded,
 					width,
+					flat,
 				},
 				theme,
 			);

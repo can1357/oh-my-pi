@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -5,9 +6,10 @@ import { Container, Text } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tools/path-utils";
-import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
-import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
+import { PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../tools/render-utils";
+import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync, truncateToWidth } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import type { LayoutMode } from "../layout-mode";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
 
@@ -102,6 +104,8 @@ type ReadToolResultDetails = {
 
 type ReadToolGroupOptions = {
 	showContentPreview?: boolean;
+	/** Owning mode's transcript layout; captured at construction (per-instance, never global). */
+	layout?: () => LayoutMode;
 };
 
 function getSuffixResolution(details: ReadToolResultDetails | undefined): ReadToolSuffixResolution | undefined {
@@ -335,6 +339,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#expanded = false;
 	#toolActivityVisible = true;
 	#showContentPreview: boolean;
+	/** Owning mode's transcript layout accessor (per-instance, never global). */
+	#layout: (() => LayoutMode) | undefined;
 	// A read group accretes entries across multiple assistant completions for as
 	// long as the run of reads is uninterrupted. It remains active while its
 	// header can change from `Read <path>` to `Read (N)` plus a tree. The
@@ -353,9 +359,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
 		this.#showContentPreview = options.showContentPreview ?? false;
+		this.#layout = options.layout;
 		this.#text = new Text("", 0, 0);
 		this.addChild(this.#text);
 		this.#updateDisplay();
+	}
+
+	/** Flat opencode layout, resolved through the owning mode's accessor. */
+	#isFlat(): boolean {
+		return this.#layout?.() === "opencode";
 	}
 
 	override render(width: number): readonly string[] {
@@ -542,6 +554,69 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
 		this.#text = new Text("", 0, 0);
+
+		// Opencode layout (collapsed): every read renders as its own flat dim
+		// `→ Read path` row (no group header, tree connectors, usage rows, or
+		// previews). Non-success statuses (pending, warning, error) keep their
+		// status mark so liveness stays visible, and rows keep their OSC-8 file
+		// hyperlink with its first selector line target. Error rows additionally
+		// keep their full content preview below the mark row: the entry's
+		// contentText is the actionable error message, and a one-line row would
+		// hide it (same "errors stay full-size" contract as tool cards).
+		// Ctrl+O (`setExpanded`) restores the grouped view.
+		if (this.#isFlat() && !this.#expanded) {
+			let flatRows: string[] = [];
+			const flushFlatRows = () => {
+				if (flatRows.length === 0) return;
+				// Rows carry hyperlinks/styling and arbitrary path text, so bound
+				// them to the render width (one advertised line per read) via a
+				// width-aware child instead of a plain Text that would wrap.
+				const rows = flatRows;
+				flatRows = [];
+				let cachedWidth: number | undefined;
+				let cachedLines: string[] | undefined;
+				this.addChild({
+					render: (width: number) => {
+						if (cachedLines && cachedWidth === width) return cachedLines;
+						cachedWidth = width;
+						cachedLines = rows.map(row => truncateToWidth(row, Math.max(1, width)));
+						return cachedLines;
+					},
+					invalidate: () => {
+						cachedWidth = undefined;
+						cachedLines = undefined;
+					},
+				});
+			};
+			for (const row of displayRows) {
+				const status = this.#statusForTargets(row.targets);
+				const plain = replaceTabs(stripVTControlCharacters(this.#formatRowPath(row)));
+				const linkPath = linkPathForTargets(row.targets);
+				const line = firstSelectorLineForTargets(row.targets);
+				const pathText = linkPath
+					? fileHyperlink(linkPath, plain, line !== undefined ? { line } : undefined)
+					: plain;
+				flatRows.push(
+					status === "success"
+						? theme.fg("dim", ` ${theme.symbol("oc.read")} Read ${pathText}`)
+						: ` ${this.#formatStatus(status)} ${theme.fg("dim", `Read ${pathText}`)}`,
+				);
+				if (status !== "error") continue;
+				flushFlatRows();
+				const seen = new Set<string>();
+				for (const target of row.targets) {
+					const entry = target.entry;
+					if (entry.status !== "error" || entry.contentText === undefined || seen.has(entry.toolCallId)) continue;
+					seen.add(entry.toolCallId);
+					this.#addContentPreview(entry);
+				}
+			}
+			if (flatRows.length === 0 && this.children.length === 0) {
+				flatRows.push(theme.fg("dim", ` ${theme.symbol("oc.read")} Read`));
+			}
+			flushFlatRows();
+			return;
+		}
 
 		if (displayRows.length === 0) {
 			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
@@ -821,6 +896,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		let cachedWidth: number | undefined;
 		let cachedLines: string[] | undefined;
 		const expanded = this.#expanded;
+		const flat = this.#isFlat();
 		const component: Component = {
 			render: (width: number) => {
 				if (cachedLines && cachedWidth === width) return cachedLines;
@@ -835,6 +911,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						codeStartLine: entry.codeStartLine,
 						codeLineNumbers: entry.codeLineNumbers,
 						width,
+						flat,
 					},
 					theme,
 				);
@@ -871,6 +948,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
+		// Opencode layout: no framed content-preview boxes while collapsed — the
+		// group stays a flat list of one-line reads (Ctrl+O restores previews).
+		// Error entries bypass this in #updateDisplay's flat branch directly.
+		if (this.#isFlat() && !this.#expanded) return false;
 		return this.#showContentPreview && entry.contentText !== undefined;
 	}
 

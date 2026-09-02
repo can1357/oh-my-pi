@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { Clipboard, SnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -16,7 +17,9 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
-import type { Theme } from "../../modes/theme/theme";
+import { hasTaskResultError } from "../../task/render";
+import type { SymbolKey, Theme } from "../../modes/theme/theme";
+import { SYMBOL_PRESETS } from "../../modes/theme/symbols";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
@@ -34,8 +37,132 @@ import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import type { LayoutMode } from "../layout-mode";
+
 import { renderDiff } from "./diff";
 import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
+
+// Opencode-layout tool row glyphs, mirroring opencode's iconography: reads →,
+// searches ∗, shell $, writes ←, subagents ◆. Anything unlisted falls back to
+// the search glyph. Resolved through the theme symbol table so symbolPreset
+// "ascii" renders ASCII fallbacks (->, *, <-, #, -) instead of Unicode.
+const OPENCODE_TOOL_GLYPHS: Record<string, SymbolKey> = {
+	read: "oc.read",
+	fetch: "oc.read",
+	grep: "oc.search",
+	glob: "oc.search",
+	ast_grep: "oc.search",
+	bash: "oc.shell",
+	eval: "oc.shell",
+	write: "oc.write",
+	edit: "oc.write",
+	ast_edit: "oc.write",
+	task: "oc.subagent",
+	todo: "oc.todo",
+};
+
+// Built-in settled collapse restyles `<icon> Tool detail` headers into
+// opencode's `<glyph> Tool detail`, so the native leading icon must be
+// removed. Built-in headers start with a status icon (formatStatusIcon/
+// renderStatusLine) or a per-tool identity glyph, and under symbolPreset
+// "ascii" many are alphanumeric ("+f", "lsp", "web", "[ok]") — no character
+// class can tell them apart from real text. Strip by the active theme's known
+// icon strings instead, longest first so "[!!]" wins over "[!]"; custom
+// renderer output is ordinary tool text and must stay verbatim.
+const HEADER_ICON_KEYS = (Object.keys(SYMBOL_PRESETS.unicode) as SymbolKey[]).filter(
+	key => key.startsWith("status.") || key.startsWith("tool."),
+);
+let headerIconStripCache: { theme: Theme; regex: RegExp } | undefined;
+function headerIconStrip(): RegExp {
+	if (headerIconStripCache?.theme !== theme) {
+		const icons = [...new Set(HEADER_ICON_KEYS.map(key => theme.symbol(key)))]
+			.filter(icon => icon.length > 0)
+			.sort((a, b) => b.length - a.length)
+			.map(icon => RegExp.escape(icon));
+		headerIconStripCache = {
+			theme,
+			regex: new RegExp(`^(?:${icons.join("|")}|[^\\p{L}\\p{N}]{1,2})\\s+`, "u"),
+		};
+	}
+	return headerIconStripCache.regex;
+}
+
+// OSC 8 hyperlink span: `ESC ] 8 ; params ; uri (BEL|ST) text ESC ] 8 ; ; (BEL|ST)`.
+// The opener requires a non-empty URI so a stray closer can never match.
+const OSC8_LINK_REGEX = /(\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\))([\s\S]*?)(\x1b\]8;;(?:\x07|\x1b\\))/g;
+const OSC8_OPEN_REGEX = /\x1b]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\)/g;
+
+/**
+ * Re-attach every OSC-8 hyperlink from `source` (the renderer's fully styled
+ * status row) onto the matching plain-text segments of `row` (its stripped
+ * opencode restyle). The opener/closer bytes are reused verbatim, so each
+ * link target is exactly the renderer's own resolution (e.g. write links
+ * `details.resolvedPath`, read keeps its selector line) — no relative-vs-
+ * absolute guessing from raw args. Segments are bound in order, each search
+ * resuming past the previous restored span, so a rename/move header with
+ * duplicate path substrings links source and destination correctly. Rows
+ * without a link pass through unchanged.
+ */
+function restoreHyperlinks(row: string, source: string): string {
+	let out = row;
+	let from = 0;
+	for (const match of source.matchAll(OSC8_LINK_REGEX)) {
+		const [, opener, linked, closer] = match;
+		const linkedStyled = replaceTabs(linked!);
+		const linkedPlain = stripVTControlCharacters(linkedStyled);
+		if (!linkedPlain) continue;
+		let at = out.indexOf(linkedStyled, from);
+		let matched = linkedStyled;
+		if (at === -1) {
+			at = out.indexOf(linkedPlain, from);
+			matched = linkedPlain;
+		}
+		if (at === -1) {
+			const linkedPrefix = linkedPlain.endsWith("…") ? linkedPlain.slice(0, -1) : linkedPlain;
+			const prefix = linkedPrefix.slice(0, 3);
+			for (
+				let candidate = out.indexOf(prefix, from);
+				candidate !== -1;
+				candidate = out.indexOf(prefix, candidate + 1)
+			) {
+				let length = 3;
+				while (length < linkedPrefix.length && out[candidate + length] === linkedPrefix[length]) length++;
+				if (out.startsWith("…", candidate + length)) {
+					at = candidate;
+					matched = linkedPrefix.slice(0, length);
+					break;
+				}
+			}
+		}
+		if (at === -1) continue;
+		out = `${out.slice(0, at)}${opener}${matched}${closer}${out.slice(at + matched.length)}`;
+		from = at + opener!.length + matched.length + closer!.length;
+	}
+	// renderOutputBlock may itself truncate a flat header, leaving the OSC-8
+	// opener and a clipped label without its closer. Reuse that surviving target
+	// around its visible prefix rather than dropping the link entirely.
+	for (const openerMatch of source.matchAll(OSC8_OPEN_REGEX)) {
+		const opener = openerMatch[0];
+		const remaining = source.slice(openerMatch.index! + opener.length);
+		if (remaining.includes("\x1b]8;;")) continue;
+		const linkedPlain = stripVTControlCharacters(remaining);
+		const ellipsis = linkedPlain.indexOf("…");
+		const linkedPrefix = (ellipsis === -1 ? linkedPlain : linkedPlain.slice(0, ellipsis)).trimEnd();
+		const prefix = linkedPrefix.slice(0, 3);
+		if (prefix.length < 3) continue;
+		for (let at = out.indexOf(prefix, from); at !== -1; at = out.indexOf(prefix, at + 1)) {
+			let length = 3;
+			while (length < linkedPrefix.length && out[at + length] === linkedPrefix[length]) length++;
+			if (!out.startsWith("…", at + length)) continue;
+			const matched = linkedPrefix.slice(0, length);
+			const closer = "\x1b]8;;\x07";
+			out = `${out.slice(0, at)}${opener}${matched}${closer}${out.slice(at + matched.length)}`;
+			from = at + opener.length + matched.length + closer.length;
+			break;
+		}
+	}
+	return out;
+}
 
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
@@ -240,6 +367,8 @@ export interface ToolExecutionOptions {
 	useBuiltInRenderer?: boolean;
 	editFuzzyThreshold?: number;
 	editAllowFuzzy?: boolean;
+	/** Owning mode's transcript layout; captured at construction (per-instance, never global). */
+	layout?: () => LayoutMode;
 }
 
 export interface ToolExecutionHandle extends Component {
@@ -352,6 +481,7 @@ export class ToolExecutionComponent extends Container {
 	#showImages: boolean;
 	#editFuzzyThreshold: number | undefined;
 	#editAllowFuzzy: boolean | undefined;
+	#layout: (() => LayoutMode) | undefined;
 	#snapshots?: SnapshotStore;
 	#clipboard?: Clipboard;
 	#isPartial = true;
@@ -429,6 +559,12 @@ export class ToolExecutionComponent extends Container {
 	// the terminal never triggers an unnecessary full-viewport replay.
 	#firstResultViewportRepaintShapePainted = false;
 	#partialResultShapePainted = false;
+	// Memoized opencode-layout collapse: the derived status-row slice keyed on
+	// the underlying container render (same source ref => identical rows =>
+	// reuse), mirroring UserMessageComponent's OSC-zone memo so this component
+	// stays reference-stable for the transcript's incremental assembly.
+	#collapsedSource: readonly string[] | undefined;
+	#collapsedLines: readonly string[] | undefined;
 	#renderState: {
 		spinnerFrame?: number;
 		expanded: boolean;
@@ -459,6 +595,7 @@ export class ToolExecutionComponent extends Container {
 		this.#showImages = options.showImages ?? true;
 		this.#editFuzzyThreshold = options.editFuzzyThreshold;
 		this.#editAllowFuzzy = options.editAllowFuzzy;
+		this.#layout = options.layout;
 		this.#snapshots = options.snapshots;
 		this.#clipboard = options.clipboard;
 		this.#tool = tool;
@@ -971,7 +1108,7 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${this.#isFlat() ? "oc" : "omp"}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1012,6 +1149,16 @@ export class ToolExecutionComponent extends Container {
 			this.#ui.requestRender();
 		}
 	}
+	/**
+	 * The custom-tool branch wins when a tool exposes renderer callbacks. A
+	 * built-in such as TaskTool legitimately does so, but delegates its result
+	 * renderer to the registry. Only that case owns the built-in status icon.
+	 */
+	#usesBuiltInResultRenderer(): boolean {
+		if (!this.#renderer) return false;
+		if (!this.#tool?.renderCall && !this.#tool?.renderResult) return true;
+		return this.#tool?.renderResult === this.#renderer.renderResult;
+	}
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0) return [];
@@ -1028,7 +1175,64 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
-		return lines;
+		// Opencode layout: a collapsed tool block renders as its status line only
+		// (renderOutputBlock draws flat in this mode, so the first visible row is
+		// the header even for self-framing renderers). Errors stay full-size —
+		// a one-line error hides the message the user needs — and Ctrl+O
+		// (`setExpanded`) restores the complete card.
+		const taskResultError = this.#toolName === "task" && hasTaskResultError(this.#result?.details);
+		const resultIsError = this.#result?.isError === true || taskResultError;
+		const collapse = this.#isFlat() && !this.#expanded && !(resultIsError && !this.#isBenignSkip());
+		if (!collapse) return lines;
+		if (this.#collapsedSource === lines && this.#collapsedLines !== undefined) {
+			return this.#collapsedLines;
+		}
+		// First row with visible content — the status one-liner every renderer
+		// emits first (rows above it are paddingY blanks, which carry no ANSI in
+		// this mode because the state bg is disabled).
+		const first = lines.find(line => /\S/.test(line));
+		this.#collapsedSource = lines;
+		if (first === undefined) {
+			this.#collapsedLines = [];
+			return this.#collapsedLines;
+		}
+		// Settled success restyles to opencode's dim `<glyph> Tool detail` row;
+		// live calls keep their native styling (spinner/accent) so activity
+		// stays legible, matching opencode's emphasized in-flight rows.
+		if (this.#result !== undefined && !this.#isPartial && !resultIsError) {
+			const headers = this.#multiFileBoxes.flatMap(box => {
+				if (!(box instanceof Box)) return [];
+				const header = box.render(width).find(line => /\S/.test(line));
+				return header === undefined ? [] : [header];
+			});
+			const sourceRows = headers.length > 1 ? headers : [first];
+			const glyph = theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search");
+			const usesBuiltInResultRenderer = this.#usesBuiltInResultRenderer();
+			const collapsedRows = sourceRows.slice(0, 8).map(source => {
+				// Tabs are legal in filenames and custom status details; normalize
+				// them before measuring so the advertised single row truncates
+				// predictably instead of wrapping or leaving visual holes.
+				let plain = replaceTabs(stripVTControlCharacters(source)).trim();
+				if (usesBuiltInResultRenderer) {
+					plain = plain.replace(headerIconStrip(), "");
+				}
+				const row = ` ${glyph} ${plain}`;
+				return theme.fg(
+					"dim",
+					restoreHyperlinks(truncateToWidth(row.replace(OSC8_LINK_REGEX, "$2"), Math.max(1, width)), source),
+				);
+			});
+			if (sourceRows.length > 8) collapsedRows.push(theme.fg("dim", ` ... +${sourceRows.length - 8} more`));
+			this.#collapsedLines = collapsedRows;
+		} else {
+			this.#collapsedLines = [
+				restoreHyperlinks(
+					truncateToWidth(replaceTabs(first).replace(OSC8_LINK_REGEX, "$2"), Math.max(1, width)),
+					first,
+				),
+			];
+		}
+		return this.#collapsedLines;
 	}
 
 	#renderCompact(width: number): readonly string[] {
@@ -1047,8 +1251,17 @@ export class ToolExecutionComponent extends Container {
 			`${theme.fg("toolTitle", theme.bold(summary.label))}${detail}${elapsed}`,
 			Math.max(1, width - 4),
 		);
-		if (this.#allocation === 1) {
-			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
+		// Opencode layout stays flat even under viewport squeeze: the 2-row
+		// `╭─`/`╰` frame is the omp look, so always use the one-line form there.
+		if (this.#allocation === 1 || this.#isFlat()) {
+			// Settled marker rides the theme symbol table instead of a hardcoded
+			// `•` so a squeezed settled row matches the active preset (ascii stays
+			// ASCII): opencode takes the same oc.* accessor as the collapse row,
+			// omp keeps its bullet (`status.done` is `•` outside ascii).
+			const marker = this.#isFlat()
+				? theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search")
+				: theme.symbol("status.done");
+			const glyph = this.#spinnerFrame === undefined ? marker : (theme.spinnerFrames[this.#spinnerFrame] ?? marker);
 			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
 			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
 		}
@@ -1111,7 +1324,7 @@ export class ToolExecutionComponent extends Container {
 		const benignSkip = this.#isBenignSkip();
 		const stateBgKey =
 			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
-		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
+		const stateBgFn = this.#isFlat() ? undefined : (t: string) => theme.bg(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,
 		// so bypass any bespoke error frame and draw the neutral generic card —
@@ -1415,11 +1628,18 @@ export class ToolExecutionComponent extends Container {
 		return { ...(renderArgs as Record<string, unknown>), previewDiff: first.diff };
 	}
 
+	/** Flat opencode layout, resolved through the owning mode's accessor. */
+	#isFlat(): boolean {
+		return this.#layout?.() === "opencode";
+	}
 	/**
 	 * Build render context for tools that need extra state (bash, python, edit)
 	 */
 	#buildRenderContext(): Record<string, unknown> {
 		const context: Record<string, unknown> = {};
+		// Every framed renderer folds this into its `renderOutputBlock` options —
+		// the flat/framed choice must come from the owning mode, never a global.
+		context.flat = this.#isFlat();
 		const normalizeTimeoutSeconds = (value: unknown, maxSeconds: number): number | undefined => {
 			if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 			return Math.max(1, Math.min(maxSeconds, value));
@@ -1548,7 +1768,7 @@ export class ToolExecutionComponent extends Container {
 	 * only need the neutral tint. Bespoke-renderer tools get their content box
 	 * swapped for the same neutral card.
 	 */
-	#renderBenignSkipCard(stateBgFn: (text: string) => string): void {
+	#renderBenignSkipCard(stateBgFn: ((text: string) => string) | undefined): void {
 		if (!this.#usesContentBox) {
 			this.#contentText.setCustomBgFn(stateBgFn);
 			this.#contentText.invalidate();

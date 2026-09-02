@@ -142,7 +142,16 @@ export const readToolRenderer = {
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({
 				render: (width: number) =>
-					outputBlock.render({ header, state: "error", sections: [{ lines: errorLines }], width }, uiTheme),
+					outputBlock.render(
+						{
+							header,
+							state: "error",
+							sections: [{ lines: errorLines }],
+							width,
+							flat: options.renderContext?.flat === true,
+						},
+						uiTheme,
+					),
 				invalidate: () => outputBlock.invalidate(),
 			});
 		}
@@ -207,6 +216,7 @@ export const readToolRenderer = {
 								},
 							],
 							width,
+							flat: options.renderContext?.flat === true,
 						},
 						uiTheme,
 					),
@@ -244,10 +254,13 @@ export const readToolRenderer = {
 		let cachedWidth: number | undefined;
 		let cachedExpanded: boolean | undefined;
 		let cachedLines: string[] | undefined;
+		let cachedFlat: boolean | undefined;
 		return markFramedBlockComponent({
 			render: (width: number) => {
 				const expanded = options.expanded;
-				if (cachedLines && cachedWidth === width && cachedExpanded === expanded) return cachedLines;
+				const flat = options.renderContext?.flat === true;
+				if (cachedLines && cachedWidth === width && cachedExpanded === expanded && cachedFlat === flat)
+					return cachedLines;
 				cachedLines = isMarkdown
 					? renderMarkdownCell(
 							{
@@ -257,6 +270,7 @@ export const readToolRenderer = {
 								output: warningLines.length > 0 ? warningLines.join("\n") : undefined,
 								expanded,
 								width,
+								flat,
 							},
 							uiTheme,
 						)
@@ -271,16 +285,19 @@ export const readToolRenderer = {
 								codeStartLine: details?.displayContent?.startLine,
 								codeLineNumbers: details?.displayContent?.lineNumbers,
 								width,
+								flat,
 							},
 							uiTheme,
 						);
 				cachedWidth = width;
 				cachedExpanded = expanded;
+				cachedFlat = flat;
 				return cachedLines;
 			},
 			invalidate: () => {
 				cachedWidth = undefined;
 				cachedExpanded = undefined;
+				cachedFlat = undefined;
 				cachedLines = undefined;
 			},
 		});

@@ -29,6 +29,7 @@ import {
 } from "../../session/messages";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { theme } from "../theme/theme";
+import type { LayoutMode } from "../layout-mode";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -62,6 +63,8 @@ import { createUsageRowBlock, turnElapsedMs } from "./usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
+	/** Owning mode's transcript layout accessor; omitted surfaces render the default omp look. */
+	layout?: () => LayoutMode;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Whether the active registry entry came from a built-in factory. */
@@ -218,6 +221,7 @@ export class ChatTranscriptBuilder {
 		if (!this.#readGroup) {
 			this.#readGroup = new ReadToolGroupComponent({
 				showContentPreview: settings.get("read.toolResultPreview"),
+				layout: this.deps.layout,
 			});
 			this.#trackExpandable(this.#readGroup);
 			this.container.addChild(this.#readGroup);
@@ -305,11 +309,11 @@ export class ChatTranscriptBuilder {
 					// collapse them behind a compact summary that builds Markdown only on
 					// ctrl+o expand. Real user prompts stay fully rendered.
 					if (isSynthetic) {
-						const collapsed = new CollapsedSyntheticMessageComponent(textContent);
+						const collapsed = new CollapsedSyntheticMessageComponent(textContent, undefined, this.deps.layout);
 						this.#trackExpandable(collapsed);
 						this.container.addChild(collapsed);
 					} else {
-						this.container.addChild(new UserMessageComponent(textContent, false));
+						this.container.addChild(new UserMessageComponent(textContent, false, undefined, this.deps.layout));
 					}
 				}
 				break;
@@ -456,6 +460,7 @@ export class ChatTranscriptBuilder {
 					showImages: settings.get("terminal.showImages"),
 					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+					layout: this.deps.layout,
 				},
 				this.deps.getTool?.(content.name),
 				this.deps.ui,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `display.layout` setting (Appearance → Display) with an `opencode` option: a flat, opencode-style transcript where collapsed tool calls render as one status line (Ctrl+O expands), framed tool output renders without borders, and user messages get a left accent gutter. A new setup-wizard scene offers the choice on first run and on upgrade.
+
 ### Fixed
 
 - Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.

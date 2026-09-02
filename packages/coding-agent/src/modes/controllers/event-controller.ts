@@ -413,6 +413,7 @@ export class EventController {
 		if (!this.#lastReadGroup) {
 			const group = new ReadToolGroupComponent({
 				showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+				layout: () => this.ctx.layoutMode,
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
 			this.ctx.chatContainer.addChild(group);
@@ -1278,6 +1279,7 @@ export class EventController {
 							showImages: settings.get("terminal.showImages"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+							layout: () => this.ctx.layoutMode,
 						},
 						tool,
 						this.ctx.ui,
@@ -1538,6 +1540,7 @@ export class EventController {
 					snapshots: getFileSnapshotStore(this.ctx.viewSession),
 					clipboard: getEditClipboard(this.ctx.viewSession),
 					showImages: settings.get("terminal.showImages"),
+					layout: () => this.ctx.layoutMode,
 				},
 				tool,
 				this.ctx.ui,

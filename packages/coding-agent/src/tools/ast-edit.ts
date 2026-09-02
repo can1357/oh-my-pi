@@ -610,6 +610,7 @@ export const astEditToolRenderer = {
 		args?: AstEditRenderArgs,
 	): Component {
 		const details = result.details;
+		const flat = options.renderContext?.flat === true;
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text || "Unknown error";
@@ -620,6 +621,7 @@ export const astEditToolRenderer = {
 				state: "error",
 				borderColor: "error",
 				width,
+				flat,
 			}));
 		}
 
@@ -646,6 +648,7 @@ export const astEditToolRenderer = {
 				state: "warning",
 				borderColor: "borderMuted",
 				width,
+				flat,
 			}));
 		}
 
@@ -703,7 +706,7 @@ export const astEditToolRenderer = {
 		}
 		return framedBlock(uiTheme, width => {
 			const changeLines = buildChangeBody(changeGroups, Boolean(options.expanded), COLLAPSED_CHANGE_LIMIT, uiTheme);
-			const innerWidth = outputBlockContentWidth(width);
+			const innerWidth = outputBlockContentWidth(width, undefined, undefined, flat);
 			const bodyLines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, innerWidth, Ellipsis.Omit));
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {
@@ -712,6 +715,7 @@ export const astEditToolRenderer = {
 				state: options.isPartial ? "pending" : "success",
 				borderColor: "borderMuted",
 				width,
+				flat,
 			};
 		});
 	},

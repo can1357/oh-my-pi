@@ -60,13 +60,18 @@ export interface SearchRenderDetails {
 }
 
 /** Render a web search failure as a framed error panel, matching the success layout. */
-function renderSearchErrorPanel(message: string, providerLabel: string | undefined, theme: Theme): Component {
+function renderSearchErrorPanel(
+	message: string,
+	providerLabel: string | undefined,
+	theme: Theme,
+	flat: boolean,
+): Component {
 	const header = renderStatusLine({ icon: "error", title: "Web Search", description: providerLabel }, theme);
 	const body = theme.fg("error", `Error: ${replaceTabs(message)}`);
 	const outputBlock = new CachedOutputBlock();
 	return markFramedBlockComponent({
 		render(width: number): readonly string[] {
-			return outputBlock.render({ header, state: "error", sections: [{ lines: [body] }], width }, theme);
+			return outputBlock.render({ header, state: "error", sections: [{ lines: [body] }], width, flat }, theme);
 		},
 		invalidate() {
 			outputBlock.invalidate();
@@ -91,7 +96,7 @@ export function renderSearchResult(
 		const errorProvider = details.response?.provider;
 		const errorProviderLabel =
 			errorProvider && errorProvider !== "none" ? getSearchProviderLabel(errorProvider) : undefined;
-		return renderSearchErrorPanel(details.error, errorProviderLabel, theme);
+		return renderSearchErrorPanel(details.error, errorProviderLabel, theme, options.renderContext?.flat === true);
 	}
 
 	const rawText = result.content?.find(block => block.type === "text")?.text?.trim() ?? "";
@@ -159,7 +164,8 @@ export function renderSearchResult(
 			const { expanded } = options;
 
 			// Answer lines: full markdown when expanded, capped markdown preview when collapsed.
-			const answerWidth = outputBlockContentWidth(width);
+			const flat = options.renderContext?.flat === true;
+			const answerWidth = outputBlockContentWidth(width, undefined, undefined, flat);
 			const renderedAnswer = answerMarkdown ? answerMarkdown.render(answerWidth) : [];
 			let answerLines: readonly string[];
 			if (renderedAnswer.length === 0) {
@@ -234,6 +240,7 @@ export function renderSearchResult(
 						{ label: theme.fg("toolTitle", "Metadata"), lines: metaLines },
 					],
 					width,
+					flat,
 				},
 				theme,
 			);

@@ -277,7 +277,14 @@ export type SymbolKey =
 	| "tool.goal"
 	| "tool.irc"
 	| "tool.delete"
-	| "tool.move";
+	| "tool.move"
+	// Opencode-layout collapsed tool row glyphs (flat one-line transcript rows)
+	| "oc.read"
+	| "oc.search"
+	| "oc.shell"
+	| "oc.write"
+	| "oc.subagent"
+	| "oc.todo";
 
 export type SymbolMap = Record<SymbolKey, string>;
 /**
@@ -629,6 +636,13 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
 	"tool.move": "➜",
+	// Opencode-layout collapsed tool row glyphs
+	"oc.read": "→",
+	"oc.search": "∗",
+	"oc.shell": "$",
+	"oc.write": "←",
+	"oc.subagent": "◆",
+	"oc.todo": "▪",
 };
 
 const NERD_SYMBOLS: SymbolMap = {
@@ -1059,6 +1073,13 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
 	"tool.move": "\uf061",
+	// Opencode-layout collapsed tool row glyphs
+	"oc.read": "→",
+	"oc.search": "∗",
+	"oc.shell": "$",
+	"oc.write": "←",
+	"oc.subagent": "◆",
+	"oc.todo": "▪",
 };
 
 const ASCII_SYMBOLS: SymbolMap = {
@@ -1328,6 +1349,13 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.irc": "irc",
 	"tool.delete": "rm",
 	"tool.move": "mv",
+	// Opencode-layout collapsed tool row glyphs
+	"oc.read": "->",
+	"oc.search": "*",
+	"oc.shell": "$",
+	"oc.write": "<-",
+	"oc.subagent": "#",
+	"oc.todo": "-",
 };
 
 export const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {

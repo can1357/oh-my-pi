@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { renderMarkdownCell } from "@oh-my-pi/pi-coding-agent/tui/code-cell";
-import { renderOutputBlock } from "@oh-my-pi/pi-coding-agent/tui/output-block";
+import { outputBlockContentWidth, renderOutputBlock } from "@oh-my-pi/pi-coding-agent/tui/output-block";
 
 describe("renderOutputBlock", () => {
 	beforeAll(async () => {
@@ -53,5 +53,45 @@ describe("renderOutputBlock", () => {
 
 		expect(lines[1]).toBe(`│ ${"x".repeat(26)} │`);
 		expect(lines[2]).toStartWith("│ … 1 more line");
+	});
+
+	it("truncates flat section labels to their indented width", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const lines = renderOutputBlock(
+			{
+				width: 12,
+				flat: true,
+				sections: [{ label: "ask questions[].id", lines: [] }],
+			},
+			theme,
+		).map(line => stripVTControlCharacters(line));
+
+		expect(lines).toEqual(["  ask quest…"]);
+	});
+
+	it("removes tabs from flat header and section labels", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const lines = renderOutputBlock(
+			{
+				width: 80,
+				flat: true,
+				header: "Edit\tfile.ts",
+				headerMeta: "2\tchanges",
+				sections: [{ label: "Changed\tlines", lines: ["body"] }],
+			},
+			theme,
+		).map(line => stripVTControlCharacters(line));
+
+		expect(lines).toEqual(["Edit   file.ts · 2   changes", "  Changed   lines", "  body"]);
+	});
+
+	it("keeps the original positional contract of outputBlockContentWidth", () => {
+		// Pre-opencode signature: (width, contentPaddingLeft?, contentPaddingRight?).
+		// Precompiled JS extension callers rely on these positions.
+		expect(outputBlockContentWidth(40)).toBe(36);
+		expect(outputBlockContentWidth(40, 0)).toBe(38);
+		expect(outputBlockContentWidth(40, 2, 3)).toBe(33);
+		// The opencode `flat` flag is appended LAST so the positions above never shift.
+		expect(outputBlockContentWidth(40, undefined, undefined, true)).toBe(38);
 	});
 });

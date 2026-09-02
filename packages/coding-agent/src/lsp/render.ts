@@ -188,6 +188,7 @@ export function renderResult(
 					],
 					width,
 					applyBg: false,
+					flat: options.renderContext?.flat === true,
 				},
 				theme,
 			);

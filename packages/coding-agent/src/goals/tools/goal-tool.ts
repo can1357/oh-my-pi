@@ -178,7 +178,7 @@ export const goalToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: GoalToolDetails; isError?: boolean },
-		_options: RenderResultOptions,
+		options: RenderResultOptions,
 		uiTheme: Theme,
 		args?: GoalRenderArgs,
 	): Component {
@@ -195,6 +195,7 @@ export const goalToolRenderer = {
 				state: "error",
 				borderColor: "error",
 				width,
+				flat: options.renderContext?.flat === true,
 			}));
 		}
 
@@ -244,6 +245,7 @@ export const goalToolRenderer = {
 			state: "success",
 			borderColor: "borderMuted",
 			width,
+			flat: options.renderContext?.flat === true,
 		}));
 	},
 

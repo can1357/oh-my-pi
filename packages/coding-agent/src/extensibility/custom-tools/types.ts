@@ -170,8 +170,13 @@ export interface RenderResultOptions {
 	 * Streamed `xd://` previews stay queued until this is set.
 	 */
 	executionStarted?: boolean;
+	/**
+	 * Tool-specific render context built by ToolExecutionComponent. Always
+	 * carries `flat: boolean` (the owning mode's opencode-layout flag) for
+	 * framed renderers; tools like bash/eval add their own fields.
+	 */
+	renderContext?: Record<string, unknown>;
 }
-
 export type CustomToolResult<TDetails = any> = AgentToolResult<TDetails>;
 
 /**

@@ -878,6 +878,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 			state: "pending",
 			borderColor: "borderMuted",
 			width,
+			flat: options.renderContext?.flat === true,
 		};
 	});
 }
@@ -1468,13 +1469,26 @@ function selectCollapsedResults(ordered: readonly SingleResult[]): readonly Sing
 	const picked = new Set<SingleResult>();
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
-		if (result.aborted || result.exitCode !== 0 || result.error) picked.add(result);
+		if (isTaskResultError(result) || result.error) picked.add(result);
 	}
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
 		picked.add(result);
 	}
 	return ordered.filter(result => picked.has(result));
+}
+/**
+ * Whether a settled task result makes the task card an error. Kept shared with
+ * transcript collapse so aggregate task failures cannot be hidden as success.
+ */
+export function isTaskResultError(result: Pick<SingleResult, "aborted" | "exitCode">): boolean {
+	return result.aborted === true || result.exitCode !== 0;
+}
+
+export function hasTaskResultError(
+	details: { results?: readonly Pick<SingleResult, "aborted" | "exitCode">[] } | undefined,
+): boolean {
+	return details?.results?.some(isTaskResultError) ?? false;
 }
 
 /**
@@ -1515,6 +1529,7 @@ export function renderResult(
 			state: errored ? "error" : "success",
 			borderColor: errored ? "error" : "borderMuted",
 			width,
+			flat: options.renderContext?.flat === true,
 		}));
 	}
 
@@ -1531,9 +1546,10 @@ export function renderResult(
 	if (hasResults) {
 		for (const r of details.results) {
 			requestTotal += r.requests ?? 0;
-			if (r.aborted) abortedCount++;
-			else if (r.exitCode !== 0) failCount++;
-			else if (r.error) mergeFailedCount++;
+			if (isTaskResultError(r)) {
+				if (r.aborted) abortedCount++;
+				else failCount++;
+			} else if (r.error) mergeFailedCount++;
 			else successCount++;
 		}
 	}
@@ -1682,6 +1698,7 @@ export function renderResult(
 			state,
 			borderColor,
 			width,
+			flat: options.renderContext?.flat === true,
 		};
 	});
 }

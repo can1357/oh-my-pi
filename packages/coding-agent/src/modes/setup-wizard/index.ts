@@ -3,6 +3,7 @@ import { CURRENT_SETUP_VERSION } from "../setup-version";
 import type { InteractiveModeContext } from "../types";
 import { composerSetupScene } from "./scenes/composer";
 import { glyphSetupScene } from "./scenes/glyph";
+import { layoutSetupScene } from "./scenes/layout";
 import { modelSetupScene } from "./scenes/model";
 import { providersSetupScene } from "./scenes/providers";
 import { themeSetupScene } from "./scenes/theme";
@@ -20,6 +21,7 @@ export const ALL_SCENES = [
 	glyphSetupScene,
 	composerSetupScene,
 	themeSetupScene,
+	layoutSetupScene,
 ] as const satisfies readonly SetupScene[];
 
 export interface SetupSceneSelectionOptions {
