@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser-relay reconnects failing to re-attach tabs that still had live session holders after the extension's orphan sweep detached them, so an extension/service-worker restart no longer strands active relay-controlled tabs in a permanently detached state until the next manual claim ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed a recoverable tab that fails to re-attach after an outage (for example, DevTools claimed it) leaving a discovering Puppeteer client holding an undrivable recreated target: the relay bridge now retracts the re-announced target when the guard-authorized reattach fails, matching the `Target.setAutoAttach` path ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed browser-relay recovery skipping the debugger re-attach for a still-claimed tab whose session holder attached through `Target.attachToTarget` without enabling `Target.setAutoAttach`: the reconnect path now forces the attachment for recoverable tabs regardless of auto-attach clients, so the tab is not left announced-but-detached with the holder's next command failing ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed that same recovery path tearing down a bare `Target.attachToTarget` holder's page session while re-attaching, which made the holder's next command fail `Unknown session id` and, with no session left to sweep, left the debugger attachment orphaned past client disconnect: the relay bridge now preserves those tabId-routed page sessions across the Chrome root swap, so recovered tabs stay drivable and are still detached (infobar cleared) when the last holder disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed browser-relay recovery minting fresh auto-attach sessions for a tab the user detached (dismissed the debugger infobar) while the final subscription-replay RPC was in flight: the replay continuation now revalidates that the tab is still attached, unbanned, and on the same extension socket before emitting replacement sessions, so downstream clients no longer receive sessions whose every command fails ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed a second, concurrent subscription replay being launched when another tab's delayed guard detach triggered a same-socket hello while a replay was still in flight, which could double-issue journaled subscriptions and let a stale task retract sessions after commands resumed: same-socket hellos now preserve the active replay instead of discarding its task pointer ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed
@@ -11,16 +20,6 @@
 - Rewinding to a user message (double-Escape, `/branch`) now branches within the current session — the old path stays reachable in `/tree` — instead of forking a child session; `/rewind` is an alias for `/branch` ([#10565](https://github.com/can1357/oh-my-pi/pull/10565) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
-
-- Fixed an issue where custom model overrides were lost during configuration updates
-- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
-- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
-- Fixed browser-relay reconnects failing to re-attach tabs that still had live session holders after the extension's orphan sweep detached them, so an extension/service-worker restart no longer strands active relay-controlled tabs in a permanently detached state until the next manual claim ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed a recoverable tab that fails to re-attach after an outage (for example, DevTools claimed it) leaving a discovering Puppeteer client holding an undrivable recreated target: the relay bridge now retracts the re-announced target when the guard-authorized reattach fails, matching the `Target.setAutoAttach` path ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed browser-relay recovery skipping the debugger re-attach for a still-claimed tab whose session holder attached through `Target.attachToTarget` without enabling `Target.setAutoAttach`: the reconnect path now forces the attachment for recoverable tabs regardless of auto-attach clients, so the tab is not left announced-but-detached with the holder's next command failing ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed that same recovery path tearing down a bare `Target.attachToTarget` holder's page session while re-attaching, which made the holder's next command fail `Unknown session id` and, with no session left to sweep, left the debugger attachment orphaned past client disconnect: the relay bridge now preserves those tabId-routed page sessions across the Chrome root swap, so recovered tabs stay drivable and are still detached (infobar cleared) when the last holder disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed browser-relay recovery minting fresh auto-attach sessions for a tab the user detached (dismissed the debugger infobar) while the final subscription-replay RPC was in flight: the replay continuation now revalidates that the tab is still attached, unbanned, and on the same extension socket before emitting replacement sessions, so downstream clients no longer receive sessions whose every command fails ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
-- Fixed a second, concurrent subscription replay being launched when another tab's delayed guard detach triggered a same-socket hello while a replay was still in flight, which could double-issue journaled subscriptions and let a stale task retract sessions after commands resumed: same-socket hellos now preserve the active replay instead of discarding its task pointer ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Active sessions now keep memory proportional to truncated raw SSE and tool outputs instead of retaining complete oversized backing strings ([#10547](https://github.com/can1357/oh-my-pi/issues/10547)).
 - Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.
 - TypeScript code intelligence now works on TypeScript 7 projects: the built-in `typescript-native` server runs `tsc --lsp --stdio` when the resolved TypeScript install no longer ships `tsserver.js`, replacing `typescript-language-server` for that project.
