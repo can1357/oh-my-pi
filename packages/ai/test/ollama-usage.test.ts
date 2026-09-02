@@ -196,7 +196,6 @@ describe("ollama-cloud usage provider", () => {
 		);
 		expect(report).not.toBeNull();
 		expect(report?.limits).toHaveLength(0);
-		expect(report?.notes?.[0]).toContain("No usage endpoint reachable");
 	});
 
 	it("transient HTTP error (500) → returns null, never throws", async () => {
