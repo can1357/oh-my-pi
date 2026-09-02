@@ -46,6 +46,7 @@ import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
+	RpcClearQueueResult,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -58,6 +59,7 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcReadyFrame,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -797,15 +799,17 @@ export async function runRpcMode(
 			// stdout gone (host exited) — nothing left to deliver; keep the queue alive.
 			.catch(() => {});
 	};
-	writeFrames(
-		frameEncoder.encodeFrames({
-			type: "ready",
-			protocolVersion: 1,
-			supportedProtocolVersions: [1, 2],
-			maxFrameBytes: MAX_RPC_FRAME_BYTES,
-			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
-		}),
-	);
+	const readyFrame: RpcReadyFrame = {
+		type: "ready",
+		protocolVersion: 1,
+		supportedProtocolVersions: [1, 2],
+		maxFrameBytes: MAX_RPC_FRAME_BYTES,
+		maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
+		// Capability values are exact integers, not booleans: bumping one is how a
+		// semantic change to an already-shipped capability is announced.
+		features: { activeTurnSteering: 1 },
+	};
+	writeFrames(frameEncoder.encodeFrames(readyFrame));
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeFrames(frameEncoder.encodeFrames(obj));
 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
@@ -1154,14 +1158,35 @@ export async function runRpcMode(
 				return success(id, "prompt");
 			}
 
+			// `activeTurnOnly` means "interrupt the run happening right now". Without
+			// it, a steer that arrives just after the turn ended lands on the idle
+			// queue and auto-drains into a fresh turn — a surprise the host cannot
+			// undo. With it the session rejects, leaving both queues untouched, and
+			// the host decides whether to send a normal prompt instead.
 			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
+				const accepted = await session.steer(command.message, command.images, {
+					activeTurnOnly: command.activeTurnOnly === true,
+				});
+				return success(id, "steer", { accepted });
 			}
 
 			case "follow_up": {
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
+			}
+
+			// `forInterrupt` is the Esc-then-abort shape: it also drops hidden non-user
+			// steers so `abort`'s stranded-queue drain cannot restart the very run the
+			// host is interrupting. Clearing for any other reason (editor restore)
+			// leaves it off and keeps those messages queued for a continuing stream.
+			// clearQueue() replaces both queues synchronously, so a host that awaits
+			// this response before sending `abort` cannot race the drain.
+			case "clear_queue": {
+				const cleared = session.clearQueue({ forInterrupt: command.forInterrupt === true });
+				return success(id, "clear_queue", {
+					steering: cleared.steering.length,
+					followUp: cleared.followUp.length,
+				} satisfies RpcClearQueueResult);
 			}
 
 			case "abort": {
