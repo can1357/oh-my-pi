@@ -79,9 +79,10 @@ export interface GrokbotOptions extends StreamOptions {
 	/** Sand `context` tier (`300k` / `1m`); when omitted, follows sandMaxMode. */
 	context?: string;
 	/**
-	 * Explicit Anthropic sand ids reject field-2 agent tools (HTTP 400). `error` throws;
+	 * Anthropic + tools sand wire. Default `auto` resolves to `keep-model`
+	 * (product PascalCase+jsonSchema tools, original requestedModel).
+	 * `automation` still rewrites to sand-automation. `error` throws;
 	 * `sand-default-fallback` rewrites to bare sand-default (tools work; model not guaranteed Opus).
-	 * Default/error unless `GROKBOT_ANTHROPIC_TOOLS_WIRE=sand-default-fallback`.
 	 */
 	anthropicToolsWire?: AnthropicSandToolsWire;
 }
@@ -665,7 +666,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			);
 			const messages = toInferenceMessages(context);
 			const tools = toInferenceTools(context.tools);
-			let grammarTools = buildGrammarToolIndex(context.tools);
+			const grammarTools = buildGrammarToolIndex(context.tools);
 			const modelConfig = buildModelConfig(model, options);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			const reqModel = resolveGrokbotRequestedModel(model.id, {
@@ -706,7 +707,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
 				}
 				augmentToolIndexForProductWire(grammarTools, context.tools);
-				if (anthropicWire.wireMode === "automation" || anthropicWire.wireMode === "parent-chat") {
+				if (
+					anthropicWire.wireMode === "automation" ||
+					anthropicWire.wireMode === "parent-chat" ||
+					anthropicWire.wireMode === "keep-model"
+				) {
 					// History stores omp names (bash/read/write); product tools are
 					// Shell/Read/Write — rewrite replayed call/result names to match.
 					body.messages = rewriteInferenceMessagesForProductWire(

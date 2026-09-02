@@ -20,6 +20,8 @@ describe("anthropic sand tool wire", () => {
 	test("detects anthropic sand model ids", () => {
 		expect(isAnthropicSandModelId("claude-opus-5")).toBe(true);
 		expect(isAnthropicSandModelId("claude_sonnet_4")).toBe(true);
+		expect(isAnthropicSandModelId("claude-fable-5")).toBe(true);
+		expect(isAnthropicSandModelId("claude-haiku-4-5")).toBe(true);
 		expect(isAnthropicSandModelId("grok-4.6")).toBe(false);
 		expect(isAnthropicSandModelId("sand-automation")).toBe(false);
 	});
@@ -41,10 +43,7 @@ describe("anthropic sand tool wire", () => {
 			sandParameterIds: ["thinking", "context", "effort", "fast"],
 		});
 		expect(() =>
-			applyAnthropicSandToolWire(
-				{ requestedModel, tools: [{ name: "read" }], modelId: "claude-opus-5" },
-				"error",
-			),
+			applyAnthropicSandToolWire({ requestedModel, tools: [{ name: "read" }], modelId: "claude-opus-5" }, "error"),
 		).toThrow(/HTTP 400/);
 	});
 
@@ -54,8 +53,16 @@ describe("anthropic sand tool wire", () => {
 			sandParameterIds: ["thinking", "context", "effort", "fast"],
 		});
 		const tools = [
-			{ name: "bash", description: "run shell", parameters: { type: "object", properties: { command: { type: "string" } } } },
-			{ name: "read", description: "read file", parameters: { type: "object", properties: { path: { type: "string" } } } },
+			{
+				name: "bash",
+				description: "run shell",
+				parameters: { type: "object", properties: { command: { type: "string" } } },
+			},
+			{
+				name: "read",
+				description: "read file",
+				parameters: { type: "object", properties: { path: { type: "string" } } },
+			},
 		];
 		const wired = applyAnthropicSandToolWire(
 			{ requestedModel, tools, modelId: "claude-opus-5", ompTools: tools },
@@ -76,19 +83,90 @@ describe("anthropic sand tool wire", () => {
 		expect(shell?.parameters).toHaveProperty("jsonSchema");
 	});
 
-	test("auto resolves anthropic + tools to automation", () => {
+	test("auto resolves anthropic + tools to keep-model", () => {
 		expect(
 			resolveAnthropicSandToolsWire(undefined, undefined, {
 				modelId: "claude-opus-5",
 				toolCount: 2,
 			}),
-		).toBe("automation");
+		).toBe("keep-model");
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "claude-fable-5",
+				toolCount: 2,
+			}),
+		).toBe("keep-model");
 		expect(
 			resolveAnthropicSandToolsWire(undefined, undefined, {
 				modelId: "grok-4.6",
 				toolCount: 2,
 			}),
 		).toBe("error");
+	});
+
+	test("keep-model keeps anthropic requestedModel and maps product tools", () => {
+		const requestedModel = resolveGrokbotRequestedModel("claude-fable-5", {
+			effort: "low",
+			sandParameterIds: ["thinking", "context", "effort", "fast"],
+		});
+		const tools = [
+			{
+				name: "bash",
+				description: "run shell",
+				parameters: { type: "object", properties: { command: { type: "string" } } },
+			},
+			{
+				name: "read",
+				description: "read file",
+				parameters: { type: "object", properties: { path: { type: "string" } } },
+			},
+			{
+				name: "write",
+				description: "write file",
+				parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } },
+			},
+			{
+				name: "edit",
+				description: "patch file",
+				parameters: { type: "object", properties: { path: { type: "string" } } },
+			},
+			{
+				name: "grep",
+				description: "search files",
+				parameters: { type: "object", properties: { pattern: { type: "string" } } },
+			},
+			{
+				name: "glob",
+				description: "find files",
+				parameters: { type: "object", properties: { glob: { type: "string" } } },
+			},
+		];
+		const wired = applyAnthropicSandToolWire(
+			{ requestedModel, tools, modelId: "claude-fable-5", ompTools: tools },
+			"keep-model",
+		);
+		expect(wired.wireMode).toBe("keep-model");
+		expect(wired.requestedModel.modelId).toBe("claude-fable-5");
+		expect(wired.requestedModel).toEqual(requestedModel);
+		expect(wired.requestedModel.parameters).toEqual(requestedModel.parameters);
+		expect(wired.originalModelId).toBe("claude-fable-5");
+		expect(wired.subagentType).toBeUndefined();
+		expect(wired.automationId).toBeUndefined();
+		expect(wired.acceptedUnadvertisedToolNames?.length).toBeGreaterThan(20);
+		const names = (wired.tools as Array<{ name: string }>).map(t => t.name);
+		expect(names).toEqual(["Shell", "Read", "Write", "Grep", "Glob"]);
+		for (const tool of wired.tools as Array<{ parameters: Record<string, unknown> }>) {
+			expect(tool.parameters).toHaveProperty("jsonSchema");
+		}
+	});
+
+	test("keep-model on non-anthropic is a no-op", () => {
+		const requestedModel = resolveGrokbotRequestedModel("grok-4.6", {
+			sandParameterIds: ["effort", "fast"],
+		});
+		const tools = [{ name: "read" }];
+		const input = { requestedModel, tools, modelId: "grok-4.6" };
+		expect(applyAnthropicSandToolWire(input, "keep-model")).toEqual(input);
 	});
 
 	test("sand-default-fallback rewrites requested model and keeps tools", () => {
@@ -113,6 +191,9 @@ describe("anthropic sand tool wire", () => {
 		expect(resolveAnthropicSandToolsWire(undefined, "sand-default-fallback")).toBe("sand-default-fallback");
 		expect(resolveAnthropicSandToolsWire(undefined, undefined, { modelId: "grok-4.6", toolCount: 0 })).toBe("error");
 		expect(resolveAnthropicSandToolsWire("automation", undefined)).toBe("automation");
+		expect(resolveAnthropicSandToolsWire("keep-model", undefined)).toBe("keep-model");
+		expect(resolveAnthropicSandToolsWire("keep-id", undefined)).toBe("keep-model");
+		expect(resolveAnthropicSandToolsWire("keep", undefined)).toBe("keep-model");
 	});
 });
 

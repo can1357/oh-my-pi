@@ -1,9 +1,10 @@
 /**
  * Sand InferenceService wire policy for explicit Anthropic model ids + agent tools.
  *
- * Live probes (2026-08-31): explicit `claude-*` + omp field-2 tools → HTTP 400.
- * Product routes coding tasks through sand-automation + generalPurpose with
- * PascalCase field-2 tools and jsonSchema envelopes (see product-wire.ts).
+ * Raw omp field-2 tools on explicit Anthropic ids fail ERROR_PROVIDER_ERROR.
+ * Product PascalCase field-2 tools with jsonSchema envelopes on the original
+ * Anthropic requestedModel work (keep-model). automation remains an opt-in
+ * grok worker rewrite to sand-automation + generalPurpose.
  *
  * Anthropic identity comes from catalog taxonomy (`classifyModel`), not id spelling.
  */
@@ -21,6 +22,7 @@ export type AnthropicSandToolsWire =
 	| "error"
 	| "sand-default-fallback"
 	| "automation"
+	| "keep-model"
 	| "parent-chat"
 	| "auto";
 
@@ -45,6 +47,7 @@ export function resolveAnthropicSandToolsWire(
 		return "sand-default-fallback";
 	}
 	if (raw === "automation" || raw === "product") return "automation";
+	if (raw === "keep-model" || raw === "keep-id" || raw === "keep") return "keep-model";
 	if (raw === "parent-chat" || raw === "parent") return "parent-chat";
 	if (raw === "error") return "error";
 	if (raw !== "auto") return "error";
@@ -52,7 +55,7 @@ export function resolveAnthropicSandToolsWire(
 	const toolCount = context?.toolCount ?? 0;
 	const modelId = context?.modelId?.trim() ?? "";
 	if (toolCount === 0) return "error";
-	if (isAnthropicSandModelId(modelId)) return "automation";
+	if (isAnthropicSandModelId(modelId)) return "keep-model";
 	if (modelId === "sand-default") return "parent-chat";
 	if (modelId === "sand-automation") return "automation";
 	return "error";
@@ -76,7 +79,7 @@ export type AnthropicSandToolWireResult = AnthropicSandToolWireInput & {
 };
 
 function productProfileForWire(wire: AnthropicSandToolsWire): ProductWireProfile | undefined {
-	if (wire === "automation") return "automation";
+	if (wire === "automation" || wire === "keep-model") return "automation";
 	if (wire === "parent-chat") return "parent-chat";
 	return undefined;
 }
@@ -100,8 +103,8 @@ function applyProductWire(
 		tools: productTools,
 		wireMode,
 		originalModelId: options.originalModelId,
-		subagentType: options.subagentType,
-		automationId: options.automationId,
+		...(options.subagentType !== undefined ? { subagentType: options.subagentType } : {}),
+		...(options.automationId !== undefined ? { automationId: options.automationId } : {}),
 		acceptedUnadvertisedToolNames: [...field9AllowlistForProfile(profile)],
 	};
 }
@@ -114,20 +117,20 @@ export function applyAnthropicSandToolWire(
 	const modelId = input.modelId?.trim() || input.requestedModel.modelId;
 	if (toolCount === 0) return input;
 
+	if (wire === "keep-model") {
+		if (!isAnthropicSandModelId(modelId)) return input;
+		return applyProductWire(input, "automation", "keep-model", {
+			requestedModel: input.requestedModel,
+			originalModelId: modelId,
+		});
+	}
+
 	const profile = productProfileForWire(wire);
 	if (profile) {
-		if (
-			profile === "automation" &&
-			!isAnthropicSandModelId(modelId) &&
-			modelId !== "sand-automation"
-		) {
+		if (profile === "automation" && !isAnthropicSandModelId(modelId) && modelId !== "sand-automation") {
 			return input;
 		}
-		if (
-			profile === "parent-chat" &&
-			!isAnthropicSandModelId(modelId) &&
-			modelId !== "sand-default"
-		) {
+		if (profile === "parent-chat" && !isAnthropicSandModelId(modelId) && modelId !== "sand-default") {
 			return input;
 		}
 		const automationModel = resolveGrokbotRequestedModel("sand-automation", {
@@ -140,8 +143,7 @@ export function applyAnthropicSandToolWire(
 		});
 		if (profile === "automation") {
 			return applyProductWire(input, profile, wire, {
-				requestedModel:
-					modelId === "sand-automation" ? input.requestedModel : automationModel,
+				requestedModel: modelId === "sand-automation" ? input.requestedModel : automationModel,
 				subagentType: "generalPurpose",
 				automationId: crypto.randomUUID(),
 				originalModelId: isAnthropicSandModelId(modelId) ? modelId : undefined,
@@ -169,9 +171,9 @@ export function applyAnthropicSandToolWire(
 
 	throw new Error(
 		`Grok Bot sand rejects field-2 agent tools on explicit Anthropic model "${modelId}" (HTTP 400). ` +
-			`Options: set GROKBOT_ANTHROPIC_TOOLS_WIRE=automation (product sand-automation wire); ` +
+			`Options: set GROKBOT_ANTHROPIC_TOOLS_WIRE=keep-model (product tools on original Anthropic requestedModel); ` +
+			`set GROKBOT_ANTHROPIC_TOOLS_WIRE=automation (product sand-automation wire); ` +
 			`use grokbot/sand-default or grokbot/grok-4.6 for direct InferenceService tools; ` +
-			`use cursor/claude-opus-5:max for Opus AgentService; ` +
 			`or set GROKBOT_ANTHROPIC_TOOLS_WIRE=sand-default-fallback to route via sand-default (model not guaranteed Opus).`,
 	);
 }
