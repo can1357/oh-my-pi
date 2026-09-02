@@ -244,6 +244,13 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					}
 				} else if (block.type === "toolCall") {
 					emittedToolCallNames.set(block.id, block.name);
+					// Gemini 3 requires a thought signature on function calls it makes. For
+					// calls we cannot sign (cross-model replay, secret-redacted args, or the
+					// secondary calls of a parallel turn), the public Gemini API accepts the
+					// `skip_thought_signature_validator` sentinel as a bypass. Cloud Code
+					// Assist / Antigravity and Vertex AI reject that sentinel with 400
+					// INVALID_ARGUMENT — permanently wedging any session whose history
+					// contains one — so for those transports we omit the field instead. (#9638)
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const effectiveSignature =
 						thoughtSignature || (model.compat.requiresSkipThoughtSignature ? SKIP_THOUGHT_SIGNATURE : undefined);

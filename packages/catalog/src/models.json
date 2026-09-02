@@ -30887,6 +30887,99 @@
 				"supportsDeveloperRole": false
 			}
 		},
+		"qwen3.8-flash": {
+			"id": "qwen3.8-flash",
+			"name": "Qwen3.8 Flash",
+			"api": "openai-completions",
+			"provider": "alibaba-token-plan",
+			"baseUrl": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "qwen",
+				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"identity": {
+				"class": "qwen",
+				"revision": "3.8.0"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "qwen3",
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"supportsDeveloperRole": false
+			}
+		},
 		"qwen3.8-max": {
 			"id": "qwen3.8-max",
 			"name": "Qwen3.8 Max",
@@ -55772,6 +55865,7 @@
 				"effort": "high",
 				"logicalId": "claude-fable-5"
 			},
+			"requiresCursorToolSchemaProjection": true,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
@@ -55820,6 +55914,7 @@
 				"effort": "low",
 				"logicalId": "claude-fable-5"
 			},
+			"requiresCursorToolSchemaProjection": true,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
@@ -55868,6 +55963,7 @@
 				"effort": "max",
 				"logicalId": "claude-fable-5"
 			},
+			"requiresCursorToolSchemaProjection": true,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
@@ -55916,6 +56012,7 @@
 				"effort": "medium",
 				"logicalId": "claude-fable-5"
 			},
+			"requiresCursorToolSchemaProjection": true,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
@@ -55964,6 +56061,7 @@
 				"effort": "xhigh",
 				"logicalId": "claude-fable-5"
 			},
+			"requiresCursorToolSchemaProjection": true,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
@@ -79488,7 +79586,6 @@
 			"thinking": {
 				"mode": "google-level",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
@@ -80538,7 +80635,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80593,7 +80690,7 @@
 			},
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80631,7 +80728,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80681,7 +80778,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80739,7 +80836,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80803,7 +80900,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80860,7 +80957,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -80917,7 +81014,7 @@
 			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -81230,7 +81327,7 @@
 			},
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -81278,7 +81375,7 @@
 			},
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -81327,7 +81424,7 @@
 			},
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -81374,7 +81471,7 @@
 			},
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82281,7 +82378,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82330,7 +82427,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82377,7 +82474,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82424,7 +82521,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82473,7 +82570,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82522,7 +82619,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82571,7 +82668,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -82604,7 +82701,6 @@
 			"thinking": {
 				"mode": "google-level",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
@@ -82620,7 +82716,7 @@
 			"supportsComputerUse": false,
 			"compat": {
 				"supportsFunctionPartId": false,
-				"requiresSkipThoughtSignature": true,
+				"requiresSkipThoughtSignature": false,
 				"dropUnsignedThinking": false,
 				"ccaLegacyParametersSchema": false,
 				"multimodalFunctionResponse": true,
@@ -263246,7 +263342,6 @@
 			"thinking": {
 				"mode": "google-level",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
@@ -362094,9 +362189,9 @@
 		"glm-5.3-flash": {
 			"id": "glm-5.3-flash",
 			"name": "GLM-5.3-Flash",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "zai",
-			"baseUrl": "https://api.z.ai/api/anthropic",
+			"baseUrl": "https://api.z.ai/api/coding/paas/v4",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -362129,28 +362224,59 @@
 			"tokenizer": "glm5",
 			"supportsComputerUse": false,
 			"compat": {
-				"officialEndpoint": false,
-				"signingEndpoint": false,
-				"supportsContextManagement": true,
-				"supportsOutputEffort": true,
-				"disableStrictTools": false,
-				"disableAdaptiveThinking": false,
-				"allowAnthropicHeaderOverrides": false,
-				"supportsEagerToolInputStreaming": false,
-				"supportsLongCacheRetention": false,
-				"supportsMidConversationSystem": false,
-				"supportsTurnScopedSystem": false,
-				"supportsMidConversationToolChanges": false,
-				"supportsPerMessageEffort": false,
-				"supportsThinkingBindingControls": false,
-				"supportsForcedToolChoice": true,
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
 				"supportsSamplingParams": true,
-				"requiresToolResultId": true,
-				"requiresThinkingEnabled": false,
-				"replayUnsignedThinking": true,
-				"escapeBuiltinToolNames": false,
-				"injectClaudeCodeInstruction": true,
-				"stripImageInput": false
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "zai",
+				"reasoningDisableMode": "zai-thinking-disabled",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"streamIdleTimeoutMs": 600000,
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": true,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
 			}
 		},
 		"glm-5v-turbo": {

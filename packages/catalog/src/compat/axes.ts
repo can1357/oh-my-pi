@@ -272,6 +272,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"credential-scoped-catalog": { key: "credentialScopedCatalog", set: "catalog", shape: "scalar" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
+	"requires-cursor-tool-schema-projection": {
+		key: "requiresCursorToolSchemaProjection",
+		set: "catalog",
+		shape: "scalar",
+	},
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	/**
 	 * Offline Sand wire-parameter allowlist (e.g. `effort`/`fast`). Applied only

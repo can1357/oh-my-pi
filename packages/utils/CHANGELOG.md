@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed retry-hint extraction for body-level millisecond hints and absolute quota-reset timestamps ([#10325](https://github.com/can1357/oh-my-pi/pull/10325) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
+
 ## [18.1.0] - 2026-09-01
 
 ### Added

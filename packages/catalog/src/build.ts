@@ -33,9 +33,10 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
- * `sand-parameter-ids`) is rule-owned; `context-promotion-target` and
- * `sand-parameter-ids` fill only when the spec left them unset (live
- * AvailableModels wins for sand params).
+ * `requires-cursor-tool-schema-projection`, `sand-parameter-ids`) is
+ * rule-owned; `context-promotion-target` and `sand-parameter-ids` fill
+ * only when the spec left them unset (live AvailableModels wins for
+ * sand params).
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
@@ -52,6 +53,12 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
+	}
+	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
+	if (requiresCursorToolSchemaProjection === true) {
+		model.requiresCursorToolSchemaProjection = true;
+	} else {
+		delete model.requiresCursorToolSchemaProjection;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {

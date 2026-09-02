@@ -5,6 +5,12 @@
 ### Added
 
 - Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed the TUI tearing in Herdr panes so the live viewport updates as one frame instead of leaving the top frozen while only the bottom refreshed. Pane identity vars (`HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`) also count as inside Herdr, not only `HERDR_ENV=1`. A DECRPM “unrecognized” report keeps synchronized output on; a “permanently reset” report, or a custom terminal that omits the DECRPM status, still turns it off.
+
 ## [18.1.0] - 2026-09-01
 
 ### Fixed
