@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Large bracketed pastes followed by Enter now submit their attachment immediately instead of leaving the composer idle ([#10576](https://github.com/can1357/oh-my-pi/issues/10576)).
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

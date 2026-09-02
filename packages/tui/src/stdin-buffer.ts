@@ -17,7 +17,7 @@
  * MIT License - Copyright (c) 2025 opentui
  */
 import { EventEmitter } from "events";
-import { isKittyProtocolActive } from "./keys";
+import { isKittyProtocolActive, parseKey } from "./keys";
 
 const ESC = "\x1b";
 const BRACKETED_PASTE_START = "\x1b[200~";
@@ -350,6 +350,33 @@ function extractCompleteSequences(
 	return { sequences, remainder: "", resumeSearchFrom: 0 };
 }
 
+/**
+ * Split `remaining` (bytes trailing a completed bracketed paste in the same read)
+ * around its first recognized keypress.
+ *
+ * Unknown sequences before the key stay on the normal data-event route. This
+ * includes terminal responses — private and public CSI reports, OSC/DCS/APC
+ * strings, and mouse reports — so ProcessTerminal can update capability,
+ * appearance, and geometry state before the paste reaches the focused component.
+ * Partial escapes likewise stay buffered for cross-read assembly.
+ */
+function firstKeypressTail(remaining: string): { before: string; key: string; rest: string } | undefined {
+	const parsed = extractCompleteSequences(remaining, 0);
+	if (parsed.discardFrom !== undefined) return undefined;
+	let offset = 0;
+	for (const sequence of parsed.sequences) {
+		if (parseKey(sequence) !== undefined) {
+			return {
+				before: remaining.slice(0, offset),
+				key: sequence,
+				rest: remaining.slice(offset + sequence.length),
+			};
+		}
+		offset += sequence.length;
+	}
+	return undefined;
+}
+
 export type StdinBufferOptions = {
 	/**
 	 * Maximum time to wait for sequence completion (default: 75ms).
@@ -377,7 +404,7 @@ export type StdinBufferOptions = {
 
 export type StdinBufferEventMap = {
 	data: [string];
-	paste: [string];
+	paste: [content: string, trailingInput?: string];
 };
 
 /**
@@ -577,10 +604,19 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#pasteBytes = 0;
 		this.#pendingKittyPrintableCodepoint = undefined;
 
-		this.emit("paste", pastedContent);
-
-		if (remaining.length > 0) {
-			this.process(remaining);
+		// Keep the first same-read trailing keypress attached to the paste so an overlay
+		// opened by the paste cannot steal a submit key that shared the burst. Terminal
+		// reports before that key are routed first so capability/appearance/geometry
+		// handlers still see them; StdinBuffer leaves the submit decision to the focused
+		// component because kitty and remapped bindings do not share one wire encoding.
+		const attach = remaining.length > 0 ? firstKeypressTail(remaining) : undefined;
+		if (attach) {
+			if (attach.before.length > 0) this.process(attach.before);
+			this.emit("paste", pastedContent, attach.key);
+			if (attach.rest.length > 0) this.process(attach.rest);
+		} else {
+			this.emit("paste", pastedContent);
+			if (remaining.length > 0) this.process(remaining);
 		}
 	}
 

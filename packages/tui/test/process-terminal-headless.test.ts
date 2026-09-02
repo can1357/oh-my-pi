@@ -94,6 +94,63 @@ describe("ProcessTerminal headless suppression", () => {
 		}
 	});
 
+	it("dispatches a bracketed paste and same-read Enter to one focused component", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		const input: string[] = [];
+		const burst = "\x1b[200~line 1\nline 2\x1b[201~\r";
+		try {
+			terminal.start(
+				data => input.push(data),
+				() => {},
+			);
+			process.stdin.emit("data", Buffer.from(burst));
+
+			expect(input).toEqual([burst]);
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
+	it("routes a CSI terminal report after a paste through ProcessTerminal instead of the focused component", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		const input: string[] = [];
+		const paste = "\x1b[200~payload\x1b[201~";
+		try {
+			terminal.start(
+				data => input.push(data),
+				() => {},
+			);
+			process.stdin.emit("data", Buffer.from(`${paste}\x1b[?1;2c`));
+
+			expect(input).toEqual([paste]);
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
+	it("handles leading CSI reports before delivering a same-read paste and Enter together", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		const input: string[] = [];
+		const paste = "\x1b[200~payload\x1b[201~";
+		try {
+			terminal.start(
+				data => input.push(data),
+				() => {},
+			);
+			process.stdin.emit("data", Buffer.from(`${paste}\x1b[?1;2c\x1b[?997;1n\r`));
+
+			expect(input).toEqual([`${paste}\r`]);
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
 	// #6374: arrows stopped working inside omp and stayed broken in the shell
 	// after exit — a missing cursor-key/keypad reset. omp owns the TTY and emits
 	// a full private-mode reset menu, but never restored normal cursor-key

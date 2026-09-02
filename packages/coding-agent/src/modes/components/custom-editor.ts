@@ -4,6 +4,7 @@ import {
 	addKeyAliases,
 	canonicalKeyId,
 	Editor,
+	getKeybindings,
 	type EditorTextDecorationContext,
 	type EditorTheme,
 	type KeyId,
@@ -966,7 +967,12 @@ export class CustomEditor extends Editor {
 				);
 				return;
 			}
-			this.pasteText(content);
+			const remainingKey = parseKey(remaining);
+			const submitAfterPaste =
+				remainingKey !== undefined &&
+				getKeybindings().matchesCanonical(canonicalKeyId(remainingKey), "tui.input.submit");
+			if (submitAfterPaste) this.pasteText(content, { submitAfterPaste: true });
+			else this.pasteText(content);
 			// No async paste was started; drain the queued trailing bytes ourselves.
 			const drained = this.#pendingInput.splice(0);
 			for (const chunk of drained) this.handleInput(chunk);

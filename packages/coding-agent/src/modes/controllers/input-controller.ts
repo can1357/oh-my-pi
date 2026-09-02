@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
+import { type AutocompleteProvider, matchesKey, type PasteOptions, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
@@ -516,7 +516,7 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
 		);
 		this.ctx.editor.onPasteTextRaw = () => void this.handleClipboardTextRawPaste();
-		this.ctx.editor.onLargePaste = (text, lineCount) => this.handleLargePaste(text, lineCount);
+		this.ctx.editor.onLargePaste = (text, lineCount, options) => this.handleLargePaste(text, lineCount, options);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.copyPrompt",
 			this.ctx.keybindings.getKeys("app.clipboard.copyPrompt"),
@@ -1832,8 +1832,12 @@ export class InputController {
 	 * configured `paste.largeMenuThreshold` line count; otherwise `false` for default collapse-to-marker
 	 * behavior. The async menu is fired and forgotten — the editor only needs the synchronous verdict.
 	 */
-	handleLargePaste(text: string, lineCount: number): boolean {
+	handleLargePaste(text: string, lineCount: number, options: PasteOptions = {}): boolean {
 		const threshold = this.ctx.settings.get("paste.largeMenuThreshold");
+		if (options.submitAfterPaste) {
+			this.ctx.editor.insertTextAttachment(text);
+			return true;
+		}
 		if (!(threshold > 0) || lineCount < threshold) {
 			// Below the menu threshold: stage the paste as a text-attachment chip
 			// (compact token in the buffer, band card above the editor).

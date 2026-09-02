@@ -467,6 +467,11 @@ export interface EditorTextAssistProvider {
 type HistoryCursorAnchor = "start" | "end";
 type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
 
+/** Context known by a paste transport before the editor inserts its payload. */
+export interface PasteOptions {
+	/** The same terminal input burst requests submission immediately after the paste. */
+	submitAfterPaste?: boolean;
+}
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
 		lines: [""],
@@ -577,12 +582,10 @@ export class Editor implements Component, Focusable {
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
 	/** Called for a "marker-sized" paste — the point where the editor would otherwise collapse it
-	 *  into a `[Paste #N]` token (> 10 lines or > 1000 characters). Return `true` to intercept:
-	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
-	 *  "wrap in a code block / XML / attach as file" menu for very large pastes), which re-inserts
+	 *  to a `[Paste #N]` marker (> 10 lines or > 1000 chars). Return `true` to intercept and handle it
 	 *  via {@link insertPaste} or {@link insertText}. Return `false` (or leave unset) for the
 	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count. */
-	onLargePaste?: (text: string, lineCount: number) => boolean;
+	onLargePaste?: (text: string, lineCount: number, options: PasteOptions) => boolean;
 	onAutocompleteCancel?: () => void;
 	disableSubmit: boolean = false;
 
@@ -2148,8 +2151,8 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
-	pasteText(text: string): void {
-		this.#handlePaste(text);
+	pasteText(text: string, options: PasteOptions = {}): void {
+		this.#handlePaste(text, options);
 	}
 
 	/** Insert `content` as a collapsed `[Paste #N]` marker (stored for expansion on submit via
@@ -2289,7 +2292,7 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	#handlePaste(pastedText: string): void {
+	#handlePaste(pastedText: string, options: PasteOptions = {}): void {
 		let filteredText = this.#sanitizePastedText(pastedText);
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
@@ -2311,7 +2314,7 @@ export class Editor implements Component, Focusable {
 		// Let the host intercept marker-sized pastes (e.g. the large-paste menu). When it takes
 		// over, the editor inserts nothing and records no undo state — the host re-inserts via
 		// `insertPaste`/`insertText` once the user chooses.
-		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length)) {
+		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length, options)) {
 			return;
 		}
 

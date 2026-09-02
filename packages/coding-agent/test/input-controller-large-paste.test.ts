@@ -11,9 +11,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { getEditorTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-function createContext(options?: { threshold?: number; choice?: string; artifactsDir?: string }) {
+function createContext(options?: {
+	threshold?: number;
+	choice?: string;
+	artifactsDir?: string;
+	editor?: InteractiveModeContext["editor"];
+}) {
 	const insertTextAttachment = vi.fn();
 	const insertText = vi.fn();
 	const pasteText = vi.fn();
@@ -22,7 +29,9 @@ function createContext(options?: { threshold?: number; choice?: string; artifact
 	const showError = vi.fn();
 	const showHookSelector = vi.fn(async (_title: string, _options: unknown, _dialog?: unknown) => options?.choice);
 	const ctx = {
-		editor: { insertTextAttachment, insertText, pasteText } as unknown as InteractiveModeContext["editor"],
+		editor:
+			options?.editor ??
+			({ insertTextAttachment, insertText, pasteText } as unknown as InteractiveModeContext["editor"]),
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		settings: { get: () => options?.threshold ?? 100 } as unknown as InteractiveModeContext["settings"],
 		sessionManager: {
@@ -72,6 +81,28 @@ describe("InputController.handleLargePaste gate", () => {
 		expect(menu).toHaveBeenCalledWith("payload", 100);
 		expect(spies.insertTextAttachment).not.toHaveBeenCalled();
 	});
+
+	// The submit key that shares the paste burst is encoded differently per keyboard
+	// protocol: legacy terminals send `\r`, the kitty protocol sends CSI-u `\x1b[13u`.
+	// Both must stage the attachment synchronously and submit without opening the menu.
+	for (const [label, enter] of [
+		["legacy \\r", "\r"],
+		["kitty CSI-u \\x1b[13u", "\x1b[13u"],
+	] as const) {
+		it(`stages and submits a threshold-sized paste when Enter (${label}) follows in the same burst`, () => {
+			const editor = new CustomEditor(getEditorTheme());
+			const { controller, spies } = createContext({ threshold: 100, editor });
+			editor.onLargePaste = (text, lineCount, options) => controller.handleLargePaste(text, lineCount, options);
+			const submitted = vi.fn();
+			editor.onSubmit = submitted;
+			const payload = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
+
+			editor.handleInput(`\x1b[200~${payload}\x1b[201~${enter}`);
+
+			expect(spies.showHookSelector).not.toHaveBeenCalled();
+			expect(submitted).toHaveBeenCalledWith(payload);
+		});
+	}
 });
 
 describe("InputController.presentLargePasteMenu actions", () => {
