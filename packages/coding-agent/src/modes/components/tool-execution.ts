@@ -18,6 +18,7 @@ import {
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { SymbolKey, Theme } from "../../modes/theme/theme";
+import { SYMBOL_PRESETS } from "../../modes/theme/symbols";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
@@ -58,6 +59,32 @@ const OPENCODE_TOOL_GLYPHS: Record<string, SymbolKey> = {
 	task: "oc.subagent",
 	todo: "oc.todo",
 };
+
+// Settled collapse restyles `<icon> Tool detail` headers into opencode's
+// `<glyph> Tool detail`, so the native leading icon must be removed. Headers
+// start with a status icon (formatStatusIcon/renderStatusLine) or a per-tool
+// identity glyph, and under symbolPreset "ascii" many of those are
+// alphanumeric ("+f", "lsp", "web", "[ok]") — no character class can tell
+// them apart from real text. Strip by the active theme's known icon strings
+// instead, longest first so "[!!]" wins over "[!]"; glyphs from custom
+// renderers outside the symbol table keep the symbol-ish 1-2 char fallback.
+const HEADER_ICON_KEYS = (Object.keys(SYMBOL_PRESETS.unicode) as SymbolKey[]).filter(
+	key => key.startsWith("status.") || key.startsWith("tool."),
+);
+let headerIconStripCache: { theme: Theme; regex: RegExp } | undefined;
+function headerIconStrip(): RegExp {
+	if (headerIconStripCache?.theme !== theme) {
+		const icons = [...new Set(HEADER_ICON_KEYS.map(key => theme.symbol(key)))]
+			.filter(icon => icon.length > 0)
+			.sort((a, b) => b.length - a.length)
+			.map(icon => RegExp.escape(icon));
+		headerIconStripCache = {
+			theme,
+			regex: new RegExp(`^(?:${icons.join("|")}|[^\\p{L}\\p{N}]{1,2})\\s+`, "u"),
+		};
+	}
+	return headerIconStripCache.regex;
+}
 
 // OSC 8 hyperlink span: `ESC ] 8 ; params ; uri (BEL|ST) text ESC ] 8 ; ; (BEL|ST)`.
 // The opener requires a non-empty URI so a stray closer can never match.
@@ -1115,9 +1142,7 @@ export class ToolExecutionComponent extends Container {
 			// Tabs are legal in filenames and custom status details; normalize
 			// them before measuring so the advertised single row truncates
 			// predictably instead of wrapping or leaving visual holes.
-			const plain = replaceTabs(stripVTControlCharacters(first))
-				.trim()
-				.replace(/^[^\p{L}\p{N}]{1,2}\s+/u, "");
+			const plain = replaceTabs(stripVTControlCharacters(first)).trim().replace(headerIconStrip(), "");
 			const glyph = theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search");
 			const row = restoreHyperlinks(` ${glyph} ${plain}`, first);
 			this.#collapsedLines = [theme.fg("dim", truncateToWidth(row, Math.max(1, width)))];
@@ -1146,7 +1171,14 @@ export class ToolExecutionComponent extends Container {
 		// Opencode layout stays flat even under viewport squeeze: the 2-row
 		// `╭─`/`╰` frame is the omp look, so always use the one-line form there.
 		if (this.#allocation === 1 || this.#isFlat()) {
-			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
+			// Settled marker rides the theme symbol table instead of a hardcoded
+			// `•` so a squeezed settled row matches the active preset (ascii stays
+			// ASCII): opencode takes the same oc.* accessor as the collapse row,
+			// omp keeps its bullet (`status.done` is `•` outside ascii).
+			const marker = this.#isFlat()
+				? theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search")
+				: theme.symbol("status.done");
+			const glyph = this.#spinnerFrame === undefined ? marker : (theme.spinnerFrames[this.#spinnerFrame] ?? marker);
 			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
 			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
 		}

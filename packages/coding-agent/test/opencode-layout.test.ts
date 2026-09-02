@@ -8,6 +8,7 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import type { LayoutMode } from "@oh-my-pi/pi-coding-agent/modes/layout-mode";
 import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import { SYMBOL_PRESETS, type SymbolKey } from "@oh-my-pi/pi-coding-agent/modes/theme/symbols";
 import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { CachedOutputBlock, markFramedBlockComponent } from "@oh-my-pi/pi-coding-agent/tui/output-block";
 import { replaceTabs, Text, type TUI } from "@oh-my-pi/pi-tui";
@@ -284,6 +285,55 @@ describe("opencode layout", () => {
 			// Unmapped tools fall back to the search glyph.
 			expect(rows[2]).toContain("* HEADLINE ok");
 			for (const row of rows) expect(row).toMatch(/^[\x20-\x7E]*$/);
+		} finally {
+			setThemeInstance(baseTheme);
+		}
+	});
+
+	it("strips every ascii status/tool icon from a settled collapsed header", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			// Sweep the full ascii inventory of icons that can lead a settled
+			// header (formatStatusIcon + per-tool identity glyphs). Many are
+			// alphanumeric ("+f", "lsp", "web", "[ok]"), which the old
+			// `[^\p{L}\p{N}]{1,2}` guess never removed.
+			const iconKeys = (Object.keys(SYMBOL_PRESETS.ascii) as SymbolKey[]).filter(
+				key => key.startsWith("status.") || key.startsWith("tool."),
+			);
+			expect(iconKeys.length).toBeGreaterThan(0);
+			for (const key of iconKeys) {
+				const icon = theme.symbol(key);
+				const tool = {
+					...makeMultiLineTool(),
+					renderResult: () => new Text(`${icon} Label detail\nDETAIL-1`, 0, 0),
+				};
+				const component = makeComponent(tool, opencode);
+				component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+				const rows = visibleRows(component);
+				expect(rows).toHaveLength(1);
+				// The native icon is gone; only the opencode glyph leads the row.
+				expect(rows[0]).toBe(" * Label detail");
+			}
+		} finally {
+			setThemeInstance(baseTheme);
+		}
+	});
+
+	it("renders an ascii squeezed settled row through the oc.* marker, not `•`", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			const component = makeComponent(makeMultiLineTool(), opencode);
+			component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+			component.setTranscriptAllocation(1, { tick: 0, now: 0 });
+			const rows = component.render(80).map(line => stripVTControlCharacters(line));
+			expect(rows).toHaveLength(1);
+			// Unmapped tools take the oc.search marker; ascii preset renders "*".
+			expect(rows[0]).toBe("* Custom");
+			expect(rows[0]).toMatch(/^[\x20-\x7E]*$/);
 		} finally {
 			setThemeInstance(baseTheme);
 		}
