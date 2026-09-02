@@ -3280,10 +3280,9 @@ export class RelayBridge {
 						tab,
 						keepPageSessions,
 						ext,
-						forceFreshRoot ||
-							(refreshedRoot &&
-								(tab.contextGeneration !== contextGenerationBeforeRecovery ||
-									tab.url !== urlBeforeRecovery)),
+						refreshedRoot &&
+							(tab.contextGeneration !== contextGenerationBeforeRecovery ||
+								tab.url !== urlBeforeRecovery),
 						tab.recoveryStartLoaderId,
 					);
 				} catch (err) {
