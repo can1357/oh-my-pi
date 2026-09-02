@@ -1285,7 +1285,20 @@ export class RelayBridge {
 			// the preload handlers already do for interrupted registrations.
 			if (pendingSubscription && isExtensionTransportInterrupted(err)) {
 				const tab = this.#tabs.get(tabId);
-				if (tab) tab.forceFreshRootBeforeReplay = true;
+				if (tab) {
+					// An interrupted Runtime.removeBinding is doubly ambiguous: Chrome may
+					// have already dropped the binding while the journal still records the
+					// paired addBinding under the same per-name key. A reconnect would
+					// then replay a binding the root no longer carries and resurrect the
+					// explicitly removed function. Forget the journal entry so recovery
+					// cannot revive it, mirroring the preload-removal path, before forcing
+					// the fresh root below.
+					if (msg.method === "Runtime.removeBinding") {
+						const key = this.#subscriptionTrackingKey(msg);
+						if (key) this.#forgetTabSubscription(tab, key);
+					}
+					tab.forceFreshRootBeforeReplay = true;
+				}
 			}
 			this.#replyError(
 				conn,
@@ -2217,7 +2230,10 @@ export class RelayBridge {
 		) {
 			return `${domain}.enable`;
 		}
-		if (msg.method === "Runtime.addBinding") {
+		if (
+			msg.method === "Runtime.addBinding" ||
+			msg.method === "Runtime.removeBinding"
+		) {
 			const name =
 				typeof msg.params?.name === "string" ? msg.params.name : undefined;
 			return name ? `Runtime.addBinding:${name}` : undefined;

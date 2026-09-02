@@ -4322,6 +4322,79 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	it("forgets and forces a fresh root after an interrupted Runtime.removeBinding", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Install a binding so the per-name journal entry exists.
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Runtime.addBinding",
+				params: { name: "ompExposed" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.some((m) => m.id === addId && "result" in m)).toBe(
+			true,
+		);
+
+		// Issue the removal, then drop the socket ordinarily before its result
+		// arrives. Chrome may already have removed the binding.
+		const removeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: removeId,
+				sessionId: pageSession,
+				method: "Runtime.removeBinding",
+				params: { name: "ompExposed" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext.rpcs("send").some((rpc) => rpc.method === "Runtime.removeBinding"),
+			"interrupted removeBinding RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		expect(cdp.messages.some((m) => m.id === removeId && "error" in m)).toBe(
+			true,
+		);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		// The interrupted removal forces a fresh root: detach → attach.
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"fresh-root detach after interrupted removeBinding",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"fresh-root attach after interrupted removeBinding",
+		);
+		ack(bridge, ext2, "attach");
+		await flush();
+		// The journal entry was forgotten, so recovery must NOT resurrect the
+		// explicitly removed binding by replaying it onto the fresh root.
+		expect(
+			ext2.rpcs("send").filter((rpc) => rpc.method === "Runtime.addBinding"),
+		).toHaveLength(0);
+	});
+
 	it("preserves recovery authorization when the forced-root detach outlives its socket", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
