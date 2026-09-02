@@ -226,7 +226,7 @@ where
 /// cost; aborting the whole host process is not. `forget` on a
 /// `Box<dyn Any + Send>` is always memory-safe (it only skips the destructor
 /// and leaks the allocation).
-fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+pub(crate) fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
 	if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| {
 		crate::crash_handler::blocking_task_panic_scope(|| drop(payload));
 	})) {

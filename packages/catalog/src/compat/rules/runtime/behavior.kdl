@@ -11,6 +11,15 @@ behavior {
 		exclude-substring "embedding"
 	}
 
+	// Retired providers: their entire roster is excluded from the generated
+	// bundle and must never be resurrected from the previous snapshot.
+	// `opencode` was split into `opencode-go` / `opencode-zen`; models.dev's
+	// `opencode` key now maps to `opencode-zen`, so fresh discovery never emits
+	// it, but its legacy rows survived as previous-snapshot zombies (no
+	// descriptor makes it authoritative to prune), surfacing a dead, un-authable
+	// `opencode` provider in the picker.
+	retired-providers "wafer-pass" "wandb" "opencode"
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"

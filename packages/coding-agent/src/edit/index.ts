@@ -751,10 +751,10 @@ export class EditTool implements AgentTool<TInput> {
 					_onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
 				) => {
 					const { input } = params as SloppyParams;
-					// `[path]` headers open per-file sections; the first line MUST be one.
+					// `<SM:EDIT path="…">` openers begin per-file sections; the first line MUST be one.
 					const sections = splitSloppySections(input);
 					if (sections.length === 0) {
-						throw new Error("Missing file header: start the payload with `§relative/path.ts`.");
+						throw new Error('Missing file target: start the payload with <SM:EDIT path="relative/path.ts">.');
 					}
 					const resolved: SloppySection[] = [];
 					for (const section of sections) {

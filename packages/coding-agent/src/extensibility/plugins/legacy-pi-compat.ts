@@ -1,3 +1,4 @@
+// oxlint-disable-next-line typescript/triple-slash-reference -- legacy virtual module declarations.
 /// <reference path="./legacy-pi-virtual-modules.d.ts" />
 
 import { Database } from "bun:sqlite";
@@ -1838,8 +1839,8 @@ async function isSelectedNoTypeEsmPackageBranch(
 	);
 	return Boolean(
 		importTarget &&
-			path.resolve(importTarget) === path.resolve(resolvedPath) &&
-			(!requireTarget || path.resolve(requireTarget) !== path.resolve(importTarget)),
+		path.resolve(importTarget) === path.resolve(resolvedPath) &&
+		(!requireTarget || path.resolve(requireTarget) !== path.resolve(importTarget)),
 	);
 }
 

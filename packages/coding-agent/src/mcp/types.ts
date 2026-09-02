@@ -108,6 +108,8 @@ export interface MCPStdioServerConfig extends MCPServerConfigBase {
 	 * (`${PLUGIN_ROOT}`/`${PLUGIN_DATA}`).
 	 */
 	envPolicy?: "literal";
+	/** Env keys whose values are final package data; auth resolution keeps them verbatim. */
+	envLiteralKeys?: string[];
 	cwd?: string;
 }
 

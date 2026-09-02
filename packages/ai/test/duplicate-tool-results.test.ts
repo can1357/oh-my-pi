@@ -17,6 +17,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { normalizeToolCallId } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 /**
@@ -624,6 +625,581 @@ describe("Duplicate Tool Results Regression", () => {
 
 			expect(assistantIds, providerModel.provider).toEqual([duplicateId, expectedDuplicateId]);
 			expect(toolWireIds(wireMessages), providerModel.provider).toEqual([duplicateId, expectedDuplicateId]);
+		}
+	});
+});
+
+/**
+ * Regression test for composite tool-call id pairing.
+ *
+ * The OpenAI Codex Responses API stores a tool result's id as a composite
+ * `<call_id>|<response_item_id>` (e.g. `call_ABC|fc_XYZ`), while the assistant
+ * `toolCall` that produced it carries the plain `call_ABC`. `transformMessages`
+ * paired the two by raw-string equality, so a valid pair looked disjoint: the
+ * real result was never pulled into the call's result window and the call was
+ * back-filled with a synthetic `"No result provided"` stub — the model ran a
+ * tool, the result was persisted, but the model saw nothing.
+ *
+ * Pairing must match on the stable `call_` component so a composite result finds
+ * its plain call, WITHOUT collapsing two distinct parallel calls whose results
+ * happen to share a `response_item` (`fc_`) half.
+ */
+describe("Composite Tool-Call Id Pairing", () => {
+	// The deployed gateway path is a SAME-MODEL Codex (openai-responses) replay:
+	// omp re-encodes Codex history back to a Codex target, so `isSameModel` holds
+	// and composite tool-call ids pass through untouched to the pairing logic
+	// (the cross-provider / anthropic-target id normalization at :598-613 does
+	// NOT fire). Model the tests on that path so composite ids reach the fix.
+	const model: Model<"openai-responses"> = buildModel({
+		api: "openai-responses",
+		provider: "openai",
+		id: "gpt-5-codex",
+		name: "GPT-5 Codex",
+		baseUrl: "https://api.openai.com",
+		input: ["text"],
+		cost: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 0 },
+		maxTokens: 8192,
+		contextWindow: 200000,
+		reasoning: true,
+	});
+
+	const makeToolCallAssistant = (ids: string[], timestamp: number): AssistantMessage => ({
+		role: "assistant",
+		content: ids.map(id => ({ type: "toolCall", id, name: "tool_search", arguments: {} })),
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5-codex",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp,
+	});
+
+	const makeToolResult = (id: string, text: string, timestamp: number): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: id,
+		toolName: "tool_search",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp,
+	});
+
+	// The transform preserves each result's own wire id (composite stays
+	// composite), so match on the stable call_ component, not the raw id.
+	//
+	// NOT `_dup`-aware: this keys on `toolCallId.split("|")[0]`, so a result whose
+	// call was `_dup`-renamed across turns (`call_X_dup1|fc_Y` splits to
+	// `call_X_dup1`) will NOT match `resultsFor(_, "call_X")` — it returns []. That
+	// is deliberate: stripping `_dupN` here would re-collapse the two now-distinct
+	// calls dedup separated and could mask a real drop. For any
+	// reuse/dedup case use a flat resultTexts scan (see the reuse tests below), not
+	// this helper.
+	const resultsFor = (messages: Message[], callId: string): ToolResultMessage[] =>
+		messages.filter(
+			(m): m is ToolResultMessage =>
+				m.role === "toolResult" &&
+				((m as ToolResultMessage).toolCallId === callId ||
+					(m as ToolResultMessage).toolCallId.split("|", 1)[0] === callId),
+		);
+
+	const hasSynthetic = (messages: Message[]): boolean =>
+		messages.some(
+			m =>
+				m.role === "toolResult" &&
+				(m as ToolResultMessage).content.some(part => part.type === "text" && part.text === "No result provided"),
+		);
+
+	it("pairs a composite result id with its plain assistant call id", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_ABC"], 2),
+			makeToolResult("call_ABC|fc_XYZ", "205 tools found", 3),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = resultsFor(transformed, "call_ABC");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+	});
+
+	it("keeps parallel composite results distinct when they share an fc_ half", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "search twice", timestamp: 1 },
+			makeToolCallAssistant(["call_AAA", "call_BBB"], 2),
+			makeToolResult("call_AAA|fc_SHARED", "result A", 3),
+			makeToolResult("call_BBB|fc_SHARED", "result B", 4),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		expect(resultsFor(transformed, "call_AAA").at(0)?.content).toEqual([{ type: "text", text: "result A" }]);
+		expect(resultsFor(transformed, "call_BBB").at(0)?.content).toEqual([{ type: "text", text: "result B" }]);
+	});
+
+	it("still pairs plain-to-plain ids (no regression)", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_PLAIN"], 2),
+			makeToolResult("call_PLAIN", "plain result", 3),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		expect(resultsFor(transformed, "call_PLAIN")).toHaveLength(1);
+	});
+
+	it("pairs when BOTH assistant and result ids are composite (same-provider Codex replay)", () => {
+		// The real deployed shape: the Codex decode path mints the assistant
+		// toolCall id composite too (encodeResponsesToolCallId(call_id, item_id)),
+		// while the result carries the same call_ half with a DIFFERENT item half.
+		// Both must collapse to the call_ component and pair.
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_ABC|fc_ASSISTANT"], 2),
+			makeToolResult("call_ABC|fc_RESULT", "205 tools found", 3),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = resultsFor(transformed, "call_ABC");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+	});
+
+	it("survives a reused wire call_id across turns (composite results)", () => {
+		// The SAME plain wire call_id is reused across two assistant turns,
+		// each result arriving as a composite with a DIFFERENT fc_ half. Before the
+		// fix, dedup keyed on the raw composite id, so turn-2's real result was
+		// dropped and back-filled with the "No result provided" synthetic stub.
+		// Canonical keying (toolCallPairingKey) now _dup-suffixes the reused call,
+		// so both turns' real results survive under distinct call_ halves.
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_REUSE"], 2),
+			makeToolResult("call_REUSE|fc_T1", "result one", 3),
+			makeToolCallAssistant(["call_REUSE"], 4),
+			makeToolResult("call_REUSE|fc_T2", "result two", 5),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const resultTexts = transformed
+			.filter((m): m is ToolResultMessage => m.role === "toolResult")
+			.flatMap(m => m.content.flatMap(p => (p.type === "text" ? [p.text] : [])));
+		expect(resultTexts).toContain("result one");
+		expect(resultTexts).toContain("result two");
+	});
+
+	it("separates two calls sharing a call_ half so both results survive", () => {
+		// dedup's canonical keying (toolCallPairingKey) keeps two same-turn calls
+		// that share a call_ half (call_DUP|fc_A + call_DUP|fc_B) distinct: the
+		// second is _dup-suffixed rather than collapsing onto the first's pairing
+		// key, so BOTH results survive instead of one being dropped.
+		const messages: Message[] = [
+			{ role: "user", content: "search twice", timestamp: 1 },
+			makeToolCallAssistant(["call_DUP|fc_A", "call_DUP|fc_B"], 2),
+			makeToolResult("call_DUP|fc_A", "result A", 3),
+			makeToolResult("call_DUP|fc_B", "result B", 4),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const resultTexts = transformed
+			.filter((m): m is ToolResultMessage => m.role === "toolResult")
+			.flatMap(m => m.content.flatMap(p => (p.type === "text" ? [p.text] : [])));
+		expect(resultTexts).toContain("result A");
+		expect(resultTexts).toContain("result B");
+	});
+
+	it("survives a wire call_id reused across THREE turns (_dup2 + seen-counter)", () => {
+		// The reuse case extended past two turns: the SAME plain wire call_id is reused across
+		// THREE assistant turns, each result a distinct composite (`fc_`) half. The
+		// third turn drives dedup's per-key seen-counter to 2 (the `_dup2` suffix) and
+		// exercises the collision-guard `while` loop that bumps duplicateIndex past an
+		// already-taken `_dupN` key. Pre-fix (raw-composite keying) turns 2 & 3 were
+		// dropped to "No result provided" stubs; canonical keying keeps all three real
+		// results under distinct call_ halves.
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_REUSE3"], 2),
+			makeToolResult("call_REUSE3|fc_T1", "result one", 3),
+			makeToolCallAssistant(["call_REUSE3"], 4),
+			makeToolResult("call_REUSE3|fc_T2", "result two", 5),
+			makeToolCallAssistant(["call_REUSE3"], 6),
+			makeToolResult("call_REUSE3|fc_T3", "result three", 7),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const resultTexts = transformed
+			.filter((m): m is ToolResultMessage => m.role === "toolResult")
+			.flatMap(m => m.content.flatMap(p => (p.type === "text" ? [p.text] : [])));
+		expect(resultTexts).toContain("result one");
+		expect(resultTexts).toContain("result two");
+		expect(resultTexts).toContain("result three");
+	});
+
+	it("pairs a composite assistant call id with a PLAIN result id (mirror of the composite-result/plain-call case)", () => {
+		// Mirror of the "pairs a composite result id with its plain assistant call
+		// id" case: here the assistant
+		// call carries the composite (`call_MIRROR|fc_X`) and the result arrives plain
+		// (`call_MIRROR`). Both must collapse to the `call_` component and pair.
+		// Pre-fix, raw-key pairing missed (`call_MIRROR|fc_X` !== `call_MIRROR`) and the
+		// call was back-filled with the synthetic stub.
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_MIRROR|fc_X"], 2),
+			makeToolResult("call_MIRROR", "205 tools found", 3),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = resultsFor(transformed, "call_MIRROR");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+	});
+
+	it("keeps two empty-call-half results distinct end-to-end", () => {
+		// Characterization of the empty-call-half shape (`|fc_X`, pipe at index 0).
+		// `toolCallPairingKey` returns the FULL id when `pipe <= 0` rather than the
+		// empty-string prefix, specifically so two
+		// UNRELATED empty-half calls don't collapse onto one shared "" bucket.
+		//
+		// What this test actually defends: an empty-call-half id is representable
+		// end-to-end — `sanitizeMalformedToolCalls` does NOT drop it (the id is a
+		// non-empty string; only ""/whitespace ids are malformed), and both parallel
+		// results survive distinct rather than one being dropped to a synthetic stub.
+		//
+		// NOTE (deliberately narrow claim): this does NOT independently pin the
+		// `pipe <= 0` branch. `deduplicateToolCallIds` runs first, and if both ids
+		// collapsed to "" it would `_dup`-suffix the second (`_dup1`) and re-separate
+		// them — so a `<= 0` -> `< 0` regression stays masked and green here. The teeth
+		// this test has are on the upstream-representability + no-collapse contract.
+		const messages: Message[] = [
+			{ role: "user", content: "search twice", timestamp: 1 },
+			makeToolCallAssistant(["|fc_A", "|fc_B"], 2),
+			makeToolResult("|fc_A", "result A", 3),
+			makeToolResult("|fc_B", "result B", 4),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const resultTexts = transformed
+			.filter((m): m is ToolResultMessage => m.role === "toolResult")
+			.flatMap(m => m.content.flatMap(p => (p.type === "text" ? [p.text] : [])));
+		expect(resultTexts).toContain("result A");
+		expect(resultTexts).toContain("result B");
+	});
+
+	it("pairs a composite result on the aborted-turn path", () => {
+		// flushPendingAbortedToolCalls also keys on the pairing key. An assistant
+		// turn that aborted mid-tool-call, then a real composite result arriving
+		// after, must pair — not be replaced by the "aborted" synthetic stub.
+		const abortedAssistant: AssistantMessage = { ...makeToolCallAssistant(["call_ABORT"], 2), stopReason: "aborted" };
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			abortedAssistant,
+			makeToolResult("call_ABORT|fc_LATE", "205 tools found", 3),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		const results = resultsFor(transformed, "call_ABORT");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+		expect(results.some(r => r.content.some(p => p.type === "text" && p.text === "aborted"))).toBe(false);
+	});
+
+	it("preserves a later orphan after a composite call was resolved by a plain result (Greptile P1 regression)", () => {
+		// The composite assistant call `call_A|fc_1` is resolved INLINE by a PLAIN
+		// result `call_A`: line 833-834 sets toolCallStatus["call_A"] = Resolved but
+		// leaves `call_A|fc_1` sitting in pendingToolCalls (an inline result never
+		// clears the pending window — only a flush does). A later orphan then arrives
+		// with NO user/assistant/developer message between it and the plain result,
+		// so the composite call is still unflushed and the orphan branch's guard
+		// (l.858-863) runs against a live pendingToolCalls entry.
+		//
+		// The guard must recognise that entry as ALREADY resolved via its canonical
+		// key: `!toolCallStatus.has(toolCallPairingKey(tc.id))` -> `!has("call_A")` ->
+		// false, so the guard does not fire and the orphan is preserved as a note.
+		// Under the raw-key regression (`!toolCallStatus.has(tc.id)` -> `!has(
+		// "call_A|fc_1")` -> true) the guard wrongly fires and the orphan is dropped
+		// silently. This locks Greptile P1 on #758 (cf8bceae; fixed 4dc0198b).
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_A|fc_1"], 2),
+			makeToolResult("call_A", "205 tools found", 3),
+			makeToolResult("toolu_orphan_stale", "stale orphan payload", 4),
+		];
+
+		const transformed = transformMessages(messages, model);
+
+		// 1. The orphan's payload survives as exactly one user-level stale note
+		//    (reds under the line-859 raw-key mutation, which drops it silently).
+		const noteCarriers = transformed.filter(
+			(m): m is UserMessage =>
+				m.role === "user" &&
+				typeof (m as UserMessage).content === "string" &&
+				((m as UserMessage).content as string).includes("toolu_orphan_stale"),
+		);
+		expect(noteCarriers).toHaveLength(1);
+		expect(noteCarriers[0]!.content as string).toContain("stale orphan payload");
+
+		// 2. The orphan must not leak into the developer channel (would gain
+		//    system/instruction priority on Ollama / OpenAI reasoning paths).
+		const developerLeaks = transformed.filter(
+			(m): m is DeveloperMessage =>
+				m.role === "developer" &&
+				typeof (m as DeveloperMessage).content === "string" &&
+				((m as DeveloperMessage).content as string).includes("toolu_orphan_stale"),
+		);
+		expect(developerLeaks).toHaveLength(0);
+
+		// 3. The real composite pair survived intact — no "No result provided" stub
+		//    back-filled for `call_A|fc_1`, and the plain `call_A` result is kept.
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = resultsFor(transformed, "call_A");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+	});
+
+	it("survives cross-provider normalization to an Anthropic target (#10284)", () => {
+		// Codex's cross-provider angle: a session model/provider switch replays a
+		// Responses-origin composite call to an Anthropic target. The `|` is
+		// invalid for Anthropic, so the assistant call `call_A|fc_ASSISTANT`
+		// normalizes to `call_A_fc_ASSISTANT` while its real result arrives with a
+		// DIFFERENT item half (`call_A|fc_RESULT`). Pre-fix the result missed the
+		// exact-key lookup and stayed composite, so the pairing pass replaced the
+		// real result with the synthetic stub. Canonical pairing must carry the
+		// call_ component's normalized id onto the result across normalization.
+		const anthropicTarget: Model<"anthropic-messages"> = buildModel({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			maxTokens: 8192,
+			contextWindow: 200000,
+			reasoning: true,
+		});
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_A|fc_ASSISTANT"], 2),
+			makeToolResult("call_A|fc_RESULT", "205 tools found", 3),
+		];
+
+		const transformed = transformMessages(messages, anthropicTarget, normalizeToolCallId);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const callIds = transformed
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content)
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		expect(callIds).toEqual(["call_A_fc_ASSISTANT"]);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.toolCallId).toBe("call_A_fc_ASSISTANT");
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+	});
+
+	it("maps a composite result to a PLAIN Responses call across Anthropic replay (#10284 P1)", () => {
+		// The plain-call variant of the cross-provider case above: the Responses
+		// assistant call carries a PLAIN id `call_A` (already a valid Anthropic
+		// id, so normalization is identity), while its real result arrives
+		// composite (`call_A|fc_RESULT`). Pre-fix the plain call skipped recording
+		// the Responses call-component mapping (the record lived behind
+		// `normalizedId !== toolCall.id`), so the composite result never resolved
+		// to the plain emitted id and stayed composite — the encoder would emit an
+		// assistant call `call_A` beside a result `call_A|fc_RESULT`, breaking
+		// call/result correspondence and the Anthropic id char rules. The mapping
+		// must be recorded even when the assistant id is plain.
+		const anthropicTarget: Model<"anthropic-messages"> = buildModel({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			maxTokens: 8192,
+			contextWindow: 200000,
+			reasoning: true,
+		});
+		const messages: Message[] = [
+			{ role: "user", content: "search", timestamp: 1 },
+			makeToolCallAssistant(["call_A"], 2),
+			makeToolResult("call_A|fc_RESULT", "205 tools found", 3),
+		];
+
+		const transformed = transformMessages(messages, anthropicTarget, normalizeToolCallId);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const callIds = transformed
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content)
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		expect(callIds).toEqual(["call_A"]);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		// The composite result must adopt the plain call's emitted id, not stay composite.
+		expect(results[0]!.toolCallId).toBe("call_A");
+		expect(results[0]!.content).toEqual([{ type: "text", text: "205 tools found" }]);
+	});
+});
+
+/**
+ * Regression for #10284: same-model Chat Completions tool-call ids are OPAQUE
+ * provider correlation tokens that may themselves contain `|`
+ * (`openai-completions.ts` preserves them verbatim on same-model replay). The
+ * composite-`call_` pairing must NOT canonicalize them: splitting `opaque|first`
+ * and `opaque|second` onto one `opaque` bucket collapsed two distinct calls, so
+ * the assistant halves were `_dup`-suffixed (`opaque_dup1|second_dup1`) and the
+ * lone result (`opaque|second`) paired with neither surviving wire id — the
+ * provider then rejected the replay.
+ */
+describe("Opaque Chat Completions ids are not canonicalized (#10284)", () => {
+	const model: Model<"openai-completions"> = buildModel({
+		api: "openai-completions",
+		provider: "openai",
+		id: "gpt-4o",
+		name: "GPT-4o",
+		baseUrl: "https://api.openai.com/v1",
+		input: ["text"],
+		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+		maxTokens: 8192,
+		contextWindow: 128000,
+		reasoning: false,
+	});
+
+	const assistantWithCalls = (ids: string[], timestamp: number): AssistantMessage => ({
+		role: "assistant",
+		content: ids.map(id => ({ type: "toolCall", id, name: "read", arguments: {} })),
+		api: "openai-completions",
+		provider: "openai",
+		model: "gpt-4o",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp,
+	});
+
+	const toolResult = (id: string, text: string, timestamp: number): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: id,
+		toolName: "read",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp,
+	});
+
+	it("leaves pipe-bearing opaque ids intact and pairs the lone result to its call", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "read twice", timestamp: 1 },
+			assistantWithCalls(["opaque|first", "opaque|second"], 2),
+			toolResult("opaque|second", "second output", 3),
+		];
+
+		const context: Context = { messages };
+		const wireMessages = convertMessages(model, context, model.compat);
+
+		const assistantIds = wireMessages
+			.filter((m): m is ChatCompletionAssistantMessageParam => m.role === "assistant" && Array.isArray(m.tool_calls))
+			.flatMap(m => m.tool_calls?.map(tc => tc.id) ?? []);
+		// Both opaque ids survive verbatim — neither collapsed onto `opaque` nor
+		// `_dup`-suffixed.
+		expect(assistantIds).toEqual(["opaque|first", "opaque|second"]);
+
+		const toolWireIds = wireMessages
+			.filter((m): m is ChatCompletionToolMessageParam => m.role === "tool")
+			.map(m => m.tool_call_id);
+		// The real result pairs with its own call; every emitted result id matches
+		// a surviving assistant call.
+		expect(toolWireIds).toContain("opaque|second");
+		for (const id of toolWireIds) {
+			expect(assistantIds).toContain(id);
+		}
+	});
+
+	it("does not collapse opaque completions ids that share a prefix with an earlier Responses call (#10284 P2)", () => {
+		// Mixed-provider history: an EARLIER Responses-family assistant call
+		// `call_A` seeds `call_A` as a Responses component. Later, SAME-MODEL Chat
+		// Completions ids `call_A|first` / `call_A|second` are OPAQUE (the pipe is
+		// literal, preserved verbatim). Pre-fix the global prefix set let the
+		// shared `call_A` prefix canonicalize both opaque ids onto one `call_A`
+		// bucket: dedup `_dup`-suffixed the second call and the lone result for
+		// `call_A|second` was wrongly consumed by the first. Concrete per-id origin
+		// tracking keeps the opaque ids keyed by raw equality.
+		const responsesAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_A", name: "read", arguments: {} }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5-codex",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 2,
+		};
+		const messages: Message[] = [
+			{ role: "user", content: "read", timestamp: 1 },
+			responsesAssistant,
+			toolResult("call_A|fc_R", "responses output", 3),
+			{ role: "user", content: "read twice", timestamp: 4 },
+			assistantWithCalls(["call_A|first", "call_A|second"], 5),
+			toolResult("call_A|second", "second output", 6),
+		];
+
+		const context: Context = { messages };
+		const wireMessages = convertMessages(model, context, model.compat);
+
+		const assistantIds = wireMessages
+			.filter((m): m is ChatCompletionAssistantMessageParam => m.role === "assistant" && Array.isArray(m.tool_calls))
+			.flatMap(m => m.tool_calls?.map(tc => tc.id) ?? []);
+		// Both opaque ids survive verbatim — neither collapsed onto `call_A` nor
+		// `_dup`-suffixed by the shared-prefix Responses call.
+		expect(assistantIds).toContain("call_A|first");
+		expect(assistantIds).toContain("call_A|second");
+
+		const toolWireIds = wireMessages
+			.filter((m): m is ChatCompletionToolMessageParam => m.role === "tool")
+			.map(m => m.tool_call_id);
+		// The lone opaque result pairs with its OWN call, and every emitted result
+		// id matches a surviving assistant call.
+		expect(toolWireIds).toContain("call_A|second");
+		for (const id of toolWireIds) {
+			expect(assistantIds).toContain(id);
 		}
 	});
 });

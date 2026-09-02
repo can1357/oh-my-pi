@@ -975,7 +975,7 @@ it("can nested type call from standard schema generic", () => {
 		T extends {
 			schema: StandardSchemaV1;
 		},
-	>(_: T) {
+	>(_schema: T) {
 		return {} as StandardSchemaV1.InferOutput<T["schema"]>;
 	}
 
@@ -1119,7 +1119,6 @@ it("allows morph union with non-overlapping root objects", () => {
 	});
 });
 it("allows inferring a schema's type argument in a generic wrapper function when the type uses Default", () => {
-	// biome-ignore lint/complexity/noBannedTypes: generic Type parameter test
 	function someFunction<TSchema extends Record<string, any>>(schema: Type<TSchema, {}>): (typeof schema)["infer"] {
 		const someData = { hello: "world" };
 		return schema.assert(someData);
@@ -1179,7 +1178,7 @@ it("cyclic discriminated union issue 1", () => {
 		Bar: "Foo",
 	}).export();
 
-	const baz = $.Bar.pipe((_: object): type.Any | undefined => {
+	const baz = $.Bar.pipe((_value: object): type.Any | undefined => {
 		wasPiped = true;
 		return type("string");
 	});

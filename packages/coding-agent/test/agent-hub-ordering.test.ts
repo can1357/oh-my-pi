@@ -15,6 +15,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import { AgentActivityIndex, type AgentActivityRow } from "../src/activity";
 
 interface GeometryStub {
 	setRows(n: number): void;
@@ -61,7 +62,12 @@ interface RenderedAgentRow {
 	selected: boolean;
 }
 
-const ROSTER_ENTRY_PATTERN = /^(❯| ) (\S+) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+)/u;
+const ROSTER_ENTRY_PATTERN = /^(❯| ) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+) (\S+)/u;
+function rosterEntryMatch(cell: string | undefined): RegExpExecArray | null {
+	if (!cell) return null;
+	const match = ROSTER_ENTRY_PATTERN.exec(cell);
+	return match?.[2] === "│" ? null : match;
+}
 
 function rosterCell(raw: string): string | undefined {
 	const line = Bun.stripANSI(raw);
@@ -72,13 +78,11 @@ function rosterCell(raw: string): string | undefined {
 }
 
 function renderedAgentRows(hub: AgentHubOverlayComponent, width = 120): RenderedAgentRow[] {
-	// Roster entry first cells are
-	// `<cursor> <status-glyph> [tree-prefix] <id> …`; task cells are
-	// indented deeper and never match the cursor/status slots.
+	// `<cursor> <status-glyph> [tree-prefix] <id> …`; continuation rows may
+	// carry `│` in the status column and are rejected by rosterEntryMatch.
 	const rows: RenderedAgentRow[] = [];
 	for (const raw of hub.render(width)) {
-		const cell = rosterCell(raw);
-		const match = cell ? ROSTER_ENTRY_PATTERN.exec(cell) : null;
+		const match = rosterEntryMatch(rosterCell(raw));
 		if (match) rows.push({ id: match[3]!, selected: match[1] === "❯" });
 	}
 	return rows;
@@ -94,26 +98,19 @@ function selectedAgentId(hub: AgentHubOverlayComponent): string | undefined {
 
 function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: number): string {
 	const cells = hub.render(width).map(rosterCell);
-	const start = cells.findIndex(cell => {
-		const match = cell ? ROSTER_ENTRY_PATTERN.exec(cell) : null;
-		return match?.[3] === id;
-	});
+	const start = cells.findIndex(cell => rosterEntryMatch(cell)?.[3] === id);
 	expect(start).toBeGreaterThanOrEqual(0);
 	const entry: string[] = [];
 	for (let i = start; i < cells.length; i++) {
 		const cell = cells[i];
 		if (cell === undefined || cell.trim().length === 0) break;
-		if (i > start && ROSTER_ENTRY_PATTERN.test(cell)) break;
+		if (i > start && rosterEntryMatch(cell)) break;
 		entry.push(cell.trimEnd());
 	}
 	return entry.join("\n");
 }
 function renderedRosterHeaderLineRaw(hub: AgentHubOverlayComponent, id: string, width: number): string {
-	const line = hub.render(width).find(raw => {
-		const cell = rosterCell(raw);
-		const match = cell ? ROSTER_ENTRY_PATTERN.exec(cell) : null;
-		return match?.[3] === id;
-	});
+	const line = hub.render(width).find(raw => rosterEntryMatch(rosterCell(raw))?.[3] === id);
 	if (!line) throw new Error(`No rendered roster header for ${id}`);
 	return line;
 }
@@ -156,7 +153,7 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
-	it("freezes the initial lastActivity order while the hub is open", () => {
+	it("re-sorts rows by most-recent activity while the hub is open", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
 		try {
@@ -176,22 +173,44 @@ describe("Agent hub row ordering", () => {
 
 			hub = makeHub(agents);
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
-			// Bump A's lastActivity far ahead of the others; captured order wins.
+			// Bump A's lastActivity far ahead of the others; recency wins live.
 			setSystemTime(4000);
 			agents.setActivity("A", "still running");
 
-			// Status changes must not reorder the captured roster either.
-			agents.setStatus("B", "idle");
-
-			// Registering a new agent schedules a coalesced row refresh; even a
-			// different status is appended after all rows captured on open.
+			// A parked agent sorts below live ones by status order.
 			setSystemTime(5000);
 			const sessionD = {} as AgentSession;
 			agents.register({ id: "D", displayName: "Delta", kind: "sub", session: sessionD, status: "parked" });
-
+			// Renders coalesce: the immediate frame still shows the captured order.
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A", "D"]);
+			expect(renderedAgentIds(hub)).toEqual(["A", "C", "B", "D"]);
+		} finally {
+			hub?.dispose();
+			vi.useRealTimers();
+			setSystemTime();
+		}
+	});
+
+	it("filters agents with a fuzzy query and clears on Escape", () => {
+		vi.useFakeTimers();
+		let hub: AgentHubOverlayComponent | undefined;
+		try {
+			geometry = stubStdoutGeometry(120);
+			const agents = new AgentRegistry();
+			const sessionA = {} as AgentSession;
+			agents.register({ id: "alpha-one", displayName: "Alpha", kind: "sub", session: sessionA });
+			const sessionB = {} as AgentSession;
+			agents.register({ id: "beta-two", displayName: "Beta", kind: "sub", session: sessionB });
+
+			hub = makeHub(agents);
+			expect(renderedAgentIds(hub)).toEqual(["alpha-one", "beta-two"]);
+			hub.handleInput("/");
+			hub.handleInput("a");
+			hub.handleInput("p");
+			expect(renderedAgentIds(hub)).toEqual(["alpha-one"]);
+			hub.handleInput("\u001b");
+			expect(renderedAgentIds(hub)).toEqual(["alpha-one", "beta-two"]);
 		} finally {
 			hub?.dispose();
 			vi.useRealTimers();
@@ -747,7 +766,7 @@ describe("Agent hub row ordering", () => {
 
 			const historical = renderedRosterEntry(hub, "Historical", 160);
 			expect(historical).toContain("Restored task");
-			expect(historical).toContain("usage —");
+			expect(historical).toMatch(/usage\s+·/);
 			expect(historical).not.toContain("$0.000");
 		} finally {
 			hub.dispose();
@@ -810,8 +829,8 @@ describe("Agent hub row ordering", () => {
 		try {
 			const rendered = Bun.stripANSI(hub.render(160).join("\n"));
 			expect(rendered).toContain("0/2 measured");
-			expect(renderedRosterEntry(hub, "Incomplete", 160)).toContain("usage —");
-			expect(renderedRosterEntry(hub, "NonFinite", 160)).toContain("usage —");
+			expect(renderedRosterEntry(hub, "Incomplete", 160)).toMatch(/usage\s+·/);
+			expect(renderedRosterEntry(hub, "NonFinite", 160)).toMatch(/usage\s+·/);
 			expect(getSessionStats).not.toHaveBeenCalled();
 		} finally {
 			hub.dispose();
@@ -947,9 +966,46 @@ describe("Agent hub row ordering", () => {
 
 		try {
 			hub.handleInput("t");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├── First");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│   └── Grandchild");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└── Last");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├── ⟳ First");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│   └── ⟳ Grandchild");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└── ⟳ Last");
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("keeps tree rails continuous across task and metrics rows", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(32);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
+		agents.setActivity("Parent", "Parent task");
+		agents.register({ id: "First", displayName: "First", kind: "sub", parentId: "Parent", session: null });
+		agents.setActivity("First", "First task");
+		agents.register({ id: "Grandchild", displayName: "Grandchild", kind: "sub", parentId: "First", session: null });
+		agents.setActivity("Grandchild", "Grandchild task");
+		agents.register({ id: "Last", displayName: "Last", kind: "sub", parentId: "Parent", session: null });
+		agents.setActivity("Last", "Last task");
+		const hub = makeHub(agents);
+
+		try {
+			hub.handleInput("t");
+			const parentDetails = renderedRosterEntry(hub, "Parent", 120).split("\n").slice(1);
+			const firstDetails = renderedRosterEntry(hub, "First", 120).split("\n").slice(1);
+			const grandchildDetails = renderedRosterEntry(hub, "Grandchild", 120).split("\n").slice(1);
+			const lastDetails = renderedRosterEntry(hub, "Last", 120).split("\n").slice(1);
+			expect(parentDetails).toHaveLength(2);
+			expect(firstDetails).toHaveLength(2);
+			expect(grandchildDetails).toHaveLength(2);
+			expect(lastDetails).toHaveLength(2);
+			expect(parentDetails.every(line => line.startsWith("  │ "))).toBe(true);
+			expect(firstDetails.every(line => line.startsWith("  │   │ "))).toBe(true);
+			expect(grandchildDetails.every(line => line.startsWith("  │         "))).toBe(true);
+			expect(lastDetails.every(line => line.startsWith("        ") && !line.includes("│"))).toBe(true);
+			const metadataOrigins = [parentDetails, firstDetails, grandchildDetails, lastDetails].map(lines =>
+				lines[1]!.indexOf("usage"),
+			);
+			expect(new Set(metadataOrigins)).toEqual(new Set([metadataOrigins[0]]));
+			expect(metadataOrigins[0]).toBeGreaterThan(0);
 		} finally {
 			hub.dispose();
 		}
@@ -1017,6 +1073,71 @@ describe("Agent hub row ordering", () => {
 
 			hub.handleInput("\x1b");
 			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Roster");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("renders and operates the unified Activity view with transcript deep-links", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		const activity = new AgentActivityIndex();
+		activity.setLive("Worker", [
+			{
+				id: "tool-error",
+				agentId: "Worker",
+				timestamp: 1_000,
+				kind: "tool",
+				title: "read",
+				summary: "src/auth.ts",
+				status: "error",
+				toolName: "read",
+				source: "live",
+			},
+			{
+				id: "response",
+				agentId: "Worker",
+				timestamp: 2_000,
+				kind: "response",
+				title: "Response",
+				summary: "Reviewed the authentication boundary",
+				status: "success",
+				entryId: "entry-42",
+				source: "transcript",
+			},
+		] satisfies AgentActivityRow[]);
+		const hub = makeHub(agents, { activity, initialSection: "activity" });
+
+		try {
+			const initial = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(initial).toContain("2 Activity");
+			expect(initial).toContain("src/auth.ts");
+			expect(initial).toContain("Reviewed the authentication boundary");
+
+			hub.handleInput("f");
+			const errors = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(errors).toContain("errors");
+			expect(errors).toContain("src/auth.ts");
+			expect(errors).not.toContain("Reviewed the authentication boundary");
+
+			hub.handleInput("f");
+			hub.handleInput("/");
+			for (const key of "authentication") hub.handleInput(key);
+			hub.handleInput("\r");
+			const searched = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(searched).toContain("responses");
+			expect(searched).toContain("authentication");
+			expect(searched).not.toContain("src/auth.ts");
+
+			const open = vi.spyOn(hub, "openChat");
+			hub.handleInput("\r");
+			expect(open).toHaveBeenCalledWith("Worker", "entry-42");
+			hub.handleInput(" ");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("paused");
+			hub.handleInput("1");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Roster");
 		} finally {
 			hub.dispose();
 		}

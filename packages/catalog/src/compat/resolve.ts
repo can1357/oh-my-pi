@@ -248,8 +248,8 @@ function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	) {
 		return true;
 	}
-	if (/^10\./.test(hostname)) return true;
-	if (/^192\.168\./.test(hostname)) return true;
+	if (hostname.startsWith("10.")) return true;
+	if (hostname.startsWith("192.168.")) return true;
 	if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) return true;
 	if (hostname.endsWith(".local")) return true;
 	return false;
@@ -436,9 +436,9 @@ function detectOpenAICompat(
 			: facts.is("mimo") && hostMatchesUrl(baseUrl, "xiaomi")
 				? 300_000
 				: spec.reasoning &&
-						facts.is("kimi") &&
-						(facts.family("k3") || facts.family("k2.7-code")) &&
-						hostMatchesUrl(baseUrl, "moonshotNative")
+					  facts.is("kimi") &&
+					  (facts.family("k3") || facts.family("k2.7-code")) &&
+					  hostMatchesUrl(baseUrl, "moonshotNative")
 					? 300_000
 					: spec.reasoning && facts.is("deepseek") && hostMatchesUrl(baseUrl, "deepseekDirect")
 						? 300_000
@@ -846,7 +846,11 @@ function resolveAnthropicPolicy(
 		allowAnthropicHeaderOverrides: false,
 		supportsEagerToolInputStreaming: official,
 		supportsLongCacheRetention: official,
-		supportsMidConversationSystem: official && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsMidConversationSystem: official && !facts.family("sonnet") && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsTurnScopedSystem: false,
+		supportsMidConversationToolChanges: false,
+		supportsPerMessageEffort: false,
+		supportsThinkingBindingControls: false,
 		supportsForcedToolChoice: !requiresThinkingEnabled && !facts.family("fable", "mythos"),
 		supportsSamplingParams: !facts.anthropicAdaptiveGenAtLeast("4.7"),
 		requiresToolResultId: false,
@@ -1012,6 +1016,7 @@ interface RuleThinking {
 	requiresEffort?: boolean;
 	suppressWhenOff?: boolean;
 	supportsDisplay?: boolean;
+	prefixBinding?: boolean;
 }
 
 function readRuleThinking(axes: ResolvedAxes): RuleThinking {
@@ -1030,6 +1035,7 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 	if (typeof raw.requiresEffort === "boolean") out.requiresEffort = raw.requiresEffort;
 	if (typeof raw.suppressWhenOff === "boolean") out.suppressWhenOff = raw.suppressWhenOff;
 	if (typeof raw.supportsDisplay === "boolean") out.supportsDisplay = raw.supportsDisplay;
+	if (typeof raw.prefixBinding === "boolean") out.prefixBinding = raw.prefixBinding;
 	return out;
 }
 
@@ -1085,6 +1091,7 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
 	if (supportsDisplay) config.supportsDisplay = true;
+	if (rule.prefixBinding) config.prefixBinding = true;
 	const requiresEffort =
 		rule.requiresEffort ?? (impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
 	if (requiresEffort) config.requiresEffort = true;
@@ -1142,7 +1149,8 @@ function fillExplicitThinking<TApi extends Api>(
 		(rule.requiresEffort ??
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
 	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
-	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
+	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
+	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel && !needsPrefixBinding) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
@@ -1150,6 +1158,7 @@ function fillExplicitThinking<TApi extends Api>(
 	if (needsDisplay) filled.supportsDisplay = true;
 	if (needsDefaultLevel && rule.defaultLevel !== undefined) filled.defaultLevel = rule.defaultLevel;
 	if (needsRequiresEffort) filled.requiresEffort = true;
+	if (needsPrefixBinding) filled.prefixBinding = true;
 	return filled;
 }
 

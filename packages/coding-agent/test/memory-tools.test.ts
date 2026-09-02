@@ -554,6 +554,84 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(state.lastRetainedTurn).toBe(4);
 	});
 
+	it("does not retain the current session on dispose when auto-retain is disabled", async () => {
+		const entries = [{ type: "message", message: { role: "user", content: "private turn" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ autoRetain: false }), {
+			entries: () => entries,
+		});
+		const dbPath = state.memory.dbPath;
+		if (!dbPath) throw new Error("Expected a file-backed Mnemopi database");
+
+		await state.dispose();
+
+		const db = new Database(dbPath, { readonly: true });
+		const row = db
+			.prepare<{ count: number }, []>(`
+				SELECT COUNT(*) AS count
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+			`)
+			.get();
+		db.close();
+		expect(row?.count).toBe(0);
+	});
+
+	it("explicit force-retention stores the current session when auto-retain is disabled", async () => {
+		const entries = [{ type: "message", message: { role: "user", content: "explicitly forced turn" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ autoRetain: false }), {
+			entries: () => entries,
+		});
+
+		await state.forceRetainCurrentSession();
+
+		const row = state.memory.beam.db
+			.prepare<{ count: number }, []>(`
+				SELECT COUNT(*) AS count
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+			`)
+			.get();
+		expect(row?.count).toBe(1);
+	});
+	it("explicit consolidation stores the current session when auto-retain is disabled", async () => {
+		const entries = [{ type: "message", message: { role: "user", content: "explicitly consolidated turn" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ autoRetain: false }), {
+			entries: () => entries,
+		});
+
+		await state.consolidate({ sleep: false });
+
+		const row = state.memory.beam.db
+			.prepare<{ count: number }, []>(`
+				SELECT COUNT(*) AS count
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+			`)
+			.get();
+		expect(row?.count).toBe(1);
+	});
+
+	it("explicit enqueue retains the current session when auto-retain is disabled", async () => {
+		const entries = [{ type: "message", message: { role: "user", content: "explicitly retained turn" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ autoRetain: false }), {
+			entries: () => entries,
+		});
+		const retainMemory = state.getScopedRetainTarget().memory;
+		vi.spyOn(retainMemory, "sleepAllSessions");
+
+		await mnemopiBackend.enqueue(path.dirname(tempDbPath!), "/tmp", state.session);
+
+		const row = retainMemory.beam.db
+			.prepare<{ count: number }, []>(`
+				SELECT COUNT(*) AS count
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+			`)
+			.get();
+		expect(row?.count).toBe(1);
+		expect(retainMemory.sleepAllSessions).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not re-store retained turns during consolidation or after resume", async () => {
 		const entries = Array.from({ length: 6 }, (_, index) => ({
 			type: "message",

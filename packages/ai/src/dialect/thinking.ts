@@ -272,7 +272,7 @@ function trailingLineIndent(text: string, prior: number): number {
  * extend it into a non-fence line).
  */
 function findFenceCloseEnd(buffer: string, ticks: number, final: boolean): number {
-	for (let start = 0; start <= buffer.length; ) {
+	for (let start = 0; start <= buffer.length;) {
 		const nl = buffer.indexOf("\n", start);
 		const terminated = nl !== -1;
 		const line = buffer.slice(start, terminated ? nl : buffer.length).trim();

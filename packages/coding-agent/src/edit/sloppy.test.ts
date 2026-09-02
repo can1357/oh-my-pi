@@ -5,7 +5,9 @@ import {
 	applySloppy,
 	computeSloppySectionDiff,
 	executeSloppy,
+	extractInlineSloppyRegions,
 	SLOPPY_MARKERS,
+	sloppyGrammar,
 	splitSloppySections,
 	sloppyVariant as variant,
 } from "./sloppy";
@@ -100,10 +102,10 @@ describe("sloppy v8", () => {
 
 	test("keeps a mid-line ellipsis in REWRITE literal when the capture is multi-line", () => {
 		const content = "function f() {\n  a();\n  b();\n}\n";
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+		// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 		const input = operation("function f() {\n…\n}", "function f() {\n  return `${x}[… ]${y}`;\n}");
 
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+		// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 		expect(variant.apply(content, input, context)).toBe("function f() {\n  return `${x}[… ]${y}`;\n}\n");
 	});
 
@@ -180,13 +182,17 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("strips a diff-habit add marker from REWRITE lines", () => {
-		// Regression: ＋-prefixed REWRITE lines were written verbatim, leaving
-		// literal ＋ markers in the file.
+	test("inserts an all-＋ REWRITE without writing literal markers", () => {
+		// ＋-prefixed REWRITE lines are never written verbatim; an add-only
+		// REWRITE reads as the diff add-hunk habit and inserts after the MATCH.
 		const content = "start();\nmiddle();\nend();\n";
+		const notes: string[] = [];
 		const input = operation("middle();", "＋replacement();\n＋more();");
 
-		expect(variant.apply(content, input, context)).toBe("start();\nreplacement();\nmore();\nend();\n");
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"start();\nmiddle();\nreplacement();\nmore();\nend();\n",
+		);
+		expect(notes.join("\n")).toMatch(/inserted after the kept MATCH/);
 	});
 	test("deletes a run of －-marked lines silently", () => {
 		const content = "first();\nold();\nolder();\nlast();\n";
@@ -216,6 +222,81 @@ describe("sloppy v8", () => {
 		const input = operation("beta();", "－beta();\n＋gamma();");
 
 		expect(variant.apply(content, input, context)).toBe("alpha();\ngamma();\n");
+	});
+	test("matches ＋ insertion anchors leniently when only whitespace drifted", () => {
+		// Regression: blank-line miscounts in MATCH anchors hard-failed marker
+		// ops with a byte-for-byte error instead of using normalized matching.
+		const content = "over\ntime.\n\n\n### Builtins\n#### Bash\n";
+		const notes: string[] = [];
+		const input = inlineOperation("time.\n\n\n＋#### Intent injection\n\n\n### Builtins");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"over\ntime.\n#### Intent injection\n\n\n### Builtins\n#### Bash\n",
+		);
+		expect(notes.join("\n")).toMatch(/whitespace only/);
+	});
+
+	test("keeps the next anchor's indentation when a lenient ＋ insert lands above it", () => {
+		// The insert splices at line start; the tab stays on the anchor line
+		// instead of migrating onto the inserted text.
+		const content = "fn main() {\n\tsetup();\n\trun();\n}\n";
+		const notes: string[] = [];
+		const input = inlineOperation("setup();\n＋probe();\nrun();");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"fn main() {\n\tsetup();\nprobe();\n\trun();\n}\n",
+		);
+		expect(notes.join("\n")).toMatch(/whitespace only/);
+	});
+
+	test("names unmarked MATCH lines that exist nowhere and suggests ＋", () => {
+		// Regression: a new heading typed without ＋ among real anchors produced
+		// only "copy its exact indentation", steering retries at the wrong cause.
+		const content = "alpha();\nbeta();\n";
+		const input = inlineOperation("alpha();\n#### Intent injection\n＋one();\nbeta();");
+
+		expect(() => variant.apply(content, input, context)).toThrow(
+			/Unmarked MATCH lines must already exist in the file; "#### Intent injection" does not\. Copy real lines from the file, and mark new lines to insert with ＋\./,
+		);
+	});
+
+	test("treats an all-＋ REWRITE as insertion after the kept MATCH", () => {
+		// Regression: stripping the markers as diff noise replaced the MATCH,
+		// silently deleting the matched text.
+		const content = "over\ntime.\n\n### Builtins\n";
+		const notes: string[] = [];
+		const input = operation("over\ntime.", "＋#### Intent injection\n\n＋body text");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"over\ntime.\n#### Intent injection\n\nbody text\n\n### Builtins\n",
+		);
+		expect(notes.join("\n")).toMatch(/inserted after the kept MATCH/);
+	});
+
+	test("tells a context-only operation missing <SM:PUT> to delete itself", () => {
+		const content = "const a = 1;\nkeep();\n";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 2;\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT>\n<SM:FIND>\nkeep();\n</SM:FIND>\n</SM:EDIT>";
+
+		expect(() => applySloppy(content, input, { path: "i.ts", notes: [] })).toThrow(
+			/Operation 2 has <SM:FIND> but no <SM:PUT>\.\nIts lines already exist in the file unchanged/,
+		);
+	});
+
+	test("keeps unlocated errors free of a misleading file-head preview", () => {
+		// Regression: errors with no located region were suffixed with the first
+		// lines of the file under a "closest match (no re-read needed)" banner.
+		const content = "x();\n".repeat(300);
+		let message = "";
+
+		try {
+			variant.apply(content, operation("x();", "y();"), context);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain("pattern is too broad");
+		expect(message).not.toContain("no re-read needed");
 	});
 
 	test("drops apply-patch end-of-edit sentinels from the payload", () => {
@@ -345,16 +426,18 @@ describe("sloppy v8", () => {
 		const content = "  if (globalThis.crypto.getRandomValues) {\n    use();\n  }\n";
 		const payload = [
 			"*** Begin Patch",
-			"[uuid.ts]",
-			M.open,
-			`  if (globalThis.crypto.⟪getRandomValues│randomValues⟫) {`,
+			'<SM:EDIT path="uuid.ts">',
+			"<SM:FIND>",
+			"  if (globalThis.crypto.⟪getRandomValues│randomValues⟫) {",
+			"</SM:FIND>",
 			"***",
 			" End Patch",
 			" stray commentary the model appended",
 			"*** Begin Patch",
-			"[uuid.ts]",
-			M.open,
-			`  if (globalThis.crypto.⟪getRandomValues│randomValues⟫) {`,
+			'<SM:EDIT path="uuid.ts">',
+			"<SM:FIND>",
+			"  if (globalThis.crypto.⟪getRandomValues│randomValues⟫) {",
+			"</SM:FIND>",
 			"*** End Patch",
 		].join("\n");
 		const sections = splitSloppySections(payload);
@@ -396,9 +479,10 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("returns the complete atomic payload when a marker-less operation needs a rewrite", () => {
+	test("returns the complete atomic payload when an operation lacks <SM:PUT>", () => {
 		const content = "const a = 1;\nkeep();\n";
-		const input = "§\nconst a = ⟪1│2⟫;\n§\nkeep();";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 2;\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT>\n<SM:FIND>\nkeep();\n</SM:FIND>\n</SM:EDIT>";
 		let message = "";
 
 		try {
@@ -407,10 +491,10 @@ describe("sloppy v8", () => {
 			message = error instanceof Error ? error.message : String(error);
 		}
 
-		expect(message).toContain("Operation 2 needs ».");
+		expect(message).toContain("Operation 2 has <SM:FIND> but no <SM:PUT>.");
 		expect(message.match(/Copy-ready corrected payload/g)).toHaveLength(1);
 		expect(message).toContain(
-			"Copy-ready corrected payload (fill in the new text):\n§i.ts\nconst a = ⟪1│2⟫;\n§\nkeep();\n»\n<new text>",
+			'Copy-ready corrected payload (fill in the new text):\n<SM:EDIT path="i.ts">\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 2;\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT>\n<SM:FIND>\nkeep();\n</SM:FIND>\n<SM:PUT>\n{new text}\n</SM:PUT>\n</SM:EDIT>',
 		);
 	});
 
@@ -419,7 +503,7 @@ describe("sloppy v8", () => {
 		const content = "fn() {\n  run(a);\n\n  run(a);\n}\n";
 		const notes: string[] = [];
 
-		expect(applySloppy(content, "§\n  run(a);", { path: "d.ts", notes })).toBe("fn() {\n  run(a);\n}\n");
+		expect(applySloppy(content, "<SM:EDIT>\n  run(a);", { path: "d.ts", notes })).toBe("fn() {\n  run(a);\n}\n");
 		expect(notes.join("\n")).toMatch(/duplicate copy was collapsed/);
 	});
 
@@ -428,7 +512,7 @@ describe("sloppy v8", () => {
 		// `++`; partial-run candidates are invalid and the garble either resolves
 		// fully or fails closed.
 		const content = "for (i = 0; i < 9; i++) {\n";
-		const out = applySloppy(content, "§\nfor (i = 0; i < 9; i⟪+│-⟫) {", { path: "x.ts", notes: [] });
+		const out = applySloppy(content, "<SM:EDIT>\nfor (i = 0; i < 9; i⟪+│-⟫) {", { path: "x.ts", notes: [] });
 
 		expect(out).toBe("for (i = 0; i < 9; i--) {\n");
 	});
@@ -438,7 +522,7 @@ describe("sloppy v8", () => {
 		// file; that is dedup, not ambiguity.
 		const content = "open() {\n  work(unit);\n\n  work(unit);\n}\n";
 
-		expect(applySloppy(content, "§\n⟪  work(unit);\n│⟫", { path: "d.ts", notes: [] })).toBe(
+		expect(applySloppy(content, "<SM:EDIT>\n⟪  work(unit);\n│⟫", { path: "d.ts", notes: [] })).toBe(
 			"open() {\n  work(unit);\n}\n",
 		);
 	});
@@ -447,9 +531,9 @@ describe("sloppy v8", () => {
 		const content = "    if (!entryRow)\n      throw invalid();\n";
 		const notes: string[] = [];
 
-		expect(applySloppy(content, "§\n    if (entryRow)\n      throw invalid();", { path: "i.ts", notes })).toBe(
-			"    if (entryRow)\n      throw invalid();\n",
-		);
+		expect(
+			applySloppy(content, "<SM:EDIT>\n    if (entryRow)\n      throw invalid();", { path: "i.ts", notes }),
+		).toBe("    if (entryRow)\n      throw invalid();\n");
 		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
 	});
 
@@ -464,7 +548,7 @@ describe("sloppy v8", () => {
 			"",
 		].join("\n");
 		const notes: string[] = [];
-		const input = '§\nimport type { ToolActivitySummary, ToolRenderer } from "./renderers";';
+		const input = '<SM:EDIT>\nimport type { ToolActivitySummary, ToolRenderer } from "./renderers";';
 
 		expect(applySloppy(content, input, { path: "xdev.ts", notes })).toBe(
 			[
@@ -481,15 +565,15 @@ describe("sloppy v8", () => {
 	test("keeps the fail-closed error when no block resembles the stated text", () => {
 		const content = "const a = 1;\nkeep();\n";
 
-		expect(() => applySloppy(content, "§\nawait fetchRemoteConfig(session);", { path: "i.ts", notes: [] })).toThrow(
-			/needs »/,
-		);
+		expect(() =>
+			applySloppy(content, "<SM:EDIT>\nawait fetchRemoteConfig(session);", { path: "i.ts", notes: [] }),
+		).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
 	test("collapses a duplicated block stated once as mono desired text", () => {
 		const content = "run(alpha);\nrun(alpha);\ndone();\n";
 
-		expect(applySloppy(content, "§\nrun(alpha);\ndone();", { path: "m.ts" })).toBe("run(alpha);\ndone();\n");
+		expect(applySloppy(content, "<SM:EDIT>\nrun(alpha);\ndone();", { path: "m.ts" })).toBe("run(alpha);\ndone();\n");
 	});
 
 	test("recovers a unified-diff-shaped rewrite-less op as inline changes", () => {
@@ -585,14 +669,29 @@ describe("sloppy v8", () => {
 		expect(notes.join("\n")).toMatch(/duplicate adjacent code/);
 	});
 
-	test("reads § section openers natively, bare § continuing in the same file", () => {
+	test("reads <SM:EDIT> openers natively, a bare <SM:EDIT> continuing in the same file", () => {
 		const payload = [
-			"§src/config.ts",
-			`const timeout = ⟪1000│5000⟫;`,
-			"§",
-			`const retries = ⟪3│5⟫;`,
-			"§*src/catalog.ts",
-			`logger.⟪debug│trace⟫(`,
+			'<SM:EDIT path="src/config.ts">',
+			"<SM:FIND>",
+			"const timeout = 1000;",
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"const timeout = 5000;",
+			"</SM:PUT>",
+			"<SM:EDIT>",
+			"<SM:FIND>",
+			"const retries = 3;",
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"const retries = 5;",
+			"</SM:PUT>",
+			'<SM:EDIT path="src/catalog.ts" all>',
+			"<SM:FIND>",
+			"logger.debug(",
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"logger.trace(",
+			"</SM:PUT>",
 		].join("\n");
 		const sections = splitSloppySections(payload);
 
@@ -602,16 +701,15 @@ describe("sloppy v8", () => {
 		expect(sections[1].body.startsWith(`${M.open}*`)).toBe(true);
 	});
 
-	test("voices sloppy errors with § openers and keeps the rewrite separator", () => {
+	test("voices errors in the XML surface with the section path injected", () => {
 		let message = "";
 		try {
-			applySloppy("const x = 1;\n", "§\nconst y = 2;\nconst y = 3;", context);
+			applySloppy("const x = 1;\n", "<SM:EDIT>\nconst y = 2;\nconst y = 3;", context);
 		} catch (error) {
 			message = (error as Error).message;
 		}
-		expect(message).toContain("§");
+		expect(message).toContain(`<SM:EDIT path="${context.path}">`);
 		expect(message).not.toContain(M.open);
-		expect(message).toContain(M.put);
 	});
 
 	test("splits sections from a payload wrapped in a patch envelope", () => {
@@ -619,20 +717,88 @@ describe("sloppy v8", () => {
 		// must strip them before the first-line header check.
 		const payload = [
 			"*** Begin Patch",
-			"[src/a.ts]",
-			M.open,
+			'<SM:EDIT path="src/a.ts">',
+			"<SM:FIND>",
 			"const x = 1;",
-			M.put,
+			"</SM:FIND>",
+			"<SM:PUT>",
 			"const x = 2;",
+			"</SM:PUT>",
 			"*** End Patch",
 		].join("\n");
 
 		expect(splitSloppySections(payload).map(section => section.path)).toEqual(["src/a.ts"]);
 	});
 
-	test("trims whitespace inside a section header path", () => {
-		const sections = splitSloppySections("[ index.ts ]\n{M.open}".replace("{M.open}", M.open));
+	test("trims whitespace inside the path attribute", () => {
+		const sections = splitSloppySections('<SM:EDIT path=" index.ts ">\n<SM:FIND>\nx()\n</SM:FIND>');
 		expect(sections.map(section => section.path)).toEqual(["index.ts"]);
+	});
+
+	test("extracts an inline payload region without swallowing surrounding prose", () => {
+		const payload = [
+			'<SM:EDIT path="src/a.ts">',
+			"<SM:FIND>",
+			"const x = 1;",
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"const x = 2;",
+			"</SM:PUT>",
+			"</SM:EDIT>",
+		].join("\n");
+		const text = `I'll fix the constant now.\n\n${payload}\n\nThat updates the default.`;
+
+		const regions = extractInlineSloppyRegions(text);
+		expect(regions.length).toBe(1);
+		expect(regions[0].payload).toBe(payload);
+		const excised = text.slice(0, regions[0].start) + text.slice(regions[0].end);
+		expect(excised).toBe("I'll fix the constant now.\n\n\nThat updates the default.");
+	});
+
+	test("ends an inline region at trailing prose even without a </SM:EDIT> close", () => {
+		const payload = [
+			'<SM:EDIT path="src/a.ts">',
+			"<SM:FIND>",
+			"old();",
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"new();",
+			"</SM:PUT>",
+		].join("\n");
+		const regions = extractInlineSloppyRegions(`${payload}\nDone — the call site now uses new().`);
+
+		expect(regions.length).toBe(1);
+		expect(regions[0].payload).toBe(payload);
+	});
+
+	test("extracts disjoint inline regions with narration between them", () => {
+		const first = '<SM:EDIT path="a.ts">\n<SM:FIND>\none();\n</SM:FIND>\n<SM:PUT>\ntwo();\n</SM:PUT>\n</SM:EDIT>';
+		const second = '<SM:EDIT path="b.ts">\n<SM:FIND>\nred();\n</SM:FIND>\n<SM:PUT>\nblue();\n</SM:PUT>';
+		const regions = extractInlineSloppyRegions(`${first}\nNow the second file:\n${second}`);
+
+		expect(regions.map(region => region.payload)).toEqual([first, second]);
+	});
+
+	test("ignores a payload quoted inside a markdown code fence", () => {
+		const text = [
+			"Here is the payload I would send:",
+			"```text",
+			'<SM:EDIT path="src/a.ts">',
+			"<SM:FIND>",
+			"const x = 1;",
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"const x = 2;",
+			"</SM:PUT>",
+			"```",
+		].join("\n");
+
+		expect(extractInlineSloppyRegions(text)).toEqual([]);
+	});
+
+	test("drops an inline region that compiles to no sections", () => {
+		expect(extractInlineSloppyRegions('<SM:EDIT path="src/a.ts">\n</SM:EDIT>\nprose')).toEqual([]);
+		expect(extractInlineSloppyRegions("<SM:EDIT>\n<SM:FIND>\nx()\n</SM:FIND>\n<SM:PUT>\ny()\n</SM:PUT>")).toEqual([]);
 	});
 
 	test("recovers selections trailing their own retyped line with elided lines between", () => {
@@ -835,7 +1001,7 @@ describe("sloppy v8", () => {
 		}
 
 		expect(message).toMatch(
-			/reads as the » separator, leaving REWRITE empty[\s\S]*«\*\nenwlineIndex\n»\n<final text>/,
+			/reads as the <SM:PUT> separator, leaving <SM:PUT> empty[\s\S]*<SM:EDIT all>\n<SM:FIND>\nenwlineIndex\n<\/SM:FIND>\n<SM:PUT>\n\{final text\}\n<\/SM:PUT>\n<\/SM:EDIT>/,
 		);
 		expect(message).not.toContain(`enwlineIndex\n${M.put}1`);
 	});
@@ -1031,14 +1197,14 @@ describe("sloppy v8", () => {
 		].join("\n");
 		const input = `${M.open}\n  const getContrastVsBlack = (colorName: string): string => {\n…`;
 
-		expect(() => variant.apply(content, input, context)).toThrow(/needs »/);
+		expect(() => variant.apply(content, input, context)).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
 	test("still rejects a pattern-only block no other operation re-emits", () => {
 		const content = "  const kept = 1;\n  const alpha = compute();\n  const beta = alpha + 1;\n";
 		const input = `${M.open}\n  const alpha = compute();\n  const beta = alpha + 1;`;
 
-		expect(() => variant.apply(content, input, context)).toThrow(/needs »/);
+		expect(() => variant.apply(content, input, context)).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
 	test("reports deletions in apply notes", () => {
@@ -1076,7 +1242,7 @@ describe("sloppy v8", () => {
 		const content = "const flag = a || b;\n";
 
 		expect(() => variant.apply(content, inlineOperation("const flag = ⟪a || b│a || b⟫;"), context)).toThrow(
-			/identical ⟪current│desired⟫ sides never change the file[\s\S]*do not drop the operation/,
+			/stated text equals the current text[\s\S]*do not drop the operation/,
 		);
 	});
 
@@ -1177,7 +1343,7 @@ describe("sloppy v8", () => {
 		const input = operation(pattern, "newA\n…\nnewC");
 
 		expect(() => variant.apply(content, input, context)).toThrow(
-			/has 3 selections, but REWRITE proves neither positional substitution nor whole-span replacement/,
+			/has 3 selections, but <SM:PUT> proves neither positional substitution nor whole-span replacement/,
 		);
 	});
 
@@ -1198,7 +1364,7 @@ describe("sloppy v8", () => {
 		const content = "use std::time::Duration;\n\nfn combined() {}\n";
 		const input = operation("use std::time::Duration;", "use std::{sync::Arc, time::Duration};\n…\nfn combined() {}");
 
-		expect(() => variant.apply(content, input, context)).toThrow(/whole-line … with no MATCH gap to re-emit/);
+		expect(() => variant.apply(content, input, context)).toThrow(/whole-line … with no <SM:FIND> gap to re-emit/);
 	});
 
 	test("fails closed when a multi-selection rewrite proves neither interpretation", () => {
@@ -1310,7 +1476,7 @@ describe("sloppy v8", () => {
 
 		expect(() => variant.apply(content, input, context)).toThrow(
 			new RegExp(
-				String.raw`ambiguous: 2 ordered tuples match[\s\S]*retry every match:\n${esc(M.open)}\*[\s\S]*Add context that only the intended match has`,
+				String.raw`ambiguous: 2 ordered tuples match[\s\S]*retry every match:\n<SM:EDIT all>[\s\S]*Add context that only the intended match has`,
 			),
 		);
 	});
@@ -1381,7 +1547,7 @@ describe("sloppy v8", () => {
 		const content = "const value = presentValue;\n";
 		const input = `${M.open}*\n= ⟪missingValue⟫;\n${M.put}\nnextValue`;
 
-		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`${esc(M.open)}\\* found 0 matches`));
+		expect(() => variant.apply(content, input, context)).toThrow(/<SM:EDIT all> found 0 matches/);
 	});
 
 	test("preserves skipped rows for corresponding non-consecutive rewrites", () => {
@@ -1494,13 +1660,61 @@ describe("sloppy v8", () => {
 		);
 	});
 
+	test("labels a fuzzy no-match anchor as non-copyable instead of guessing a corrected operation", () => {
+		const content = "single: 1;\nreal: 2;\n";
+		const input = `${M.open}\nreal: ⟪2│TWO⟫;\n${M.open}\nnope: ⟪nothing│X⟫;`;
+
+		let message = "";
+		try {
+			variant.apply(content, input, { path: "bt.txt" });
+		} catch (error) {
+			message = (error as Error).message;
+		}
+
+		// The unmatched op is named and grounded in current file content.
+		expect(message).toMatch(/Operation 2 did not match bt\.txt\. Failed fragment: "nope:" has 0 occurrences\./);
+		// No fabricated retry: the guess `ngle:` (a sliver of `single:`) never appears,
+		// and the block is not mislabeled copy-ready when it would drop the sibling op.
+		expect(message).not.toContain(`ngle:${M.selectOpen}`);
+		expect(message).not.toContain("Copy-ready corrected operation:");
+		expect(message).toContain("No copy-ready correction");
+		expect(message).toContain(
+			"No operations were applied — ops apply atomically; re-send the full corrected payload.",
+		);
+	});
+
+	test("does not label a partial retry copy-ready when an atomic payload has sibling operations", () => {
+		const content = [
+			"real: 2;",
+			"function load() {",
+			"  const result = fetchCurrent();",
+			"  return result;",
+			"}",
+			"",
+		].join("\n");
+		const input = `${M.open}\nreal: ⟪2│TWO⟫;\n${M.open}\nfunction load() {…\n⟪const result = fetchLegacy();│const result = fetchCurrent();⟫…\nreturn result;\n}`;
+
+		let message = "";
+		try {
+			variant.apply(content, input, { path: "bt.txt" });
+		} catch (error) {
+			message = (error as Error).message;
+		}
+
+		expect(message).not.toContain("Copy-ready corrected operation:");
+		expect(message).toContain("retrying this operation alone would drop sibling operations");
+		expect(message).toContain(
+			"No operations were applied — ops apply atomically; re-send the full corrected payload.",
+		);
+	});
+
 	test("teaches insert intent when MATCH is text the author meant to add", () => {
 		const content = ["switch (event.type) {", "  case 'message':", "    handleMessage(event);", "}", ""].join("\n");
 		const input = operation("  case 'end_turn':", "  case 'end_turn':\n    finishTurn();");
 
 		expect(() => variant.apply(content, input, context)).toThrow(
 			new RegExp(
-				String.raw`If you are ADDING this text: match the existing neighbor line it belongs next to, and put the new text in the REWRITE —[\s\S]*${esc(M.open)}\n⟪⟫ {2}case 'message':\n${esc(M.put)}\n {2}case 'end_turn':\n {4}finishTurn\(\);`,
+				String.raw`If you are ADDING this text: <SM:FIND> the existing neighbor line it belongs next to, and restate it with the new text in <SM:PUT> —[\s\S]*<SM:EDIT>\n<SM:FIND>\n {2}case 'message':\n</SM:FIND>\n<SM:PUT>\n {2}case 'end_turn':\n {4}finishTurn\(\);\n {2}case 'message':\n</SM:PUT>\n</SM:EDIT>`,
 			),
 		);
 	});
@@ -1510,13 +1724,13 @@ describe("sloppy v8", () => {
 		const pattern = "const value = …⟪oldValue⟫…\nreport(value)";
 
 		expect(() => variant.apply(content, `${M.open}\nreport(value)`, context)).toThrow(
-			new RegExp(`needs ${esc(M.put)}`),
+			/has <SM:FIND> but no <SM:PUT>/,
 		);
 		expect(() => variant.apply(content, `${operation(pattern, "nextValue")}\n${M.open} end`, context)).toThrow(
-			new RegExp(`Operation 2 needs ${esc(M.put)}`),
+			/Operation 2 has <SM:FIND> but no <SM:PUT>/,
 		);
 		expect(() => variant.apply(content, operation(pattern, "⟪oldValue⟫"), context)).toThrow(
-			/has selection markers in REWRITE/,
+			/has selection markers in <SM:PUT>/,
 		);
 		expect(variant.apply(content, operation(pattern, "next…Value"), context)).toBe(
 			"const value = next…Value;\nreport(value);\n",
@@ -1555,7 +1769,7 @@ describe("sloppy v8", () => {
 		// The separator split retains the two authored leading spaces; the
 		// rewrite engine does not infer depth from the matched class member.
 		const content = "class T {\n  private _kittyProtocolActive = true;\n}\n";
-		const input = "§t.ts\n  private _kittyProtocolActive = true;\n  »  private _kittyProtocolActive = false;";
+		const input = `${M.open}\n  private _kittyProtocolActive = true;\n  »  private _kittyProtocolActive = false;`;
 
 		expect(applySloppy(content, input, { path: "t.ts", notes: [] })).toBe(
 			"class T {\n  private _kittyProtocolActive = false;\n}\n",
@@ -1667,7 +1881,7 @@ describe("sloppy v8", () => {
 			"      ui,",
 			"      (spinner) => theme.fg('accent', spinner),",
 			"      (text) => theme.fg('muted', text),",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+			// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 			"      `Summarizing branch... (${keyText('app.interrupt')} to cancel)`,",
 			"    );",
 			"",
@@ -1675,7 +1889,7 @@ describe("sloppy v8", () => {
 		const pattern = [
 			"super(\u2026",
 			"⟪'branchSummary'⟫,\u2026",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+			// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 			"`Summarizing branch... (${keyText('app.interrupt')} to cancel)`,",
 			");",
 		].join("\n");
@@ -2038,7 +2252,7 @@ describe("sloppy v8", () => {
 		const content = "const value = presentValue;\n";
 		const input = `${M.open}\nconst value = missingOld;\n${M.open}\nconst value = missingNew;`;
 
-		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`needs ${esc(M.put)}`));
+		expect(() => variant.apply(content, input, context)).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
 	test("applies an omitted-separator block over its unique same-shape window", () => {
@@ -2178,7 +2392,8 @@ describe("sloppy v8", () => {
 
 describe("splitSloppySections", () => {
 	test("splits a payload into per-file sections", () => {
-		const input = `[src/a.ts]\n${M.open}\nold\n${M.put}\nnew\n[src/b.ts]\n${M.open}\nfoo\n${M.put}\nbar`;
+		const input =
+			'<SM:EDIT path="src/a.ts">\n<SM:FIND>\nold\n</SM:FIND>\n<SM:PUT>\nnew\n</SM:PUT>\n<SM:EDIT path="src/b.ts">\n<SM:FIND>\nfoo\n</SM:FIND>\n<SM:PUT>\nbar\n</SM:PUT>';
 		const sections = splitSloppySections(input);
 		expect(sections.map(section => section.path)).toEqual(["src/a.ts", "src/b.ts"]);
 		expect(sections[0].body).toContain("old");
@@ -2187,7 +2402,8 @@ describe("splitSloppySections", () => {
 	});
 
 	test("merges repeated sections for the same file in order", () => {
-		const input = `[src/a.ts]\n${M.open}\none\n${M.put}\n1\n[src/b.ts]\n${M.open}\ntwo\n${M.put}\n2\n[src/a.ts]\n${M.open}\nthree\n${M.put}\n3`;
+		const input =
+			'<SM:EDIT path="src/a.ts">\n<SM:FIND>\none\n</SM:FIND>\n<SM:PUT>\n1\n</SM:PUT>\n<SM:EDIT path="src/b.ts">\n<SM:FIND>\ntwo\n</SM:FIND>\n<SM:PUT>\n2\n</SM:PUT>\n<SM:EDIT path="src/a.ts">\n<SM:FIND>\nthree\n</SM:FIND>\n<SM:PUT>\n3\n</SM:PUT>';
 		const sections = splitSloppySections(input);
 		expect(sections.map(section => section.path)).toEqual(["src/a.ts", "src/b.ts"]);
 		const first = sections[0].body;
@@ -2195,12 +2411,13 @@ describe("splitSloppySections", () => {
 		expect(first.indexOf("three")).toBeGreaterThan(first.indexOf("one"));
 	});
 
-	test("keeps header-looking content lines inside their operation", () => {
-		// `[content]` is followed by more MATCH text, not an opener — it is code, not a header.
-		const input = `[src/a.ts]\n${M.open}\nconst rows =\n[content]\n.flat();\n${M.put}\nconst rows = [content].flat();`;
+	test("keeps tag-looking content lines inside their operation", () => {
+		// A tag with other text on its line is content, not structure.
+		const input =
+			'<SM:EDIT path="src/a.ts">\n<SM:FIND>\nconst rows =\nrender("<SM:PUT>", value)\n.flat();\n</SM:FIND>\n<SM:PUT>\nconst rows = value.flat();\n</SM:PUT>';
 		const sections = splitSloppySections(input);
 		expect(sections).toHaveLength(1);
-		expect(sections[0].body).toContain("[content]");
+		expect(sections[0].body).toContain('render("<SM:PUT>", value)');
 	});
 
 	test("returns empty for a payload without a leading header", () => {
@@ -2354,5 +2571,91 @@ describe("overlapping operations", () => {
 		].join("\n");
 
 		expect(() => variant.apply(content, input, context)).toThrow(/target overlapping original spans/);
+	});
+});
+describe("xml surface", () => {
+	test("applies a <SM:FIND>/<SM:PUT> pair", () => {
+		const content = "const timeout = 1000;\nstart();\n";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nconst timeout = 1000;\n</SM:FIND>\n<SM:PUT>\nconst timeout = 5000;\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("const timeout = 5000;\nstart();\n");
+	});
+
+	test("an empty <SM:PUT></SM:PUT> deletes the match", () => {
+		const content = "keep();\ndebugLog(request);\nfinish();\n";
+		const input = "<SM:EDIT>\n<SM:FIND>\ndebugLog(request);\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("keep();\nfinish();\n");
+	});
+
+	test("a multi-line empty <SM:PUT> block also deletes", () => {
+		const content = "keep();\ndebugLog(request);\nfinish();\n";
+		const input = "<SM:EDIT>\n<SM:FIND>\ndebugLog(request);\n</SM:FIND>\n<SM:PUT>\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("keep();\nfinish();\n");
+	});
+
+	test("the all attribute rewrites every match", () => {
+		const content = "logger.debug(a);\nlogger.debug(b);\n";
+		const input =
+			"<SM:EDIT all>\n<SM:FIND>\nlogger.debug(\n</SM:FIND>\n<SM:PUT>\nlogger.trace(\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("logger.trace(a);\nlogger.trace(b);\n");
+	});
+
+	test("multiple pairs in one <SM:EDIT> block apply together", () => {
+		const content = "const a = 1;\nconst b = 2;\n";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 10;\n</SM:PUT>\n<SM:FIND>\nconst b = 2;\n</SM:FIND>\n<SM:PUT>\nconst b = 20;\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("const a = 10;\nconst b = 20;\n");
+	});
+
+	test("content between tags is raw, never entity-decoded", () => {
+		const content = "if (a < b && c) { run(); }\n";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nif (a < b && c) { run(); }\n</SM:FIND>\n<SM:PUT>\nif (a < b || c) { run(); }\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("if (a < b || c) { run(); }\n");
+	});
+
+	test("entity-escaped content is not decoded and fails to match", () => {
+		// Decoding &lt; would make this match and silently apply; it must not.
+		const content = "if (a < b) { run(); }\n";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nif (a &lt; b) { run(); }\n</SM:FIND>\n<SM:PUT>\nif (a > b) { run(); }\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(() => variant.apply(content, input, context)).toThrow(/did not match/);
+	});
+
+	test("gaps in <SM:FIND> re-emit through … in <SM:PUT>", () => {
+		const content = "function legacy(a) {\n  stage(a);\n  commit(a);\n}\n";
+		const input =
+			"<SM:EDIT>\n<SM:FIND>\nfunction legacy(a) {\n…\n}\n</SM:FIND>\n<SM:PUT>\nfunction modern(a) {\n…\n}\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(variant.apply(content, input, context)).toBe("function modern(a) {\n  stage(a);\n  commit(a);\n}\n");
+	});
+
+	test("a fenced xml payload is unwrapped", () => {
+		const content = "const x = 1;\n";
+		const input =
+			"```xml\n<SM:EDIT>\n<SM:FIND>\nconst x = 1;\n</SM:FIND>\n<SM:PUT>\nconst x = 2;\n</SM:PUT>\n</SM:EDIT>\n```";
+
+		expect(variant.apply(content, input, context)).toBe("const x = 2;\n");
+	});
+
+	test("a <SM:PUT> with no <SM:FIND> reads as stated desired text", () => {
+		const content = "    if (!entryRow)\n      throw invalid();\n";
+		const notes: string[] = [];
+		const input = "<SM:EDIT>\n<SM:PUT>\n    if (entryRow)\n      throw invalid();\n</SM:PUT>\n</SM:EDIT>";
+
+		expect(applySloppy(content, input, { path: "i.ts", notes })).toBe("    if (entryRow)\n      throw invalid();\n");
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+	});
+
+	test("sloppy grammar does not use regex lookarounds unsupported by constrained decoding engines", () => {
+		expect(sloppyGrammar).not.toMatch(/\(\?[!=]|\(\?<[!=]/);
+		expect(sloppyGrammar).toContain("TEXT: /[^\\n]+/");
 	});
 });

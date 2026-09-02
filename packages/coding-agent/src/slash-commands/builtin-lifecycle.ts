@@ -561,7 +561,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (command, runtime) => {
 			const title = command.args.trim();
 			if (!title) {
-				runtime.ctx.showError("Usage: /rename <title>");
+				runtime.ctx.showStatus("Usage: /rename <title>");
 				runtime.ctx.editor.setText("");
 				return;
 			}

@@ -2159,7 +2159,7 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(keyId, () => {
 				const ctx = runner.createCommandContext();
 				try {
-					shortcut.handler(ctx);
+					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {
 					runner.emitError({
 						extensionPath: shortcut.extensionPath,
