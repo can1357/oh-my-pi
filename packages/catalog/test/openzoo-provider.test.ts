@@ -3,7 +3,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import type { ProviderCatalogEntry } from "@oh-my-pi/pi-catalog/provider-models/descriptor-types";
 import {
@@ -103,13 +103,13 @@ function stubFetch(seen: { urls: string[]; authorization: (string | null)[] }): 
 }
 
 describe("openzoo built-in provider", () => {
-	test("registers a keyless, dynamic-authoritative runtime descriptor defaulting to the router", () => {
+	test("registers a keyless, dynamic-authoritative runtime descriptor defaulting to a real catalog id", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "openzoo");
 		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("auto");
+		expect(descriptor?.defaultModel).toBe("claude-sonnet-4.5");
 		expect(descriptor?.allowUnauthenticated).toBe(true);
 		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.openzoo).toBe("auto");
+		expect(DEFAULT_MODEL_PER_PROVIDER.openzoo).toBe("claude-sonnet-4.5");
 		expect(descriptor?.createModelManagerOptions({}).providerId).toBe("openzoo");
 	});
 
@@ -118,7 +118,7 @@ describe("openzoo built-in provider", () => {
 		expect(entry).toBeDefined();
 		expect(entry?.catalogDiscovery).toBeUndefined();
 		expect(MODELS_DEV_PROVIDER_DESCRIPTORS.some(d => d.providerId === "openzoo")).toBe(false);
-		expect(getBundledModels("openzoo" as Parameters<typeof getBundledModels>[0])).toEqual([]);
+		expect(getBundledProviders()).not.toContain("openzoo");
 	});
 
 	test("counts as authenticated without any env var; OPENZOO_API_KEY still wins", () => {
@@ -165,10 +165,10 @@ describe("openzoo built-in provider", () => {
 		expect(seen.urls).toEqual(["http://localhost:8402/v1/models"]);
 		expect(seen.authorization).toEqual([null]);
 
-		// Router aliases collapse to `auto`; harness-compat twins are dropped.
+		// Router-alias rows (a stale gateway may still publish them) and
+		// harness-compat twins are both dropped: only real catalog ids surface.
 		expect((models ?? []).map(model => model.id)).toEqual([
 			"anthropic/claude-sonnet-4",
-			"auto",
 			"example-lab/not-in-any-catalog",
 		]);
 
@@ -199,20 +199,17 @@ describe("openzoo built-in provider", () => {
 		expect(unknown?.reasoning).toBe(false);
 		expect(unknown?.input).toEqual(["text"]);
 
-		const auto = models?.find(model => model.id === "auto");
-		expect(auto?.name).toBe("Auto");
-		expect(auto?.cost.input).toBeCloseTo(0.1, 9);
-		expect(auto?.cost.output).toBeCloseTo(0.2, 9);
-		expect(auto?.cost.cacheRead).toBe(0);
-		expect(auto?.cost.cacheWrite).toBe(0);
-		expect(auto?.contextWindow).toBe(32_768);
-		expect(auto?.maxTokens).toBeNull();
+		// Every router-alias spelling is gone, not renamed.
+		expect(models?.some(model => ["auto", "openzoo/auto", "openzoo-auto"].includes(model.id))).toBe(false);
 	});
 
-	test("sends the bearer and honours OPENZOO_BASE_URL when configured", async () => {
-		Bun.env.OPENZOO_BASE_URL = "https://tunnel.example/v1";
+	test("sends the bearer and honours a configured base URL", async () => {
 		const seen = { urls: [] as string[], authorization: [] as (string | null)[] };
-		const options = openzooModelManagerOptions({ apiKey: "oz_tunnel-bearer", fetch: stubFetch(seen) });
+		const options = openzooModelManagerOptions({
+			apiKey: "oz_tunnel-bearer",
+			baseUrl: "https://tunnel.example/v1",
+			fetch: stubFetch(seen),
+		});
 		const models = await options.fetchDynamicModels?.();
 		expect(seen.urls).toEqual(["https://tunnel.example/v1/models"]);
 		expect(seen.authorization).toEqual(["Bearer oz_tunnel-bearer"]);

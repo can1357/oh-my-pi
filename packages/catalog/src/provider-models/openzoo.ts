@@ -19,12 +19,12 @@ import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./
 export const OPENZOO_DEFAULT_BASE_URL = "http://localhost:8402/v1";
 
 /**
- * The router model. The proxy publishes it as `openzoo/auto` (plus the
- * `openzoo-auto` / `auto` aliases) and accepts any of them on the wire; OMP
- * exposes the bare id so the selector reads `openzoo/auto` rather than
- * `openzoo/openzoo/auto`.
+ * Router aliases the proxy USED to publish. As of openzoo 0.50.84 the catalog
+ * excludes them (routing lives on the backend; `lib/models.js#augmentModelList`
+ * upstream asserts `openzoo/auto` is missing), but a stale or hosted gateway
+ * may still list them — so discovery drops any row wearing one of these ids
+ * rather than surfacing a model the published contract says does not exist.
  */
-export const OPENZOO_AUTO_MODEL_ID = "auto";
 const OPENZOO_AUTO_ALIASES: ReadonlySet<string> = new Set(["openzoo/auto", "openzoo-auto", "auto"]);
 
 export interface OpenzooModelManagerConfig {
@@ -86,24 +86,6 @@ function toDisplayName(value: unknown, fallback: string): string {
 	return trimmed.length > 0 ? trimmed : fallback;
 }
 
-function hasPricing(cost: TokenCost): boolean {
-	return cost.input > 0 || cost.output > 0;
-}
-
-function mapOpenzooAutoRow(
-	entry: OpenAICompatibleModelRecord,
-	defaults: ModelSpec<"openai-completions">,
-): ModelSpec<"openai-completions"> {
-	return {
-		...defaults,
-		id: OPENZOO_AUTO_MODEL_ID,
-		name: "Auto",
-		cost: mapOpenzooCost(entry.pricing),
-		contextWindow: toPositiveNumber(entry.max_model_len, null),
-		maxTokens: toPositiveNumber(entry.max_output_tokens, null),
-	};
-}
-
 /**
  * Map one proxy row. Limits come from the row where it carries the model's
  * real numbers, and from the bundled upstream reference (matched by the
@@ -120,7 +102,7 @@ export function mapOpenzooModel(
 	references: ModelReferenceIndex,
 ): ModelSpec<"openai-completions"> | null {
 	if (isOpenzooAutoAlias(defaults.id)) {
-		return mapOpenzooAutoRow(entry, defaults);
+		return null;
 	}
 	if (isOpenzooHarnessTwin(entry)) {
 		return null;
@@ -148,10 +130,9 @@ export function mapOpenzooModel(
 }
 
 /**
- * Per-fetch mapper. Discovery dedupes by mapped id (last row wins), and the
- * proxy publishes the router under several ids, so the router rows are
- * folded into one `auto` entry that keeps the first numbers seen where a
- * later alias row omits them.
+ * Per-fetch mapper. Stateless: router-alias rows are dropped in
+ * [`mapOpenzooModel`] (the published catalog no longer carries them), so
+ * there is nothing to fold across rows anymore.
  */
 export function createOpenzooModelMapper(
 	references: ModelReferenceIndex,
@@ -159,22 +140,7 @@ export function createOpenzooModelMapper(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
 ) => ModelSpec<"openai-completions"> | null {
-	let auto: ModelSpec<"openai-completions"> | undefined;
-	return (entry, defaults) => {
-		if (!isOpenzooAutoAlias(defaults.id)) {
-			return mapOpenzooModel(entry, defaults, references);
-		}
-		const row = mapOpenzooAutoRow(entry, defaults);
-		auto = auto
-			? {
-					...auto,
-					cost: hasPricing(auto.cost) ? auto.cost : row.cost,
-					contextWindow: auto.contextWindow ?? row.contextWindow,
-					maxTokens: auto.maxTokens ?? row.maxTokens,
-				}
-			: row;
-		return auto;
-	};
+	return (entry, defaults) => mapOpenzooModel(entry, defaults, references);
 }
 
 export function openzooModelManagerOptions(
