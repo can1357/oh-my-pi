@@ -517,7 +517,7 @@ export class ToolExecutionComponent extends Container {
 	// the terminal never triggers an unnecessary full-viewport replay.
 	#firstResultViewportRepaintShapePainted = false;
 	#partialResultShapePainted = false;
-	// Memoized opencode-layout collapse: the derived single-line slice keyed on
+	// Memoized opencode-layout collapse: the derived status-row slice keyed on
 	// the underlying container render (same source ref => identical rows =>
 	// reuse), mirroring UserMessageComponent's OSC-zone memo so this component
 	// stays reference-stable for the transcript's incremental assembly.
@@ -1146,21 +1146,29 @@ export class ToolExecutionComponent extends Container {
 		// live calls keep their native styling (spinner/accent) so activity
 		// stays legible, matching opencode's emphasized in-flight rows.
 		if (this.#result !== undefined && !this.#isPartial && !this.#result.isError) {
-			// Tabs are legal in filenames and custom status details; normalize
-			// them before measuring so the advertised single row truncates
-			// predictably instead of wrapping or leaving visual holes.
-			let plain = replaceTabs(stripVTControlCharacters(first)).trim();
-			if (this.#renderer !== undefined && !this.#tool?.renderCall && !this.#tool?.renderResult) {
-				plain = plain.replace(headerIconStrip(), "");
-			}
+			const headers = this.#multiFileBoxes.flatMap(box => {
+				if (!(box instanceof Box)) return [];
+				const header = box.render(width).find(line => /\S/.test(line));
+				return header === undefined ? [] : [header];
+			});
+			const sourceRows = headers.length > 1 ? headers : [first];
 			const glyph = theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search");
-			const row = ` ${glyph} ${plain}`;
-			this.#collapsedLines = [
-				theme.fg(
+			const collapsedRows = sourceRows.slice(0, 8).map(source => {
+				// Tabs are legal in filenames and custom status details; normalize
+				// them before measuring so the advertised single row truncates
+				// predictably instead of wrapping or leaving visual holes.
+				let plain = replaceTabs(stripVTControlCharacters(source)).trim();
+				if (this.#renderer !== undefined && !this.#tool?.renderCall && !this.#tool?.renderResult) {
+					plain = plain.replace(headerIconStrip(), "");
+				}
+				const row = ` ${glyph} ${plain}`;
+				return theme.fg(
 					"dim",
-					restoreHyperlinks(truncateToWidth(row.replace(OSC8_LINK_REGEX, "$2"), Math.max(1, width)), first),
-				),
-			];
+					restoreHyperlinks(truncateToWidth(row.replace(OSC8_LINK_REGEX, "$2"), Math.max(1, width)), source),
+				);
+			});
+			if (sourceRows.length > 8) collapsedRows.push(theme.fg("dim", ` ... +${sourceRows.length - 8} more`));
+			this.#collapsedLines = collapsedRows;
 		} else {
 			this.#collapsedLines = [
 				restoreHyperlinks(

@@ -69,6 +69,22 @@ describe("renderOutputBlock", () => {
 		expect(lines).toEqual(["  ask quest…"]);
 	});
 
+	it("removes tabs from flat header and section labels", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const lines = renderOutputBlock(
+			{
+				width: 80,
+				flat: true,
+				header: "Edit\tfile.ts",
+				headerMeta: "2\tchanges",
+				sections: [{ label: "Changed\tlines", lines: ["body"] }],
+			},
+			theme,
+		).map(line => stripVTControlCharacters(line));
+
+		expect(lines).toEqual(["Edit   file.ts · 2   changes", "  Changed   lines", "  body"]);
+	});
+
 	it("keeps the original positional contract of outputBlockContentWidth", () => {
 		// Pre-opencode signature: (width, contentPaddingLeft?, contentPaddingRight?).
 		// Precompiled JS extension callers rely on these positions.

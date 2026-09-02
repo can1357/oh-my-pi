@@ -2,7 +2,7 @@
  * Bordered output container with optional header and sections.
  */
 import type { Component } from "@oh-my-pi/pi-tui";
-import { ImageProtocol, padding, TERMINAL, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import { ImageProtocol, padding, replaceTabs, TERMINAL, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
 import { getSixelLineMask } from "../utils/sixel";
 import type { State } from "./types";
@@ -82,13 +82,17 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 	if (options.flat) {
 		const flatWidth = Math.max(0, options.width);
 		const lines: string[] = [];
-		const labelText = [options.header, options.headerMeta].filter(Boolean).join(theme.sep.dot);
+		const labelText = [options.header, options.headerMeta]
+			.filter((value): value is string => Boolean(value))
+			.map(replaceTabs)
+			.join(theme.sep.dot);
 		if (labelText) lines.push(truncateToWidth(labelText, flatWidth));
 		const indent = padding(2);
 		const flatContentWidth = Math.max(1, flatWidth - 2);
 		const flatSections = options.sections ?? [];
 		for (const section of flatSections) {
-			if (section.label) lines.push(`${indent}${theme.fg("dim", truncateToWidth(section.label, flatContentWidth))}`);
+			if (section.label)
+				lines.push(`${indent}${theme.fg("dim", truncateToWidth(replaceTabs(section.label), flatContentWidth))}`);
 			const sectionLines = section.lines.flatMap(l => l.split("\n"));
 			const sixelMask = TERMINAL.imageProtocol === ImageProtocol.Sixel ? getSixelLineMask(sectionLines) : undefined;
 			for (let i = 0; i < sectionLines.length; i++) {

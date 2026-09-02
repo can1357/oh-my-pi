@@ -94,6 +94,61 @@ describe("opencode layout", () => {
 		expect(expanded).toContain("DETAIL-2");
 	});
 
+	it("collapses a multi-file edit to one dim status row per file", () => {
+		settings.override("tui.hyperlinks", "always");
+		try {
+			const paths = ["alpha.ts", "beta.ts", "gamma.ts"].map(name => path.resolve("/workspace/src", name));
+			const component = new ToolExecutionComponent(
+				"edit",
+				{ edits: paths.map(path => ({ path, oldText: "before", newText: "after" })) },
+				{ layout: opencode },
+				undefined,
+				ui,
+				process.cwd(),
+			);
+			component.updateResult(
+				{
+					content: [],
+					details: { perFileResults: paths.map(path => ({ path, diff: "" })) },
+				},
+				false,
+			);
+
+			const rows = component.render(80).filter(line => /\S/.test(stripVTControlCharacters(line)));
+			expect(rows).toHaveLength(3);
+			for (const [index, row] of rows.entries()) {
+				expect(row).toContain(theme.getFgAnsi("dim"));
+				expect(row).toContain(url.pathToFileURL(paths[index]!).href);
+				expect(stripVTControlCharacters(row)).toContain(paths[index]!);
+			}
+		} finally {
+			settings.clearOverride("tui.hyperlinks");
+		}
+	});
+
+	it("bounds collapsed multi-file edits with a remaining-files row", () => {
+		const paths = Array.from({ length: 10 }, (_, index) => `src/file-${index}.ts`);
+		const component = new ToolExecutionComponent(
+			"edit",
+			{ edits: paths.map(path => ({ path, oldText: "before", newText: "after" })) },
+			{ layout: opencode },
+			undefined,
+			ui,
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [],
+				details: { perFileResults: paths.map(path => ({ path, diff: "" })) },
+			},
+			false,
+		);
+
+		const rows = visibleRows(component);
+		expect(rows).toHaveLength(9);
+		expect(rows.at(-1)).toContain("... +2 more");
+	});
+
 	it("never collapses an error result", () => {
 		const component = makeComponent(makeMultiLineTool(), opencode);
 		component.updateResult({ content: [{ type: "text", text: "boom" }], isError: true }, false);
