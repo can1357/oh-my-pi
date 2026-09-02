@@ -703,7 +703,14 @@ export class RelayBridge {
 				(conn) => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0,
 			);
 			if (tab.attached) {
-				const needsRecoveryReplay = tab.restorePending && !sameSocketReplay;
+				// An interrupted preload add/remove can leave Chrome's surviving root
+				// carrying an orphaned (or already-removed) registration we cannot
+				// dedupe. The reconnect hello still reports the debugger attached, so
+				// the stale root would otherwise be reused as-is: honor the pending
+				// fresh-root request here too, not just an in-flight replay resume.
+				const needsRecoveryReplay =
+					(tab.restorePending || tab.forceFreshRootBeforeReplay) &&
+					!sameSocketReplay;
 				tab.resumeSubscriptionReconcileAfterRestore =
 					needsRecoveryReplay && tab.pendingSubscriptionReconcile.length > 0;
 				if (tab.pendingSubscriptionReconcile.length > 0) {
@@ -724,6 +731,9 @@ export class RelayBridge {
 					// A socket replacement can interrupt replay after Chrome accepted only
 					// part of it. The replacement hello still reports the debugger attached,
 					// so resume the pending journal instead of treating the root as ready.
+					// A forced fresh root must also replay the surviving holders' state
+					// onto the new root, so mark the journal pending before recovery.
+					if (tab.forceFreshRootBeforeReplay) tab.restorePending = true;
 					this.#pruneSubscriptions(tab, preserve);
 					this.#prunePreloadScripts(tab, preserve);
 					this.#startTabRecovery(tab, false, preserve);
@@ -934,12 +944,25 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
 			return;
 		}
-		const result = (await this.#rpc({
-			op: "send",
-			tabId: ref.tabId,
-			method: msg.method,
-			params: msg.params,
-		})) as Record<string, unknown> | undefined;
+		let result: Record<string, unknown> | undefined;
+		try {
+			result = (await this.#rpc({
+				op: "send",
+				tabId: ref.tabId,
+				method: msg.method,
+				params: msg.params,
+			})) as Record<string, unknown> | undefined;
+		} catch (err) {
+			// Chrome may have accepted this initial additive registration before the
+			// socket dropped and the result never reached us. We never learned its
+			// root identifier, so the registration is active but unjournaled — a
+			// retry would install a duplicate and closing the owner cannot remove an
+			// unknown script. Force the tab back to a known root on the next
+			// recovery so the orphaned registration is dropped before any replay.
+			if (isExtensionTransportInterrupted(err))
+				tab.forceFreshRootBeforeReplay = true;
+			throw err;
+		}
 		const rootIdentifier = result?.identifier;
 		if (typeof rootIdentifier !== "string") {
 			this.#replyError(
@@ -1000,12 +1023,28 @@ export class RelayBridge {
 			script && clientIdentifier
 				? { ...(msg.params ?? {}), identifier: script.rootIdentifier }
 				: msg.params;
-		await this.#rpc({
-			op: "send",
-			tabId: ref.tabId,
-			method: msg.method,
-			params,
-		});
+		try {
+			await this.#rpc({
+				op: "send",
+				tabId: ref.tabId,
+				method: msg.method,
+				params,
+			});
+		} catch (err) {
+			// Chrome may have accepted this removal before the socket dropped and
+			// the result never reached us. The stable client identifier now points
+			// at a root identifier Chrome has already dropped, so retries fail and a
+			// later guard recovery would replay the stale journal entry and
+			// resurrect the explicitly removed script. Treat the interrupted
+			// transport as ambiguous: forget the entry so recovery cannot revive it,
+			// and force a fresh root so the tab returns to a known registration set.
+			if (isExtensionTransportInterrupted(err)) {
+				if (script && clientIdentifier)
+					this.#forgetPreloadScript(tab, sessionId, clientIdentifier);
+				tab.forceFreshRootBeforeReplay = true;
+			}
+			throw err;
+		}
 		if (script && clientIdentifier)
 			this.#forgetPreloadScript(tab, sessionId, clientIdentifier);
 		this.#reply(conn, msg, {});

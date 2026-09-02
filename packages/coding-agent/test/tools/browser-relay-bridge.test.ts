@@ -3895,6 +3895,160 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 	});
 
+	it("forces a fresh root after an interrupted initial preload registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Issue the initial registration, then drop the socket ordinarily before
+		// its result arrives. Chrome may already hold the (unjournaled)
+		// registration, so the next recovery must not reuse the surviving root.
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		// The client sees the interrupted command fail.
+		expect(
+			cdp.messages.some((m) => m.id === addId && "error" in m),
+		).toBe(true);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		// forceFreshRootBeforeReplay must drive a detach → attach cycle so the
+		// orphaned initial registration is dropped rather than left duplicated on
+		// the surviving root.
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"fresh-root detach after interrupted initial registration",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"fresh-root attach after interrupted initial registration",
+		);
+		ack(bridge, ext2, "attach");
+		await flush();
+		// Nothing was journaled, so there is no preload replay on the fresh root.
+		expect(
+			ext2
+				.rpcs("send")
+				.filter(
+					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+				),
+		).toHaveLength(0);
+	});
+
+	it("forgets and forces a fresh root after an interrupted preload removal", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "root-script" });
+		await flush();
+		const addReply = cdp.messages.find((message) => message.id === addId);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
+
+		// Issue the removal, then drop the socket ordinarily before its result
+		// arrives. Chrome may already have removed the script.
+		const removeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: removeId,
+				sessionId: pageSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
+					),
+			"interrupted preload removal RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		expect(
+			cdp.messages.some((m) => m.id === removeId && "error" in m),
+		).toBe(true);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		// The interrupted removal forces a fresh root: detach → attach.
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"fresh-root detach after interrupted removal",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"fresh-root attach after interrupted removal",
+		);
+		ack(bridge, ext2, "attach");
+		await flush();
+		// The journal entry was forgotten, so recovery must NOT resurrect the
+		// explicitly removed script by replaying it onto the fresh root.
+		expect(
+			ext2
+				.rpcs("send")
+				.filter(
+					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+				),
+		).toHaveLength(0);
+	});
+
 	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
