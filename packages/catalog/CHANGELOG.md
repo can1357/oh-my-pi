@@ -24,6 +24,9 @@
 - Fixed startup failures when discovering Bedrock-style Mistral Mixtral models.
 - Fixed Muse Spark 1.3 contributor models on OpenCode gateways so they use the correct Responses API route.
 - Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
+### Added
+
+- Added the `openzoo` provider: live model discovery from the local x402 pay-per-call proxy (`npx openzoo`, `http://localhost:8402/v1`, overridable with `OPENZOO_BASE_URL`), with per-token pricing and the real attention window taken from the proxy catalog, the proxy's router aliases (`openzoo/auto` and friends, no longer published by openzoo >= 0.50.84) dropped from discovery, and no bundled model list.
 
 ## [18.1.4] - 2026-09-02
 
@@ -34,10 +37,6 @@
 ### Fixed
 
 - Antigravity and Gemini CLI now collapse every Gemini Flash generation from 3.6 on (`gemini-3.8-flash-low/-medium/-high` and the `-tiered` alias, and future revisions) into one routed `gemini-<rev>-flash` entry via a revision-templated `variant-family`, instead of surfacing raw per-level ids until a per-revision rule lands.
-### Added
-
-- Added the `openzoo` provider: live model discovery from the local x402 pay-per-call proxy (`npx openzoo`, `http://localhost:8402/v1`, overridable with `OPENZOO_BASE_URL`), with per-token pricing and the real attention window taken from the proxy catalog, the proxy's router aliases (`openzoo/auto` and friends, no longer published by openzoo >= 0.50.84) dropped from discovery, and no bundled model list.
-
 ## [18.1.3] - 2026-09-02
 
 ### Added
