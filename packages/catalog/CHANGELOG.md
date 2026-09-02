@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- GitHub Copilot base model variants now use the provider's default prompt budget instead of inheriting the 1M context tier ([#10616](https://github.com/can1357/oh-my-pi/issues/10616)).
 - GitHub Copilot discovery now uses the Copilot CLI identity so account-eligible enterprise and experimental models are returned
 - Discovered Bedrock-style `mistral.mixtral-*` models no longer abort startup with an ambiguous family classification ([#10598](https://github.com/can1357/oh-my-pi/issues/10598)).
 

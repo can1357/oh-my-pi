@@ -6136,7 +6136,18 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						// prompt tokens. Cap the base entry to the default tier — the long
 						// tier is the opt-in `-1m` sibling below.
 						const tokenPrices = extractCopilotTokenPrices(entry);
-						const defaultContextMax = tokenPrices.defaultTier?.contextMax;
+						let defaultContextMax = tokenPrices.defaultTier?.contextMax;
+						// Tiered rows use max_prompt_tokens as the base lane's prompt
+						// ceiling. Keep the tighter signal when billing.default overlaps
+						// the long-context lane, or both selectable rows become 1M.
+						if (
+							tokenPrices.longContext?.contextMax !== undefined &&
+							copilotLimits.maxPromptTokens !== undefined &&
+							copilotLimits.maxPromptTokens > 0 &&
+							(defaultContextMax === undefined || copilotLimits.maxPromptTokens < defaultContextMax)
+						) {
+							defaultContextMax = copilotLimits.maxPromptTokens;
+						}
 						const defaultTierWindow =
 							defaultContextMax !== undefined &&
 							defaultContextMax > 0 &&

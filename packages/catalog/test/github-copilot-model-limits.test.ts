@@ -501,6 +501,7 @@ function tieredCopilotEntry(overrides: {
 	window: number;
 	maxOutput: number;
 	defaultContextMax?: number;
+	maxPrompt?: number;
 	longContextMax?: number;
 	defaultPrices?: { input: number; output: number; cache: number };
 	longPrices?: { input: number; output: number; cache: number };
@@ -514,6 +515,7 @@ function tieredCopilotEntry(overrides: {
 			type: overrides.type ?? "chat",
 			limits: {
 				max_context_window_tokens: overrides.window,
+				...(overrides.maxPrompt !== undefined && { max_prompt_tokens: overrides.maxPrompt }),
 				max_output_tokens: overrides.maxOutput,
 			},
 			...(overrides.vision !== undefined && { supports: { vision: overrides.vision } }),
@@ -602,6 +604,27 @@ describe("github copilot tiered context windows", () => {
 		expect(variant?.contextWindow).toBe(1_000_000);
 		expect(variant?.maxTokens).toBe(64_000);
 		expect(variant?.contextPromotionTarget).toBeUndefined();
+	});
+
+	it("uses the base prompt budget when billing's default ceiling overlaps the 1M lane", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				tieredCopilotEntry({
+					id: "gpt-5.6-luna",
+					name: "GPT-5.6 Luna",
+					window: 1_050_000,
+					maxPrompt: 272_000,
+					maxOutput: 56_000,
+					defaultContextMax: 950_000,
+					longContextMax: 994_000,
+				}),
+			],
+		});
+
+		const base = models.find(candidate => candidate.id === "gpt-5.6-luna");
+		expect(base?.contextWindow).toBe(328_000);
+		const variant = models.find(candidate => candidate.id === "gpt-5.6-luna-1m");
+		expect(variant?.contextWindow).toBe(1_050_000);
 	});
 
 	it("prices the long-context variant from its own tier", async () => {
