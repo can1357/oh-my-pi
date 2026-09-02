@@ -385,6 +385,17 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Flags whose value is consumed exactly once at startup and cannot be replayed.
+ *
+ * `--provider-api-keys-fd N` transfers ownership of descriptor N: it is read
+ * and closed during startup, so handing the same number to the replacement
+ * process makes it exit with "must name a readable open descriptor" instead of
+ * resuming the session. The credentials do not survive `/restart`; a named
+ * `--provider-api-keys` path is re-readable and is replayed normally.
+ */
+const CONSUMED_ONCE_FLAGS: ReadonlySet<string> = new Set(["--provider-api-keys-fd"]);
+
+/**
  * Rewrite the launch argv for an in-place self-restart (`/restart`).
  *
  * Keeps every configuration flag as launched, but drops:
@@ -392,7 +403,9 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
- *   duplicate the initial prompt.
+ *   duplicate the initial prompt;
+ * - consumed-once flags ({@link CONSUMED_ONCE_FLAGS}), whose value no longer
+ *   exists by the time the replacement process starts.
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
@@ -407,7 +420,7 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
-		if (SESSION_SOURCE_FLAGS.has(flag)) {
+		if (SESSION_SOURCE_FLAGS.has(flag) || CONSUMED_ONCE_FLAGS.has(flag)) {
 			if (consumesNext) i++;
 			continue;
 		}

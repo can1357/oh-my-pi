@@ -222,4 +222,26 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	it("omits --resume for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
+
+	it("drops a consumed credential descriptor but keeps a re-readable bundle path", () => {
+		// `--provider-api-keys-fd N` is single-use: startup consumed and closed N,
+		// so replaying it makes the replacement process exit with "must name a
+		// readable open descriptor" instead of resuming. The named path is still
+		// readable, so it is replayed as ordinary configuration.
+		expect(restartArgv(["--provider-api-keys-fd", "7", "--provider-api-keys", "/run/keys.json"], "sid")).toEqual([
+			"--provider-api-keys",
+			"/run/keys.json",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("drops the inline equals form of a consumed credential descriptor", () => {
+		expect(restartArgv(["--provider-api-keys-fd=7", "--model", "gpt-5"], "sid")).toEqual([
+			"--model",
+			"gpt-5",
+			"--resume",
+			"sid",
+		]);
+	});
 });
