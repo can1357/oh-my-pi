@@ -3062,7 +3062,7 @@ function openCodeModelManagerOptions(
 						const api = resolveApi(defaults.id, defaults.api);
 						const baseUrl = openCodeBaseUrlForApi(api, basePath);
 						const identity = classifyModel(providerId, defaults.id, { lenient: true });
-						if (identity.class === "meta" && identity.family === undefined) {
+						if (identity.class === "meta" && identity.family === "spark") {
 							// Gateway lists these as bare ids with no capability
 							// metadata and no local bundled row, so the generic
 							// defaults would hide the effort dial

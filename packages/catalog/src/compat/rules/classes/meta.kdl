@@ -1,13 +1,18 @@
 // Model-lineage compat for "meta"; regenerated from the frozen census using class taxonomy selectors.
 
 class "meta" {
-	family "spark" {
-		// Meta documents Muse Spark as a multimodal reasoning family. Identity
-		// and capabilities belong here; discovery only supplies transport
-		// metadata and documented fallback limits.
+	models "muse-spark-1.2" "muse-spark-1.2-contributor" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
-		thinking-mode "effort"
-		input-modalities "text" "image"
+	}
+	on "meta" {
+		family "spark" {
+			// Meta documents Muse Spark as a multimodal reasoning family.
+			// Identity and capabilities belong here; discovery only supplies
+			// transport metadata and documented fallback limits.
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			thinking-mode "effort"
+			input-modalities "text" "image"
+		}
 	}
 	on "kilo" "nvidia" {
 		family "llama" {

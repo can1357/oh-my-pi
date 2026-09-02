@@ -5500,6 +5500,32 @@
 			{
 				"source": "classes/meta.kdl:4",
 				"class": "meta",
+				"models": [
+					{
+						"kind": "exact",
+						"value": "muse-spark-1.2"
+					},
+					{
+						"kind": "exact",
+						"value": "muse-spark-1.2-contributor"
+					}
+				],
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "classes/meta.kdl:8",
+				"class": "meta",
+				"providers": [
+					"meta"
+				],
 				"family": "spark",
 				"thinking": {
 					"efforts": [
@@ -5519,7 +5545,7 @@
 				}
 			},
 			{
-				"source": "classes/meta.kdl:13",
+				"source": "classes/meta.kdl:18",
 				"class": "meta",
 				"providers": [
 					"kilo",
