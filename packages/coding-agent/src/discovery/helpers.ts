@@ -299,6 +299,7 @@ export interface ParsedAgentFields {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
+	restrictTools?: boolean;
 	blocking?: boolean;
 	/** `true` = keep `yield` and the output schema when `task.structured` is off. */
 	structured?: boolean;
@@ -375,6 +376,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const blocking = parseBoolean(frontmatter.blocking);
 	const structured = parseBoolean(frontmatter.structured);
 	const readSummarize = parseBoolean(frontmatter.readSummarize);
+	const restrictTools = parseBoolean(frontmatter.restrictTools);
+	if (restrictTools === true && tools === undefined) return null;
 	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
 	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
 	if (prewalk === undefined && typeof frontmatter.prewalk === "string") {
@@ -402,6 +405,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		structured,
 		autoloadSkills,
 		readSummarize,
+		restrictTools,
 		prewalk,
 		advisor,
 	};

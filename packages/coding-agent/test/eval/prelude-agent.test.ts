@@ -31,6 +31,9 @@ describe("eval js agent() handle", () => {
 		let seenName: string | undefined;
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (name, args) => {
+			if (name === "__wait__") {
+				return { items: [{ status: "completed", text: "done", model: "m", family: "openai" }] };
+			}
 			seenName = name;
 			seenArgs = args as Record<string, unknown>;
 			return { id: "abc123", agent: "task" };
@@ -44,6 +47,11 @@ describe("eval js agent() handle", () => {
 		expect(handle.id).toBe("abc123");
 		expect(handle.agent).toBe("task");
 		expect(handle.handle).toBe("agent://abc123");
+		expect(handle.model).toBeUndefined();
+		expect(handle.family).toBeUndefined();
+		expect(await (handle.wait as () => Promise<unknown>)()).toBe("done");
+		expect(handle.model).toBe("m");
+		expect(handle.family).toBe("openai");
 	});
 
 	it("maps positional args onto named options in order", async () => {

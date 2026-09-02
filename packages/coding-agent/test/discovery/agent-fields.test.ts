@@ -198,6 +198,16 @@ describe("parseAgentFields", () => {
 	test("returns undefined readSummarize when field absent", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
 	});
+
+	test("parses restrictTools only with an explicit tool allowlist", () => {
+		expect(
+			parseAgentFields({ name: "worker", description: "desc", tools: ["read"], restrictTools: true })?.restrictTools,
+		).toBe(true);
+		expect(parseAgentFields({ name: "worker", description: "desc", restrictTools: false })?.restrictTools).toBe(
+			false,
+		);
+		expect(parseAgentFields({ name: "worker", description: "desc", restrictTools: true })).toBeNull();
+	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: false })?.prewalk).toBe(false);
