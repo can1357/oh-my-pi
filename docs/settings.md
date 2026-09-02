@@ -686,6 +686,86 @@ tui:
 | `tui.resizeScrollback`      | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
+#### Built-in presets
+| Preset | Left segments | Right segments | Use case |
+|---|---|---|---|
+| `default` | pi, model, mode, collab, path, git, pr, context_pct, cost | session_name | Full info, balanced layout. |
+| `minimal` | path, git | session_name, mode, context_pct | Only essential info. |
+| `compact` | model, mode, git, pr | session_name, cost, context_pct | Small footprint, key metrics. |
+| `full` | pi, hostname, model, mode, path, git, pr, subagents | session_name, cache_hit, token_in, token_out, token_rate, cache_read, cost, context_pct, time_spent, time | Maximum visibility. |
+| `nerd` | pi, hostname, model, mode, path, git, pr, session, subagents | session_name, token_in, token_out, cache_read, cache_write, token_rate, cost, context_pct, context_total, time_spent, time | Full preset with Nerd Font icons. |
+| `ascii` | model, mode, path, git, pr | session_name, token_total, cost, context_pct | Compact preset with ASCII separators. |
+| `custom` | _(user-defined)_ | _(user-defined)_ | Set `leftSegments` and `rightSegments` to your preferred layout. |
+
+#### Custom layout
+
+Set `statusLine.preset: custom` and configure the segment lists:
+
+```yaml
+statusLine:
+  preset: custom
+  leftSegments: [model, mode, path, git]
+  rightSegments: [context_pct, cost, time]
+  separator: powerline-thin
+```
+
+Available segment IDs: `pi`, `hostname`, `model`, `mode`, `path`, `git`, `pr`, `subagents`, `session_name`, `cost`, `context_pct`, `context_total`, `time_spent`, `time`, `cache_read`, `cache_write`, `cache_hit`, `token_in`, `token_out`, `token_total`, `token_rate`, `collab`, `session`, `usage`.
+
+#### Segment options
+
+Per-segment configuration lives in `statusLine.segmentOptions`. Each segment ID can have its own options object.
+
+#### Per-segment options
+
+| Segment | Option | Type | Default | Description |
+|---|---|---|---|---|
+| `model` | `showThinkingLevel` | boolean | `true` | Show the thinking level (e.g. `high`, `xhigh`) after the model name. |
+| `path` | `abbreviate` | boolean | `true` | Abbreviate the path using `~` and ellipsis. |
+| `path` | `maxLength` | number | `40` | Max display length before truncation. |
+| `path` | `stripWorkPrefix` | boolean | `true` | Remove the worktree prefix from paths in worktree mode. |
+| `git` | `showBranch` | boolean | `true` | Show the current git branch. |
+| `git` | `showStaged` | boolean | `true` | Show number of staged changes. |
+| `git` | `showUnstaged` | boolean | `true` | Show number of unstaged changes. |
+| `git` | `showUntracked` | boolean | `true` | Show number of untracked files. |
+| `time` | `format` | enum | `"24h"` | `"12h"` or `"24h"` time format. |
+| `time` | `showSeconds` | boolean | `false` | Show seconds in the time display. |
+| `contextPct` | `format` | string | _(default)_ | Format string with percent escapes (see below). |
+#### `contextPct.format`
+**`contextPct.format`** — Format string for the context usage segment. Supports percent-escape placeholders:
+
+| Escape | Replaced with |
+|---|---|
+| `%t` | Used tokens (formatted, e.g. `500K`) |
+| `%p` | Percent used (e.g. `50.0%`) |
+| `%w` | Window size (formatted, e.g. `1M`) |
+| `%%` | Literal `%` sign |
+
+Unknown escapes pass through unchanged. Omit the key (or set to empty string) for the default `<pct>%/<window>` format.
+
+#### Examples
+
+```yaml
+statusLine:
+  preset: custom
+  leftSegments: [model, path, git]
+  rightSegments: [context_pct, cost]
+  segmentOptions:
+    model:
+      showThinkingLevel: false
+    path:
+      abbreviate: true
+      maxLength: 30
+    git:
+      showBranch: true
+      showStaged: true
+      showUnstaged: true
+      showUntracked: false
+    contextPct:
+      format: "%p (%t)"    # renders as "50.0% (500K)"
+    # format: "%t/%w"      # renders as "500K/1M"
+    # format: "%p of %w"   # renders as "50.0% of 1M"
+```
+
 
 ### Interaction
 
