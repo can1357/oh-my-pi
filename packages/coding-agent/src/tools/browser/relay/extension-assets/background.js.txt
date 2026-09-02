@@ -81,6 +81,9 @@ function restoreRecoverableState(target, storedIds, mutatedTabIds) {
       target.add(id);
   }
 }
+function extensionOwnedAttachedTabIds(targets, recoverableTabIds) {
+  return targets.filter((target) => target.attached && target.tabId !== undefined && recoverableTabIds.has(target.tabId)).map((target) => target.tabId);
+}
 function snapshotAttachmentState(epochs, tabIds) {
   const snapshot = new Map;
   for (const tabId of tabIds)
@@ -470,15 +473,7 @@ async function buildHello() {
     if (snap)
       snapshots.push(snap);
   }
-  const attachedTabIds = [];
-  for (const target of targets) {
-    if (target.attached && target.tabId !== undefined) {
-      attachedTabIds.push(target.tabId);
-    }
-  }
-  const recoverableSnapshot = new Set(recoverableTabIds);
-  for (const tabId of attachedTabIds)
-    recoverableSnapshot.add(tabId);
+  const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   const hardwareConcurrency = Number.isInteger(navigator.hardwareConcurrency) && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : undefined;
   return {
@@ -488,7 +483,7 @@ async function buildHello() {
     hardwareConcurrency,
     tabs: snapshots,
     attachedTabIds,
-    recoverableTabIds: [...recoverableSnapshot]
+    recoverableTabIds: [...recoverableTabIds]
   };
 }
 async function attachTab(tabId, socket) {

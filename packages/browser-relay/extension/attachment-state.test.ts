@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	consumeRelayInitiatedDetach,
+	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
 	restoreRecoverableState,
@@ -97,5 +98,18 @@ describe("attachment-state", () => {
 		const current = new Set<number>();
 		restoreRecoverableState(current, [1, 2, "invalid"], new Set([1]));
 		expect([...current]).toEqual([2]);
+	});
+
+	it("excludes debugger attachments not owned by the extension", () => {
+		expect(
+			extensionOwnedAttachedTabIds(
+				[
+					{ tabId: 1, attached: true },
+					{ tabId: 2, attached: true },
+					{ tabId: 3, attached: false },
+				],
+				new Set([1, 3]),
+			),
+		).toEqual([1]);
 	});
 });

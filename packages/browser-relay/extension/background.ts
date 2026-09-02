@@ -17,6 +17,7 @@ import type {
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import {
 	consumeRelayInitiatedDetach,
+	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
 	restoreRecoverableState,
@@ -619,14 +620,11 @@ async function buildHello(): Promise<
 		const snap = snapshot(tab);
 		if (snap) snapshots.push(snap);
 	}
-	const attachedTabIds: number[] = [];
-	for (const target of targets) {
-		if (target.attached && target.tabId !== undefined) {
-			attachedTabIds.push(target.tabId);
-		}
-	}
-	const recoverableSnapshot = new Set(recoverableTabIds);
-	for (const tabId of attachedTabIds) recoverableSnapshot.add(tabId);
+	// chrome.debugger.getTargets reports attachments owned by DevTools and other
+	// debuggers too. Only persisted extension-owned ids are safe to advertise as
+	// relay attachments; promoting every attached target would resurrect a user
+	// takeover that onDetach deliberately removed from recovery state.
+	const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
 		Number.isInteger(navigator.hardwareConcurrency) &&
@@ -640,7 +638,7 @@ async function buildHello(): Promise<
 		hardwareConcurrency,
 		tabs: snapshots,
 		attachedTabIds,
-		recoverableTabIds: [...recoverableSnapshot],
+		recoverableTabIds: [...recoverableTabIds],
 	};
 }
 

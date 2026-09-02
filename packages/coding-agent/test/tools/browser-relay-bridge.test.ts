@@ -3841,7 +3841,7 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
-	it("does not rerun preload scripts immediately when replaying them after recovery", async () => {
+	it("reruns immediate preload scripts when guard recovery reattaches a fresh root", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3889,7 +3889,7 @@ describe("RelayBridge tab grouping", () => {
 			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
-			runImmediately: false,
+			runImmediately: true,
 		});
 	});
 

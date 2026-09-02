@@ -3175,7 +3175,8 @@ export class RelayBridge {
 		const restoring = (async () => {
 			let ok: boolean;
 			try {
-				refreshedRoot = tab.forceFreshRootBeforeReplay;
+				refreshedRoot =
+					tab.forceFreshRootBeforeReplay || (attach && !tab.attached);
 				ok = refreshedRoot
 					? await this.#refreshRootForRecovery(tab, ext)
 					: !attach || (await this.#ensureAttached(tab));

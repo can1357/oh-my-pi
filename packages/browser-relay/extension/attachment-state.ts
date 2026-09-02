@@ -46,6 +46,20 @@ export function restoreRecoverableState(
 	}
 }
 
+export function extensionOwnedAttachedTabIds(
+	targets: ReadonlyArray<{ tabId?: number; attached: boolean }>,
+	recoverableTabIds: ReadonlySet<number>,
+): number[] {
+	return targets
+		.filter(
+			(target) =>
+				target.attached &&
+				target.tabId !== undefined &&
+				recoverableTabIds.has(target.tabId),
+		)
+		.map((target) => target.tabId as number);
+}
+
 export function snapshotAttachmentState(epochs: Map<number, number>, tabIds: number[]): Map<number, number> {
 	const snapshot = new Map<number, number>();
 	for (const tabId of tabIds) snapshot.set(tabId, epochs.get(tabId) ?? 0);
