@@ -91,6 +91,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
+		case "lm-studio":
+			// v2 invalidates rows cached before native model metadata retained
+			// authoritative text-only modality declarations.
+			return "lm-studio:native-modalities-v2";
 		case "cursor":
 			// v4: Grok 4.5/4.6 rows cached before the effort-less default-tier fix
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch

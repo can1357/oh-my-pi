@@ -4351,6 +4351,7 @@ export function kimiCodeModelManagerOptions(
 /** Native LM Studio metadata keyed by model id from `/api/v0/models`. */
 export interface LmStudioNativeModelMetadata {
 	input: ("text" | "image")[];
+	inputAuthoritative: boolean;
 	contextWindow?: number;
 }
 
@@ -4380,6 +4381,10 @@ function getLmStudioNativeInput(entry: Record<string, unknown>): ("text" | "imag
 	const capabilities = getLmStudioCapabilityNames(entry.capabilities);
 	const supportsImage = modelType === "vlm" || capabilities.includes("vision") || capabilities.includes("image");
 	return supportsImage ? ["text", "image"] : ["text"];
+}
+
+function hasLmStudioNativeInputMetadata(entry: Record<string, unknown>): boolean {
+	return typeof entry.type === "string" || Array.isArray(entry.capabilities);
 }
 
 function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number | undefined {
@@ -4429,6 +4434,7 @@ export async function fetchLmStudioNativeModelMetadata(
 				const contextWindow = getLmStudioNativeContextWindow(entry);
 				metadata.set(entry.id, {
 					input: getLmStudioNativeInput(entry),
+					inputAuthoritative: hasLmStudioNativeInputMetadata(entry),
 					...(contextWindow === undefined ? {} : { contextWindow }),
 				});
 			}
@@ -4457,6 +4463,7 @@ export function lmStudioModelManagerOptions(
 	const references = createBundledReferenceMap<"openai-completions">("lm-studio" as any);
 	return {
 		providerId: "lm-studio",
+		cacheProviderId: resolveModelCacheProviderId("lm-studio", { apiKey, baseUrl }),
 		fetchDynamicModels: async () => {
 			const nativeMetadataPromise = fetchLmStudioNativeModelMetadata(baseUrl, config?.fetch, {
 				headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
@@ -4487,6 +4494,9 @@ export function lmStudioModelManagerOptions(
 				return {
 					...model,
 					input: metadata.input,
+					...(metadata.inputAuthoritative
+						? { catalogFallback: { ...model.catalogFallback, liveInputModalities: true } }
+						: {}),
 					contextWindow: metadata.contextWindow ?? model.contextWindow,
 				};
 			});

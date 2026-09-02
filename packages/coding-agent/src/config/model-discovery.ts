@@ -903,7 +903,9 @@ export async function discoverOpenAIModelsList(
 				reasoning: reference?.reasoning ?? false,
 				thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 				input: nativeMetadataForModel?.input ?? reportedInput ?? reference?.input ?? ["text"],
-				...(reportedInput !== undefined ? { catalogFallback: { liveInputModalities: true } } : {}),
+				...(reportedInput !== undefined || nativeMetadataForModel?.inputAuthoritative
+					? { catalogFallback: { liveInputModalities: true } }
+					: {}),
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 				// Proxy/gateway pricing is provider-specific and rarely matches
 				// upstream bundled catalogs, so keep costs local-unknown even

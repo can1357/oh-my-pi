@@ -1522,6 +1522,9 @@ export class ModelRegistry {
 		if (providerConfig.discovery.type === "ollama") {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
+		if (providerConfig.discovery.type === "lm-studio") {
+			return `${providerConfig.provider}:lm-studio-native-modalities-v2`;
+		}
 		if (providerConfig.discovery.type === "openai-models-list") {
 			// context-v4 invalidates rows that parsed server-advertised modalities
 			// without retaining their provenance; otherwise catalog fallbacks can

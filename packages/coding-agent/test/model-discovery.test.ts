@@ -2554,15 +2554,26 @@ providers:
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:9995/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "local-vlm", object: "model", input: ["text"] }] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "local-vlm", object: "model", input: ["text"] },
+							{ id: "openbmb/minicpm-v-4_5", object: "model" },
+						],
+					}),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
 			}
 			if (url === "http://127.0.0.1:9995/api/v0/models") {
 				return new Response(
 					JSON.stringify({
-						data: [{ id: "local-vlm", type: "vlm", capabilities: ["vision"], state: "loaded" }],
+						data: [
+							{ id: "local-vlm", type: "vlm", capabilities: ["vision"], state: "loaded" },
+							{ id: "openbmb/minicpm-v-4_5", type: "llm", capabilities: [], state: "loaded" },
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -2572,6 +2583,7 @@ providers:
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		expect(registry.find("lm-studio-test", "local-vlm")?.input).toEqual(["text", "image"]);
+		expect(registry.find("lm-studio-test", "openbmb/minicpm-v-4_5")?.input).toEqual(["text"]);
 	});
 
 	test("proxy discovery honors API-reported context_length and endpoint routing", async () => {
