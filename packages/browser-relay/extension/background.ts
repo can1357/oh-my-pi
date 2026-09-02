@@ -129,20 +129,45 @@ async function maybeScheduleOrphanSweep(
 	forceDisconnected = false,
 ): Promise<void> {
 	await recoverableUpdates;
+	const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
+	if (nextDeadlineMs !== orphanSweepDeadlineMs)
+		await setOrphanSweepDeadline(nextDeadlineMs);
+}
+
+function computeNextOrphanSweepDeadline(
+	forceDisconnected: boolean,
+): number | null {
 	const disconnected = orphanSweepSeesRelayDisconnected({
 		socketReadyState: ws?.readyState,
 		openReadyState: WebSocket.OPEN,
 		forceDisconnected,
 	});
-	const nextDeadlineMs = nextOrphanSweepDeadline({
+	return nextOrphanSweepDeadline({
 		nowMs: Date.now(),
 		graceMs: ORPHAN_GRACE_MS,
 		disconnected,
 		hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
 		existingDeadlineMs: orphanSweepDeadlineMs,
 	});
+}
+
+/**
+ * Arm the orphan sweep from `runtime.onSuspend` without yielding first.
+ *
+ * Chrome does not guarantee any asynchronous work once an `onSuspend` listener
+ * returns, so `maybeScheduleOrphanSweep()`'s leading `await recoverableUpdates`
+ * can let the worker terminate before `chrome.alarms.create` ever runs, leaving
+ * surviving debugger attachments with no future sweep. Recoverable ids and
+ * tracked attachments are already in memory (`trackAttachments` persists ids
+ * before handing them to the guard), so the deadline can be computed
+ * synchronously. `setOrphanSweepDeadline` fires `chrome.alarms.create` before
+ * its first await, so the alarm is registered even if the trailing storage
+ * write loses the race with worker termination.
+ */
+function scheduleOrphanSweepBeforeSuspend(): void {
+	const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
 	if (nextDeadlineMs !== orphanSweepDeadlineMs)
-		await setOrphanSweepDeadline(nextDeadlineMs);
+		void setOrphanSweepDeadline(nextDeadlineMs);
 }
 
 async function maybeRunOrphanSweep(): Promise<void> {
@@ -366,6 +391,7 @@ let helloRefresh: {
 	socket: WebSocket;
 	done: Promise<void>;
 	dirty: boolean;
+	afterSend: (() => void) | null;
 } | null = null;
 
 /**
@@ -390,20 +416,30 @@ let helloRefresh: {
  * dirty and rebuild once it settles, so the follow-up hello reflects the final
  * attachment state.
  */
-function refreshHello(): void {
+function refreshHello(onSent?: () => void): void {
 	const socket = ws;
 	if (!socket || socket.readyState !== WebSocket.OPEN) return;
 	if (helloRefresh?.socket === socket) {
 		// A refresh is already running for this socket; its snapshot may predate
 		// this change. Rebuild after it settles instead of discarding the refresh.
 		helloRefresh.dirty = true;
+		// Carry a caller's post-send callback onto the in-flight refresh so a
+		// coalesced hello (e.g. the reconnect's own refresh) still runs it once the
+		// authoritative hello is actually sent.
+		if (onSent) helloRefresh.afterSend = onSent;
 		return;
 	}
-	const startRefresh = (): void => {
-		const entry: { socket: WebSocket; done: Promise<void>; dirty: boolean } = {
+	const startRefresh = (afterSend: (() => void) | null): void => {
+		const entry: {
+			socket: WebSocket;
+			done: Promise<void>;
+			dirty: boolean;
+			afterSend: (() => void) | null;
+		} = {
 			socket,
 			dirty: false,
 			done: Promise.resolve(),
+			afterSend,
 		};
 		entry.done = buildHello()
 			.then(async (hello) => {
@@ -430,8 +466,17 @@ function refreshHello(): void {
 						socket.readyState === WebSocket.OPEN,
 				);
 				if (entry.dirty) return;
-				if (ws === socket && socket.readyState === WebSocket.OPEN)
+				if (ws === socket && socket.readyState === WebSocket.OPEN) {
 					socket.send(JSON.stringify(hello));
+					// The relay has now received our attachment state, so it owns
+					// reconciliation. Only now is it safe to cancel the orphan sweep the
+					// disconnected worker armed; clearing it at `onopen` (before the
+					// hello is built/sent) would strand surviving attachments whenever
+					// `buildHello()` rejected or the socket never delivered a hello.
+					const done = entry.afterSend;
+					entry.afterSend = null;
+					done?.();
+				}
 			})
 			.finally(() => {
 				if (helloRefresh !== entry) return;
@@ -441,15 +486,16 @@ function refreshHello(): void {
 					socket.readyState === WebSocket.OPEN
 				) {
 					// A refresh arrived while this one was in flight; its snapshot may be
-					// stale, so rebuild to capture the change it observed.
-					startRefresh();
+					// stale, so rebuild to capture the change it observed. Carry any
+					// not-yet-run post-send callback onto the rebuild.
+					startRefresh(entry.afterSend);
 				} else {
 					helloRefresh = null;
 				}
 			});
 		helloRefresh = entry;
 	};
-	startRefresh();
+	startRefresh(onSent ?? null);
 }
 
 function invalidateHelloRefresh(): void {
@@ -710,10 +756,19 @@ async function connect(): Promise<void> {
 	ws = socket;
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
-		attachmentGuard.onConnected();
-		void setOrphanSweepDeadline(null);
 		void setBadge(true);
-		refreshHello();
+		// Do not mark the guard connected or clear the persisted orphan-sweep
+		// deadline yet: the relay has not received any attachment state. If
+		// `buildHello()` rejects or the hello is never delivered (a transient
+		// tabs/getTargets failure), the socket stays open and pinging with no retry
+		// path, so eagerly cancelling the sweep here would strand surviving debugger
+		// attachments. Keep the disconnected-armed sweep intact and cancel it only
+		// from the refresh's post-send callback, once the hello has actually been
+		// sent and the relay owns reconciliation.
+		refreshHello(() => {
+			attachmentGuard.onConnected();
+			void setOrphanSweepDeadline(null);
+		});
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
@@ -840,7 +895,7 @@ chrome.runtime.onStartup.addListener(() => {
 // deadline and let the next normal alarm/startup event perform the actual
 // reclaim if the relay stayed down through the full grace period.
 chrome.runtime.onSuspend.addListener(() => {
-	void maybeScheduleOrphanSweep(true);
+	scheduleOrphanSweepBeforeSuspend();
 });
 
 void reconcileOrphans();

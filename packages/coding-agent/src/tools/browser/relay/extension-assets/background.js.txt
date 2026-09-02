@@ -178,20 +178,28 @@ async function setOrphanSweepDeadline(deadlineMs) {
 }
 async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   await recoverableUpdates;
+  const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
+  if (nextDeadlineMs !== orphanSweepDeadlineMs)
+    await setOrphanSweepDeadline(nextDeadlineMs);
+}
+function computeNextOrphanSweepDeadline(forceDisconnected) {
   const disconnected = orphanSweepSeesRelayDisconnected({
     socketReadyState: ws?.readyState,
     openReadyState: WebSocket.OPEN,
     forceDisconnected
   });
-  const nextDeadlineMs = nextOrphanSweepDeadline({
+  return nextOrphanSweepDeadline({
     nowMs: Date.now(),
     graceMs: ORPHAN_GRACE_MS,
     disconnected,
     hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
     existingDeadlineMs: orphanSweepDeadlineMs
   });
+}
+function scheduleOrphanSweepBeforeSuspend() {
+  const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
   if (nextDeadlineMs !== orphanSweepDeadlineMs)
-    await setOrphanSweepDeadline(nextDeadlineMs);
+    setOrphanSweepDeadline(nextDeadlineMs);
 }
 async function maybeRunOrphanSweep() {
   if (!shouldRunOrphanSweep({
@@ -339,19 +347,22 @@ async function setBadge(connected) {
   } catch {}
 }
 var helloRefresh = null;
-function refreshHello() {
+function refreshHello(onSent) {
   const socket = ws;
   if (!socket || socket.readyState !== WebSocket.OPEN)
     return;
   if (helloRefresh?.socket === socket) {
     helloRefresh.dirty = true;
+    if (onSent)
+      helloRefresh.afterSend = onSent;
     return;
   }
-  const startRefresh = () => {
+  const startRefresh = (afterSend) => {
     const entry = {
       socket,
       dirty: false,
-      done: Promise.resolve()
+      done: Promise.resolve(),
+      afterSend
     };
     entry.done = buildHello().then(async (hello) => {
       if (entry.dirty)
@@ -359,20 +370,24 @@ function refreshHello() {
       await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN);
       if (entry.dirty)
         return;
-      if (ws === socket && socket.readyState === WebSocket.OPEN)
+      if (ws === socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(hello));
+        const done = entry.afterSend;
+        entry.afterSend = null;
+        done?.();
+      }
     }).finally(() => {
       if (helloRefresh !== entry)
         return;
       if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
-        startRefresh();
+        startRefresh(entry.afterSend);
       } else {
         helloRefresh = null;
       }
     });
     helloRefresh = entry;
   };
-  startRefresh();
+  startRefresh(onSent ?? null);
 }
 function invalidateHelloRefresh() {
   if (helloRefresh)
@@ -549,10 +564,11 @@ async function connect() {
   ws = socket;
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
-    attachmentGuard.onConnected();
-    setOrphanSweepDeadline(null);
     setBadge(true);
-    refreshHello();
+    refreshHello(() => {
+      attachmentGuard.onConnected();
+      setOrphanSweepDeadline(null);
+    });
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
@@ -647,7 +663,7 @@ chrome.runtime.onStartup.addListener(() => {
   connect();
 });
 chrome.runtime.onSuspend.addListener(() => {
-  maybeScheduleOrphanSweep(true);
+  scheduleOrphanSweepBeforeSuspend();
 });
 reconcileOrphans();
 connect();
