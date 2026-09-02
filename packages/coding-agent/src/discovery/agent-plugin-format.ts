@@ -86,7 +86,7 @@ function isValidAgentPluginName(name: string): boolean {
 	return !name.includes("--") && !name.includes("..");
 }
 
-/** The closed frontmatter field set from the skills-ref reference validator. */
+/** The frontmatter field set the Agent Skills specification defines (§Frontmatter). */
 const SKILL_FIELDS: Record<string, true> = {
 	name: true,
 	description: true,
@@ -94,6 +94,18 @@ const SKILL_FIELDS: Record<string, true> = {
 	"allowed-tools": true,
 	metadata: true,
 	compatibility: true,
+};
+/**
+ * Invocation keys omp honors in addition to the spec fields. The Agent Skills
+ * specification never states that the frontmatter schema is closed; the
+ * skills-ref validator that rejects unknown keys is documented as "intended
+ * for demonstration purposes only", and the official client-implementation
+ * guide instructs clients to "Warn on issues but still load the skill when
+ * possible". Both keys carry boolean values and are raw (unnormalized) here.
+ */
+const OMP_SKILL_FIELDS: Record<string, true> = {
+	hide: true,
+	"disable-model-invocation": true,
 };
 /** Skill `name` characters: Unicode letters/digits (Python `str.isalnum`) and hyphens. */
 const SKILL_NAME_CHARS_RE = /^[\p{L}\p{N}-]+$/u;
@@ -116,14 +128,17 @@ function validateSkillName(raw: unknown, dirName: string): string | null {
 /**
  * Validate `SKILL.md` frontmatter against the Agent Skills specification
  * (https://agentskills.io/specification), the source of truth for skill
- * validity under Agent Plugins §7.1, mirroring the official skills-ref
- * reference validator: the frontmatter schema is CLOSED to its six fields and
- * any unexpected key rejects the skill. Returns the first violation, or `null`
- * when the skill conforms. Frontmatter keys must be raw (unnormalized).
+ * validity under Agent Plugins §7.1. The spec's own fields are accepted as
+ * specified; omp's two invocation keys are accepted with boolean values; every
+ * other unexpected key still rejects the skill. Returns the first violation,
+ * or `null` when the skill may load. Frontmatter keys must be raw
+ * (unnormalized).
  */
 export function validateAgentSkillFrontmatter(frontmatter: Record<string, unknown>, dirName: string): string | null {
 	for (const key in frontmatter) {
-		if (!SKILL_FIELDS[key]) return `unexpected frontmatter field "${key}"`;
+		if (SKILL_FIELDS[key]) continue;
+		if (!OMP_SKILL_FIELDS[key]) return `unexpected frontmatter field "${key}"`;
+		if (typeof frontmatter[key] !== "boolean") return `"${key}" must be a boolean`;
 	}
 
 	const nameViolation = validateSkillName(frontmatter.name, dirName);

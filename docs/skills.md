@@ -56,7 +56,7 @@ Supported frontmatter fields on the skill type:
 - `globs?: string[]`
 - `alwaysApply?: boolean`
 - `hide?: boolean`
-- `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
+- `disableModelInvocation?: boolean` (a Claude Code / Pi convention, not a field the agentskills.io specification defines; normalized from kebab-case `disable-model-invocation`; alias of `hide`)
 - additional keys are preserved as unknown metadata
 
 Current runtime behavior:
@@ -67,6 +67,14 @@ Current runtime behavior:
   - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
 - the claude/codex/agents/opencode/claude-plugins providers can load skills without description
+
+On the Agent Plugins path (`plugin.json` packages), `hide` and
+`disable-model-invocation` are accepted as top-level frontmatter with boolean
+values; any other key outside the Agent Skills field set still skips the skill.
+The specification never states that the SKILL.md frontmatter schema is closed:
+the `skills-ref` validator that rejects unknown keys is documented as "intended
+for demonstration purposes only", while the official client-implementation guide
+tells clients to "Warn on issues but still load the skill when possible".
 
 ## Discovery pipeline
 

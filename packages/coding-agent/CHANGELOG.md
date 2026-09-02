@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent Plugin skills setting `hide: true` or `disable-model-invocation: true` now load and are omitted from the model's skill listing, instead of being skipped as invalid ([#10505](https://github.com/can1357/oh-my-pi/issues/10505)).
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

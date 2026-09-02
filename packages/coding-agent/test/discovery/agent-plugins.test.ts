@@ -419,7 +419,7 @@ describe("agent-plugins discovery", () => {
 		await writeSkill("long-description", `name: long-description\ndescription: ${"x".repeat(1025)}`);
 		await writeSkill("long-compat", `name: long-compat\ndescription: ok\ncompatibility: ${"y".repeat(501)}`);
 		await writeSkill("bad-metadata", "name: bad-metadata\ndescription: ok\nmetadata:\n  version: 2");
-		// Closed schema per skills-ref: client conventions are unexpected fields.
+		// Not one of omp's honored invocation keys, so still an unexpected field.
 		await writeSkill("unknown-field", "name: unknown-field\ndescription: ok\nenabled: false");
 		await writeRegistry(pluginPath);
 
@@ -436,6 +436,35 @@ describe("agent-plugins discovery", () => {
 		expect(warned(`"compatibility" exceeds 500 characters`)).toBe(true);
 		expect(warned(`"metadata.version" must be a string`)).toBe(true);
 		expect(warned(`unexpected frontmatter field "enabled"`)).toBe(true);
+	});
+
+	test("honors the invocation keys as top-level frontmatter", async () => {
+		await writeManifest();
+		await writeSkill("kebab-axis", "name: kebab-axis\ndescription: ok\ndisable-model-invocation: true");
+		await writeSkill("hide-axis", "name: hide-axis\ndescription: ok\nhide: true");
+		await writeSkill("opted-in", "name: opted-in\ndescription: ok\ndisable-model-invocation: false");
+		await writeRegistry(pluginPath);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const fromPlugin = skills.all.filter(skill => skill._source.provider === "agent-plugins");
+		expect(fromPlugin.map(skill => skill.name).sort()).toEqual(["hide-axis", "kebab-axis", "opted-in"]);
+		const byName = (name: string) => fromPlugin.find(skill => skill.name === name);
+		// The kebab key normalizes to the camel field the prompt filter reads.
+		expect(byName("kebab-axis")?.frontmatter?.disableModelInvocation).toBe(true);
+		expect(byName("hide-axis")?.frontmatter?.hide).toBe(true);
+		expect(byName("opted-in")?.frontmatter?.disableModelInvocation).toBe(false);
+	});
+
+	test("rejects a non-boolean invocation key", async () => {
+		await writeManifest();
+		await writeSkill("stringy", 'name: stringy\ndescription: ok\ndisable-model-invocation: "true"');
+		await writeRegistry(pluginPath);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+		expect(skills.all.find(skill => skill.name === "stringy")).toBeUndefined();
+		expect(skills.warnings.some(warning => warning.includes(`"disable-model-invocation" must be a boolean`))).toBe(
+			true,
+		);
 	});
 
 	test("rejects an escaping plugin.json symlink without consuming outside content", async () => {
