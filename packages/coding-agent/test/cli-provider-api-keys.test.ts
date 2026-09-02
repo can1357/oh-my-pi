@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import {
+	bundleFileRefusal,
 	installProviderApiKeys,
 	readProviderApiKeyBundle,
 	readProviderApiKeyBundleFd,
@@ -37,6 +38,17 @@ function fdIsOpen(fd: number): boolean {
 		return false;
 	}
 }
+
+/** A stat whose every policy-relevant field is a private, owned, well-sized regular file. */
+function ownedRegularFile(overrides: Partial<Omit<BundleStatFields, "isFile">> & { isFile?: boolean } = {}) {
+	const { isFile = true, ...fields } = overrides;
+	return { mode: 0o600, nlink: 1, size: 64, uid: 1000, ...fields, isFile: () => isFile };
+}
+
+type BundleStatFields = { mode: number; nlink: number; size: number; uid: number; isFile: () => boolean };
+
+const POSIX_HOST = { enforcePosixOwnership: true, euid: 1000 } as const;
+const WINDOWS_HOST = { enforcePosixOwnership: false, euid: undefined } as const;
 
 describe("--provider-api-keys", () => {
 	it("parses a credential-file path without leaking it into the prompt", () => {
@@ -338,5 +350,57 @@ describe("--provider-api-keys", () => {
 		// consult the override instead of returning no headers at all.
 		const headers = mergeAuthHeaderSources([], true, undefined, () => "runtime-key");
 		expect(headers?.Authorization).toBe("Bearer runtime-key");
+	});
+});
+
+describe("bundle file policy", () => {
+	// The named-path and descriptor loaders both refuse through this policy, and
+	// its Windows branch previously had no coverage that could run off-Windows:
+	// `it.skipIf(process.platform !== "win32")` never executes in CI, so a
+	// regression that rejected every Windows bundle would have shipped green.
+	it("keeps POSIX mode bits out of the decision on Windows", () => {
+		// Windows reports mode bits the filesystem never enforced; a 0o666 there
+		// is an ordinary file, and refusing it locks Windows users out entirely.
+		expect(bundleFileRefusal(ownedRegularFile({ mode: 0o666, uid: 0 }), WINDOWS_HOST)).toBeUndefined();
+	});
+
+	it("refuses the same group-readable file on a POSIX host", () => {
+		expect(bundleFileRefusal(ownedRegularFile({ mode: 0o640 }), POSIX_HOST)).toBe(
+			"credential bundle must not be group/world-accessible",
+		);
+	});
+
+	it("refuses a private file owned by another user on a POSIX host", () => {
+		expect(bundleFileRefusal(ownedRegularFile({ uid: 65534 }), POSIX_HOST)).toBe(
+			"credential bundle must be owned by the current user",
+		);
+	});
+
+	it("skips the ownership check when the runtime exposes no euid", () => {
+		// Bun on a platform without geteuid must not compare against undefined
+		// and refuse every bundle.
+		expect(bundleFileRefusal(ownedRegularFile({ uid: 65534 }), { ...POSIX_HOST, euid: undefined })).toBeUndefined();
+	});
+
+	it("accepts an unlinked descriptor whose loose mode bits are unreachable", () => {
+		// nlink 0 is the anonymous-descriptor handoff: no path exists for another
+		// process to open, so the mode bits carry no exposure.
+		expect(bundleFileRefusal(ownedRegularFile({ mode: 0o666, nlink: 0 }), POSIX_HOST)).toBeUndefined();
+	});
+
+	it("refuses anything that is not a regular file before reading it", () => {
+		// The FIFO hang guard: a pipe never reaches a read call.
+		expect(bundleFileRefusal(ownedRegularFile({ isFile: false }), POSIX_HOST)).toBe(
+			"credential bundle must name a regular file",
+		);
+	});
+
+	it("refuses an empty or oversized bundle on either host", () => {
+		expect(bundleFileRefusal(ownedRegularFile({ size: 0 }), POSIX_HOST)).toBe(
+			"credential bundle must be 1-1000000 bytes",
+		);
+		expect(bundleFileRefusal(ownedRegularFile({ size: 1_000_001 }), WINDOWS_HOST)).toBe(
+			"credential bundle must be 1-1000000 bytes",
+		);
 	});
 });

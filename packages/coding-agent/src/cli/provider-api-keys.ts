@@ -135,17 +135,50 @@ function readFd(fd: number, buffer: Buffer, offset: number, length: number, posi
 	return promise;
 }
 
-function validateBundleFile(stat: fs.Stats): void {
-	if (!stat.isFile()) throw new CliUsageError("credential bundle must name a regular file");
-	if (process.platform !== "win32") {
+/** The stat fields the bundle policy reads. */
+export type BundleStat = {
+	readonly mode: number;
+	readonly nlink: number;
+	readonly size: number;
+	readonly uid: number;
+	isFile(): boolean;
+};
+
+/** Host facts the policy depends on, injected so either branch is testable off-platform. */
+export type BundleHost = {
+	/** POSIX mode and ownership bits only carry meaning where the kernel enforces them. */
+	readonly enforcePosixOwnership: boolean;
+	/** Effective uid, or undefined when the runtime exposes none. */
+	readonly euid: number | undefined;
+};
+
+/**
+ * Returns why a candidate bundle is refused, or undefined when it is acceptable.
+ *
+ * Windows reports POSIX-looking mode bits that the filesystem never enforced, so a
+ * 0o666 there is a normal file rather than a leaked credential; gating the check on
+ * the host keeps the refusal honest on both platforms.
+ */
+export function bundleFileRefusal(stat: BundleStat, host: BundleHost): string | undefined {
+	if (!stat.isFile()) return "credential bundle must name a regular file";
+	if (host.enforcePosixOwnership) {
 		if (stat.nlink !== 0 && (stat.mode & 0o077) !== 0) {
-			throw new CliUsageError("credential bundle must not be group/world-accessible");
+			return "credential bundle must not be group/world-accessible";
 		}
-		if (typeof process.geteuid === "function" && stat.uid !== process.geteuid()) {
-			throw new CliUsageError("credential bundle must be owned by the current user");
+		if (host.euid !== undefined && stat.uid !== host.euid) {
+			return "credential bundle must be owned by the current user";
 		}
 	}
 	if (stat.size === 0 || stat.size > MAX_BUNDLE_BYTES) {
-		throw new CliUsageError(`credential bundle must be 1-${MAX_BUNDLE_BYTES} bytes`);
+		return `credential bundle must be 1-${MAX_BUNDLE_BYTES} bytes`;
 	}
+	return undefined;
+}
+
+function validateBundleFile(stat: fs.Stats): void {
+	const refusal = bundleFileRefusal(stat, {
+		enforcePosixOwnership: process.platform !== "win32",
+		euid: typeof process.geteuid === "function" ? process.geteuid() : undefined,
+	});
+	if (refusal !== undefined) throw new CliUsageError(refusal);
 }
