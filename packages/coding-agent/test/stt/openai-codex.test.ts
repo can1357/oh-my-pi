@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, OAuthAccess } from "@oh-my-pi/pi-ai";
-import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	getCodexAttestationProvider,
+	setCodexAttestationProvider,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS, URL_PATHS } from "@oh-my-pi/pi-catalog/wire/codex";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -36,9 +39,6 @@ const callbacks = {
 };
 
 describe("CodexSttTranscriber", () => {
-	afterEach(() => {
-		setCodexAttestationProvider(undefined);
-	});
 	it("sends the Codex transcription wire contract for the selected OAuth account", async () => {
 		const getOAuthAccess = vi.fn().mockResolvedValue(ACCESS);
 		const fetchMock = vi
@@ -90,19 +90,24 @@ describe("CodexSttTranscriber", () => {
 	});
 
 	it("sends the current Codex DeviceCheck attestation", async () => {
+		const previousProvider = getCodexAttestationProvider();
 		setCodexAttestationProvider(async () => "attestation-envelope");
-		const fetchMock = vi
-			.fn()
-			.mockResolvedValue(new Response(JSON.stringify({ text: "transcribed" }), { status: 200 }));
-		const session = await new CodexSttTranscriber({ fetch: fetchMock }).createSession(
-			makeContext(vi.fn().mockResolvedValue(ACCESS)),
-			callbacks,
-		);
-		session.pushAudio(new Float32Array([0.25]));
-		await expect(session.stop()).resolves.toBe("transcribed");
-		const init = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> };
-		expect(init.headers[OPENAI_HEADERS.ATTESTATION]).toBe("attestation-envelope");
-		await session.dispose();
+		try {
+			const fetchMock = vi
+				.fn()
+				.mockResolvedValue(new Response(JSON.stringify({ text: "transcribed" }), { status: 200 }));
+			const session = await new CodexSttTranscriber({ fetch: fetchMock }).createSession(
+				makeContext(vi.fn().mockResolvedValue(ACCESS)),
+				callbacks,
+			);
+			session.pushAudio(new Float32Array([0.25]));
+			await expect(session.stop()).resolves.toBe("transcribed");
+			const init = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> };
+			expect(init.headers[OPENAI_HEADERS.ATTESTATION]).toBe("attestation-envelope");
+			await session.dispose();
+		} finally {
+			setCodexAttestationProvider(previousProvider);
+		}
 	});
 
 	it("rejects before recording when no Codex account is configured", async () => {

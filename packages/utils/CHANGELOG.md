@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+
 ## [18.1.0] - 2026-09-01
 
 ### Added
@@ -13,9 +17,6 @@
 - Fixed sub-second duration formatting so it no longer exposes floating-point precision noise.
 - Managed Chrome-for-Testing downloads now reject unsupported Linux ARM64 hosts instead of installing an incompatible x86_64 browser.
 - Fixed Markdown reference-link labels that match built-in `Object.prototype` names, such as `constructor` and `__proto__`, so they are no longer misidentified as definitions or emitted with an undefined URL ([#10283](https://github.com/can1357/oh-my-pi/issues/10283)).
-### Added
-
-- Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
 
 ## [18.0.11] - 2026-08-29
 

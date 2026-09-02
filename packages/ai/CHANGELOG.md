@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `getCodexAttestationProvider` so hosts and tests can read and restore the installed Codex attestation hook ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
 
 ## [18.1.2] - 2026-09-01
 
