@@ -50,9 +50,9 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 
 Parse `features` leniently. Unknown keys, a bumped version, a non-integer value, and a `features` field that is not an object all mean "capability absent" — never a connection failure. A client that rejects the ready frame over an unrecognized capability cannot start against a server it would otherwise interoperate with. Currently advertised:
 
-| Capability              | Meaning                                                                                                             |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `activeTurnSteering: 1` | `steer` honors `activeTurnOnly` and answers `data.accepted`; `clear_queue` is available and accepts `forInterrupt`. |
+| Capability              | Meaning                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTurnSteering: 1` | `steer` honors `activeTurnOnly` and answers `data.accepted`; `abort` accepts `clearQueue: true`; `clear_queue` accepts `forInterrupt`. |
 
 Clients that support protocol v2 SHOULD immediately send:
 
@@ -123,7 +123,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "steer", message: string, images?: ImageContent[], activeTurnOnly?: true }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
 - `{ id?, type: "clear_queue", forInterrupt?: boolean }`
-- `{ id?, type: "abort" }`
+- `{ id?, type: "abort", clearQueue?: true }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
 
@@ -622,19 +622,21 @@ not advertise `activeTurnSteering`.
 Requires `features.activeTurnSteering: 1`.
 
 `abort` drains messages left stranded in the queues, so a queued steer starts
-another turn right after the interrupt. Clear first, and wait for the response:
+another turn right after the interrupt. Clear and abort in one command:
 
 ```json
-{ "id": "c1", "type": "clear_queue", "forInterrupt": true }
-{ "id": "a1", "type": "abort" }
+{ "id": "a1", "type": "abort", "clearQueue": true }
 ```
 
-`clear_queue` replaces both queues before it is acknowledged, so a host that
-awaits `c1` before sending `a1` cannot lose the race. `forInterrupt: true`
-additionally drops hidden non-user steers (advisor cards excepted, since abort
-preserves them as visible advice); without it those stay queued and the drain
-still fires. The response reports how many user-authored messages were dropped,
-which is what a host would restore into its editor:
+The serialized `abort` handler synchronously replaces both queues immediately
+before starting the abort. No client round trip exists where IRC or an extension
+can enqueue work between those operations. The clear uses interrupt semantics:
+hidden non-user steers are dropped, except advisor cards that abort preserves as
+visible advice. Plain `{ "type": "abort" }` keeps the legacy stranded-queue
+behavior.
+
+`clear_queue` remains available for queue inspection and editor restore. Its
+response reports how many user-authored messages were dropped:
 
 ```json
 { "id": "c1", "type": "response", "command": "clear_queue", "success": true, "data": { "steering": 1, "followUp": 0 } }

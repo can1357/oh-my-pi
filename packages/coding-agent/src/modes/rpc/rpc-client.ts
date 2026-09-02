@@ -648,10 +648,9 @@ export class RpcClient {
 	/**
 	 * Drop queued messages and report how many user-authored ones were dropped.
 	 *
-	 * `options.forInterrupt` additionally drops hidden non-user steers, so a
-	 * following {@link abort} cannot be undone by the server's stranded-queue
-	 * drain restarting the interrupted run. Requires
-	 * `serverFeatures.activeTurnSteering === 1`.
+	 * `options.forInterrupt` also drops hidden non-user steers. Use
+	 * {@link abort} with `clearQueue: true` for a final interrupt; separate
+	 * `clearQueue` and `abort` calls leave an enqueue gap between commands.
 	 */
 	async clearQueue(options?: { forInterrupt?: boolean }): Promise<RpcClearQueueResult> {
 		const response = await this.#send({
@@ -669,10 +668,13 @@ export class RpcClient {
 	}
 
 	/**
-	 * Abort current operation.
+	 * Abort the current operation.
+	 *
+	 * `options.clearQueue` atomically drops all interrupt queues immediately
+	 * before abort starts. Requires `serverFeatures.activeTurnSteering === 1`.
 	 */
-	async abort(): Promise<void> {
-		await this.#send({ type: "abort" });
+	async abort(options?: { clearQueue?: boolean }): Promise<void> {
+		await this.#send({ type: "abort", ...(options?.clearQueue ? { clearQueue: true } : {}) });
 	}
 
 	/**

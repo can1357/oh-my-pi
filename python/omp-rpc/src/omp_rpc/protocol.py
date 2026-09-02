@@ -957,7 +957,8 @@ class ServerFeatures:
     never negotiates v2 still reads them.
 
     `active_turn_steering == 1`: `steer` honors `active_turn_only` and answers
-    with `accepted`, and `clear_queue` is available with `for_interrupt`.
+    with `accepted`; `abort` accepts `clear_queue=True`; and `clear_queue` is
+    available with `for_interrupt`.
     """
 
     active_turn_steering: Literal[1] | None = None
