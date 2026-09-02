@@ -209,13 +209,14 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools?, timeout? })`; Python uses keyword arguments (`schema_mode`).
 - Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails handle allocation; Python raises directly, JS's pending handle rejects when awaited/used. Execution failures surface from `.wait()`.
 - `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
-- `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.
-- Handle surface: `.id`, `.agent`, `.handle` (`agent://<id>`), `.status`, `.done()`, `.wait(timeout?)`, `.send(message)`, `.cancel()`, `.output()`. Python handles are awaitable; JavaScript uses `await handle.wait()`.
-- The job is a regular async job owned by the calling agent: an unwaited result auto-delivers like a backgrounded `task`, and handle `.wait()` consumes the delivery so it is not replayed. Eval subagents are kept alive (message with `write agent://<id>`, read transcripts at `history://<id>`) and get their own eval executors, like every subagent.
+- `timeout` caps the subagent's wall-clock seconds; exactly `0` disables the cap and every positive value is bounded to at least 1 ms. Omitted inherits `task.maxRuntimeMs`.
+- `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel. Agents with `restrictTools: true` cannot receive these custom tools; their declared built-in allowlist remains in effect.
+- Handle surface: .id, .agent, .handle (agent://<id>), .status, .done(), .wait(timeout?), .send(message), .cancel(), .output(). Settled results report the served model and canonical family. Python handles are awaitable; JavaScript uses await handle.wait().
+- The job is a regular async job owned by the calling agent: unwaited results auto-deliver; handle .wait() consumes delivery. Eval subagents remain addressable through hub and history://, each with a separate eval executor.
 
 ### `wait()`
 
