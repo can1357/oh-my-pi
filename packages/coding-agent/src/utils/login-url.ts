@@ -57,16 +57,25 @@ export function persistLoginUrl(url: string): string | undefined {
  * The command a user runs to print the persisted URL, portable to the shell
  * they are actually in.
  *
- * cmd.exe has no `cat`, so win32 renders `type` (also a PowerShell alias) with
- * the path quoted. POSIX renders `cat` with the home prefix shortened to `~`,
- * which must stay outside quotes to expand, so the path is unquoted only when
- * every character is shell-inert. Anything else is single-quoted with embedded
- * quotes escaped: unlike double quotes, single quotes stop `$()` and backtick
- * substitution, so a hostile PI_CODING_AGENT_DIR cannot execute through the
- * advertised command.
+ * win32 renders `type` (cmd.exe built-in, also a PowerShell alias). A path of
+ * shell-inert characters is left unquoted, which both shells read identically.
+ * Anything else is PowerShell single-quoted with embedded quotes doubled:
+ * single quotes stop `$()`, backticks, and `%`/`!` expansion there. cmd.exe
+ * cannot be made literal at all: `%VAR%` (and `!x!` under delayed expansion)
+ * substitutes before quote parsing, so no quoting suppresses it. The quoted
+ * form therefore targets PowerShell, the modern Windows default shell.
+ *
+ * POSIX renders `cat` with the home prefix shortened to `~`, which must stay
+ * outside quotes to expand, so the path is unquoted only when every character
+ * is shell-inert. Anything else is single-quoted with embedded quotes escaped:
+ * unlike double quotes, single quotes stop `$()` and backtick substitution, so
+ * a hostile PI_CODING_AGENT_DIR cannot execute through the advertised command.
  */
 export function loginUrlCopyCommand(filePath: string): string {
-	if (process.platform === "win32") return `type "${filePath}"`;
+	if (process.platform === "win32") {
+		if (/^[\w.:\\/-]+$/.test(filePath)) return `type ${filePath}`;
+		return `type '${filePath.replaceAll("'", "''")}'`;
+	}
 	const home = os.homedir();
 	const display = filePath.startsWith(`${home}/`) ? `~${filePath.slice(home.length)}` : filePath;
 	if (/^[\w@%+=:,./~-]+$/.test(display)) return `cat ${display}`;

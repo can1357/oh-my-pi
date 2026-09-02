@@ -950,11 +950,19 @@ export class MCPCommandController {
 						block.addChild(
 							launched
 								? new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0)
-								: new Text(theme.fg("muted", "→ Browser launch disabled by BROWSER=none. Open the URL below."), 1, 0),
+								: new Text(
+										theme.fg("muted", "→ Browser launch disabled by BROWSER=none. Open the URL below."),
+										1,
+										0,
+									),
 						);
 						block.addChild(new Spacer(1));
 						block.addChild(
-							new Text(theme.fg("muted", launched ? "Alternative if browser did not open:" : "Log in at:"), 1, 0),
+							new Text(
+								theme.fg("muted", launched ? "Alternative if browser did not open:" : "Log in at:"),
+								1,
+								0,
+							),
 						);
 						block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
 						{
@@ -962,7 +970,9 @@ export class MCPCommandController {
 							// and padding, and OSC 52/OSC 8 are optional terminal features.
 							const urlFile = persistLoginUrl(info.url);
 							if (urlFile) {
-								block.addChild(new Text(theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 1, 0));
+								block.addChild(
+									new Text(theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 1, 0),
+								);
 							}
 						}
 						this.ctx.ui.requestRender();

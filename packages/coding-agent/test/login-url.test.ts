@@ -1,21 +1,30 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
-import { join } from "node:path";
+import * as path from "node:path";
 import { loginUrlCopyCommand, persistLoginUrl } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 // Redirected per test: writing to the real agent dir would overwrite or delete
 // a clean-copy URL belonging to a live omp login on the developer's machine.
-let tmp: string;
+let tmp: string | undefined;
 function useTempAgentDir(): string {
-	tmp = mkdtempSync(join(os.tmpdir(), "login-url-test-"));
-	spyOn(piUtils, "getAgentDir").mockReturnValue(tmp);
+	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "login-url-test-"));
+	vi.spyOn(piUtils, "getAgentDir").mockReturnValue(tmp);
 	return tmp;
 }
 
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+function setPlatform(value: NodeJS.Platform): void {
+	Object.defineProperty(process, "platform", { value, configurable: true });
+}
+
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
+	// The spy must not outlive the temp dir it points at.
+	vi.restoreAllMocks();
+	if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+	if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+	tmp = undefined;
 });
 
 describe("persistLoginUrl", () => {
@@ -24,29 +33,29 @@ describe("persistLoginUrl", () => {
 		const url = `https://auth.example.com/oauth/authorize?code_challenge=${"B".repeat(43)}&state=${"s".repeat(64)}`;
 		const returned = persistLoginUrl(url);
 		// Per-process: concurrent omp logins must not overwrite each other.
-		expect(returned).toBe(join(dir, `login-url-${process.pid}.txt`));
+		expect(returned).toBe(path.join(dir, `login-url-${process.pid}.txt`));
 		// Byte-exact: the whole point is that no terminal artifact touches it.
-		expect(readFileSync(returned as string, "utf8")).toBe(`${url}\n`);
-		expect(statSync(returned as string).mode & 0o777).toBe(0o600);
+		expect(fs.readFileSync(returned as string, "utf8")).toBe(`${url}\n`);
+		expect(fs.statSync(returned as string).mode & 0o777).toBe(0o600);
 	});
 
 	it("sweeps day-old files from dead processes, keeps fresh ones", () => {
 		const dir = useTempAgentDir();
-		const stale = join(dir, "login-url-99999.txt");
-		const fresh = join(dir, "login-url-88888.txt");
-		writeFileSync(stale, "old\n");
-		writeFileSync(fresh, "new\n");
+		const stale = path.join(dir, "login-url-99999.txt");
+		const fresh = path.join(dir, "login-url-88888.txt");
+		fs.writeFileSync(stale, "old\n");
+		fs.writeFileSync(fresh, "new\n");
 		const dayAgo = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
-		utimesSync(stale, dayAgo, dayAgo);
+		fs.utimesSync(stale, dayAgo, dayAgo);
 
 		persistLoginUrl("https://x.test/a");
 
-		expect(() => statSync(stale)).toThrow();
-		expect(readFileSync(fresh, "utf8")).toBe("new\n");
+		expect(() => fs.statSync(stale)).toThrow();
+		expect(fs.readFileSync(fresh, "utf8")).toBe("new\n");
 	});
 });
 
-describe("loginUrlCopyCommand", () => {
+describe("loginUrlCopyCommand (posix)", () => {
 	it("shortens the home prefix and leaves ~ outside quotes so it expands", () => {
 		if (process.platform === "win32") return;
 		const home = os.homedir();
@@ -66,5 +75,37 @@ describe("loginUrlCopyCommand", () => {
 		);
 		// An embedded single quote cannot terminate the quoting.
 		expect(loginUrlCopyCommand("/tmp/o'brien/login-url-1.txt")).toBe("cat '/tmp/o'\\''brien/login-url-1.txt'");
+	});
+});
+
+describe("loginUrlCopyCommand (win32)", () => {
+	it("leaves a shell-inert path unquoted so cmd and PowerShell read it identically", () => {
+		setPlatform("win32");
+		expect(loginUrlCopyCommand("C:\\Users\\seth\\.omp\\agent\\login-url-1.txt")).toBe(
+			"type C:\\Users\\seth\\.omp\\agent\\login-url-1.txt",
+		);
+	});
+
+	it("keeps cmd %VAR% and delayed-expansion ! literal via PowerShell single quotes", () => {
+		setPlatform("win32");
+		// Double quotes would let cmd expand %NAME% and !x!; the single-quoted
+		// form is byte-literal in PowerShell, the shell the quoting targets.
+		expect(loginUrlCopyCommand("C:\\Users\\%NAME%\\agent dir\\login-url-1.txt")).toBe(
+			"type 'C:\\Users\\%NAME%\\agent dir\\login-url-1.txt'",
+		);
+		expect(loginUrlCopyCommand("C:\\agents\\!x!\\login-url-1.txt")).toBe("type 'C:\\agents\\!x!\\login-url-1.txt'");
+	});
+
+	it("never lets PowerShell run a subexpression from the path", () => {
+		setPlatform("win32");
+		// $() executes inside PowerShell double quotes; single quotes stop it.
+		expect(loginUrlCopyCommand("C:\\agents\\$(calc)\\login-url-1.txt")).toBe(
+			"type 'C:\\agents\\$(calc)\\login-url-1.txt'",
+		);
+		// An embedded single quote cannot terminate the quoting: doubled per
+		// PowerShell's literal-string escape.
+		expect(loginUrlCopyCommand("C:\\Users\\o'brien\\login-url-1.txt")).toBe(
+			"type 'C:\\Users\\o''brien\\login-url-1.txt'",
+		);
 	});
 });

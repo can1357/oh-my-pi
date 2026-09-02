@@ -103,7 +103,9 @@ export class LoginDialogComponent extends OverlayPanel {
 		// selection carries row breaks and padding, and OSC 52/OSC 8 are optional.
 		const urlFile = persistLoginUrl(url);
 		if (urlFile) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 0, 0));
+			this.#contentContainer.addChild(
+				new Text(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 0, 0),
+			);
 		}
 
 		// Open browser (best-effort). `false` means BROWSER=none suppressed the
