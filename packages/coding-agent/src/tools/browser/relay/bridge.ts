@@ -379,6 +379,8 @@ class TabState {
 	runtimeGeneration = 0;
 	/** Increments whenever Chrome reports a newly created JavaScript context. */
 	contextGeneration = 0;
+	/** Monotonic main-frame navigation token independent of Runtime events. */
+	mainFrameNavigationGeneration = 0;
 	/** URL observed before an extension outage, for navigation-aware recovery. */
 	recoveryStartUrl: string | null = null;
 	/** Main-frame loader observed by the extension when recovery began. */
@@ -3093,6 +3095,11 @@ export class RelayBridge {
 				);
 			}
 		}
+		if (method === "Page.frameNavigated") {
+			const frame = params?.frame;
+			if (frame && typeof frame === "object" && !("parentId" in frame))
+				tab.mainFrameNavigationGeneration++;
+		}
 	}
 
 	#onTabDetached(tabId: number, reason: string, relayInitiated: boolean): void {
@@ -3588,6 +3595,8 @@ export class RelayBridge {
 			}
 			let rootIdentifier = identifier;
 			const contextGenerationAfterRegistration = tab.contextGeneration;
+			const navigationGenerationAfterRegistration =
+				tab.mainFrameNavigationGeneration;
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(
 					tab.tabId,
@@ -3600,7 +3609,9 @@ export class RelayBridge {
 					// already covered by that registration. Only retry when the loader
 					// changed before acknowledgement; otherwise runImmediately would
 					// execute non-idempotent preload code twice in the new document.
-					tab.contextGeneration === contextGenerationAfterRegistration
+					tab.contextGeneration === contextGenerationAfterRegistration &&
+					tab.mainFrameNavigationGeneration ===
+						navigationGenerationAfterRegistration
 				) {
 					let retry: Record<string, unknown> | undefined;
 					try {

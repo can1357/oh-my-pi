@@ -81,7 +81,6 @@ const RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
 const recoverableTabIds = new Set<number>();
 const liveOwnedTabIds = new Set<number>();
 const recoveryLoaderIds = new Map<number, string>();
-let recoveryLoaderUpdates: Promise<void> = Promise.resolve();
 let recoveryLoaderGeneration = 0;
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
@@ -136,7 +135,9 @@ const loadRecoverableState = createRetryableLoader(() => {
 			return true;
 		});
 });
-const initialRecoverableReady = loadRecoverableState();
+const initialRecoverableReady: Promise<void> = loadRecoverableState().then(
+	() => {},
+);
 let recoverableUpdates: Promise<void> = initialRecoverableReady.catch(() => {});
 let orphanSweepDeadlineUpdates: Promise<void> = initialRecoverableReady.catch(
 	() => {},
@@ -186,25 +187,44 @@ function updateRecoverable(
 	for (const tabId of affectedTabIds) recoverableStartupMutations.add(tabId);
 	update(affectedTabIds);
 	const generation = ++recoverableUpdateGeneration;
-	const persistCurrent = async (): Promise<unknown> => {
+	const loadCurrent = async (): Promise<void> => {
 		// Never replace the persisted ownership snapshot from a partially initialized
 		// worker. A successful (possibly retried) load first merges every unaffected
 		// id; recoverableStartupMutations keeps this event's per-tab change authoritative.
 		await loadRecoverableState();
-		return chrome.storage.session.set({
-			[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
-			[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
-			[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
-		});
 	};
-	const immediateWrite = persistCurrent().catch(() => {});
+	const immediateWrite = loadCurrent()
+		.then(() =>
+			chrome.storage.session.set({
+				[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+				[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+			}),
+		)
+		.catch(() => {});
 	recoverableUpdates = serializeRecoverableStateUpdate(
 		recoverableUpdates,
 		immediateWrite,
 		() => generation === recoverableUpdateGeneration,
-		persistCurrent,
+		async () => {
+			await loadCurrent();
+			await persistRecoveryState();
+		},
 	);
 	return recoverableUpdates;
+}
+
+function persistRecoveryState(): Promise<void> {
+	return chrome.storage.session.set({
+		[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+		[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+		[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+	});
+}
+
+function persistRecoveryLoaderIds(): Promise<void> {
+	const update = recoverableUpdates.catch(() => {}).then(persistRecoveryState);
+	recoverableUpdates = update;
+	return update;
 }
 
 function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
@@ -423,16 +443,24 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
 						shouldRetrackAfterDetachFailure(targets, tabId)
 					) {
-						void trackAttachments([tabId]);
+						try {
+							await trackAttachments([tabId], () =>
+								(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+							);
+						} catch {
+							if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
+								return;
+							attachmentGuard.onDisconnected();
+							attachmentGuard.track(tabId);
+							void maybeScheduleOrphanSweep(true);
+						}
 					}
 				}),
 			);
 		}
 		void Promise.all([...pendingDetaches]).then(async () => {
 			if (loaderGeneration !== recoveryLoaderGeneration) return;
-			await chrome.storage.session.set({
-				[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
-			});
+			await persistRecoveryLoaderIds();
 		});
 	},
 });
@@ -740,7 +768,7 @@ async function buildHello(): Promise<
 	// relay attachments; promoting every attached target would resurrect a user
 	// takeover that onDetach deliberately removed from recovery state.
 	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
-	await recoveryLoaderUpdates;
+	await flushRecoverableUpdates();
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
 		Number.isInteger(navigator.hardwareConcurrency) &&
@@ -793,6 +821,7 @@ async function attachTabOperation(
 	// `detached` that bans the tab and drops its recovery bit instead of
 	// letting the surviving relay reconcile it from the next hello.
 	if (ws !== socket) {
+		const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 		guardDetachments.add(tabId);
 		await trackPendingDetach(
 			chrome.debugger.detach({ tabId }).catch(async () => {
@@ -805,8 +834,21 @@ async function attachTabOperation(
 				// survived, so a subsequent sweep reclaims it instead of leaving the
 				// debugger infobar orphaned indefinitely.
 				const targets = await chrome.debugger.getTargets().catch(() => null);
-				if (shouldRetrackAfterDetachFailure(targets, tabId)) {
-					void trackAttachments([tabId]);
+				if (
+					(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
+					shouldRetrackAfterDetachFailure(targets, tabId)
+				) {
+					try {
+						await trackAttachments([tabId], () =>
+							(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+						);
+					} catch {
+						if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
+							return;
+						attachmentGuard.onDisconnected();
+						attachmentGuard.track(tabId);
+						void maybeScheduleOrphanSweep(true);
+					}
 				}
 			}),
 		);
@@ -1049,11 +1091,12 @@ async function connect(): Promise<void> {
 				}),
 			);
 			if (loaderGeneration !== recoveryLoaderGeneration) return;
-			await chrome.storage.session.set({
-				[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
-			});
+			await persistRecoveryState();
 		};
-		recoveryLoaderUpdates = captureLoaderIds();
+		const loaderUpdate = recoverableUpdates
+			.catch(() => {})
+			.then(captureLoaderIds);
+		recoverableUpdates = loaderUpdate;
 		// A new disconnect cycle: invalidate any orphan sweep that already yielded
 		// to the alarms/storage APIs so its stale resume cannot cancel the fresh
 		// grace deadline armed below.
