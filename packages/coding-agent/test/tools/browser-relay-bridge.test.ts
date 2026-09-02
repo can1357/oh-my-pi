@@ -4395,6 +4395,81 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	it("forgets and forces a fresh root after an interrupted shared-root clear", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Establish a tracked shared-root subscription (Fetch.enable) so the
+		// journal records an enable under the `Fetch.enable` key.
+		const enableId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: enableId,
+				sessionId: pageSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.some((m) => m.id === enableId && "result" in m)).toBe(
+			true,
+		);
+
+		// Issue the tab-wide clear (Fetch.disable), then drop the socket
+		// ordinarily before its result arrives. Chrome may already have disabled
+		// interception, but #recordSubscription never ran to forget the journaled
+		// enable.
+		const disableId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: disableId,
+				sessionId: pageSession,
+				method: "Fetch.disable",
+			}),
+		);
+		await waitFor(
+			() => ext.rpcs("send").some((rpc) => rpc.method === "Fetch.disable"),
+			"interrupted Fetch.disable RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		expect(cdp.messages.some((m) => m.id === disableId && "error" in m)).toBe(
+			true,
+		);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		// The interrupted clear forces a fresh root: detach → attach.
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"fresh-root detach after interrupted clear",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"fresh-root attach after interrupted clear",
+		);
+		ack(bridge, ext2, "attach");
+		await flush();
+		// The journaled enable was forgotten, so recovery must NOT resurrect the
+		// explicitly disabled interception by replaying Fetch.enable onto the
+		// fresh root.
+		expect(
+			ext2.rpcs("send").filter((rpc) => rpc.method === "Fetch.enable"),
+		).toHaveLength(0);
+	});
+
 	it("preserves recovery authorization when the forced-root detach outlives its socket", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

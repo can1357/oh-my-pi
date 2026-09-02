@@ -1286,17 +1286,16 @@ export class RelayBridge {
 			if (pendingSubscription && isExtensionTransportInterrupted(err)) {
 				const tab = this.#tabs.get(tabId);
 				if (tab) {
-					// An interrupted Runtime.removeBinding is doubly ambiguous: Chrome may
-					// have already dropped the binding while the journal still records the
-					// paired addBinding under the same per-name key. A reconnect would
-					// then replay a binding the root no longer carries and resurrect the
-					// explicitly removed function. Forget the journal entry so recovery
-					// cannot revive it, mirroring the preload-removal path, before forcing
-					// the fresh root below.
-					if (msg.method === "Runtime.removeBinding") {
-						const key = this.#subscriptionTrackingKey(msg);
-						if (key) this.#forgetTabSubscription(tab, key);
-					}
+					// A tab-wide clear (a `<domain>.disable`, an explicit clear/reset, a
+					// removed binding, or a neutral-value setter) is doubly ambiguous when
+					// interrupted: Chrome may have already applied it while the journal
+					// still records the prior enable/override under the same key. Because
+					// #recordSubscription runs only on the success path, that stale entry
+					// survives, and a fresh-root replay would resurrect the very state the
+					// caller explicitly cleared. Forget the journal entry so recovery
+					// cannot revive it before forcing the fresh root below.
+					const clearedKey = this.#interruptedClearKey(msg);
+					if (clearedKey) this.#forgetTabSubscription(tab, clearedKey);
 					tab.forceFreshRootBeforeReplay = true;
 				}
 			}
@@ -2284,6 +2283,118 @@ export class RelayBridge {
 			default:
 				return undefined;
 		}
+	}
+
+	// Mirrors the tab-wide "forget" branches of #recordSubscription: returns the
+	// journal key a command clears (its `<domain>.enable`, per-name binding, or
+	// tracked setter key) when the command resets tab state rather than
+	// establishing it. Used by the interruption handler so an interrupted clear
+	// forgets the prior enable/override it was meant to undo, since
+	// #recordSubscription never ran to record the clear itself.
+	#interruptedClearKey(msg: CdpCommand): string | undefined {
+		const separator = msg.method.indexOf(".");
+		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
+		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
+		if (domain && domain !== "Runtime" && command === "disable") {
+			return this.#subscriptionTrackingKey(msg);
+		}
+		if (msg.method === "Runtime.removeBinding") {
+			return this.#subscriptionTrackingKey(msg);
+		}
+		let cleared: boolean;
+		switch (msg.method) {
+			case "Emulation.clearDeviceMetricsOverride":
+			case "Page.clearDeviceMetricsOverride":
+			case "Emulation.clearGeolocationOverride":
+			case "Page.clearGeolocationOverride":
+			case "Emulation.clearIdleOverride":
+			case "Emulation.resetPageScaleFactor":
+			case "Network.clearAcceptedEncodings":
+				cleared = true;
+				break;
+			case "Target.setAutoAttach":
+				cleared = msg.params?.autoAttach !== true;
+				break;
+			case "Target.setDiscoverTargets":
+				cleared = msg.params?.discover !== true;
+				break;
+			case "Page.setLifecycleEventsEnabled":
+				cleared = msg.params?.enabled !== true;
+				break;
+			case "Network.setCacheDisabled":
+				cleared = msg.params?.cacheDisabled !== true;
+				break;
+			case "Page.setBypassCSP":
+			case "Emulation.setTouchEmulationEnabled":
+			case "Page.setTouchEmulationEnabled":
+			case "Input.setInterceptDrags":
+			case "Page.setInterceptFileChooserDialog":
+			case "Emulation.setAutomationOverride":
+				cleared = msg.params?.enabled !== true;
+				break;
+			case "Network.setExtraHTTPHeaders":
+				cleared = !hasObjectKeys(msg.params?.headers);
+				break;
+			case "Network.setBlockedURLs": {
+				const urls = msg.params?.urls;
+				const urlPatterns = msg.params?.urlPatterns;
+				cleared =
+					(!Array.isArray(urls) || urls.length === 0) &&
+					(!Array.isArray(urlPatterns) || urlPatterns.length === 0);
+				break;
+			}
+			case "Emulation.setEmulatedMedia":
+			case "Emulation.setLocaleOverride":
+			case "Emulation.setFocusEmulationEnabled":
+			case "Emulation.setScrollbarsHidden":
+			case "Emulation.setEmulatedVisionDeficiency":
+				cleared =
+					!hasObjectKeys(msg.params) ||
+					(msg.method === "Emulation.setFocusEmulationEnabled" &&
+						msg.params?.enabled === false) ||
+					(msg.method === "Emulation.setScrollbarsHidden" &&
+						msg.params?.hidden === false) ||
+					(msg.method === "Emulation.setLocaleOverride" &&
+						msg.params?.locale === "") ||
+					(msg.method === "Emulation.setEmulatedVisionDeficiency" &&
+						msg.params?.type === "none");
+				break;
+			case "Emulation.setTimezoneOverride":
+				cleared = msg.params?.timezoneId === "";
+				break;
+			case "Emulation.setCPUThrottlingRate":
+				cleared = msg.params?.rate === 1;
+				break;
+			case "Emulation.setScriptExecutionDisabled":
+				cleared = msg.params?.value === false;
+				break;
+			case "Network.setBypassServiceWorker":
+				cleared = msg.params?.bypass === false;
+				break;
+			case "Security.setIgnoreCertificateErrors":
+				cleared = msg.params?.ignore === false;
+				break;
+			case "Network.setUserAgentOverride":
+			case "Emulation.setUserAgentOverride":
+				cleared = isEmptyUserAgentOverride(msg.params);
+				break;
+			case "Emulation.setHardwareConcurrencyOverride":
+				cleared = isDefaultHardwareConcurrency(
+					msg.params,
+					this.#extInfo?.hardwareConcurrency,
+				);
+				break;
+			case "Emulation.setDefaultBackgroundColorOverride":
+				cleared = !hasObjectKeys(msg.params);
+				break;
+			case "Network.emulateNetworkConditions":
+				cleared = isNeutralNetworkConditions(msg.params);
+				break;
+			default:
+				cleared = false;
+				break;
+		}
+		return cleared ? this.#subscriptionTrackingKey(msg) : undefined;
 	}
 
 	#isCurrentPreservedSubscription(
