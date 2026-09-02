@@ -381,6 +381,8 @@ class TabState {
 	contextGeneration = 0;
 	/** URL observed before an extension outage, for navigation-aware recovery. */
 	recoveryStartUrl: string | null = null;
+	/** Main-frame loader observed by the extension when recovery began. */
+	recoveryStartLoaderId: string | undefined;
 	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
 	restoring: Promise<void> | null = null;
 	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
@@ -705,6 +707,7 @@ export class RelayBridge {
 			if (!seen.has(tabId)) this.#onTabRemoved(tabId);
 		}
 		for (const tab of this.#tabs.values()) {
+			tab.recoveryStartLoaderId = msg.recoveryLoaderIds?.[String(tab.tabId)];
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
 			// A same-socket hello (another tab's delayed guard detach triggering a
@@ -1479,7 +1482,8 @@ export class RelayBridge {
 			msg.method === "Runtime.addBinding" ||
 			msg.method === "Runtime.removeBinding"
 		) {
-			const name = typeof msg.params?.name === "string" ? msg.params.name : undefined;
+			const name =
+				typeof msg.params?.name === "string" ? msg.params.name : undefined;
 			if (!name) return;
 			const key = `Runtime.addBinding:${name}`;
 			if (msg.method === "Runtime.removeBinding") {
@@ -3199,13 +3203,14 @@ export class RelayBridge {
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
 		let refreshedRoot = false;
+		let forceFreshRoot = false;
 		const contextGenerationBeforeRecovery = tab.contextGeneration;
 		const urlBeforeRecovery = tab.recoveryStartUrl ?? tab.url;
 		const restoring = (async () => {
 			let ok: boolean;
 			try {
-				refreshedRoot =
-					tab.forceFreshRootBeforeReplay || (attach && !tab.attached);
+				forceFreshRoot = tab.forceFreshRootBeforeReplay;
+				refreshedRoot = forceFreshRoot || (attach && !tab.attached);
 				ok = refreshedRoot
 					? await this.#refreshRootForRecovery(tab, ext)
 					: !attach || (await this.#ensureAttached(tab));
@@ -3275,9 +3280,11 @@ export class RelayBridge {
 						tab,
 						keepPageSessions,
 						ext,
-						refreshedRoot &&
-							(tab.contextGeneration !== contextGenerationBeforeRecovery ||
-								tab.url !== urlBeforeRecovery),
+						forceFreshRoot ||
+							(refreshedRoot &&
+								(tab.contextGeneration !== contextGenerationBeforeRecovery ||
+									tab.url !== urlBeforeRecovery)),
+						tab.recoveryStartLoaderId,
 					);
 				} catch (err) {
 					// A replacement keeps the journal pending. Its hello restarts the
@@ -3302,6 +3309,7 @@ export class RelayBridge {
 				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
 				tab.recoveryStartUrl = null;
+				tab.recoveryStartLoaderId = undefined;
 			}
 			// The user can cancel the debugger attachment while the final replay RPC
 			// is in flight: #onTabDetached then bans the tab and retracts its
@@ -3433,6 +3441,7 @@ export class RelayBridge {
 		conns: CdpConnection[],
 		expectedExt: RelaySocket | null,
 		_runImmediatePreloads: boolean,
+		recoveryLoaderId?: string,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
@@ -3520,9 +3529,9 @@ export class RelayBridge {
 			this.#assertExtensionCurrent(expectedExt);
 			const runImmediately =
 				script.params?.runImmediately === true &&
-				script.loaderId !== undefined &&
+				recoveryLoaderId !== undefined &&
 				currentLoaderId !== undefined &&
-				script.loaderId !== currentLoaderId;
+				recoveryLoaderId !== currentLoaderId;
 			const replayParams =
 				script.params &&
 				typeof script.params === "object" &&

@@ -78,6 +78,8 @@ const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 const recoverableTabIds = new Set<number>();
 const liveOwnedTabIds = new Set<number>();
+const recoveryLoaderIds = new Map<number, string>();
+let recoveryLoaderUpdates: Promise<void> = Promise.resolve();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
@@ -342,7 +344,17 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		for (const tabId of tabIds) {
 			guardDetachments.add(tabId);
 			void trackPendingDetach(
-				chrome.debugger.detach({ tabId }).catch(async () => {
+				(async () => {
+					const frameTree = (await chrome.debugger
+						.sendCommand({ tabId }, "Page.getFrameTree")
+						.catch(() => undefined)) as
+						| { frameTree?: { frame?: { loaderId?: unknown } } }
+						| undefined;
+					const loaderId = frameTree?.frameTree?.frame?.loaderId;
+					if (typeof loaderId === "string")
+						recoveryLoaderIds.set(tabId, loaderId);
+					await chrome.debugger.detach({ tabId });
+				})().catch(async () => {
 					guardDetachments.delete(tabId);
 					// The detach rejected. If Chrome still reports the tab attached, the
 					// #sweep() that fired this already dropped it from the guard's tracked
@@ -663,6 +675,7 @@ async function buildHello(): Promise<
 	// relay attachments; promoting every attached target would resurrect a user
 	// takeover that onDetach deliberately removed from recovery state.
 	const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
+	await recoveryLoaderUpdates;
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
 		Number.isInteger(navigator.hardwareConcurrency) &&
@@ -677,6 +690,12 @@ async function buildHello(): Promise<
 		tabs: snapshots,
 		attachedTabIds,
 		recoverableTabIds: [...recoverableTabIds],
+		recoveryLoaderIds: Object.fromEntries(
+			[...recoveryLoaderIds].map(([tabId, loaderId]) => [
+				String(tabId),
+				loaderId,
+			]),
+		),
 	};
 }
 
@@ -931,6 +950,18 @@ async function connect(): Promise<void> {
 		if (ws !== socket) return;
 		ws = null;
 		if (helloDeliveredSocket === socket) helloDeliveredSocket = null;
+		recoveryLoaderUpdates = Promise.all(
+			attachmentGuard.attachedTabIds().map(async (tabId) => {
+				const frameTree = (await chrome.debugger
+					.sendCommand({ tabId }, "Page.getFrameTree")
+					.catch(() => undefined)) as
+					| { frameTree?: { frame?: { loaderId?: unknown } } }
+					| undefined;
+				const loaderId = frameTree?.frameTree?.frame?.loaderId;
+				if (typeof loaderId === "string")
+					recoveryLoaderIds.set(tabId, loaderId);
+			}),
+		).then(() => {});
 		// A new disconnect cycle: invalidate any orphan sweep that already yielded
 		// to the alarms/storage APIs so its stale resume cannot cancel the fresh
 		// grace deadline armed below.

@@ -24,7 +24,13 @@ export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
 	| { op: "forgetRecovery"; tabId: number }
-	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
+	| {
+			op: "send";
+			tabId: number;
+			sessionId?: string;
+			method: string;
+			params?: Record<string, unknown>;
+	  }
 	| { op: "createTab"; url: string }
 	| { op: "removeTab"; tabId: number }
 	| { op: "activateTab"; tabId: number }
@@ -34,7 +40,9 @@ export type RelayRpcRequest =
 	| { op: "ungroup"; tabIds: number[] };
 
 /** Messages sent relay → extension. */
-export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };
+export type RelayToExtMessage =
+	| ({ t: "rpc"; id: number } & RelayRpcRequest)
+	| { t: "pong" };
 
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =
@@ -49,11 +57,25 @@ export type ExtToRelayMessage =
 			attachedTabIds: number[];
 			/** Tabs detached by the extension's orphan guard and therefore safe to restore for surviving sessions. */
 			recoverableTabIds?: number[];
+			/** Main-frame loader observed when recovery began, keyed by tab id. */
+			recoveryLoaderIds?: Record<string, string>;
 	  }
-	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
+	| {
+			t: "cdpEvent";
+			tabId: number;
+			sessionId?: string;
+			method: string;
+			params?: Record<string, unknown>;
+	  }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }
 	| { t: "tabCreated"; tab: TabSnapshot }
 	| { t: "tabUpdated"; tab: TabSnapshot }
 	| { t: "tabRemoved"; tabId: number }
-	| { t: "rpcResult"; id: number; ok: boolean; result?: unknown; error?: string }
+	| {
+			t: "rpcResult";
+			id: number;
+			ok: boolean;
+			result?: unknown;
+			error?: string;
+	  }
 	| { t: "ping" };

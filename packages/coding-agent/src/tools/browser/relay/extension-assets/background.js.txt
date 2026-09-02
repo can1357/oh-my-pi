@@ -190,6 +190,8 @@ var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
 var recoverableTabIds = new Set;
 var liveOwnedTabIds = new Set;
+var recoveryLoaderIds = new Map;
+var recoveryLoaderUpdates = Promise.resolve();
 var recoverableUpdateGeneration = 0;
 var recoverableStartupMutations = new Set;
 var orphanSweepDeadlineMs = null;
@@ -342,7 +344,15 @@ var attachmentGuard = new AttachmentGuard({
   detachAll: (tabIds) => {
     for (const tabId of tabIds) {
       guardDetachments.add(tabId);
-      trackPendingDetach(chrome.debugger.detach({ tabId }).catch(async () => {
+      trackPendingDetach((async () => {
+        const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => {
+          return;
+        });
+        const loaderId = frameTree?.frameTree?.frame?.loaderId;
+        if (typeof loaderId === "string")
+          recoveryLoaderIds.set(tabId, loaderId);
+        await chrome.debugger.detach({ tabId });
+      })().catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => null);
         if (shouldRetrackAfterDetachFailure(targets, tabId)) {
@@ -516,6 +526,7 @@ async function buildHello() {
       snapshots.push(snap);
   }
   const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
+  await recoveryLoaderUpdates;
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   const hardwareConcurrency = Number.isInteger(navigator.hardwareConcurrency) && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : undefined;
   return {
@@ -525,7 +536,11 @@ async function buildHello() {
     hardwareConcurrency,
     tabs: snapshots,
     attachedTabIds,
-    recoverableTabIds: [...recoverableTabIds]
+    recoverableTabIds: [...recoverableTabIds],
+    recoveryLoaderIds: Object.fromEntries([...recoveryLoaderIds].map(([tabId, loaderId]) => [
+      String(tabId),
+      loaderId
+    ]))
   };
 }
 async function attachTab(tabId, socket) {
@@ -647,9 +662,7 @@ async function reconcileOrphans() {
   const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
     ...attachmentStateEpochs.keys()
   ]);
-  const targets = await chrome.debugger.getTargets().catch(() => null);
-  if (targets === null)
-    return;
+  const targets = await chrome.debugger.getTargets();
   const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
   await trackAttachments(attachedTabIds, () => true, attachmentState);
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
@@ -691,6 +704,14 @@ async function connect() {
     ws = null;
     if (helloDeliveredSocket === socket)
       helloDeliveredSocket = null;
+    recoveryLoaderUpdates = Promise.all(attachmentGuard.attachedTabIds().map(async (tabId) => {
+      const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => {
+        return;
+      });
+      const loaderId = frameTree?.frameTree?.frame?.loaderId;
+      if (typeof loaderId === "string")
+        recoveryLoaderIds.set(tabId, loaderId);
+    })).then(() => {});
     connectionGeneration++;
     if (pingTimer !== null) {
       clearInterval(pingTimer);
