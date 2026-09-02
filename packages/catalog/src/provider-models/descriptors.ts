@@ -479,6 +479,18 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "vLLM", allowUnauthenticated: true },
 	},
 	{
+		id: "volcengine-agent-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
+		catalogDiscovery: { label: "Volcengine Agent Plan", oauthProvider: "volcengine-agent-plan" },
+	},
+	{
+		id: "volcengine-coding-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_CODING_PLAN_API_KEY"],
+		catalogDiscovery: { label: "Volcengine Coding Plan", oauthProvider: "volcengine-coding-plan" },
+	},
+	{
 		id: "wafer-serverless",
 		defaultModel: "GLM-5.1",
 		envVars: ["WAFER_SERVERLESS_API_KEY"],
