@@ -42,6 +42,7 @@ import {
 	openaiModelManagerOptions,
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
+	openllmModelManagerOptions,
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
@@ -382,6 +383,16 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "claude-opus-4-8",
 		envVars: ["OPENCODE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeZenModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+	},
+	{
+		id: "openllm",
+		defaultModel: "ultra",
+		envVars: ["OPENLLM_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => openllmModelManagerOptions(config),
+		// Per-account catalog: rows come from `/v1/models` discovery only and are
+		// deliberately excluded from `generate-models.ts` (no `catalogDiscovery`),
+		// mirroring LiteLLM's never-bundled behavior.
 		dynamicModelsAuthoritative: true,
 	},
 	{

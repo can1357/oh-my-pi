@@ -5883,6 +5883,62 @@ export function nanoGptModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 23.5 OpenLLM
+// ---------------------------------------------------------------------------
+
+export interface OpenLLMModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+function toOpenLLMCapabilities(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+export function openllmModelManagerOptions(
+	config?: OpenLLMModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("openllm")!;
+	return {
+		providerId: "openllm",
+		// OpenLLM catalogs are per-account (activated models plus fallback-chain
+		// aliases such as `ultra`), so rows are never bundled in models.json;
+		// `/v1/models` discovery is the only source. The cache is scoped to the
+		// credential and endpoint because two accounts (or the hosted gateway vs
+		// a local daemon) expose different catalogs.
+		cacheProviderId: resolveModelCacheProviderId("openllm", { apiKey, baseUrl }),
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "openllm",
+				baseUrl,
+				apiKey,
+				// The gateway also lists image/video generation models; only
+				// chat-capable rows are usable through chat completions.
+				filterModel: entry => {
+					const capabilities = toOpenLLMCapabilities(entry.capabilities);
+					return capabilities.length === 0 || capabilities.includes("chat");
+				},
+				mapModel: (entry, defaults) => {
+					const capabilities = toOpenLLMCapabilities(entry.capabilities);
+					const displayName = entry.display_name;
+					return {
+						...defaults,
+						name: typeof displayName === "string" && displayName.length > 0 ? displayName : defaults.name,
+						reasoning: capabilities.includes("reasoning"),
+						input: capabilities.includes("vision") ? ["text", "image"] : ["text"],
+						contextWindow: toPositiveNumber(entry.context_window, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_output_tokens, defaults.maxTokens),
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 24. GitHub Copilot
 // ---------------------------------------------------------------------------
 
