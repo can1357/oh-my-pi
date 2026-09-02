@@ -1423,6 +1423,34 @@ export class RelayBridge {
 			return;
 		}
 
+		// Runtime.addBinding installs a named binding on the shared debugger root
+		// (Puppeteer's page.exposeFunction pairs it with a preload wrapper script).
+		// The preload half is already journaled, but without tracking the binding a
+		// guard-authorized root replacement replays the wrapper onto a fresh root
+		// that never re-registers the binding, so the exposed function silently
+		// stops firing. Track each binding by name so it can be replayed, and treat
+		// Runtime.removeBinding as its tab-wide clear.
+		if (
+			msg.method === "Runtime.addBinding" ||
+			msg.method === "Runtime.removeBinding"
+		) {
+			const name = typeof msg.params?.name === "string" ? msg.params.name : undefined;
+			if (!name) return;
+			const key = `Runtime.addBinding:${name}`;
+			if (msg.method === "Runtime.removeBinding") {
+				this.#forgetTabSubscription(tab, key);
+				return;
+			}
+			if (!ownerIsCurrent) return;
+			this.#rememberSessionSubscription(tab, key, ownerSessionId, {
+				method: msg.method,
+				params: msg.params,
+				ownerSessionId,
+				sequence: ++this.#subscriptionSeq,
+			});
+			return;
+		}
+
 		let enabled: boolean | undefined;
 		switch (msg.method) {
 			case "Target.setAutoAttach":
@@ -2189,6 +2217,11 @@ export class RelayBridge {
 		) {
 			return `${domain}.enable`;
 		}
+		if (msg.method === "Runtime.addBinding") {
+			const name =
+				typeof msg.params?.name === "string" ? msg.params.name : undefined;
+			return name ? `Runtime.addBinding:${name}` : undefined;
+		}
 		switch (msg.method) {
 			case "Target.setAutoAttach":
 			case "Target.setDiscoverTargets":
@@ -2337,6 +2370,17 @@ export class RelayBridge {
 			};
 		}
 		switch (subscription.method) {
+			case "Runtime.addBinding": {
+				// A binding installed on the shared root clears with its name; when the
+				// preserved owner disappears after replay, remove it so surviving
+				// holders do not inherit an orphaned binding on the fresh root.
+				const name =
+					typeof subscription.params?.name === "string"
+						? subscription.params.name
+						: undefined;
+				if (!name) return null;
+				return { method: "Runtime.removeBinding", params: { name } };
+			}
 			case "Target.setAutoAttach": {
 				// CDP requires `waitForDebuggerOnStart` on every Target.setAutoAttach
 				// call, even when flipping autoAttach back off during recovery cleanup.

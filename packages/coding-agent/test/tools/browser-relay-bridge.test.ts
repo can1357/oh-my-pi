@@ -3030,6 +3030,110 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	it("replays a Runtime.addBinding for a preserved session across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendRootCommand = async (
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({ id, sessionId: pageSession, method, params }),
+			);
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(
+				cdp.messages.filter(
+					(message) => message.id === id && "result" in message,
+				),
+			).toHaveLength(1);
+		};
+
+		await sendRootCommand("Runtime.addBinding", { name: "ompExposed" });
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"recovery reattach RPC",
+		);
+		ack(bridge, ext2, "attach");
+
+		await waitFor(
+			() => ext2.rpcs("send").length === 1,
+			"binding replay",
+		);
+		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+			"Runtime.addBinding",
+		]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ name: "ompExposed" });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(1);
+	});
+
+	it("stops replaying a Runtime.addBinding after Runtime.removeBinding clears it", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendRootCommand = async (
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({ id, sessionId: pageSession, method, params }),
+			);
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(
+				cdp.messages.filter(
+					(message) => message.id === id && "result" in message,
+				),
+			).toHaveLength(1);
+		};
+
+		await sendRootCommand("Runtime.addBinding", { name: "ompExposed" });
+		await sendRootCommand("Runtime.removeBinding", { name: "ompExposed" });
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"recovery reattach RPC",
+		);
+		ack(bridge, ext2, "attach");
+		await flush();
+		await flush();
+
+		expect(
+			ext2
+				.rpcs("send")
+				.filter((rpc) => rpc.method === "Runtime.addBinding"),
+		).toHaveLength(0);
+	});
+
 	it("replays preserved network throttling across recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

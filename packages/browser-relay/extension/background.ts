@@ -495,6 +495,20 @@ function refreshHello(onSent?: () => void): void {
 					done?.();
 				}
 			})
+			.catch(() => {
+				// `buildHello()` (or the attachment-state persistence it awaits) can
+				// reject when `chrome.tabs.query()` / `chrome.debugger.getTargets()`
+				// transiently fail. The socket stays OPEN, so keepalive `connect()`
+				// short-circuits on the live socket and never retries — the relay
+				// never receives a hello and the extension is stuck unusable. Close
+				// the socket so `onclose` runs the normal reconnect path
+				// (`scheduleReconnect()`), which opens a fresh socket and rebuilds the
+				// hello. The disconnected-armed orphan sweep is left intact because we
+				// never reached the post-send callback that cancels it.
+				if (ws === socket && socket.readyState === WebSocket.OPEN) {
+					socket.close();
+				}
+			})
 			.finally(() => {
 				if (helloRefresh !== entry) return;
 				if (
