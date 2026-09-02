@@ -182,11 +182,11 @@ mod background {
 				VK_UP, VkKeyScanW,
 			},
 			WindowsAndMessaging::{
-				AttachThreadInput, GA_ROOT, GetAncestor, GetClassNameW, GetFocus, GetGUIThreadInfo,
-				GetWindowThreadProcessId, GUITHREADINFO, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN,
-				WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK,
-				WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-				WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+				GA_ROOT, GetAncestor, GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId,
+				GUITHREADINFO, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
+				WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
+				WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK,
+				WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 			},
 		},
 	};
@@ -195,7 +195,8 @@ mod background {
 		capture,
 		delivery::{EventKind, would_be_silently_dropped},
 	};
-	use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 
 	const MK_LBUTTON: usize = 0x0001;
 	const MK_RBUTTON: usize = 0x0002;
