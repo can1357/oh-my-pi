@@ -1,9 +1,6 @@
 import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted, ToolError } from "../../tool-errors";
-
-// Duplicated from attach.ts so this module can load without pi-natives (attach.ts imports Process).
-const ATTACH_TARGET_SKIP_PATTERN =
-	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
+import { ATTACH_TARGET_SKIP_PATTERN } from "../target-skip-pattern";
 
 const MAX_CLAIM_ROUNDS = 3;
 const CDP_ERROR_TAB_CLAIMED = -32050;

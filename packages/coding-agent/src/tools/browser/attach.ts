@@ -4,9 +4,7 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Socket } from "bun";
 import type { Browser, Page } from "puppeteer-core";
 import { ToolError, throwIfAborted } from "../tool-errors";
-
-export const ATTACH_TARGET_SKIP_PATTERN =
-	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
+import { ATTACH_TARGET_SKIP_PATTERN } from "./target-skip-pattern";
 
 /**
  * Allocate an unused TCP port on 127.0.0.1 by binding to port 0 and reading
