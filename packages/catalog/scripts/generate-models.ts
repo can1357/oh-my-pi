@@ -99,15 +99,20 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
  * via `allowed_model_uids`; Merge exposes an account-specific route roster).
- * Fetching them during generation would bake one private account's entitlements
- * into the shared bundle, and those rows then survive forever as
- * previous-snapshot zombies: a later regen without that credential can never
- * mark the provider authoritative to prune them. These providers are never
- * fetched at generation time and their previous-snapshot rows are dropped —
- * curated static seeds remain bundled, while runtime discovery is authoritative
- * per credential.
+ * Ordinary full-catalog generation must not bake one private account's
+ * entitlements into the shared bundle or preserve previous-snapshot zombies.
+ * Explicit `--provider` generation may refresh that provider intentionally
+ * with the caller's credential. Runtime discovery remains authoritative per
+ * credential.
  */
 const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "merge-gateway"]);
+
+export function shouldFetchCatalogProvider(providerId: string, requestedProvider?: string): boolean {
+	return (
+		!DISCOVERY_ONLY_PROVIDERS.has(providerId) &&
+		(!CREDENTIAL_SCOPED_PROVIDERS.has(providerId) || providerId === requestedProvider)
+	);
+}
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -534,9 +539,7 @@ async function generateModels() {
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
-			isCatalogDescriptor(descriptor) &&
-			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
+			isCatalogDescriptor(descriptor) && shouldFetchCatalogProvider(descriptor.providerId, REQUESTED_PROVIDER),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
