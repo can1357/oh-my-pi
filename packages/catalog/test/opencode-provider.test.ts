@@ -660,6 +660,19 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
+	test("routes opencode-go muse-spark-1.3 to the responses API (#10610)", () => {
+		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
+		// Same failure class as #8957: the Go gateway serves muse-spark-1.3
+		// only at /zen/go/v1/responses (per opencode.ai/docs/go/#endpoints),
+		// but discovery falls through to openai-completions, which 500s.
+		for (const id of ["muse-spark-1.3", "muse-spark-1.3-contributor"]) {
+			expect(descriptor?.resolveApi?.(id, { tool_call: true })).toEqual({
+				api: "openai-responses",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+			});
+		}
+	});
+
 	test("pins gateway-only muse-spark ids to responses in live discovery (#8957)", async () => {
 		// models.dev omits muse-spark-1.2[-contributor] under opencode-go, so
 		// there is no bundled reference row. Without the discovery-side pin the

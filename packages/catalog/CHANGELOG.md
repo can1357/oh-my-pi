@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `opencode-go/muse-spark-1.3` (and `muse-spark-1.3-contributor`) failing every turn with `500 Internal server error`. The Go gateway serves these ids only at `/zen/go/v1/responses`, but the resolver fell through to `openai-completions`; both ids are now pinned to `openai-responses` like `muse-spark-1.2` ([#10610](https://github.com/can1357/oh-my-pi/issues/10610)).
+
 ## [18.1.4] - 2026-09-02
 
 ### Changed
