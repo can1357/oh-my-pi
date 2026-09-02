@@ -904,7 +904,7 @@ export class TUI extends Container {
 	setMouseTracking(enabled: boolean): void {
 		if (this.#mouseTracking === enabled) return;
 		this.#mouseTracking = enabled;
-		if (this.#stopped) return;
+		if (this.#stopped || this.#inputDeferred) return;
 		if (this.#altActive) {
 			const topOverlay = this.#getTopmostVisibleOverlay();
 			const wantMouseTracking = enabled && topOverlay?.options?.mouseTracking !== false;
@@ -916,6 +916,10 @@ export class TUI extends Container {
 			this.terminal.write(enabled ? NORMAL_MOUSE_TRACKING_ON : NORMAL_MOUSE_TRACKING_OFF);
 			this.#normalMouseTrackingActive = enabled;
 		}
+	}
+
+	get resizeAltActive(): boolean {
+		return this.#resizeAltActive;
 	}
 
 	get clearScrollbackOnNextRender(): boolean {

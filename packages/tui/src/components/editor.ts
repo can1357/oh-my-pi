@@ -2044,6 +2044,7 @@ export class Editor implements Component, Focusable, MouseRoutable {
 		if (event.release || event.wheel !== null || !event.leftClick) return true;
 		const isOption = event.alt === true || (event.button & 8) !== 0;
 		if (!isOption) return true;
+		if (this.tui?.resizeAltActive) return true;
 
 		let editorLine: number;
 		let editorCol: number;

@@ -227,18 +227,13 @@ export class Composer implements TerminalFrameProvider {
 		this.#statusSnapshot = options.status;
 		this.#applyWelcomeUpdate(options.welcome ?? {});
 
-		this.ui = new TUI(
-			options.terminal ?? new ProcessTerminal(),
-			this.#preferences.showHardwareCursor,
-			options.tuiOptions,
-		);
-		this.ui.setFrameProvider(this);
-		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
-		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
+		this.ui = new TUI(options.terminal ?? new ProcessTerminal(), this.#preferences.showHardwareCursor, {
+			...options.tuiOptions,
+			mouseTracking: this.#preferences.mouse !== false,
+		});
 
 		this.#editor = new CustomEditor(getEditorTheme());
 		this.#editor.tui = this.ui;
-		this.ui.setMouseTracking(this.#preferences.mouse !== false);
 		this.editor.disableSubmit = true;
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
@@ -260,6 +255,10 @@ export class Composer implements TerminalFrameProvider {
 		this.editor.onClear = () => this.#handleInterrupt();
 		this.editor.onExit = () => this.#requestExit(0);
 		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+
+		this.ui.setFrameProvider(this);
+		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
+		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		if (!this.#preferences.quiet) this.#ensureWelcome();
 		this.#rebuildHeader();
@@ -368,15 +367,16 @@ export class Composer implements TerminalFrameProvider {
 	/** Sync the editor screen position once the frame has been physically emitted. */
 	onFrameEmitted(viewportTop: number): void {
 		if (this.#lastEditorViewportRow !== undefined) {
-			this.editor.setRenderedScreenRow(viewportTop + this.#lastEditorViewportRow);
+			this.#editor?.setRenderedScreenRow(viewportTop + this.#lastEditorViewportRow);
 		} else {
-			this.editor.setRenderedScreenRow(undefined);
+			this.#editor?.setRenderedScreenRow(undefined);
 		}
 	}
 
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
 	renderResizeFrame(viewport: ViewportSize): readonly string[] {
 		if (!this.#started || this.#stopped) return [];
+		this.#editor?.setRenderedScreenRow(undefined);
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
 		const tail = this.#runtimeMounted
