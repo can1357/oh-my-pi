@@ -12,7 +12,8 @@ import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keyb
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
 import type { SymbolTheme } from "../symbols";
-import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
+import { type MouseRoutable, parseSgrMouse, type SgrMouseEvent } from "../mouse";
+import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui";
 import {
 	getSegmenter,
 	getWidthConfigEpoch,
@@ -396,6 +397,17 @@ interface WrapEntry {
 	chunks: TextChunk[] | null;
 }
 
+interface EditorRenderLayout {
+	width: number;
+	layoutWidth: number;
+	topChromeRows: number;
+	paddingX: number;
+	chromeWidth: number;
+	promptGutterWidth: number;
+	scrollOffset: number;
+	visibleLayoutLines: LayoutLine[];
+}
+
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	/** Stable accent for composer chrome that should not follow the mutable border state. */
@@ -473,7 +485,7 @@ export interface PasteOptions {
 	submitAfterPaste?: boolean;
 }
 
-export class Editor implements Component, Focusable {
+export class Editor implements Component, Focusable, MouseRoutable {
 	#state: EditorState = {
 		lines: [""],
 		cursorLine: 0,
@@ -495,6 +507,10 @@ export class Editor implements Component, Focusable {
 	 *  to the content width rather than reflowed. Cursor glyphs and inline hints are excluded. */
 	decorateText: ((text: string, context: EditorTextDecorationContext) => string) | undefined;
 	#promptGutter: string | undefined;
+
+	tui?: TUI;
+	#renderedScreenRow: number | undefined;
+	#lastRenderLayout?: EditorRenderLayout;
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -710,6 +726,14 @@ export class Editor implements Component, Focusable {
 		const paddingX = this.#getEditorPaddingX();
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
 		return Math.max(0, terminalWidth - borderWidth * 2);
+	}
+
+	setRenderedScreenRow(row: number | undefined): void {
+		this.#renderedScreenRow = row;
+	}
+
+	getRenderedScreenRow(): number | undefined {
+		return this.#renderedScreenRow;
 	}
 
 	/**
@@ -1101,6 +1125,16 @@ export class Editor implements Component, Focusable {
 
 		const topRow = style.renderTop(chromeCtx);
 		if (topRow !== undefined) result.push(topRow);
+		this.#lastRenderLayout = {
+			width,
+			layoutWidth,
+			topChromeRows: topRow !== undefined ? 1 : 0,
+			paddingX,
+			chromeWidth: borderWidth,
+			promptGutterWidth: promptGutter?.width ?? 0,
+			scrollOffset: this.#scrollOffset,
+			visibleLayoutLines: [...visibleLayoutLines],
+		};
 
 		// Render each layout line
 		// Keep the hardware cursor at the text insertion point while autocomplete
@@ -1332,6 +1366,14 @@ export class Editor implements Component, Focusable {
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
 	#handleInputChunk(data: string): string | undefined {
+		if (data.startsWith("\x1b[<")) {
+			const mouseEvent = parseSgrMouse(data);
+			if (mouseEvent) {
+				this.#handleMouseEvent(mouseEvent);
+				return undefined;
+			}
+		}
+
 		const kb = getKeybindings();
 		// Parse the sequence once; every binding probe below is then a set
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
@@ -1979,6 +2021,82 @@ export class Editor implements Component, Focusable {
 
 	getCursor(): { line: number; col: number } {
 		return { line: this.#state.cursorLine, col: this.#state.cursorCol };
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		this.#handleMouseEvent(event, line, col);
+	}
+
+	#resolveRenderedScreenRow(): number | undefined {
+		if (this.#renderedScreenRow !== undefined) return this.#renderedScreenRow;
+		if (this.tui && this.#lastRenderLayout) {
+			const cursorRow = this.tui.hardwareCursorRow;
+			const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+			const cursorVisualLine = this.#findCurrentVisualLine(visualLines);
+			const cursorVisibleIndex = cursorVisualLine - this.#lastRenderLayout.scrollOffset;
+			const cursorRenderedRow = this.#lastRenderLayout.topChromeRows + cursorVisibleIndex;
+			return cursorRow - cursorRenderedRow;
+		}
+		return undefined;
+	}
+
+	#handleMouseEvent(event: SgrMouseEvent, localLine?: number, localCol?: number): boolean {
+		if (event.release || event.wheel !== null || !event.leftClick) return true;
+		const isOption = event.alt === true || (event.button & 8) !== 0;
+		if (!isOption) return true;
+
+		let editorLine: number;
+		let editorCol: number;
+		if (localLine !== undefined && localCol !== undefined) {
+			editorLine = localLine;
+			editorCol = localCol;
+		} else {
+			const screenRow = this.#resolveRenderedScreenRow();
+			if (screenRow === undefined) return true;
+			editorLine = event.row - screenRow;
+			editorCol = event.col;
+		}
+
+		const layout = this.#lastRenderLayout;
+		if (!layout) return true;
+
+		const visualIndex = editorLine - layout.topChromeRows;
+		if (visualIndex < 0 || visualIndex >= layout.visibleLayoutLines.length) {
+			return true;
+		}
+
+		const layoutLine = layout.visibleLayoutLines[visualIndex];
+		if (!layoutLine) return true;
+
+		const leftOffset = layout.chromeWidth + layout.promptGutterWidth;
+		const textCol = editorCol - leftOffset;
+
+		let targetCharCol: number;
+		if (textCol <= 0) {
+			targetCharCol = layoutLine.sourceStartCol;
+		} else if (textCol >= layoutLine.width) {
+			targetCharCol = layoutLine.sourceStartCol + layoutLine.text.length;
+		} else {
+			const offsetInSegment = offsetAtVisualCol(layoutLine.text, textCol);
+			targetCharCol = layoutLine.sourceStartCol + offsetInSegment;
+		}
+
+		const lineText = this.#state.lines[layoutLine.sourceLine] ?? "";
+		targetCharCol = Math.max(0, Math.min(targetCharCol, lineText.length));
+
+		const atomic = this.#atomicTokenAt(lineText, targetCharCol);
+		if (atomic !== undefined) {
+			targetCharCol = targetCharCol - atomic.start < atomic.end - targetCharCol ? atomic.start : atomic.end;
+		}
+
+		this.#exitHistoryForEditing();
+		this.#state.cursorLine = layoutLine.sourceLine;
+		this.#setCursorCol(targetCharCol);
+		this.#resetKillSequence();
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+		if (this.onChange) this.onChange(this.getText());
+		return true;
 	}
 
 	moveToLineStart(): void {

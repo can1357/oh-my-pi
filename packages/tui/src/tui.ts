@@ -87,6 +87,8 @@ const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 // native text selection.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+const NORMAL_MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1006h";
+const NORMAL_MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1000l";
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
@@ -104,6 +106,12 @@ export interface RenderScheduler {
 
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
+	/**
+	 * Enable terminal mouse reporting (?1000h/?1006h) in normal mode.
+	 * Defaults to true. When enabled, button press/release events (including
+	 * Option-click) are reported without any-motion flooding.
+	 */
+	mouseTracking?: boolean;
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -816,6 +824,8 @@ export class TUI extends Container {
 	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
 	#altActive = false;
 	#altMouseTrackingActive = false;
+	#normalMouseTrackingActive = false;
+	#mouseTracking: boolean;
 	#altPreviousLines: string[] = [];
 	#altEnterWidth = 0;
 	#altEnterHeight = 0;
@@ -842,6 +852,7 @@ export class TUI extends Container {
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
+		this.#mouseTracking = options?.mouseTracking ?? true;
 	}
 	static #initialResizeScrollbackMode(): ResizeScrollbackMode {
 		const mode = Bun.env.PI_TUI_RESIZE_SCROLLBACK;
@@ -882,6 +893,28 @@ export class TUI extends Container {
 	/** Return how settled resizes refresh native scrollback. */
 	getResizeScrollback(): ResizeScrollbackMode {
 		return this.#resizeScrollbackMode;
+	}
+
+	get mouseTracking(): boolean {
+		return this.#mouseTracking;
+	}
+
+	setMouseTracking(enabled: boolean): void {
+		if (this.#mouseTracking === enabled) return;
+		this.#mouseTracking = enabled;
+		if (this.#stopped) return;
+		if (!this.#altActive) {
+			this.terminal.write(enabled ? NORMAL_MOUSE_TRACKING_ON : NORMAL_MOUSE_TRACKING_OFF);
+			this.#normalMouseTrackingActive = enabled;
+		}
+	}
+
+	get providerViewportTop(): number {
+		return this.#providerViewportTop;
+	}
+
+	get hardwareCursorRow(): number {
+		return this.#hardwareCursorRow;
 	}
 
 	/** Set how settled resizes refresh native scrollback. */
@@ -1150,6 +1183,10 @@ export class TUI extends Container {
 		}
 		this.terminal.hideCursor();
 		this.#recordHardwareCursorHidden();
+		if (this.#mouseTracking && !this.#altActive) {
+			this.terminal.write(NORMAL_MOUSE_TRACKING_ON);
+			this.#normalMouseTrackingActive = true;
+		}
 		if (!this.#inputDeferred) {
 			this.#querySixelSupport();
 			this.#queryCellSize();
@@ -1655,6 +1692,10 @@ export class TUI extends Container {
 			this.#altMouseTrackingActive = false;
 			this.#altPreviousLines = [];
 			this.#pendingAltExit = "";
+		}
+		if (this.#normalMouseTrackingActive) {
+			this.terminal.write(NORMAL_MOUSE_TRACKING_OFF);
+			this.#normalMouseTrackingActive = false;
 		}
 		// A latched destructive reset (settled rebuild-mode resize, /clear) pairs
 		// ED3 with a complete-ledger replay. Running that pair during stop would
@@ -2597,7 +2638,11 @@ export class TUI extends Container {
 			// modified-key reporting sequence on the freshly entered alternate
 			// screen, or Esc/modified keys revert to legacy encoding inside
 			// fullscreen overlays (Ghostty/kitty/iTerm2).
-			const mouseEnter = wantMouseTracking ? MOUSE_TRACKING_ON : "";
+			const mouseEnter = wantMouseTracking
+				? MOUSE_TRACKING_ON
+				: this.#normalMouseTrackingActive
+					? NORMAL_MOUSE_TRACKING_OFF
+					: "";
 			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}${mouseEnter}`);
 			setAltScreenActive(true);
 			this.terminal.hideCursor();
@@ -2609,12 +2654,11 @@ export class TUI extends Container {
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
 		} else if (!wantAlt && this.#altActive) {
+			const normalMouse = this.#mouseTracking ? NORMAL_MOUSE_TRACKING_ON : "";
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
-			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l`;
-			// Session replacement finishes while its fullscreen selector still
-			// covers the old normal buffer. Fuse the restore into the destructive
-			// repaint so no stale frame can become visible between writes.
+			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l${normalMouse}`;
+			this.#normalMouseTrackingActive = this.#mouseTracking;
 			if (this.#clearScrollbackOnNextRender) {
 				this.#pendingAltExit = exitSequence;
 			} else {

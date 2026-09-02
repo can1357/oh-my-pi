@@ -24,6 +24,12 @@ export interface SgrMouseEvent {
 	motion: boolean;
 	/** True for a left-button press (not motion, not release, not wheel). */
 	leftClick: boolean;
+	/** True when Shift was held during the event (button bit 4). */
+	shift?: boolean;
+	/** True when Alt/Option was held during the event (button bit 8). */
+	alt?: boolean;
+	/** True when Control was held during the event (button bit 16). */
+	ctrl?: boolean;
 }
 
 /**
@@ -41,7 +47,10 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	const wheel = button & 64 ? ((button & 1 ? 1 : -1) as 1 | -1) : null;
 	const motion = (button & 32) !== 0 && wheel === null;
 	const leftClick = !release && wheel === null && !motion && (button & 3) === 0;
-	return { button, col, row, release, wheel, motion, leftClick };
+	const shift = (button & 4) !== 0;
+	const alt = (button & 8) !== 0;
+	const ctrl = (button & 16) !== 0;
+	return { button, col, row, release, wheel, motion, leftClick, shift, alt, ctrl };
 }
 
 /** Handler invoked with a decoded SGR event; returning `false` reports unhandled. */

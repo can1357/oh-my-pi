@@ -69,6 +69,7 @@ describe("Composer prepaint", () => {
 			maxInlineImages: settings.get("tui.maxInlineImages"),
 			resizeScrollback: settings.get("tui.resizeScrollback"),
 			imeSafeCursor: settings.get("tui.imeSafeCursor"),
+			mouse: settings.get("tui.mouse"),
 			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
 			spellingTypoDetection: settings.get("spelling.typoDetection"),
 			spellingAutocomplete: settings.get("spelling.autocomplete"),
@@ -403,6 +404,7 @@ describe("Composer prepaint", () => {
 			maxInlineImages: getDefault("tui.maxInlineImages"),
 			resizeScrollback: getDefault("tui.resizeScrollback"),
 			imeSafeCursor: getDefault("tui.imeSafeCursor"),
+			mouse: getDefault("tui.mouse"),
 			autocompleteMaxVisible: getDefault("autocompleteMaxVisible"),
 			spellingTypoDetection: getDefault("spelling.typoDetection"),
 			spellingAutocomplete: getDefault("spelling.autocomplete"),
@@ -646,5 +648,41 @@ describe("Composer prepaint", () => {
 		lease?.adopt();
 		expect(terminal.inputEnables).toBe(1);
 		lease?.composer.ui.stop();
+	});
+
+	it("positions cursor when option-clicking in the composer prompt entry box", async () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const composer = new Composer({
+			preferences: { ...config, composerShape: "box" },
+			terminal,
+		});
+		composer.editor.setText("Hello world prompt");
+		composer.start();
+
+		await terminal.waitForRender(() =>
+			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Hello world prompt")),
+		);
+
+		const renderedScreenRow = composer.editor.getRenderedScreenRow();
+		expect(renderedScreenRow).toBeDefined();
+		const row1Based = (renderedScreenRow ?? 0) + 2;
+
+		// Click on "world" (offset 6): screen col = 3 + 6 = 9 -> 1-based col 10
+		terminal.sendInput(`\x1b[<8;10;${row1Based}M`);
+		expect(composer.editor.getCursor()).toEqual({ line: 0, col: 6 });
+
+		// Click at start of prompt (left border, col 1): moves to col 0
+		terminal.sendInput(`\x1b[<8;1;${row1Based}M`);
+		expect(composer.editor.getCursor()).toEqual({ line: 0, col: 0 });
+
+		// Click past end of line (col 50): moves to end of line
+		terminal.sendInput(`\x1b[<8;50;${row1Based}M`);
+		expect(composer.editor.getCursor()).toEqual({ line: 0, col: 18 });
+
+		// Normal click (button 0, no Alt) does not move cursor
+		terminal.sendInput(`\x1b[<0;10;${row1Based}M`);
+		expect(composer.editor.getCursor()).toEqual({ line: 0, col: 18 });
+
+		composer.stop();
 	});
 });

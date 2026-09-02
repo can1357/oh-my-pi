@@ -35,6 +35,7 @@ export interface ComposerPreferences {
 	readonly spellingTypoDetection: boolean;
 	readonly spellingAutocomplete: boolean;
 	readonly spellingAutocorrect: boolean;
+	readonly mouse?: boolean;
 }
 
 /** Settings-schema-compatible defaults used when constructing a dependency-free composer. */
@@ -49,6 +50,7 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	spellingTypoDetection: true,
 	spellingAutocomplete: true,
 	spellingAutocorrect: false,
+	mouse: true,
 };
 
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
@@ -91,6 +93,23 @@ export interface ComposerOptions {
 	readonly status?: ComposerStatusSnapshot;
 	readonly exit?: (code: number) => void;
 	readonly now?: () => number;
+}
+
+function containsComponent(root: Component, target: Component): boolean {
+	if (root === target) return true;
+	if (root instanceof Container) {
+		return root.children.some(child => containsComponent(child, target));
+	}
+	return false;
+}
+
+function offsetOfComponent(roots: readonly Component[], target: Component, width: number): number | undefined {
+	let offset = 0;
+	for (const root of roots) {
+		if (containsComponent(root, target)) return offset;
+		offset += root.render(width).length;
+	}
+	return undefined;
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -217,6 +236,8 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		this.#editor = new CustomEditor(getEditorTheme());
+		this.#editor.tui = this.ui;
+		this.ui.setMouseTracking(this.#preferences.mouse !== false);
 		this.editor.disableSubmit = true;
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
@@ -262,7 +283,14 @@ export class Composer implements TerminalFrameProvider {
 			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			const rendered = this.#renderRoots(roots, width);
+			const editorOffset = offsetOfComponent(roots, this.editor, width);
+			if (editorOffset !== undefined) {
+				const vpOffset = Math.max(0, rendered.length - rows);
+				const editorVpRow = editorOffset - vpOffset;
+				this.editor.setRenderedScreenRow(editorVpRow >= 0 ? this.ui.providerViewportTop + editorVpRow : undefined);
+			}
+			return { viewport: rendered.slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -282,6 +310,13 @@ export class Composer implements TerminalFrameProvider {
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - composed.length);
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
+		}
+		const offsetInAfter = offsetOfComponent(roots.slice(transcriptIndex + 1), this.editor, width);
+		if (offsetInAfter !== undefined) {
+			const editorRowInComposed = before.length + active.length + offsetInAfter;
+			const vpOffset = Math.max(0, composed.length - rows);
+			const editorVpRow = editorRowInComposed - vpOffset;
+			this.editor.setRenderedScreenRow(editorVpRow >= 0 ? this.ui.providerViewportTop + editorVpRow : undefined);
 		}
 		return {
 			history,
@@ -551,6 +586,7 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.setShowHardwareCursor(this.#preferences.showHardwareCursor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
+		if (update.mouse !== undefined) this.ui.setMouseTracking(update.mouse);
 		if (update.resizeScrollback !== undefined) this.ui.setResizeScrollback(update.resizeScrollback);
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
 		this.editor.setAutocompleteMaxVisible(this.#preferences.autocompleteMaxVisible);
@@ -601,6 +637,7 @@ export class Composer implements TerminalFrameProvider {
 	/** Update the canonical editor reference after InteractiveMode remounts a custom editor. */
 	setEditor(editor: CustomEditor): void {
 		this.#editor = editor;
+		editor.tui = this.ui;
 	}
 
 	/**

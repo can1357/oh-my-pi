@@ -24,6 +24,9 @@ describe("parseSgrMouse", () => {
 			wheel: null,
 			motion: false,
 			leftClick: true,
+			shift: false,
+			alt: false,
+			ctrl: false,
 		});
 	});
 
@@ -44,6 +47,23 @@ describe("parseSgrMouse", () => {
 		expect(event?.motion).toBe(true);
 		expect(event?.leftClick).toBe(false);
 		expect(event?.wheel).toBeNull();
+	});
+
+	it("decodes modifier keys in button code", () => {
+		const altClick = parseSgrMouse("\x1b[<8;5;9M");
+		expect(altClick?.alt).toBe(true);
+		expect(altClick?.shift).toBe(false);
+		expect(altClick?.ctrl).toBe(false);
+		expect(altClick?.leftClick).toBe(true);
+
+		const shiftClick = parseSgrMouse("\x1b[<4;5;9M");
+		expect(shiftClick?.shift).toBe(true);
+		expect(shiftClick?.alt).toBe(false);
+
+		const ctrlAltClick = parseSgrMouse("\x1b[<24;5;9M");
+		expect(ctrlAltClick?.ctrl).toBe(true);
+		expect(ctrlAltClick?.alt).toBe(true);
+		expect(ctrlAltClick?.shift).toBe(false);
 	});
 });
 

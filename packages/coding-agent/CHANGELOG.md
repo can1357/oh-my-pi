@@ -119,6 +119,9 @@
 ### Removed
 
 - Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
+### Added
+
+- Option-clicking in the prompt entry box now moves the cursor directly to the clicked location.
 
 ## [18.1.3] - 2026-09-02
 
