@@ -72,7 +72,9 @@ const attachmentStateEpochs = new Map<number, number>();
 const relayInitiatedDetachTabs = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+const OWNED_TAB_IDS_KEY = "ompOwnedTabIds";
 const recoverableTabIds = new Set<number>();
+const ownedTabIds = new Set<number>();
 let recoverableUpdateGeneration = 0;
 const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
@@ -83,7 +85,11 @@ let orphanSweepDeadlineMs: number | null = null;
 let connectionGeneration = 0;
 let orphanSweepDeadlineGeneration = 0;
 const recoverableReady = chrome.storage.session
-	.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null })
+	.get({
+		[RECOVERABLE_TAB_IDS_KEY]: [],
+		[OWNED_TAB_IDS_KEY]: [],
+		[ORPHAN_SWEEP_DEADLINE_KEY]: null,
+	})
 	.then((stored) => {
 		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
 		// A user detach can arrive before this startup read resolves. Never merge
@@ -91,6 +97,11 @@ const recoverableReady = chrome.storage.session
 		restoreRecoverableState(
 			recoverableTabIds,
 			ids,
+			recoverableStartupMutations,
+		);
+		restoreRecoverableState(
+			ownedTabIds,
+			stored[OWNED_TAB_IDS_KEY],
 			recoverableStartupMutations,
 		);
 		recoverableStartupMutations.clear();
@@ -130,6 +141,7 @@ function updateRecoverable(
 	const persistCurrent = (): Promise<unknown> =>
 		chrome.storage.session.set({
 			[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+			[OWNED_TAB_IDS_KEY]: [...ownedTabIds],
 		});
 	const immediateWrite = persistCurrent().catch(() => {});
 	recoverableUpdates = serializeRecoverableStateUpdate(
@@ -143,13 +155,23 @@ function updateRecoverable(
 
 function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
 	return updateRecoverable(freshTabIds, (tabIds) => {
-		for (const tabId of tabIds) recoverableTabIds.add(tabId);
+		for (const tabId of tabIds) {
+			recoverableTabIds.add(tabId);
+			ownedTabIds.add(tabId);
+		}
 	});
 }
 
 function forgetRecoverable(tabId: number): Promise<void> {
 	return updateRecoverable(() => [tabId], () => {
 		recoverableTabIds.delete(tabId);
+		ownedTabIds.delete(tabId);
+	});
+}
+
+function markGuardDetached(tabId: number): Promise<void> {
+	return updateRecoverable(() => [tabId], () => {
+		ownedTabIds.delete(tabId);
 	});
 }
 
@@ -624,7 +646,7 @@ async function buildHello(): Promise<
 	// debuggers too. Only persisted extension-owned ids are safe to advertise as
 	// relay attachments; promoting every attached target would resurrect a user
 	// takeover that onDetach deliberately removed from recovery state.
-	const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
+	const attachedTabIds = extensionOwnedAttachedTabIds(targets, ownedTabIds);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
 		Number.isInteger(navigator.hardwareConcurrency) &&
@@ -833,7 +855,7 @@ async function reconcileOrphans(): Promise<void> {
 	// takeover becomes relay-authorized again before buildHello can filter it.
 	const attachedTabIds = extensionOwnedAttachedTabIds(
 		targets,
-		recoverableTabIds,
+		ownedTabIds,
 	);
 	await trackAttachments(attachedTabIds, () => true, attachmentState);
 	// Only a socket that has actually delivered a hello owns reconciliation. A
@@ -945,6 +967,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 		// report it as a user detach (which bans the tab); refresh hello so the
 		// relay can restore only this guard-authorized attachment. Coalesce with
 		// the reconnect's own hello so a single recovery attach is launched.
+		void markGuardDetached(source.tabId);
 		refreshHello();
 		return;
 	}
