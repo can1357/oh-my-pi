@@ -3587,6 +3587,7 @@ export class RelayBridge {
 				);
 			}
 			let rootIdentifier = identifier;
+			const contextGenerationAfterRegistration = tab.contextGeneration;
 			if (script.params?.runImmediately === true && !runImmediately) {
 				const loaderAfterRegistration = await this.#mainFrameLoaderId(
 					tab.tabId,
@@ -3594,7 +3595,12 @@ export class RelayBridge {
 				if (
 					currentLoaderId !== undefined &&
 					loaderAfterRegistration !== undefined &&
-					loaderAfterRegistration !== currentLoaderId
+					loaderAfterRegistration !== currentLoaderId &&
+					// A context created after Chrome acknowledged the registration is
+					// already covered by that registration. Only retry when the loader
+					// changed before acknowledgement; otherwise runImmediately would
+					// execute non-idempotent preload code twice in the new document.
+					tab.contextGeneration === contextGenerationAfterRegistration
 				) {
 					let retry: Record<string, unknown> | undefined;
 					try {
