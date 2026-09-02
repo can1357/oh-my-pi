@@ -72,8 +72,7 @@ const relayInitiatedDetachTabs = new Set<number>();
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const recoverableTabIds = new Set<number>();
 let recoverableUpdateGeneration = 0;
-let recoverableStateLoaded = false;
-const startupRecoverableMutations = new Set<number>();
+const recoverableStartupMutations = new Set<number>();
 let orphanSweepDeadlineMs: number | null = null;
 // Bumped on every relay disconnect. maybeRunOrphanSweep snapshots this before it
 // yields to the alarms/storage APIs so a reconnect+disconnect cycle that arms a
@@ -90,9 +89,9 @@ const recoverableReady = chrome.storage.session
 		restoreRecoverableState(
 			recoverableTabIds,
 			ids,
-			startupRecoverableMutations,
+			recoverableStartupMutations,
 		);
-		recoverableStateLoaded = true;
+		recoverableStartupMutations.clear();
 		const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
 		if (typeof deadline === "number" && Number.isFinite(deadline))
 			orphanSweepDeadlineMs = deadline;
@@ -111,16 +110,18 @@ function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 	return tracked;
 }
 
-function updateRecoverable(tabIds: number[], update: () => void): Promise<void> {
+function updateRecoverable(
+	tabIds: () => number[],
+	update: (tabIds: number[]) => void,
+): Promise<void> {
 	// Apply ownership changes before this event handler returns. In particular, a
 	// user detach must disappear from the next hello even when an older storage
 	// operation is still pending. Start the write immediately so MV3 also sees a
 	// live extension API operation, then serialize a final current-state write to
 	// repair any older write that happened to settle out of order.
-	update();
-	if (!recoverableStateLoaded) {
-		for (const tabId of tabIds) startupRecoverableMutations.add(tabId);
-	}
+	const affectedTabIds = tabIds();
+	for (const tabId of affectedTabIds) recoverableStartupMutations.add(tabId);
+	update(affectedTabIds);
 	const generation = ++recoverableUpdateGeneration;
 	const persistCurrent = (): Promise<unknown> =>
 		chrome.storage.session.set({
@@ -137,14 +138,13 @@ function updateRecoverable(tabIds: number[], update: () => void): Promise<void> 
 }
 
 function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
-	const tabIds = freshTabIds();
-	return updateRecoverable(tabIds, () => {
+	return updateRecoverable(freshTabIds, (tabIds) => {
 		for (const tabId of tabIds) recoverableTabIds.add(tabId);
 	});
 }
 
 function forgetRecoverable(tabId: number): Promise<void> {
-	return updateRecoverable([tabId], () => {
+	return updateRecoverable(() => [tabId], () => {
 		recoverableTabIds.delete(tabId);
 	});
 }
