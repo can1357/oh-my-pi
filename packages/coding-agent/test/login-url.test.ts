@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,15 +29,26 @@ afterEach(() => {
 });
 
 describe("persistLoginUrl", () => {
-	it("writes the URL byte-exact to a per-process path, mode 600", () => {
+	it("writes the URL byte-exact to a per-flow path, mode 600", () => {
 		const dir = useTempAgentDir();
 		const url = `https://auth.example.com/oauth/authorize?code_challenge=${"B".repeat(43)}&state=${"s".repeat(64)}`;
-		const returned = persistLoginUrl(url);
-		// Per-process: concurrent omp logins must not overwrite each other.
-		expect(returned).toBe(path.join(dir, `login-url-${process.pid}.txt`));
+		const returned = persistLoginUrl(url) as string;
+		// Per-process pid plus per-flow counter: neither a concurrent omp login
+		// nor a later flow in this process may overwrite an advertised file.
+		expect(path.dirname(returned)).toBe(dir);
+		expect(path.basename(returned)).toMatch(new RegExp(`^login-url-${process.pid}-\\d+\\.txt$`));
 		// Byte-exact: the whole point is that no terminal artifact touches it.
-		expect(fs.readFileSync(returned as string, "utf8")).toBe(`${url}\n`);
-		expect(fs.statSync(returned as string).mode & 0o777).toBe(0o600);
+		expect(fs.readFileSync(returned, "utf8")).toBe(`${url}\n`);
+		expect(fs.statSync(returned).mode & 0o777).toBe(0o600);
+	});
+
+	it("gives each flow its own file so an earlier copy command keeps its URL", () => {
+		useTempAgentDir();
+		const first = persistLoginUrl("https://x.test/first") as string;
+		const second = persistLoginUrl("https://x.test/second") as string;
+		expect(second).not.toBe(first);
+		expect(fs.readFileSync(first, "utf8")).toBe("https://x.test/first\n");
+		expect(fs.readFileSync(second, "utf8")).toBe("https://x.test/second\n");
 	});
 
 	it("sweeps day-old files from dead processes, keeps fresh ones", () => {
@@ -65,6 +77,30 @@ describe("loginUrlCopyCommand (posix)", () => {
 	it("single-quotes the absolute path when it carries shell metacharacters", () => {
 		if (process.platform === "win32") return;
 		expect(loginUrlCopyCommand("/tmp/agent dir/login-url-1.txt")).toBe("cat '/tmp/agent dir/login-url-1.txt'");
+	});
+
+	it("keeps ~ outside the quotes when a home path needs quoting", () => {
+		if (process.platform === "win32") return;
+		const home = os.homedir();
+		// The tilde must stay outside the single quotes to expand; the rest of
+		// the path, metacharacters included, stays literal inside them.
+		const cmd = loginUrlCopyCommand(`${home}/.omp agent/login-url-1.txt`);
+		expect(cmd).toBe("cat ~/'.omp agent/login-url-1.txt'");
+		expect(loginUrlCopyCommand(`${home}/o'brien $(x)/login-url-1.txt`)).toBe(
+			"cat ~/'o'\\''brien $(x)/login-url-1.txt'",
+		);
+		// The advertised word must actually resolve under tilde expansion: echo
+		// it through a real shell with HOME pointed at a temp dir.
+		const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "login-url-home-"));
+		try {
+			const word = cmd.slice("cat ".length);
+			const resolved = execFileSync("sh", ["-c", `printf %s ${word}`], {
+				env: { ...process.env, HOME: fakeHome },
+			}).toString();
+			expect(resolved).toBe(`${fakeHome}/.omp agent/login-url-1.txt`);
+		} finally {
+			fs.rmSync(fakeHome, { recursive: true, force: true });
+		}
 	});
 
 	it("never lets the shell substitute inside the advertised command", () => {

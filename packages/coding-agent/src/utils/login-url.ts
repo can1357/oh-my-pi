@@ -6,8 +6,10 @@ import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 const FILE_PREFIX = "login-url-";
 const STALE_MS = 24 * 60 * 60 * 1000;
 
+let flowCounter = 0;
+
 /**
- * Persist the authorization URL to a per-process file and return its path, or
+ * Persist the authorization URL to a per-flow file and return its path, or
  * undefined when it could not be written.
  *
  * This is the byte-exact copy path that depends on nothing the terminal may or
@@ -17,15 +19,16 @@ const STALE_MS = 24 * 60 * 60 * 1000;
  * are byte-exact but optional terminal features. Reading a short path that fits
  * one row works everywhere, including over SSH.
  *
- * Per-process filename: two omp processes with concurrent OAuth flows would
- * otherwise overwrite each other, and the first panel's advertised command
- * would open the second flow's URL, whose `state` no longer matches. Files
- * from dead processes are removed once they are a day old. Mode 600: the URL
- * carries only public OAuth parameters, but there is no reason to share them.
+ * Per-flow filename (pid plus an in-process counter): two omp processes with
+ * concurrent OAuth flows would otherwise overwrite each other, and a second
+ * flow in the same process would repoint the first panel's advertised command
+ * at a URL whose `state` no longer matches. Files from dead processes are
+ * removed once they are a day old. Mode 600: the URL carries only public
+ * OAuth parameters, but there is no reason to share them.
  */
 export function persistLoginUrl(url: string): string | undefined {
 	const dir = getAgentDir();
-	const file = path.join(dir, `${FILE_PREFIX}${process.pid}.txt`);
+	const file = path.join(dir, `${FILE_PREFIX}${process.pid}-${++flowCounter}.txt`);
 	try {
 		fs.mkdirSync(dir, { recursive: true });
 		fs.writeFileSync(file, `${url}\n`, { mode: 0o600 });
@@ -67,9 +70,10 @@ export function persistLoginUrl(url: string): string | undefined {
  *
  * POSIX renders `cat` with the home prefix shortened to `~`, which must stay
  * outside quotes to expand, so the path is unquoted only when every character
- * is shell-inert. Anything else is single-quoted with embedded quotes escaped:
- * unlike double quotes, single quotes stop `$()` and backtick substitution, so
- * a hostile PI_CODING_AGENT_DIR cannot execute through the advertised command.
+ * is shell-inert. Anything else is single-quoted with embedded quotes escaped,
+ * keeping `~/` outside the quotes when present so it still expands: unlike
+ * double quotes, single quotes stop `$()` and backtick substitution, so a
+ * hostile PI_CODING_AGENT_DIR cannot execute through the advertised command.
  */
 export function loginUrlCopyCommand(filePath: string): string {
 	if (process.platform === "win32") {
@@ -79,5 +83,7 @@ export function loginUrlCopyCommand(filePath: string): string {
 	const home = os.homedir();
 	const display = filePath.startsWith(`${home}/`) ? `~${filePath.slice(home.length)}` : filePath;
 	if (/^[\w@%+=:,./~-]+$/.test(display)) return `cat ${display}`;
-	return `cat '${filePath.replaceAll("'", "'\\''")}'`;
+	const quoted = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+	if (display.startsWith("~/")) return `cat ~/${quoted(display.slice(2))}`;
+	return `cat ${quoted(filePath)}`;
 }
