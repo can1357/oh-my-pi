@@ -19,6 +19,7 @@ export type KnownApi =
 	| "google-vertex"
 	| "ollama-chat"
 	| "cursor-agent"
+	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent";
 export type Api = KnownApi | (string & {});
@@ -248,6 +249,13 @@ export interface OpenAICompat {
 	requiresReasoningContentForAllAssistantTurns?: boolean;
 	/** Whether the provider accepts a synthetic placeholder (e.g. ".") for missing reasoning_content on tool-call turns. Default: true. Set to false for providers like DeepSeek that validate the exact reasoning_content value. */
 	allowsSyntheticReasoningContentForToolCalls?: boolean;
+	/**
+	 * Value emitted for the reasoning field on tool-call turns when the provider
+	 * requires it (`requiresReasoningContentForToolCalls`) but no reasoning was
+	 * captured. Default: "". Some upstreams validate the exact value — the droid
+	 * proxy's DeepSeek family requires a single space.
+	 */
+	syntheticReasoningContentFallback?: string;
 	/**
 	 * Replay preserved thinking blocks as `reasoning_content` (or the configured
 	 * `reasoningContentField`) on EVERY assistant turn that carried reasoning,
@@ -681,6 +689,8 @@ export interface ResolvedOpenAISharedCompat {
 	requiresReasoningContentForToolCalls: boolean;
 	requiresReasoningContentForAllAssistantTurns: boolean;
 	allowsSyntheticReasoningContentForToolCalls: boolean;
+	/** See {@link OpenAICompat.syntheticReasoningContentFallback}. */
+	syntheticReasoningContentFallback?: string;
 	replayReasoningContent: boolean;
 	qwenPreserveThinking: boolean;
 	qwenTemplateReasoningEffort: boolean;
@@ -756,6 +766,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "requiresReasoningContentForToolCalls"
 			| "requiresReasoningContentForAllAssistantTurns"
 			| "allowsSyntheticReasoningContentForToolCalls"
+			| "syntheticReasoningContentFallback"
 			| "replayReasoningContent"
 			| "qwenPreserveThinking"
 			| "qwenTemplateReasoningEffort"
@@ -1041,6 +1052,23 @@ export type ModelTokenizer =
 	| "glm5";
 
 // Model interface for the unified model system
+/** Factory Droid effective per-token Standard Credits rates (relative unit, not dollars). */
+export interface FactoryDroidCredits {
+	input: number;
+	output: number;
+	cacheRead?: number;
+	/** Fraction off the list rate while the promo runs, e.g. 0.5 for half price. */
+	promoDiscount?: number;
+	/**
+	 * ISO 8601 instant the promo lapses. Mirrored verbatim from the registry
+	 * and may already be in the past: consumers compare it against the clock,
+	 * because a lapsed promo stays in Factory's table until the entry changes.
+	 */
+	promoExpiresAt?: string;
+	/** Suffix Factory appends to the display name while the promo applies. */
+	promoLabel?: string;
+}
+
 export interface Model<TApi extends Api = Api> {
 	id: string;
 	/**
@@ -1103,6 +1131,19 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/**
+	 * Factory Droid: account-resolved upstream rotation from the live
+	 * `provider_routing` config (first entry = default `x-api-provider`).
+	 * Overrides the registry's static `apiProviders` order when present.
+	 */
+	factoryDroidApiProviders?: string[];
+	/**
+	 * Factory Droid: effective per-token Standard Credits rates, projected from
+	 * the registry's relative multipliers at discovery time (`output`/`cacheRead`
+	 * already multiplied through; `cacheRead` absent when not separately
+	 * metered). Rendered as an `N×` badge next to the raw-$ pair.
+	 */
+	factoryDroidCredits?: FactoryDroidCredits;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

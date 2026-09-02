@@ -4,11 +4,19 @@
 
 ### Added
 
+- factory-droid: added `claude-fable-5.1` (867K ctx, refusal fallback to Opus 5, `claude_fable_5_1` gate), `glm-5.3` (1.04M ctx, thinking always on, defaults to max effort), and `glm-5.3-flash` from the droid 0.210.0 catalog.
+
+### Removed
+
+- factory-droid: removed the retired `amber-07-09` and `agate-07-11` preview codenames.
+
+
 - Added support for Claude Fable 5.1
 
 ### Changed
 
 - Updated pricing and context limits for various Claude models
+- factory-droid: updated the registry to droid 0.210.0 — client version 0.210.0; dropped the feature gates the CLI deleted in its GA wave (Opus 4.8/5, Sonnet 5, Fable 5, Gemini 3.5–3.7 Flash, GPT-5.6 Sol/Terra/Luna, Grok 4.5/4.6, Kimi K3, GLM-5.2, Nemotron 3 Ultra, DeepSeek V4 Flash); activated the `snowflake` upstream in the Opus 5, GPT-5.5, and GPT-5.6 rotations; repriced DeepSeek V4 Flash (0.176×) and V4 Pro (0.528×, cache reads now metered); recorded the sitewide 60% GPT/Grok promo (expires 2026-09-05).
 
 ### Fixed
 
@@ -100,6 +108,19 @@
 ### Fixed
 
 - Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
+
+### Added
+
+- Added the `factory-droid` provider with a static model registry ported byte-faithfully from the Droid CLI's compiled-in catalog: 55 CLI-visible models across the Droid Core flat-rate series (Kimi, GLM, DeepSeek, MiniMax, Inkling, Nemotron) and Standard Credits families (GPT-5.x, Claude, Gemini, Grok), with per-model wire protocol (`openai-completions`/`openai-responses`/`anthropic-messages`/`google-generate`), upstream rotation lists, reasoning ladders, credit multipliers, context limits, and Statsig feature-flag plus hard-deprecation gating matching the CLI's picker ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added EU account residency support to `factory-droid` discovery: the account region (captured from `GET /api/cli/whoami` at login) switches discovery to the `api.eu.factory.ai` host, hides models with no EU-serving upstream (Droid Core, Gemini, Grok, Fable 5), and resolves per-region upstream rotations ported from the CLI's `regionOverrides` table (e.g. Opus 5 rotates on `bedrock_anthropic` only, GPT-5.4/5.5 on `openai` only). Live `provider_routing` entries are intersected with the region-resolved rotation so US-centric routing cannot resurrect global-only upstreams. Global-region behavior is unchanged ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added serving-edge region filtering to `factory-droid` discovery: the `x-vercel-id` response header's edge PoP (parsed by `factoryDroidEdgeRegion`) applies the EU availability filter and EU rotations even for accounts with no residency region, so users connecting through a European edge never see models Factory's proxy cannot serve from there. An explicit account region still wins for host selection. Discovery also honors `excludeModelIds`, fed from a reactive blocklist (`factory-droid-region-blocks`) that records models Factory rejected with `400 Provider not available in this region` ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added effective Standard Credits rates to `factory-droid` discovery: the registry now mirrors the CLI's per-model credit table (`credits`) and maps each model to its upstream catalog entry (`priceRef`), so discovered models expose both the projected per-token credit rate (`factoryDroidCredits` on `Model`) and the raw-API list price as their `cost` counterfactual. Factory-only SKUs (fast tiers, preview codenames) stay zero-cost with credit data only ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Ported the Droid CLI 0.196.0 catalog update to `factory-droid`: added Grok 4.6 (xhigh reasoning, `grok_4_6` flag) and GPT-5.4 Mini Fast Mode (priority service tier), raised GPT-5.3-Codex Fast output credits from 6 to 8, cut Grok 4.5 cache-read credits from 0.25 to 0.15, and bumped the reported client version to 0.196.0. The new `auto-fast` router model is intentionally skipped (OMP does its own model routing) ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added `alwaysRefetchDynamicModels` to model-manager options: a fresh TTL cache no longer satisfies online-eligible refreshes for opted-in providers (used by `factory-droid`, whose discovery encodes the request's serving region — a cache written from one network must not be replayed from another). The cache remains the offline and fetch-failure fallback ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Changed
+
+- Ported the Droid CLI 0.203.0 catalog to the `factory-droid` registry: `azure_openai` joins the rotation of all twelve GPT-5.x entries, `mistral` joins glm-5.2's rotation, Gemini 3.7 Flash is added (1M context, 64K output, low/medium/high ladder defaulting high, 0.6×/5× credits with a 50% promo through 2027-01-01, behind the `gemini_3_7_flash` gate), and the retired Inkling model is removed. Credit rates now mirror the CLI's promo fields verbatim (`promoDiscount`/`promoExpiresAt`/`promoLabel`, expired promos included — expiry is display-layer logic), fast tiers carry `baseVariant` and are hidden when the org's `isFastModelsAllowed` policy is explicitly false, and deprecated entries record their CLI `fallbackModelId` ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.0.5] - 2026-08-25
 
@@ -335,6 +356,8 @@
 - Increased the default stream idle-timeout floor on Amazon Bedrock to 900 seconds for reasoning and adaptive-thinking models (such as Claude) to prevent premature watchdog timeouts during long reasoning stretches.
 - Fixed Devin model families (including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling) to correctly group as logical models with reasoning-effort routing instead of separate wire variants.
 - Added missing context-window and output-token limits for dynamically discovered Alibaba Token Plan models.
+
+### Added
 
 ## [17.2.10] - 2026-08-06
 

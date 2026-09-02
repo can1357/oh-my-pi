@@ -41,6 +41,17 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/**
+	 * When true, a fresh cache never satisfies an online-eligible refresh: the
+	 * dynamic fetch always runs (an explicit `"offline"` strategy is still
+	 * honored), and the cache serves only as the fetch-failure fallback. For
+	 * providers whose dynamic result encodes fast-changing live state that a
+	 * TTL cache would replay wrongly — e.g. factory-droid, where discovery
+	 * filters by the request's serving region and crossing a network border
+	 * must re-filter immediately rather than replay the region cached
+	 * elsewhere.
+	 */
+	alwaysRefetchDynamicModels?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
@@ -190,6 +201,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
 	strategy: ModelRefreshStrategy = "online-if-uncached",
 ): Promise<ModelResolutionResult<TApi>> {
+	if (options.alwaysRefetchDynamicModels && strategy === "online-if-uncached") {
+		strategy = "online";
+	}
 	const cacheProviderId = options.cacheProviderId ?? options.providerId;
 	const now = options.now ?? Date.now;
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;

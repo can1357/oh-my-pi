@@ -3,6 +3,9 @@ import { buildModel } from "../build";
 import { apiRouteFor } from "../compat/behavior";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { buildFactoryDroidModel, fetchFactoryDroidModels } from "../discovery/factory-droid";
+import { FACTORY_DROID_MODELS } from "../discovery/factory-droid-models";
+import { readFactoryDroidRegionBlockedIds } from "../discovery/factory-droid-region-blocks";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -383,6 +386,37 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Factory Droid
+// ---------------------------------------------------------------------------
+
+export interface FactoryDroidModelManagerConfig {
+	apiKey?: string;
+	/** Account residency region from the stored OAuth credential, when known. */
+	region?: string;
+	fetch?: FetchImpl;
+}
+
+export function factoryDroidModelManagerOptions(
+	config: FactoryDroidModelManagerConfig = {},
+): ModelManagerOptions<"factory-droid-agent"> {
+	return {
+		providerId: "factory-droid",
+		// Factory exposes no model-listing endpoint, so the catalog ships a
+		// bundled static list. Dynamic fetch filters it by the account's
+		// Statsig feature flags and resolves upstream routing.
+		staticModels: FACTORY_DROID_MODELS.map(model => buildFactoryDroidModel(model)),
+		dynamicModelsAuthoritative: true,
+		// Region rejections recorded by the provider hide models the edge-PoP
+		// table did not already filter.
+		fetchDynamicModels: async () =>
+			fetchFactoryDroidModels({ ...config, excludeModelIds: await readFactoryDroidRegionBlockedIds() }),
+		// Discovery encodes the request's serving region; a cache written from
+		// one network must not be replayed from another.
+		alwaysRefetchDynamicModels: true,
+	};
+}
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

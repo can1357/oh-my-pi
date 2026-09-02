@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
-import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { ANTHROPIC_THINKING, type Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
@@ -27,6 +27,7 @@ import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import { coworkFetch } from "./providers/cowork-fetch";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
+import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -948,6 +949,9 @@ function streamDispatch<TApi extends Api>(
 	if (model.api === "bedrock-converse-stream") {
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
+	if (model.api === "factory-droid-agent") {
+		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, requestOptions as FactoryDroidOptions);
+	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
 	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
@@ -1739,15 +1743,6 @@ function maxTokensWithThinkingBudget(
 export const OUTPUT_FALLBACK_BUFFER = 4000;
 const ANTHROPIC_USE_INTERLEAVED_THINKING = Bun.env.PI_NO_INTERLEAVED_THINKING !== "1";
 
-export const ANTHROPIC_THINKING: Record<Effort, number> = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 32768,
-	max: 32768,
-};
-
 const GOOGLE_THINKING: Record<Effort, number> = {
 	minimal: 1024,
 	low: 4096,
@@ -2382,6 +2377,21 @@ function mapOptionsForApi<TApi extends Api>(
 				execHandlers,
 				onToolResult,
 				wireModelId: resolveWireModelId(cursorModel, effort),
+			});
+		}
+
+		case "factory-droid-agent": {
+			const factoryModel = model as Model<"factory-droid-agent">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning
+					? requireSupportedEffort(factoryModel, options.reasoning)
+					: undefined;
+			return castApi<"factory-droid-agent">({
+				...base,
+				cwd: options?.cwd,
+				reasoning,
+				disableReasoning: options?.disableReasoning,
+				toolChoice: options?.toolChoice,
 			});
 		}
 

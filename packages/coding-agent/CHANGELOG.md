@@ -328,6 +328,15 @@
 - Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
 - Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
 
+### Added
+- Wired `factory-droid` model discovery and login help into the CLI ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added a Standard Credits rate badge (`Nx`) to the model browser for `factory-droid` models, rendered next to the $/Mtok cost pair ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Allowed registry-declared optional-key providers to resolve credentials owned by their transport without failing OMP's generic API-key preflight, and documented Factory Droid's headless token override ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Changed
+
+- Factory Droid's Standard Credits badge in the model browser now prices live promos: a running promo renders the discounted rate with a `*` marker (`1.6×*`), while a lapsed one renders the standing list rate, because the registry mirrors Factory's catalog verbatim (kimi-k3 still carries a promo that ended on 2026-08-10) and expiry is decided at render time ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
@@ -1109,6 +1118,8 @@
 - Fixed the status-line `session_name` segment to honor the `statusLine.sessionAccent` setting, falling back to the theme's accent color when disabled.
 - Fixed automatic `agent.continue()` paths failing to run context-fit maintenance when reverting to a smaller-context model after a cooldown expiry.
 - Fixed `/handoff` reporting "Handoff cancelled" for actual generation or stream timeout errors, ensuring the real error is surfaced.
+
+### Added
 
 ## [17.2.10] - 2026-08-06
 

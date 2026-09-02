@@ -8,6 +8,13 @@ export type ModelManagerConfig = {
 	fetch?: FetchImpl;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
+	/**
+	 * Account residency region (e.g. `"eu"`) from the stored OAuth
+	 * credential, when the provider is region-partitioned and the region is
+	 * known. Region-aware discovery uses it to pick the regional API host and
+	 * filter region-restricted models.
+	 */
+	region?: string;
 };
 
 /** Catalog discovery configuration for providers that support endpoint-based model listing. */

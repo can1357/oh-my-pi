@@ -803,6 +803,7 @@ const streamOpenAICompletionsOnce = (
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
+					responseHeaders = response.headers;
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
@@ -811,6 +812,10 @@ const streamOpenAICompletionsOnce = (
 					if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 				}
 			};
+			// droid CLI parity: cache-read details can arrive on the
+			// `fireworks-cached-prompt-tokens` response header when the SSE body
+			// omits `cached_tokens`; captured here for the usage parser.
+			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
 				openaiStream = await callWithCopilotModelRetry(() => createCompletionsStream(), {
@@ -1115,7 +1120,12 @@ const streamOpenAICompletionsOnce = (
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
-				output.usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal);
+				output.usage = parseChunkUsage(
+					rawUsage,
+					model,
+					premiumRequestsTotal,
+					parseFireworksCachedPromptTokens(responseHeaders),
+				);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
@@ -1841,10 +1851,21 @@ function buildParams(
 	return { params, toolStrictMode, strictToolsApplied };
 }
 
+/** droid CLI parity: the Factory completions route can report prompt-cache
+ * hits via the `fireworks-cached-prompt-tokens` response header when the SSE
+ * body omits `cached_tokens`. Returns a positive count or undefined. */
+function parseFireworksCachedPromptTokens(headers: Headers | undefined): number | undefined {
+	const raw = headers?.get("fireworks-cached-prompt-tokens");
+	if (!raw) return undefined;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export function parseChunkUsage(
 	rawUsage: object,
 	model: Model<"openai-completions">,
 	premiumRequests: number | undefined,
+	cachedTokensHeader?: number | undefined,
 ): AssistantMessage["usage"] {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
@@ -1867,15 +1888,26 @@ export function parseChunkUsage(
 	const completionReasoningTokens = completionTokenDetails?.reasoning_tokens;
 	const cacheWriteTokens = promptTokenDetails?.cache_write_tokens;
 	const outputTokens = typeof completionTokens === "number" ? completionTokens : 0;
+	// droid CLI parity: the Factory completions route can report prompt-cache
+	// hits only through the `fireworks-cached-prompt-tokens` response header
+	// when the body omits `cached_tokens` (the CLI's transport reads it as a
+	// fallback for exactly that case). Body fields win when present.
+	const bodyCachedTokens = firstPositiveNumber(
+		cachedTokens,
+		promptCacheHitTokens,
+		promptTokenCachedTokens,
+		cachedContentTokenCount,
+	);
+	const resolvedCachedTokens =
+		bodyCachedTokens > 0
+			? bodyCachedTokens
+			: typeof cachedTokensHeader === "number" && cachedTokensHeader > 0
+				? cachedTokensHeader
+				: 0;
 	const accounting = calculateOpenAIUsageAccounting({
 		promptTokens: typeof promptTokens === "number" ? promptTokens : 0,
 		outputTokens,
-		cachedTokens: firstPositiveNumber(
-			cachedTokens,
-			promptCacheHitTokens,
-			promptTokenCachedTokens,
-			cachedContentTokenCount,
-		),
+		cachedTokens: resolvedCachedTokens,
 		reasoningTokens: typeof completionReasoningTokens === "number" ? completionReasoningTokens : 0,
 		cacheWriteOpenRouter: typeof cacheWriteTokens === "number" ? cacheWriteTokens : undefined,
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
@@ -2253,8 +2285,10 @@ export function convertMessages(
 			}
 			// Tier 2: When the provider requires reasoning_content but there are genuinely no
 			// thinking blocks at all (e.g. proxy stripped reasoning_content from the response),
-			// emit an empty string. The field must be present; an empty string is the most honest
-			// representation of "no reasoning was captured."
+			// emit the configured fallback (empty string by default — the most honest
+			// representation of "no reasoning was captured"). Providers that validate
+			// the exact value opt in via `syntheticReasoningContentFallback` (the droid
+			// proxy's DeepSeek family requires a single space).
 			if (
 				needsReasoningField &&
 				!hasReasoningField &&
@@ -2262,7 +2296,7 @@ export function convertMessages(
 				!compat.allowsSyntheticReasoningContentForToolCalls
 			) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-				assistantMsg[reasoningField] = "";
+				assistantMsg[reasoningField] = compat.syntheticReasoningContentFallback ?? "";
 				hasReasoningField = true;
 			}
 			// Tier 3: For providers that accept synthetic placeholders (Kimi, OpenRouter).
