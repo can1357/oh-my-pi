@@ -69,6 +69,7 @@
 - Disabled hashline editing for Kimi, Mimo, DeepSeek Flash, and Stepfun models for improved stability.
 - Reworked `/usage` into a fullscreen dashboard overlay (no transcript output): a compact per-provider subscriptions grid with untouched providers collapsed into one line, a GitHub-style daily activity heatmap fed by local stats, and the classic full report one keypress away.
 - Reworked transcript navigation with a fullscreen rewind selector opened by double-Escape, supporting rendered-item navigation, user-turn jumps, branching rewinds, and alternate session-tree branch selection.
+- The `doubleEscapeAction` setting now accepts `tree`, so double-Escape can open the session tree instead of the rewind selector.
 - Updated `/copy` to use the fullscreen transcript selector, allowing users to copy a turn or navigate into nested content such as code, quotes, commands, and tool output.
 
 ### Fixed
