@@ -786,12 +786,15 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 			// out-of-band mechanism" (Bedrock/Vertex `<authenticated>`). They
 			// aren't real keys and uploading them would store garbage on the
 			// broker. Mirrors the env-var path's guard below.
-			if (row.credential.type === "api_key" && row.credential.key === "<authenticated>") {
+			if (
+				row.credential.type === "api_key" &&
+				(row.credential.key === "<authenticated>" || !isDiscoveryBearerApiKey(row.credential.key))
+			) {
 				skipped.push({
 					source: "local-sqlite",
 					provider: row.provider,
 					identity: "(api key)",
-					reason: "placeholder sentinel '<authenticated>' is not a real key",
+					reason: `placeholder sentinel '${row.credential.key}' is not a real key`,
 				});
 				continue;
 			}
