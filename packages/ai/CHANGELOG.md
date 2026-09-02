@@ -32,8 +32,6 @@
 - Added keyless `openzoo` provider auth: the local proxy needs no key and counts as authenticated out of the box, while `OPENZOO_API_KEY` or `/login openzoo` supply the bearer for an openzoo public tunnel URL.
 
 ## [18.1.3] - 2026-09-02
-### Added
-
 ### Fixed
 
 - Fixed Gemini 3 sessions on Antigravity/Cloud Code Assist and Vertex AI getting permanently stuck on `400 INVALID_ARGUMENT` after a turn with parallel tool calls ([#9638](https://github.com/can1357/oh-my-pi/issues/9638)).
