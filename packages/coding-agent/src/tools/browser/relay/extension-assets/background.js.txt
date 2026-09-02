@@ -228,6 +228,20 @@ var loadRecoverableState = createRetryableLoader(() => {
 var initialRecoverableReady = loadRecoverableState();
 var recoverableUpdates = initialRecoverableReady.catch(() => {});
 var orphanSweepDeadlineUpdates = initialRecoverableReady.catch(() => {});
+async function flushRecoverableUpdates() {
+  try {
+    await recoverableUpdates;
+  } catch {
+    const generation = ++recoverableUpdateGeneration;
+    const retry = serializeRecoverableStateUpdate(Promise.resolve(), Promise.resolve(), () => generation === recoverableUpdateGeneration, () => chrome.storage.session.set({
+      [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+      [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+      [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
+    }));
+    recoverableUpdates = retry;
+    await retry;
+  }
+}
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;
   invalidateHelloRefresh();
@@ -297,7 +311,7 @@ async function setOrphanSweepDeadline(deadlineMs) {
 }
 async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   requireRecoveryStateLoaded(await loadRecoverableState());
-  await recoverableUpdates;
+  await flushRecoverableUpdates();
   const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
   await setOrphanSweepDeadline(nextDeadlineMs);
 }
@@ -537,7 +551,7 @@ function invalidateHelloRefresh() {
 }
 async function buildHello() {
   requireRecoveryStateLoaded(await loadRecoverableState());
-  await recoverableUpdates;
+  await flushRecoverableUpdates();
   const [tabs, targets] = await snapshotAfterPendingOperationsSettle(() => pendingOperationGeneration, () => [...pendingAttaches, ...pendingDetaches], () => Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]));
   const snapshots = [];
   for (const tab of tabs) {

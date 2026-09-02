@@ -141,6 +141,27 @@ let orphanSweepDeadlineUpdates: Promise<void> = initialRecoverableReady.catch(
 	() => {},
 );
 
+async function flushRecoverableUpdates(): Promise<void> {
+	try {
+		await recoverableUpdates;
+	} catch {
+		const generation = ++recoverableUpdateGeneration;
+		const retry = serializeRecoverableStateUpdate(
+			Promise.resolve(),
+			Promise.resolve(),
+			() => generation === recoverableUpdateGeneration,
+			() =>
+				chrome.storage.session.set({
+					[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+					[LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+					[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+				}),
+		);
+		recoverableUpdates = retry;
+		await retry;
+	}
+}
+
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 	pendingOperationGeneration++;
 	invalidateHelloRefresh();
@@ -254,7 +275,7 @@ async function maybeScheduleOrphanSweep(
 	forceDisconnected = false,
 ): Promise<void> {
 	requireRecoveryStateLoaded(await loadRecoverableState());
-	await recoverableUpdates;
+	await flushRecoverableUpdates();
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
 	await setOrphanSweepDeadline(nextDeadlineMs);
 }
@@ -681,7 +702,7 @@ async function buildHello(): Promise<
 	// target snapshot; otherwise a same-socket refresh can still capture stale
 	// attached state, clear `tab.attaching`, and trigger a second recovery attach.
 	requireRecoveryStateLoaded(await loadRecoverableState());
-	await recoverableUpdates;
+	await flushRecoverableUpdates();
 	const [tabs, targets] = await snapshotAfterPendingOperationsSettle(
 		() => pendingOperationGeneration,
 		() => [...pendingAttaches, ...pendingDetaches],
