@@ -1,6 +1,6 @@
-import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
 import * as os from "node:os";
-import { basename, join } from "node:path";
+import * as path from "node:path";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 
 const FILE_PREFIX = "login-url-";
@@ -25,24 +25,24 @@ const STALE_MS = 24 * 60 * 60 * 1000;
  */
 export function persistLoginUrl(url: string): string | undefined {
 	const dir = getAgentDir();
-	const path = join(dir, `${FILE_PREFIX}${process.pid}.txt`);
+	const file = path.join(dir, `${FILE_PREFIX}${process.pid}.txt`);
 	try {
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(path, `${url}\n`, { mode: 0o600 });
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(file, `${url}\n`, { mode: 0o600 });
 	} catch (error) {
 		logger.warn("Failed to persist login URL", {
-			path,
+			path: file,
 			error: error instanceof Error ? error.message : String(error),
 		});
 		return undefined;
 	}
 	// Best-effort sweep of siblings left by dead processes.
 	try {
-		for (const name of readdirSync(dir)) {
-			if (!name.startsWith(FILE_PREFIX) || !name.endsWith(".txt") || name === basename(path)) continue;
-			const sibling = join(dir, name);
+		for (const name of fs.readdirSync(dir)) {
+			if (!name.startsWith(FILE_PREFIX) || !name.endsWith(".txt") || name === path.basename(file)) continue;
+			const sibling = path.join(dir, name);
 			try {
-				if (Date.now() - statSync(sibling).mtimeMs > STALE_MS) unlinkSync(sibling);
+				if (Date.now() - fs.statSync(sibling).mtimeMs > STALE_MS) fs.unlinkSync(sibling);
 			} catch {
 				// A sibling that vanished mid-sweep or cannot be statted is not our problem.
 			}
@@ -50,7 +50,7 @@ export function persistLoginUrl(url: string): string | undefined {
 	} catch {
 		// The write above succeeded; a failed sweep must not cost the copy path.
 	}
-	return path;
+	return file;
 }
 
 /**
@@ -59,12 +59,16 @@ export function persistLoginUrl(url: string): string | undefined {
  *
  * cmd.exe has no `cat`, so win32 renders `type` (also a PowerShell alias) with
  * the path quoted. POSIX renders `cat` with the home prefix shortened to `~`,
- * which must stay outside quotes to expand, so the path is only quoted (and
- * left absolute) when it contains characters the shell would interpret.
+ * which must stay outside quotes to expand, so the path is unquoted only when
+ * every character is shell-inert. Anything else is single-quoted with embedded
+ * quotes escaped: unlike double quotes, single quotes stop `$()` and backtick
+ * substitution, so a hostile PI_CODING_AGENT_DIR cannot execute through the
+ * advertised command.
  */
 export function loginUrlCopyCommand(filePath: string): string {
 	if (process.platform === "win32") return `type "${filePath}"`;
 	const home = os.homedir();
 	const display = filePath.startsWith(`${home}/`) ? `~${filePath.slice(home.length)}` : filePath;
-	return /^[\w@%+=:,./~-]+$/.test(display) ? `cat ${display}` : `cat "${filePath}"`;
+	if (/^[\w@%+=:,./~-]+$/.test(display)) return `cat ${display}`;
+	return `cat '${filePath.replaceAll("'", "'\\''")}'`;
 }

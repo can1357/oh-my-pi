@@ -53,8 +53,18 @@ describe("loginUrlCopyCommand", () => {
 		expect(loginUrlCopyCommand(`${home}/.omp/agent/login-url-1.txt`)).toBe("cat ~/.omp/agent/login-url-1.txt");
 	});
 
-	it("quotes the absolute path when it carries shell metacharacters", () => {
+	it("single-quotes the absolute path when it carries shell metacharacters", () => {
 		if (process.platform === "win32") return;
-		expect(loginUrlCopyCommand("/tmp/agent dir/login-url-1.txt")).toBe('cat "/tmp/agent dir/login-url-1.txt"');
+		expect(loginUrlCopyCommand("/tmp/agent dir/login-url-1.txt")).toBe("cat '/tmp/agent dir/login-url-1.txt'");
+	});
+
+	it("never lets the shell substitute inside the advertised command", () => {
+		if (process.platform === "win32") return;
+		// Double quotes would run $(...) and backticks; single quotes must not.
+		expect(loginUrlCopyCommand("/tmp/$(touch pwned)/login-url-1.txt")).toBe(
+			"cat '/tmp/$(touch pwned)/login-url-1.txt'",
+		);
+		// An embedded single quote cannot terminate the quoting.
+		expect(loginUrlCopyCommand("/tmp/o'brien/login-url-1.txt")).toBe("cat '/tmp/o'\\''brien/login-url-1.txt'");
 	});
 });
