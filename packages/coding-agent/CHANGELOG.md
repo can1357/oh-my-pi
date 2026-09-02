@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Task agents with invalid model selectors now name the agent, selector, and definition file instead of suggesting credential setup.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

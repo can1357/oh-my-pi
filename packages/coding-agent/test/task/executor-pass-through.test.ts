@@ -3,6 +3,8 @@
  * to `createAgentSession` so subagents skip the FS scans the parent already
  * paid for. Regression guard for issue #2190.
  */
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -485,5 +487,103 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ modelRole: "reviewer" }));
+	});
+	it("reports an unresolved agent model selector after deferred resolution stays unmatched", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		// Mirrors the live prompt path: a modelless session throws the generic
+		// credential error, so a regressed guard would surface that instead.
+		const session = createMockSession(() => {
+			throw new Error("No model selected.");
+		});
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: {
+				...baseAgent,
+				name: "probe",
+				model: ["@fast"],
+				source: "project",
+				filePath: "/tmp/.omp/agents/probe.md",
+			},
+			id: "subagent-unresolved-model",
+			// Structured dispatch funnels the frontmatter selector into modelOverride,
+			// which is what arms the SDK's deferred modelPattern resolution.
+			modelOverride: "@fast",
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			'Agent "probe": no model matched "@fast" (agent definition .omp/agents/probe.md)',
+		);
+		// The deferred resolution path must be allowed to run before the failure is
+		// reported: createAgentSession is invoked with the unresolved pattern.
+		expect(spy).toHaveBeenCalled();
+		expect(spy.mock.calls[0]?.[0]?.modelPattern).toEqual(["@fast"]);
+	});
+	it("home-shortens an out-of-project agent definition path in the error", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = createMockSession(() => {
+			throw new Error("No model selected.");
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const definitionPath = path.join(os.homedir(), ".omp", "agent", "agents", "probe.md");
+
+		const result = await runSubprocess({
+			...baseOptions,
+			cwd: path.join(os.tmpdir(), "project-outside-home"),
+			agent: {
+				...baseAgent,
+				name: "probe",
+				model: ["@fast"],
+				source: "user",
+				filePath: definitionPath,
+			},
+			id: "subagent-unresolved-model-home",
+			modelOverride: "@fast",
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(1);
+		// The user-level path is rendered with ~, never the absolute home directory.
+		expect(result.stderr).toContain("(agent definition ~/.omp/agent/agents/probe.md)");
+		expect(result.stderr).not.toContain(os.homedir());
+	});
+	it("reports an unresolved selector even when no provider is authenticated", async () => {
+		// First-time setup: the registry has no available (authenticated/keyless)
+		// models, so a typo'd selector must still be diagnosed as unmatched rather
+		// than falling through to the generic credential message.
+		const emptyRegistry = {
+			authStorage: {},
+			refresh: async () => {},
+			getAvailable: () => [],
+			getApiKey: async () => undefined,
+		} as unknown as ModelRegistry;
+		const session = createMockSession(() => {
+			throw new Error("No model selected.");
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: {
+				...baseAgent,
+				name: "probe",
+				model: ["@fast"],
+				source: "project",
+				filePath: "/tmp/.omp/agents/probe.md",
+			},
+			id: "subagent-unresolved-model-no-auth",
+			modelOverride: "@fast",
+			modelRegistry: emptyRegistry,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			'Agent "probe": no model matched "@fast" (agent definition .omp/agents/probe.md)',
+		);
 	});
 });
