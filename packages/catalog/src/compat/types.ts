@@ -92,6 +92,14 @@ export interface CompiledEffortFamily {
 export type VariantTier = Effort | "off";
 
 /**
+ * Revision placeholder in a templated `variant-family` (`gemini-{rev}-flash`).
+ * A family whose id carries it is instantiated once per live revision that
+ * discovery advertises, so new generations of a lineage collapse without a
+ * new reviewed entry.
+ */
+export const REVISION_PLACEHOLDER = "{rev}";
+
+/**
  * One reviewed provider-scoped variant family: a logical model whose provider
  * serves per-effort/thinking sibling wire ids, with explicit routing, ladder,
  * and wire facts. Compiled from `variant-family` nodes in `_collapse.kdl`.
@@ -100,6 +108,11 @@ export interface CompiledVariantFamily {
 	provider: string;
 	id: string;
 	name: string;
+	/**
+	 * Revision constraint (`">=3.6"`) gating instantiation of a
+	 * {@link REVISION_PLACEHOLDER} template; absent on concrete families.
+	 */
+	revision?: string;
 	/** Member wire ids in priority order. */
 	members: string[];
 	/** Preferred default wire id when live. */
