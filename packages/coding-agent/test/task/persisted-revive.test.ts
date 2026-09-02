@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -13,6 +14,8 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { IrcWakeTurnMonitorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -74,6 +77,8 @@ async function createPersistedSession(
 		readOnly?: boolean;
 		outputSchemaFailureToolNames?: string[];
 		outputSchemaCorrectionLocked?: boolean;
+		outputSchema?: unknown;
+		outputSchemaMode?: "permissive" | "strict";
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -85,6 +90,8 @@ async function createPersistedSession(
 		tools: contract?.tools ?? ["read", "yield"],
 		outputSchemaFailureToolNames: contract?.outputSchemaFailureToolNames,
 		outputSchemaCorrectionLocked: contract?.outputSchemaCorrectionLocked,
+		outputSchema: contract?.outputSchema,
+		outputSchemaMode: contract?.outputSchemaMode,
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -329,6 +336,41 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
 		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("restores live-model hardening for unlocked schema-bearing sessions", async () => {
+		const cwd = makeTempDir("@pi-live-hardening-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, undefined, undefined, {
+			outputSchema: {
+				type: "object",
+				properties: { token: { type: "string" } },
+				required: ["token"],
+			},
+			outputSchemaMode: "permissive",
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		let wakeOptions: IrcWakeTurnMonitorOptions | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			wakeOptions = options;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const hardeningModel = {
+			compat: { requiresStructuredOutputHardening: true },
+		} as Model;
+		expect(capturedOptions?.resolveOutputSchemaFailurePolicy?.(hardeningModel)).toEqual({
+			mode: "strict",
+			toolNames: ["yield"],
+		});
+		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("strict");
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {

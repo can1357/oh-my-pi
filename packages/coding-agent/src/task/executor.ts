@@ -2533,6 +2533,8 @@ export interface IrcWakeTurnMonitorOptions {
 	maxRuntimeMs?: number;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Live schema mode resolver for kept-alive turns whose model can change after installation. */
+	getOutputSchemaMode?: () => StructuredSubagentSchemaMode | undefined;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
 }
@@ -2630,7 +2632,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					modelOverride: options.modelOverride,
 					modelRole: options.modelRole,
 					outputSchema: options.outputSchema,
-					outputSchemaMode: options.outputSchemaMode,
+					outputSchemaMode: options.getOutputSchemaMode?.() ?? options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
 					artifactsDir: options.artifactsDir,
 					eventBus: options.eventBus,
@@ -3078,6 +3080,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			maxRuntimeMs,
 			outputSchema,
 			outputSchemaMode: effectiveOutputSchemaMode,
+			getOutputSchemaMode: () => effectiveOutputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
 			artifactsDir: options.artifactsDir,
 		});

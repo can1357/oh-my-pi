@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
@@ -12,7 +13,13 @@ import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import {
+	attachIrcWakeTurnMonitor,
+	createMCPProxyTools,
+	createSubagentSettings,
+	modelRequiresStructuredOutputHardening,
+	resolveStructuredOutputHarnessPolicy,
+} from "./executor";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -122,6 +129,24 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			let effectiveOutputSchemaMode = init.outputSchemaMode;
+			const resolveOutputSchemaFailurePolicy =
+				init.outputSchema !== undefined &&
+				init.outputSchemaFailureToolNames === undefined &&
+				init.outputSchemaCorrectionLocked !== true
+					? (liveModel: Model) => {
+							if (!modelRequiresStructuredOutputHardening(liveModel)) return undefined;
+							const policy = resolveStructuredOutputHarnessPolicy(
+								true,
+								init.outputSchema,
+								init.outputSchemaMode,
+							);
+							effectiveOutputSchemaMode = policy.mode;
+							return policy.failureToolNames
+								? { mode: policy.mode ?? "strict", toolNames: policy.failureToolNames }
+								: undefined;
+						}
+					: undefined;
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
@@ -143,6 +168,7 @@ export function createPersistedSubagentReviverFactory(
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				outputSchemaFailureToolNames: init.outputSchemaFailureToolNames,
+				resolveOutputSchemaFailurePolicy,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
 				systemPrompt: () => [init.systemPrompt],
@@ -201,6 +227,7 @@ export function createPersistedSubagentReviverFactory(
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
+				getOutputSchemaMode: () => effectiveOutputSchemaMode,
 				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
 			});
 			return session;
