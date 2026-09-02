@@ -9,7 +9,7 @@ import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "./blackbox";
 import { type DiffError, type DiffResult, generateDiffString } from "./diff";
-import { levenshteinDistance } from "./modes/replace";
+import { levenshteinDistance, similarity } from "./modes/replace";
 import { detectLineEnding, normalizeToLF, normalizeUnicode, restoreLineEndings, stripBom } from "./normalize";
 import { readEditFileText, serializeEditFileText } from "./read-file";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "./renderer";
@@ -609,6 +609,18 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 	return cleaned.join("\n");
 }
 
+/**
+ * Minimum normalized similarity between a recovered MATCH prefix and its
+ * recovered REWRITE remainder for the missing-separator split to be trusted.
+ * A real "forgot the » separator" payload pairs old and new text of the same
+ * construct (high similarity); a marker-less desired-state payload whose first
+ * line happens to exist in the file pairs a stray prefix with unrelated target
+ * text (low similarity). Below the bound the split is a misread and the payload
+ * falls through to the closest-block path (or the fail-closed error) instead
+ * of silently replacing the prefix line with the remainder.
+ */
+const RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY = 0.5;
+
 function recoverMissingSeparator(
 	lines: string[],
 	content: string,
@@ -635,6 +647,20 @@ function recoverMissingSeparator(
 		if (matches.length !== 1) continue;
 		const throughFirstRewriteLine = normalizeBlock(lines.slice(0, remainderStart + 1), false);
 		if (content.startsWith(throughFirstRewriteLine, matches[0].start)) continue;
+		// Structural gate: a recovered split must look like a rewrite of the
+		// matched text (same construct, similar normalized shape), not a
+		// marker-less desired-state block whose first line merely exists in the
+		// file. Splitting the latter replaces only the prefix line and strands
+		// the rest — the silent corruption this gate exists to prevent.
+		const patternNormalized = normalizeText(patternText).text;
+		const rewriteNormalized = normalizeText(rewrite).text;
+		if (
+			patternNormalized === "" ||
+			rewriteNormalized === "" ||
+			similarity(patternNormalized, rewriteNormalized) < RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY
+		) {
+			continue;
+		}
 		if (!candidates.some(candidate => candidate.patternText === patternText && candidate.rewrite === rewrite)) {
 			candidates.push({ patternText, rewrite });
 		}
@@ -1331,8 +1357,18 @@ function parseOperations(input: string, content: string): Operation[] {
 	) {
 		lines.unshift(OPENER);
 	}
-	lines = recoverAlternatingSeparators(lines, content) ?? lines;
-	lines = recoverBracketPairs(lines, content) ?? lines;
+	let structuralRecoveryNote: string | undefined;
+	const alternatingRecovered = recoverAlternatingSeparators(lines, content);
+	if (alternatingRecovered !== undefined) {
+		lines = alternatingRecovered;
+		structuralRecoveryNote = `Note: the payload's alternating <SM:EDIT> blocks were read as <SM:FIND>/<SM:PUT> pairs (the ${REWRITE_HEADER} separators were implied). State each operation explicitly next time.`;
+	} else {
+		const bracketed = recoverBracketPairs(lines, content);
+		if (bracketed !== undefined) {
+			lines = bracketed;
+			structuralRecoveryNote = `Note: the payload's « old » « new » bracket pairs were merged into <SM:FIND>/<SM:PUT> pairs (the ${REWRITE_HEADER} separators were implied). State each operation explicitly next time.`;
+		}
+	}
 	const operations: Operation[] = [];
 	let state: "outside" | "pattern" | "rewrite" = "outside";
 	let allMatches = false;
@@ -1403,9 +1439,15 @@ function parseOperations(input: string, content: string): Operation[] {
 		}
 		const recovered = recoverMissingSeparator(patternLines, content);
 		if (recovered) {
-			operations.push(
-				createOperation(recovered.patternText, recovered.rewrite, allMatches, operations.length + 1, true),
+			const operation = createOperation(
+				recovered.patternText,
+				recovered.rewrite,
+				allMatches,
+				operations.length + 1,
+				true,
 			);
+			operation.recoveryNote = `Note: operation ${operations.length + 1} omitted the <SM:PUT> separator, so the text was split into current text and final text at the first matching line. Add <SM:PUT> explicitly next time.`;
+			operations.push(operation);
 			return;
 		}
 		// Unified-diff habit: reinterpret `-`/`+`/`@@` bodies as inline changes.
@@ -1645,6 +1687,12 @@ function parseOperations(input: string, content: string): Operation[] {
 			);
 		});
 		if (!justified) throw new Error(message);
+	}
+	if (structuralRecoveryNote !== undefined && operations.length > 0) {
+		const first = operations[0];
+		first.recoveryNote = first.recoveryNote
+			? `${structuralRecoveryNote}\n${first.recoveryNote}`
+			: structuralRecoveryNote;
 	}
 	return operations;
 }
@@ -3824,6 +3872,7 @@ function locateWithEchoRecovery(
 			try {
 				const retryPattern = parsePattern(nonConsecutive.patternText, operationNumber);
 				const candidates = locate(content, retryPattern, nonConsecutive, operationNumber, path, exclusions);
+				nonConsecutive.recoveryNote = `Note: operation ${operationNumber} matched at non-consecutive lines; the omitted lines were inferred as ${GAP} gaps and the kept lines were applied independently. Re-emit the skipped lines with ${GAP} to make the match explicit.`;
 				return { operation: nonConsecutive, pattern: retryPattern, candidates };
 			} catch {
 				// Preserve the original diagnosis when the inferred gaps are not unique.
@@ -3837,6 +3886,7 @@ function locateWithEchoRecovery(
 				const retryPattern = parsePattern(candidatePattern, operationNumber);
 				const retryOperation = { ...operation, patternText: candidatePattern };
 				const candidates = locate(content, retryPattern, retryOperation, operationNumber, path, exclusions);
+				retryOperation.recoveryNote = `Note: operation ${operationNumber}'s <SM:FIND> did not match the file and was retried with a recovered variant of the pattern. Copy <SM:FIND> lines byte-for-byte from the file to make edits deterministic.`;
 				return { operation: retryOperation, pattern: retryPattern, candidates };
 			} catch {
 				// Try the next echo-recovery candidate.

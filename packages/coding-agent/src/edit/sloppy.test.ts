@@ -562,6 +562,33 @@ describe("sloppy v8", () => {
 		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
 	});
 
+	test("never splits a marker-less desired-state block at its matching prefix line", () => {
+		// Regression: the missing-separator recovery once split
+		// `function main() {\n  newStep();\n}` at the unique prefix
+		// `function main() {`, then replaced that one line with the remainder —
+		// dropping the function header and stranding the old body. The stated
+		// text is a whole-block rewrite, not a forgotten » separator: it must
+		// replace the full block (or fail closed), never splice the prefix.
+		const content = "function main() {\n  oldStep();\n}\n";
+		const input = "<SM:EDIT>\nfunction main() {\n  newStep();\n}";
+		const notes: string[] = [];
+
+		expect(applySloppy(content, input, { path: "f.ts", notes })).toBe("function main() {\n  newStep();\n}\n");
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+	});
+
+	test("recovers a genuinely missing separator only when the split is structurally similar", () => {
+		// A real "forgot »" payload pairs current text with a near-identical
+		// rewrite; the split applies and the note names the omitted separator.
+		const content = "const timeout = 1000;\n";
+		const notes: string[] = [];
+
+		expect(applySloppy(content, "<SM:EDIT>\nconst timeout = 1000;\nconst timeout = 5000;", { path: "c.ts", notes })).toBe(
+			"const timeout = 5000;\n",
+		);
+		expect(notes.join("\n")).toMatch(/omitted the <SM:PUT> separator/);
+	});
+
 	test("keeps the fail-closed error when no block resembles the stated text", () => {
 		const content = "const a = 1;\nkeep();\n";
 
