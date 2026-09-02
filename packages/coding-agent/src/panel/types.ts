@@ -45,7 +45,9 @@ export interface PanelRole {
 	/**
 	 * Whether every member must resolve to its own family. Defaults to `true`
 	 * for `independent` and `false` for `personas`, where repeated families are
-	 * the perspective-coverage contract.
+	 * the perspective-coverage contract. Tighten-only: a `personas` role may set
+	 * `true`, while `false` on an `independent` role is rejected rather than
+	 * allowed to trade away that strategy's diversity claim.
 	 */
 	readonly distinctFamilies?: boolean;
 }
