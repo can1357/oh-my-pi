@@ -4,16 +4,21 @@ import {
 	type AuthCredentialStore,
 	AuthStorage,
 	type StoredAuthCredential,
+	type StoredCredentialBlock,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 
 interface ObservableStore extends AuthCredentialStore {
 	cache: Map<string, { value: string; expiresAtSec: number }>;
+	blocks: Map<string, StoredCredentialBlock>;
+	reconcileAfter: Map<string, number>;
 }
 
 function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
+	const blocks = new Map<string, StoredCredentialBlock>();
+	const reconcileAfter = new Map<string, number>();
 	return {
 		cache,
 		close() {},
@@ -41,6 +46,36 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 		setCache(key, value, expiresAtSec) {
 			cache.set(key, { value, expiresAtSec });
 		},
+		getCredentialBlock(credentialId, providerKey, blockScope) {
+			const block = blocks.get(`${credentialId}\0${providerKey}\0${blockScope}`);
+			return block && block.blockedUntilMs > Date.now() ? block.blockedUntilMs : undefined;
+		},
+		getCredentialBlockReconcileAfter(credentialId, providerKey, blockScope) {
+			return reconcileAfter.get(`${credentialId}\0${providerKey}\0${blockScope}`);
+		},
+		upsertCredentialBlock(block) {
+			blocks.set(`${block.credentialId}\0${block.providerKey}\0${block.blockScope}`, block);
+		},
+		deleteCredentialBlock(credentialId, providerKey, blockScope) {
+			blocks.delete(`${credentialId}\0${providerKey}\0${blockScope}`);
+			reconcileAfter.delete(`${credentialId}\0${providerKey}\0${blockScope}`);
+		},
+		deleteCredentialBlocks(credentialId) {
+			for (const key of blocks.keys()) {
+				if (key.startsWith(`${credentialId}\0`)) blocks.delete(key);
+			}
+		},
+		cleanExpiredCredentialBlocks(nowMs) {
+			for (const [key, block] of blocks) {
+				if (block.blockedUntilMs <= nowMs) blocks.delete(key);
+			}
+		},
+		listCredentialBlocks(credentialIds) {
+			const ids = new Set(credentialIds);
+			return [...blocks.values()].filter(block => ids.has(block.credentialId) && block.blockedUntilMs > Date.now());
+		},
+		blocks,
+		reconcileAfter,
 		cleanExpiredCache() {},
 	};
 }
@@ -53,6 +88,7 @@ function oauthRow(id: number, email: string, provider = "anthropic"): StoredAuth
 		expires: Date.now() + 3_600_000,
 		accountId: `account-${id}`,
 		email,
+		orgId: `org-${id}`,
 	};
 	return { id, provider, credential, disabledCause: null };
 }
@@ -389,6 +425,158 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 
 		const retryKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(retryKey).toBe("oat-2");
+	});
+
+	it("rechecks and clears a stale Fable block when live usage is healthy", async () => {
+		const startNow = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(startNow);
+		const blockedUntilMs = startNow + 24 * 60 * 60_000;
+		store.upsertCredentialBlock?.({
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "tier:fable",
+			blockedUntilMs,
+		});
+		const reportsByAccess: Record<string, UsageReport> = {
+			"oat-1": withFable(baseReport("a@example.com"), 0, { resetsAt: blockedUntilMs }),
+			"oat-2": withFable(baseReport("b@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+			"oat-3": withFable(baseReport("c@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+		};
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			return access ? (reportsByAccess[access] ?? null) : null;
+		});
+
+		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-1");
+		expect(store.getCredentialBlock?.(1, "anthropic:oauth", "tier:fable")).toBeUndefined();
+	});
+
+	it("does not clear a fresh Fable block from a lagging healthy usage report", async () => {
+		const startNow = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(startNow);
+		const blockedUntilMs = startNow + 24 * 60 * 60_000;
+		store.upsertCredentialBlock?.({
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "tier:fable",
+			blockedUntilMs,
+		});
+		store.reconcileAfter.set(`1\0anthropic:oauth\0tier:fable`, startNow + 5 * 60_000);
+		const reportsByAccess: Record<string, UsageReport> = {
+			"oat-1": withFable(baseReport("a@example.com"), 0, { resetsAt: blockedUntilMs }),
+			"oat-2": withFable(baseReport("b@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+			"oat-3": withFable(baseReport("c@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+		};
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			return access ? (reportsByAccess[access] ?? null) : null;
+		});
+
+		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-2");
+		expect(store.getCredentialBlock?.(1, "anthropic:oauth", "tier:fable")).toBe(blockedUntilMs);
+	});
+
+	it("keeps a Fable block while the scoped live meter is exhausted", async () => {
+		const startNow = Date.now();
+		vi.spyOn(Date, "now").mockReturnValue(startNow);
+		const blockedUntilMs = startNow + 24 * 60 * 60_000;
+		store.upsertCredentialBlock?.({
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "tier:fable",
+			blockedUntilMs,
+		});
+		const reportsByAccess: Record<string, UsageReport> = {
+			"oat-1": withFable(baseReport("a@example.com"), 1, { resetsAt: blockedUntilMs }),
+			"oat-2": withFable(baseReport("b@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+			"oat-3": withFable(baseReport("c@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+		};
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			return access ? (reportsByAccess[access] ?? null) : null;
+		});
+
+		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-2");
+		expect(store.getCredentialBlock?.(1, "anthropic:oauth", "tier:fable")).toBe(blockedUntilMs);
+	});
+
+	it("heals the matching broker-sourced Anthropic grant without crossing organizations", async () => {
+		const blockedUntilMs = Date.now() + 24 * 60 * 60_000;
+		store.upsertCredentialBlock?.({
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "tier:fable",
+			blockedUntilMs,
+		});
+		const report = withFable(baseReport("a@example.com"), 0, { resetsAt: blockedUntilMs });
+		report.metadata = {
+			...report.metadata,
+			email: "a@example.com",
+			accountId: "account-1",
+			orgId: "org-1",
+		};
+		store.fetchUsageReports = async () => [report];
+
+		await storage.fetchUsageReports();
+
+		expect(store.getCredentialBlock?.(1, "anthropic:oauth", "tier:fable")).toBeUndefined();
+	});
+
+	it("does not heal an Anthropic block from another organization's usage report", async () => {
+		const blockedUntilMs = Date.now() + 24 * 60 * 60_000;
+		store.upsertCredentialBlock?.({
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "tier:fable",
+			blockedUntilMs,
+		});
+		const report = withFable(baseReport("a@example.com"), 0, { resetsAt: blockedUntilMs });
+		report.metadata = {
+			...report.metadata,
+			email: "a@example.com",
+			accountId: "account-1",
+			orgId: "other-org",
+		};
+		store.fetchUsageReports = async () => [report];
+
+		await storage.fetchUsageReports();
+
+		expect(store.getCredentialBlock?.(1, "anthropic:oauth", "tier:fable")).toBe(blockedUntilMs);
+	});
+
+	it("does not heal a requested Anthropic credential from a mismatched organization report", async () => {
+		const blockedUntilMs = Date.now() + 24 * 60 * 60_000;
+		store.upsertCredentialBlock?.({
+			credentialId: 1,
+			providerKey: "anthropic:oauth",
+			blockScope: "tier:fable",
+			blockedUntilMs,
+		});
+		const reportsByAccess: Record<string, UsageReport> = {
+			"oat-1": withFable(baseReport("a@example.com"), 0, { resetsAt: blockedUntilMs }),
+			"oat-2": withFable(baseReport("b@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+			"oat-3": withFable(baseReport("c@example.com"), 0.2, { resetsAt: blockedUntilMs }),
+		};
+		reportsByAccess["oat-1"].metadata = {
+			email: "a@example.com",
+			accountId: "account-1",
+			orgId: "org-2",
+		};
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			return access ? (reportsByAccess[access] ?? null) : null;
+		});
+
+		const key = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-2");
+		expect(store.getCredentialBlock?.(1, "anthropic:oauth", "tier:fable")).toBe(blockedUntilMs);
 	});
 
 	it("still blocks OAuth credentials with exhausted shared Anthropic limits", async () => {
