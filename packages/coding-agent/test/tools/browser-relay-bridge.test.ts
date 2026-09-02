@@ -4049,6 +4049,145 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	it("forces a fresh root after an interrupted tracked shared-root setter", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Issue a tracked shared-root setter (Fetch.enable), then drop the socket
+		// ordinarily before its result arrives. Chrome may already hold the enable,
+		// but #recordSubscription never ran, so the journal has no record of it.
+		const enableId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: enableId,
+				sessionId: pageSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "*" }] },
+			}),
+		);
+		await waitFor(
+			() => ext.rpcs("send").some((rpc) => rpc.method === "Fetch.enable"),
+			"interrupted Fetch.enable RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		// The client sees the interrupted command fail.
+		expect(
+			cdp.messages.some((m) => m.id === enableId && "error" in m),
+		).toBe(true);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		// The ambiguous tracked setter forces a fresh root: detach → attach, so a
+		// reconnect cannot reuse a root carrying an untracked Fetch.enable that
+		// owner cleanup can neither see nor disable.
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"fresh-root detach after interrupted tracked setter",
+		);
+		ack(bridge, ext2, "detach");
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"fresh-root attach after interrupted tracked setter",
+		);
+		ack(bridge, ext2, "attach");
+		await flush();
+		// The enable was never journaled, so nothing replays it onto the fresh root.
+		expect(
+			ext2.rpcs("send").filter((rpc) => rpc.method === "Fetch.enable"),
+		).toHaveLength(0);
+	});
+
+	it("preserves recovery authorization when the forced-root detach outlives its socket", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare Target.attachToTarget holder: its page session must survive recovery.
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Interrupt an initial preload registration to arm forceFreshRootBeforeReplay.
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(true);
+
+		// First reconnect drives the forced fresh-root detach; it goes in flight.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"forced fresh-root detach in flight",
+		);
+		// The extension executed the relay-initiated detach (dropping the tab from
+		// recoverableTabIds) but the socket dies before its result returns.
+		bridge.extClosed(ext2);
+		await flush();
+
+		// The replacement hello reports the tab NOT attached and NOT recoverable,
+		// yet forceFreshRootBeforeReplay still records an in-progress recovery. The
+		// bridge must preserve the recovery authorization and finish the reattach
+		// instead of treating it as a user detach that strands the holder.
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
+		await waitFor(
+			() => ext3.rpcs("attach").length === 1,
+			"recovery reattach after forced-root detach lost its socket",
+		);
+		ack(bridge, ext3, "attach");
+		await flush();
+
+		// The preserved page session survived: its command routes to the reattached
+		// tab instead of failing "Unknown session id".
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+			}),
+		);
+		ack(bridge, ext3, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find((m) => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+	});
+
 	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

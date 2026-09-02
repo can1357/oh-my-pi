@@ -753,10 +753,20 @@ export class RelayBridge {
 				continue;
 			}
 			if (!recoverableNow.has(tab.tabId)) {
-				// The user detached while the extension socket was down. Invalidate
-				// the relay's stale sessions without fighting the explicit opt-out.
-				this.#onTabDetached(tab.tabId, "detached_while_disconnected", false);
-				continue;
+				// A forced-root refresh performs its own relay-initiated detach, which
+				// removes the tab from the extension's `recoverableTabIds`. If the
+				// socket then drops after that detach but before the reattach, the
+				// replacement hello lands here with an unattached, non-recoverable tab
+				// even though `forceFreshRootBeforeReplay` still records an in-progress
+				// recovery. Treating that as a user detach would retract the preserved
+				// pseudo-sessions and strand the holders. Preserve the explicit
+				// recovery authorization and finish the reattach below instead.
+				if (!tab.forceFreshRootBeforeReplay) {
+					// The user detached while the extension socket was down. Invalidate
+					// the relay's stale sessions without fighting the explicit opt-out.
+					this.#onTabDetached(tab.tabId, "detached_while_disconnected", false);
+					continue;
+				}
 			}
 			// A guard detach creates a fresh Chrome root session, so every real child
 			// session (OOPIF/worker) tied to the old root must be torn down. But any
@@ -1253,6 +1263,18 @@ export class RelayBridge {
 			);
 		} catch (err) {
 			pendingSubscription?.resolve();
+			// Chrome may have accepted a tracked shared-root setter (e.g.
+			// `Fetch.enable`) before the socket dropped and its result never reached
+			// us. Because #recordSubscription runs only on the success path above,
+			// the journal never learns about that state: a quick reconnect would
+			// reuse a root carrying an untracked subscription that owner cleanup
+			// cannot disable and recovery cannot reproduce. Treat the interrupted
+			// tracked setter as ambiguous and force a fresh-root reconciliation, as
+			// the preload handlers already do for interrupted registrations.
+			if (pendingSubscription && isExtensionTransportInterrupted(err)) {
+				const tab = this.#tabs.get(tabId);
+				if (tab) tab.forceFreshRootBeforeReplay = true;
+			}
 			this.#replyError(
 				conn,
 				msg,
@@ -2930,9 +2952,23 @@ export class RelayBridge {
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
 		const restoring = (async () => {
-			const ok = tab.forceFreshRootBeforeReplay
-				? await this.#refreshRootForRecovery(tab, ext)
-				: !attach || (await this.#ensureAttached(tab));
+			let ok: boolean;
+			try {
+				ok = tab.forceFreshRootBeforeReplay
+					? await this.#refreshRootForRecovery(tab, ext)
+					: !attach || (await this.#ensureAttached(tab));
+			} catch (err) {
+				// #refreshRootForRecovery issues a relay-initiated detach whose RPC
+				// rejects (ExtensionReplacedError or "relay extension disconnected")
+				// when the socket drops mid-refresh — after Chrome may have already
+				// executed the detach but before its result returns. That is a
+				// retryable transport swap, not a terminal failure: leave the
+				// preserved sessions and the recovery authorization
+				// (forceFreshRootBeforeReplay) intact so the replacement hello can
+				// finish the reattach instead of stranding the holder.
+				if (isExtensionTransportInterrupted(err)) return;
+				throw err;
+			}
 			if (!ok) {
 				if (this.#ext !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
