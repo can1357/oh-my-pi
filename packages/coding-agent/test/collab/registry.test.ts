@@ -15,7 +15,7 @@ import {
 
 const cleanupDirs: string[] = [];
 const openPublications: CollabHostPublication[] = [];
-const openServers: net.Server[] = [];
+const openServers: { server: net.Server; sockets: Set<net.Socket> }[] = [];
 
 afterEach(async () => {
 	for (const pub of openPublications.splice(0)) {
@@ -25,7 +25,10 @@ afterEach(async () => {
 			// best-effort
 		}
 	}
-	for (const server of openServers.splice(0)) {
+	for (const { server, sockets } of openServers.splice(0)) {
+		// server.close() waits for every accepted connection to end; a deliberately
+		// hung fixture socket would otherwise stall the hook past its timeout.
+		for (const socket of sockets) socket.destroy();
 		const closed = Promise.withResolvers<void>();
 		server.close(() => closed.resolve());
 		await closed.promise;
@@ -266,10 +269,16 @@ describe("collab registry", () => {
 
 		// (e) unresponsive: accepts connections, never answers -> skipped, not pruned.
 		const unresponsiveEndpoint = auxEndpoint(dir, "unresponsive");
-		const unresponsive = net.createServer(() => {
-			/* accept and hang */
+		const hungSockets = new Set<net.Socket>();
+		const unresponsive = net.createServer(socket => {
+			// Accept and hang; afterEach severs these before closing the server.
+			// A client-side destroy may surface as ECONNRESET here — swallow it
+			// so an unhandled 'error' cannot take the test process down.
+			hungSockets.add(socket);
+			socket.on("error", () => {});
+			socket.once("close", () => hungSockets.delete(socket));
 		});
-		openServers.push(unresponsive);
+		openServers.push({ server: unresponsive, sockets: hungSockets });
 		const listening = Promise.withResolvers<void>();
 		unresponsive.once("error", err => listening.reject(err));
 		unresponsive.listen(unresponsiveEndpoint, () => listening.resolve());
