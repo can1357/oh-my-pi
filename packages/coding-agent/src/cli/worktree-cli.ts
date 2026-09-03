@@ -115,7 +115,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 				: `checking out '${ref}'`;
 		console.log(`Preparing worktree (${preparation})`);
 	}
-	const result = await vcs.addWorktree(repository, worktreePath, ref, {
+	const result = await repository.worktreeAdd(worktreePath, ref, {
 		detach,
 		clone: settings.get("worktree.clone"),
 		backend: parseIsolationBackend(settings.get("isolation.backend")),

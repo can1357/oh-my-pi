@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type VcsGitRepo, vcsDiscover, vcsGitClone, vcsGitDiscover, vcsGitRepoInfo } from "../native/index.js";
+import { vcsDiscover, vcsGitClone, vcsGitDiscover, vcsGitRepoInfo } from "../native/index.js";
 import * as vcs from "../native/vcs.js";
 
 const roots: string[] = [];
@@ -178,51 +178,5 @@ describe("VcsRepo", () => {
 			if (!(error instanceof Error)) throw error;
 			expect(error.message).toContain("valid: stagedDiff, revDiff");
 		}
-	});
-});
-
-describe("worktree signature compatibility", () => {
-	function legacyRepository(calls: unknown[][]): VcsGitRepo {
-		return {
-			worktreeAdd: (...args: unknown[]) => {
-				calls.push(args);
-				if (typeof args[2] !== "boolean") {
-					return Promise.reject(
-						Object.assign(new TypeError("Failed to convert napi value into rust type `bool`"), {
-							code: "BooleanExpected",
-						}),
-					);
-				}
-				return Promise.resolve();
-			},
-		} as unknown as VcsGitRepo;
-	}
-
-	test("retries the previous release addon's boolean worktree signature", async () => {
-		const calls: unknown[][] = [];
-		const repo = legacyRepository(calls);
-		const signal = new AbortController().signal;
-
-		await expect(
-			vcs.addWorktree(repo, "/tmp/worktree", "topic", { detach: false, clone: false }, signal),
-		).resolves.toEqual({});
-		expect(calls).toEqual([
-			["/tmp/worktree", "topic", { detach: false, clone: false }, signal],
-			["/tmp/worktree", "topic", false, signal],
-		]);
-	});
-
-	test("does not silently discard keepChanges on the previous release addon", async () => {
-		const calls: unknown[][] = [];
-		const repo = legacyRepository(calls);
-
-		await expect(
-			vcs.addWorktree(repo, "/tmp/worktree", "topic", {
-				detach: false,
-				clone: false,
-				keepChanges: true,
-			}),
-		).rejects.toThrow("does not support creating a worktree with uncommitted changes");
-		expect(calls).toHaveLength(1);
 	});
 });

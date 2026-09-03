@@ -745,7 +745,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 
 	const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 	try {
-		await vcs.addWorktree(repo, tmpDir, opts.branchName, { detach: false, clone: false });
+		await repo.worktreeAdd(tmpDir, opts.branchName, { detach: false, clone: false });
 		const agentCommits = await isolationRepo.revListRange(baselineSha, opts.isolationHead);
 		const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
 		// Seed the parent ODB with the dirty-side blobs needed by `git apply
@@ -884,7 +884,7 @@ export async function commitToBranch(
 			if (leftoverPatch.trim()) {
 				const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 				try {
-					await vcs.addWorktree(repo, tmpDir, branchName, { detach: false, clone: false });
+					await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
 					const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
 					await commitPatchToBranchWorktree(tmpDir, taskId, leftoverPatch, msg);
 				} finally {
@@ -899,7 +899,7 @@ export async function commitToBranch(
 		branchCreated = true;
 		const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
 		try {
-			await vcs.addWorktree(repo, tmpDir, branchName, { detach: false, clone: false });
+			await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
 
 			const msg = (commitMessage && (await commitMessage(rootPatch))) || fallbackMessage;
 			const wip = baselineHasRootWip(baseline.root) ? baseline.root : undefined;

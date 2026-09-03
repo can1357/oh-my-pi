@@ -85,28 +85,6 @@ export function clone(url, target, options = {}, signal) {
 	return api().vcsGitClone(url, target, options, signal);
 }
 
-/**
- * Add a linked worktree while bridging the pre-options native signature used
- * by the previous release addon in pull-request CI.
- */
-export async function addWorktree(repo, path, refName, options, signal) {
-	try {
-		return await repo.worktreeAdd(path, refName, options, signal);
-	} catch (error) {
-		const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-		if (code !== "BooleanExpected") throw error;
-		if (options.keepChanges) {
-			throw new Error("The installed native addon does not support creating a worktree with uncommitted changes", {
-				cause: error,
-			});
-		}
-		await repo.worktreeAdd(path, refName, options.detach, signal);
-		return options.clone
-			? { cloneError: "The installed native addon does not support copy-on-write worktree cloning" }
-			: {};
-	}
-}
-
 /** Sever a copied working tree from shared git metadata. */
 export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);
