@@ -5948,6 +5948,12 @@ describe("advisor", () => {
 	// window (`streaming: false`) a suppressed note must `preserve`, never `steer`,
 	// or it strands and #drainStrandedQueuedMessages auto-resumes it. Do not swap
 	// the call site back to session `isStreaming`.
+	//
+	// Delivery channels: an aside is only routed while the loop is live
+	// (streaming and not aborting) — that is the only window in which the loop
+	// polls getAsideMessages again. Once the loop is idle, a nit (and an
+	// immune-window idle concern) is preserved as a visible card instead of
+	// parking a note nothing will ever drain.
 	describe("resolveAdvisorDeliveryChannel", () => {
 		it("preserves every severity when a headless drain forbids primary turns", () => {
 			for (const severity of [undefined, "nit", "concern", "blocker"] as const) {
@@ -5974,50 +5980,84 @@ describe("advisor", () => {
 					preserveOnly: true,
 				}),
 			).toBe("aside");
-			for (const severity of ["concern", "blocker"] as const) {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					preserveOnly: true,
+				}),
+			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					preserveOnly: true,
+				}),
+			).toBe("steer");
+		});
+
+		it("routes a nit as an aside only while the loop is live, preserving it otherwise", () => {
+			for (const severity of [undefined, "nit"] as const) {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
 						autoResumeSuppressed: false,
 						streaming: true,
 						aborting: false,
-						preserveOnly: true,
 					}),
-				).toBe("steer");
+				).toBe("aside");
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: true,
+						streaming: true,
+						aborting: true,
+					}),
+				).toBe("preserve");
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+					}),
+				).toBe("preserve");
 			}
 		});
 
-		it("routes a non-interrupting nit to the aside queue regardless of state", () => {
+		it("a concern raised against a streaming primary never steers", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
-					severity: "nit",
-					autoResumeSuppressed: true,
-					streaming: true,
-					aborting: true,
-				}),
-			).toBe("aside");
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: undefined,
+					severity: "concern",
 					autoResumeSuppressed: false,
-					streaming: false,
+					streaming: true,
 					aborting: false,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("steer");
 		});
 
-		it("steers concern/blocker when no user interrupt is in effect", () => {
+		it("an idle mid-work concern or blocker steers a triggered turn", () => {
 			for (const severity of ["concern", "blocker"] as const) {
-				for (const streaming of [true, false]) {
-					expect(
-						resolveAdvisorDeliveryChannel({
-							severity,
-							autoResumeSuppressed: false,
-							streaming,
-							aborting: false,
-						}),
-					).toBe("steer");
-				}
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+					}),
+				).toBe("steer");
 			}
 		});
 
@@ -6045,7 +6085,7 @@ describe("advisor", () => {
 			).toBe("steer");
 		});
 
-		it("downgrades concern to aside during immune turns, but still steers a blocker (#5628)", () => {
+		it("preserves an idle concern during immune turns, keeps a streaming one on the aside queue, and still steers a blocker (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
@@ -6055,6 +6095,15 @@ describe("advisor", () => {
 					interruptImmuneTurnActive: true,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("preserve");
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
@@ -6074,6 +6123,18 @@ describe("advisor", () => {
 				}),
 			).toBe("preserve");
 		});
+
+		it("steers a concern during abort teardown when no user interrupt is in effect", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: true,
+				}),
+			).toBe("steer");
+		});
+
 		it("preserves an interrupting note while suppressed AND idle (no auto-resume of a stopped run)", () => {
 			for (const severity of ["concern", "blocker"] as const) {
 				expect(
@@ -6100,17 +6161,23 @@ describe("advisor", () => {
 			).toBe("preserve");
 		});
 
-		it("steers an interrupting note while suppressed once a turn is streaming again and not aborting (the fix)", () => {
-			for (const severity of ["concern", "blocker"] as const) {
-				expect(
-					resolveAdvisorDeliveryChannel({
-						severity,
-						autoResumeSuppressed: true,
-						streaming: true,
-						aborting: false,
-					}),
-				).toBe("steer");
-			}
+		it("delivers a suppressed note once a turn is streaming again and not aborting instead of stranding it (the fix)", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("steer");
 		});
 	});
 	describe("advisor transcript filenames", () => {

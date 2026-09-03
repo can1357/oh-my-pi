@@ -67,10 +67,11 @@ export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string
 }
 
 /**
- * Whether advice at this severity should interrupt the running agent (delivered
- * via the steering channel, aborting in-flight tools) rather than ride the
- * non-interrupting aside queue that lands at the next step boundary. `concern`
- * and `blocker` interrupt; a plain `nit` queues.
+ * Whether a note at this severity may wake or interrupt the primary. A
+ * `blocker` steers even into a streaming turn; a `concern` only wakes an idle
+ * mid-work primary and is subject to the immune-turn window; a plain `nit`
+ * never does. A streaming primary receives concerns and nits as next-step
+ * asides.
  */
 export function isInterruptingSeverity(severity: AdvisorSeverity | undefined): boolean {
 	return severity === "concern" || severity === "blocker";
@@ -93,28 +94,33 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *
  * - A `preserveOnly` caller records every note that arrives while the primary
  *   is idle as a visible card and never starts a new primary turn.
- * - A non-interrupting `nit` always rides the non-interrupting aside queue.
- * - An interrupting `concern`/`blocker` is normally steered into the agent: into
- *   the live turn while one is streaming, or (when idle) a triggered turn so the
- *   advice is acted on immediately.
- * - If the primary tail is already a terminal text answer and there is no queued
- *   work, a late `concern` is preserved as a visible card instead of waking the
- *   primary to restate completion. A `blocker` is the exception: it means the
- *   agent handed off broken or unexercised work, so it still steers a triggered
- *   turn to force the primary to acknowledge and continue before the turn is
- *   considered done (#5628) — deferring it to the next user turn is the bug.
- * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
- *   not auto-resume the stopped run. While the agent is idle — or still tearing
- *   the interrupted turn down (`aborting`) — the note is preserved as a visible
- *   card instead of restarting the run. But once a turn is actively streaming
- *   again (a resume the user already drove), steering the note in does NOT
- *   auto-resume anything, so it is delivered live. Parking it during an active
- *   run instead strands it (it never reaches the running agent) and the withheld
- *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern` notes are
- *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
- *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ * - The aside channel is only used while the primary loop is live — streaming
+ *   and not aborting — because that is the only time the loop polls
+ *   `getAsideMessages` again; a note parked any other time would strand. A
+ *   live loop therefore receives a `nit` or a `concern` as a next-step aside
+ *   and is never interrupted by a concern; only a `blocker` still steers into
+ *   the live turn.
+ * - Once the loop is idle a `nit` is preserved as a visible card. A `concern`
+ *   after a terminal answer with no queued work is preserved instead of waking
+ *   the primary to restate completion; a `concern` after a mid-work yield
+ *   steers a triggered turn so the advice is acted on immediately. A `blocker`
+ *   always steers a triggered turn: it means the agent handed off broken or
+ *   unexercised work, so the primary must acknowledge and continue before the
+ *   turn is considered done (#5628) — deferring it to the next user turn is
+ *   the bug.
+ * - The user-interrupt guard is unchanged: after a deliberate user interrupt
+ *   (`autoResumeSuppressed`) the advisor must not auto-resume the stopped run.
+ *   While the agent is idle — or still tearing the interrupted turn down
+ *   (`aborting`) — the note is preserved as a visible card instead of
+ *   restarting the run. But once a turn is actively streaming again (a resume
+ *   the user already drove), steering the note in does NOT auto-resume
+ *   anything, so it is delivered live. Parking it during an active run instead
+ *   strands it (it never reaches the running agent) and the withheld notes
+ *   dump as one burst at the next user prompt — the bug this guards.
+ * - During the post-interrupt immune-turn window an idle `concern` is
+ *   preserved as a visible card instead of triggering a turn (a streaming one
+ *   still rides the aside queue); a `blocker` remains exempt and still steers
+ *   a triggered turn even right after a prior interrupt (#5628).
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -126,11 +132,13 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
+	const live = opts.streaming && !opts.aborting;
+	if (!isInterruptingSeverity(opts.severity)) return live ? "aside" : "preserve";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
+	if (live && opts.severity !== "blocker") return "aside";
 	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
 		return "preserve";
-	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
+	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "preserve";
 	return "steer";
 }
 
