@@ -87,10 +87,15 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<TOptions extends KernelSessionRegistryOptions, TResult> {
+interface KernelSessionRegistry<
+	TKernel extends RegistryKernel,
+	TOptions extends KernelSessionRegistryOptions,
+	TResult,
+> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult>;
+	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -131,7 +136,7 @@ export function createKernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
-): KernelSessionRegistry<TOptions, TResult> {
+): KernelSessionRegistry<TKernel, TOptions, TResult> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -421,6 +426,19 @@ export function createKernelSessionRegistry<
 		return retryKernel;
 	}
 
+	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = resolveOwnerScopedSessionKey({
+			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
+			ownerId: options.kernelOwnerId,
+			reset: false,
+			hasSession: key => sessions.has(key) || startingSessions.has(key),
+			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+		});
+		const kernel = sessions.get(sessionKey)?.kernel;
+		return kernel?.isAlive() ? kernel : undefined;
+	}
+
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = resolveOwnerScopedSessionKey({
@@ -498,5 +516,5 @@ export function createKernelSessionRegistry<
 		return retryResult;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel };
 }

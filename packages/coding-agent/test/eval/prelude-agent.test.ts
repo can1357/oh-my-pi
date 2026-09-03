@@ -3,12 +3,11 @@ import * as vm from "node:vm";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 
 /**
- * The eval `agent()` helper grows a `handle` option that turns its bare
- * text result into a DAG node dict carrying the spawned agent's recoverable
- * `agent://<id>` handle, so a downstream `pipeline`/`parallel` stage can wire
- * the transcript by reference instead of re-inlining it. These lock the node
- * shape, backward compatibility of the default path, the schema interaction,
- * and the no-`details` fallback (the helper must never throw).
+ * The eval `agent()` helper always returns an `AgentHandle` — spawning is
+ * asynchronous, so callers get a recoverable `agent://<id>` handle and
+ * resolve results through `wait()`/`output()` instead of a bare string.
+ * These lock the bridge call shape, the handle surface, the positional-arg
+ * order, the missing-id error contract, and schema-aware `wait()` parsing.
  *
  * The prelude source is executed verbatim in a throwaway VM context with only
  * the host bridge (`__omp_call_tool__`) stubbed — no worker, no kernel — so the
@@ -24,40 +23,28 @@ function loadPrelude(callTool: (name: string, args: unknown) => Promise<unknown>
 type AgentHelper = (prompt: string, opts?: Record<string, unknown>) => Promise<unknown>;
 
 describe("eval js agent() handle", () => {
-	it("returns a DAG node carrying the agent:// handle when handle is set", async () => {
+	it("returns an AgentHandle carrying the bridge id, agent name, and agent:// uri", async () => {
 		let seenName: string | undefined;
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (name, args) => {
 			seenName = name;
 			seenArgs = args as Record<string, unknown>;
-			return { text: "hello world", details: { agent: "task", id: "abc123", model: "m", structured: false } };
+			return { id: "abc123", agent: "task" };
 		});
-		const node = await (sandbox.agent as AgentHelper)("say hi", { handle: true });
+		const handle = (await (sandbox.agent as AgentHelper)("say hi", { label: "Greeter" })) as Record<string, unknown>;
 		expect(seenName).toBe("__agent__");
-		expect(seenArgs?.handle).toBe(true);
-		expect(node).toEqual({
-			text: "hello world",
-			output: "hello world",
-			handle: "agent://abc123",
-			id: "abc123",
-			agent: "task",
-		});
+		expect(seenArgs).toEqual({ prompt: "say hi", label: "Greeter" });
+		expect(handle.kind).toBe("agent");
+		expect(handle.id).toBe("abc123");
+		expect(handle.agent).toBe("task");
+		expect(handle.handle).toBe("agent://abc123");
 	});
 
-	it("returns bare text by default (backward compatible)", async () => {
-		const sandbox = loadPrelude(async () => ({
-			text: "hello world",
-			details: { agent: "task", id: "abc123", structured: false },
-		}));
-		const out = await (sandbox.agent as AgentHelper)("say hi");
-		expect(out).toBe("hello world");
-	});
-
-	it("keeps positional isolation controls stable while appending schemaMode", async () => {
+	it("maps positional args onto named options in order", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (_name, args) => {
 			seenArgs = args as Record<string, unknown>;
-			return { text: '{"ok":true}', details: { agent: "task", id: "legacy", structured: false } };
+			return { id: "legacy", agent: "reviewer" };
 		});
 		const positionalAgent = sandbox.agent as (
 			prompt: string,
@@ -66,7 +53,7 @@ describe("eval js agent() handle", () => {
 		) => Promise<unknown>;
 		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
 
-		await positionalAgent("scout", "reviewer", "Legacy", schema, true, false, true, "strict");
+		await positionalAgent("scout", "reviewer", "Legacy", schema, true, false, true, "strict", ["read"]);
 
 		expect(seenArgs).toEqual({
 			prompt: "scout",
@@ -77,60 +64,28 @@ describe("eval js agent() handle", () => {
 			apply: false,
 			merge: true,
 			schemaMode: "strict",
-			handle: false,
+			tools: ["read"],
 		});
 	});
 
-	it("carries the parsed object under data when schema and handle combine", async () => {
-		const payload = JSON.stringify({ k: 1 });
-		const sandbox = loadPrelude(async () => ({
-			text: payload,
-			details: { agent: "task", id: "id-9", structured: true },
-		}));
-		const node = (await (sandbox.agent as AgentHelper)("emit", {
-			schema: { type: "object" },
-			handle: true,
-		})) as Record<string, unknown>;
-		expect(node.handle).toBe("agent://id-9");
-		expect(node.data).toEqual({ k: 1 });
-		expect(node.text).toBe(payload);
-	});
-
-	it("falls back to a null handle without throwing when the bridge omits details", async () => {
+	it("throws when the bridge omits the handle id", async () => {
 		const sandbox = loadPrelude(async () => ({ text: "lonely" }));
-		const node = await (sandbox.agent as AgentHelper)("x", { handle: true });
-		expect(node).toEqual({ text: "lonely", output: "lonely", handle: null, id: null, agent: null });
+		await expect((sandbox.agent as AgentHelper)("x")).rejects.toThrow("agent() did not return a handle");
 	});
 
-	it("exposes patchPath/branchName/nestedPatches/changesApplied/isolated/isolationSummary on the handle", async () => {
-		const payload = JSON.stringify({ ok: true });
-		const sandbox = loadPrelude(async () => ({
-			text: payload,
-			details: {
-				agent: "task",
-				id: "iso-1",
-				structured: true,
-				isolated: true,
-				patchPath: "/artifacts/iso-1.patch",
-				changesApplied: null,
-				nestedPatches: [{ relativePath: "nested", patch: "diff --git a/file b/file\n" }],
-				isolationSummary: "Isolation: changes captured at `/artifacts/iso-1.patch` (apply=false). Not applied.",
-			},
-		}));
-		const node = (await (sandbox.agent as AgentHelper)("scout", {
+	it("parses wait() text as JSON only when a schema was given", async () => {
+		const sandbox = loadPrelude(async (name, args) => {
+			if (name === "__agent__") return { id: "id-9", agent: "task" };
+			if (name === "__wait__") return { items: [{ status: "completed", text: '{"k":1}' }] };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const withSchema = (await (sandbox.agent as AgentHelper)("emit", {
 			schema: { type: "object" },
-			isolated: true,
-			apply: false,
-			handle: true,
-		})) as Record<string, unknown>;
-		expect(node.handle).toBe("agent://iso-1");
-		expect(node.data).toEqual({ ok: true });
-		expect(node.isolated).toBe(true);
-		expect(node.patchPath).toBe("/artifacts/iso-1.patch");
-		expect(node.nestedPatches).toEqual([{ relativePath: "nested", patch: "diff --git a/file b/file\n" }]);
-		expect(node.changesApplied).toBeNull();
-		expect(node.isolationSummary).toContain("/artifacts/iso-1.patch");
-		expect("branchName" in node).toBe(false);
+		})) as { wait(): Promise<unknown> };
+		expect(await withSchema.wait()).toEqual({ k: 1 });
+
+		const plain = (await (sandbox.agent as AgentHelper)("emit")) as { wait(): Promise<unknown> };
+		expect(await plain.wait()).toBe('{"k":1}');
 	});
 });
 

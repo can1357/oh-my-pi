@@ -260,7 +260,7 @@ export class AssistantMessageComponent extends Container {
 	#textColorTransform?: (text: string) => string;
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
-	/** Reaction lifted from the reply's opening line, once resolved. */
+	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
 
 	setTextColorTransform(transform?: (text: string) => string): void {
@@ -274,7 +274,7 @@ export class AssistantMessageComponent extends Container {
 	 * but never past an earlier reply — a continuation after tool calls has
 	 * nothing to react to. Call before adding this component. An
 	 * already-resolved reaction is re-applied, and a message rendered verbatim
-	 * for lack of a target is re-rendered with its reaction line stripped.
+	 * for lack of a target is re-rendered with its reaction stripped.
 	 */
 	pickReactionTarget(transcript: readonly Component[]): void {
 		this.#reactionTarget = undefined;
@@ -301,7 +301,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Display form of `message` with the reaction line handled: stripped and
+	 * Display form of `message` with the reaction handled: stripped and
 	 * forwarded to the target once resolved, withheld entirely while a streaming
 	 * prefix could still become one, and left verbatim when there is no target.
 	 */

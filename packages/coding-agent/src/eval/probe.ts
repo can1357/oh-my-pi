@@ -1,6 +1,5 @@
 /**
- * Bounded runtime-availability probe shared by the Python/Ruby/Julia eval
- * backends.
+ * Bounded runtime-availability probe shared by the Python eval backend.
  *
  * Each per-language `checkXKernelAvailability` helper runs a tiny "does this
  * interpreter start" command (`python -c "import sys;sys.exit(0)"` and friends)
