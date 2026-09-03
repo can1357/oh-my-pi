@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `registerStatusLineSegment(id, renderer)` extension API, letting extensions contribute named status-line segments usable from `statusLine.leftSegments` / `statusLine.rightSegments` alongside the built-in segment ids ([#1966](https://github.com/can1357/oh-my-pi/issues/1966)).
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes

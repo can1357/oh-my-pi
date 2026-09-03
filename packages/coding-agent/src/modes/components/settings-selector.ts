@@ -38,7 +38,7 @@ import type {
 	ContextLineMode,
 	SettingTab,
 	StatusLinePreset,
-	StatusLineSegmentId,
+	StatusLineSegmentRef,
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
@@ -566,8 +566,8 @@ export interface SettingsRuntimeContext {
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
 	contextLine?: ContextLineMode;
-	leftSegments?: StatusLineSegmentId[];
-	rightSegments?: StatusLineSegmentId[];
+	leftSegments?: StatusLineSegmentRef[];
+	rightSegments?: StatusLineSegmentRef[];
 	separator?: StatusLineSeparatorStyle;
 	sessionAccent?: boolean;
 	transparent?: boolean;

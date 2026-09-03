@@ -34,13 +34,13 @@ import {
 } from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { getPreset } from "./presets";
-import { renderSegment, type SegmentContext } from "./segments";
+import { isBuiltInSegmentId, renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
-	StatusLineSegmentId,
 	StatusLineSegmentOptions,
+	StatusLineSegmentRef,
 	StatusLineSettings,
 } from "./types";
 
@@ -301,22 +301,22 @@ const EMPTY_MESSAGES: readonly AgentMessage[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
 
-function isContextSegment(segment: StatusLineSegmentId): boolean {
+function isContextSegment(segment: StatusLineSegmentRef): boolean {
 	return segment === "context_pct" || segment === "context_total";
 }
 
-function hasContextSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasContextSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("context_pct") || segments.includes("context_total");
 }
 
-function hasNonContextSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasNonContextSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	for (const segment of segments) {
 		if (!isContextSegment(segment)) return true;
 	}
 	return false;
 }
 
-function removeContextSegments(parts: string[], segments: StatusLineSegmentId[]): void {
+function removeContextSegments(parts: string[], segments: StatusLineSegmentRef[]): void {
 	let writeIndex = 0;
 	for (let readIndex = 0; readIndex < segments.length; readIndex++) {
 		const segment = segments[readIndex];
@@ -337,18 +337,18 @@ function embeddedContextGaugeMinWidth(percent: number, contextWindow: number): n
 	return formatEmbeddedContextPercent(percent).length + formatNumber(contextWindow).length + 4;
 }
 
-function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasGitSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("git");
 }
 
-function hasPrSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasPrSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("pr");
 }
-function hasPathSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasPathSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("path");
 }
 
-function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasGitBackedSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return hasGitSegment(segments) || hasPrSegment(segments);
 }
 
@@ -514,11 +514,34 @@ export class StatusLineComponent implements Component {
 	#gitEnabled(): boolean {
 		return settings.get("git.enabled");
 	}
-	#hasGitBackedSegment(): boolean {
+	/**
+	 * True when the status line needs live git branch data: a built-in git/pr
+	 * segment, or a registered extension segment whose render context exposes
+	 * `ctx.git.branch`. Gates the cache-invalidating HEAD watcher so an
+	 * extension branch segment stays fresh across HEAD changes.
+	 */
+	#watchesGitBranch(): boolean {
 		const effectiveSettings = this.#resolveSettings();
 		return (
-			hasGitBackedSegment(effectiveSettings.leftSegments) || hasGitBackedSegment(effectiveSettings.rightSegments)
+			hasGitBackedSegment(effectiveSettings.leftSegments) ||
+			hasGitBackedSegment(effectiveSettings.rightSegments) ||
+			this.#hasRegisteredExtensionSegment(effectiveSettings.leftSegments) ||
+			this.#hasRegisteredExtensionSegment(effectiveSettings.rightSegments)
 		);
+	}
+
+	/**
+	 * True when a configured id is backed by an actually-registered extension
+	 * segment (not built-in, and a renderer is registered for it). Unknown or
+	 * mistyped ids are excluded so they don't trigger git branch resolution.
+	 */
+	#hasRegisteredExtensionSegment(segments: readonly StatusLineSegmentRef[]): boolean {
+		const runner = this.session.extensionRunner;
+		if (!runner) return false;
+		for (const segment of segments) {
+			if (!isBuiltInSegmentId(segment) && runner.getStatusLineSegment(segment)) return true;
+		}
+		return false;
 	}
 
 	#resolveActiveRepoCache(): ActiveRepoCache {
@@ -744,7 +767,7 @@ export class StatusLineComponent implements Component {
 		this.#retireGitWatcher();
 		this.#gitWatcherUnavailable = false;
 
-		if (!this.#gitEnabled() || !this.#hasGitBackedSegment()) {
+		if (!this.#gitEnabled() || !this.#watchesGitBranch()) {
 			this.invalidateGitCaches();
 			return;
 		}
@@ -1759,6 +1782,7 @@ export class StatusLineComponent implements Component {
 		includePath: boolean,
 		includeGit: boolean,
 		includePr: boolean,
+		includeBranch: boolean,
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
@@ -1798,12 +1822,13 @@ export class StatusLineComponent implements Component {
 			contextPercent = collabState.contextUsage.percent ?? contextPercent;
 		}
 
-		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr);
+		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr || includeBranch);
 		const projectDir = getProjectDir();
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
 			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
-		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache.effectiveGitCwd) : null;
+		const gitBranch =
+			includeGit || includePr || includeBranch ? this.#getBranchLabel(activeRepoCache.effectiveGitCwd) : null;
 		const gitStatus = includeGit ? this.#getStatus(activeRepoCache.effectiveGitCwd) : null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
@@ -1929,12 +1954,19 @@ export class StatusLineComponent implements Component {
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
+		// An extension segment may render the branch via its context, so resolve
+		// the branch label for custom-only layouts too — not just built-in git/pr.
+		const includeBranch =
+			gitEnabled &&
+			(this.#hasRegisteredExtensionSegment(effectiveSettings.leftSegments) ||
+				this.#hasRegisteredExtensionSegment(effectiveSettings.rightSegments));
 		const liveCtx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
 			includeGit,
 			includePr,
+			includeBranch,
 			previewTitle,
 		);
 		const ctx: SegmentContext = placeholders ? { ...liveCtx, startupPlaceholder: true } : liveCtx;
@@ -1960,7 +1992,7 @@ export class StatusLineComponent implements Component {
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
-		const leftSegIds: StatusLineSegmentId[] = [];
+		const leftSegIds: StatusLineSegmentRef[] = [];
 		const leftSegmentIds = layout === "plain-right" ? [] : effectiveSettings.leftSegments;
 		for (const segId of leftSegmentIds) {
 			if (subagentBadge && segId === "subagents") continue;
@@ -1974,7 +2006,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		const rightParts: string[] = [];
-		const rightSegIds: StatusLineSegmentId[] = [];
+		const rightSegIds: StatusLineSegmentRef[] = [];
 		const rightSegmentIds = layout === "plain-left" ? [] : effectiveSettings.rightSegments;
 		for (const segId of rightSegmentIds) {
 			if (subagentBadge && segId === "subagents") continue;

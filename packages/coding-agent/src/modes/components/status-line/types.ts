@@ -3,13 +3,14 @@ import type {
 	ContextLineMode,
 	StatusLinePreset,
 	StatusLineSegmentId,
+	StatusLineSegmentRef,
 	StatusLineSeparatorStyle,
 } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
-export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
+export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSegmentRef, StatusLineSeparatorStyle };
 
 /** Collab session indicator + (guest-only) host-state override for segments. */
 export interface CollabStatus {
@@ -28,8 +29,8 @@ export interface StatusLineSegmentOptions {
 
 export interface StatusLineSettings {
 	preset?: StatusLinePreset;
-	leftSegments?: StatusLineSegmentId[];
-	rightSegments?: StatusLineSegmentId[];
+	leftSegments?: StatusLineSegmentRef[];
+	rightSegments?: StatusLineSegmentRef[];
 	separator?: StatusLineSeparatorStyle;
 	segmentOptions?: StatusLineSegmentOptions;
 	showHookStatus?: boolean;

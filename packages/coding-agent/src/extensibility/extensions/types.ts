@@ -1179,6 +1179,41 @@ export type AssistantThinkingRenderer = (
 ) => Component | undefined;
 
 // ============================================================================
+// Status Line Segments
+// ============================================================================
+
+export interface StatusLineSegmentUsage {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalTokens: number;
+	cost: number;
+	tokensPerSecond: number | null;
+}
+
+/** Data made available to an extension-registered status-line segment renderer. */
+export interface StatusLineSegmentContext {
+	/** Terminal columns budgeted for the whole status line; segments do not need to truncate to this themselves. */
+	width: number;
+	usage: StatusLineSegmentUsage;
+	/** Context usage percent, or null when unknown (e.g. right after compaction). */
+	contextPercent: number | null;
+	contextTokens: number;
+	contextWindow: number;
+	git: { branch: string | null } | null;
+	/** Active (non-idle) processing time accumulated this session, in ms. */
+	activeMs: number;
+}
+
+export interface StatusLineSegmentResult {
+	content: string;
+	visible: boolean;
+}
+
+export type StatusLineSegmentRenderer = (ctx: StatusLineSegmentContext, theme: Theme) => StatusLineSegmentResult;
+
+// ============================================================================
 // Command Registration
 // ============================================================================
 
@@ -1411,6 +1446,18 @@ export interface ExtensionAPI {
 	 * replaced; when extensions reuse an id, the later extension wins.
 	 */
 	registerComposerShape(definition: ComposerShapeDefinition): void;
+
+	/**
+	 * Register a named status-line segment usable from `statusLine.leftSegments` /
+	 * `statusLine.rightSegments` config, alongside the built-in segment ids.
+	 *
+	 * A built-in segment id always renders as the built-in segment — a plugin
+	 * registering e.g. `"model"` is shadowed rather than replacing it, so
+	 * built-in behavior can't be silently hijacked by a plugin id collision.
+	 * When two extensions register the same non-built-in id, the most
+	 * recently loaded extension wins, matching command lookup (`getCommand`).
+	 */
+	registerStatusLineSegment(id: string, renderer: StatusLineSegmentRenderer): void;
 
 	// =========================================================================
 	// Actions
@@ -1758,6 +1805,7 @@ export interface Extension {
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
 	composerShapes: Map<string, ComposerShapeDefinition>;
+	statusLineSegments: Map<string, StatusLineSegmentRenderer>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

@@ -510,6 +510,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
 				composerShapes: new Map(),
+				statusLineSegments: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),

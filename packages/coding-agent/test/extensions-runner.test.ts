@@ -457,6 +457,51 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("status line segments", () => {
+		const segCode = (id: string, content: string) => `
+			export default function(pi) {
+				pi.registerStatusLineSegment("${id}", () => ({ content: "${content}", visible: true }));
+			}
+		`;
+
+		it("exposes a registered status-line segment via getStatusLineSegment", async () => {
+			fs.writeFileSync(path.join(extensionsDir, "seg.ts"), segCode("my_seg", "SEG"));
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect(runner.getStatusLineSegment("my_seg")).toBeDefined();
+			expect(runner.getStatusLineSegment("not-registered")).toBeUndefined();
+		});
+
+		it("prefers the later-loaded extension for a conflicting segment id", async () => {
+			fs.writeFileSync(path.join(extensionsDir, "discovered-seg.ts"), segCode("dup_seg", "DISCOVERED"));
+			const explicitExtensionPath = path.join(tempDir.path(), "explicit-seg.ts");
+			fs.writeFileSync(explicitExtensionPath, segCode("dup_seg", "EXPLICIT"));
+
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			// getStatusLineSegment searches extensions in reverse load order, so the
+			// explicit (later-loaded) extension wins — matching getCommand precedence.
+			const renderer = runner.getStatusLineSegment("dup_seg");
+			expect(renderer).toBeDefined();
+			const rendered = (renderer as unknown as () => { content: string })();
+			expect(rendered.content).toBe("EXPLICIT");
+		});
+	});
+
 	describe("error handling", () => {
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
@@ -3929,6 +3974,7 @@ describe("ExtensionRunner", () => {
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
 				composerShapes: new Map(),
+				statusLineSegments: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),
