@@ -3336,4 +3336,37 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);
+
+	/**
+	 * Regression test for issue #10651: one MCP server that fails to connect
+	 * used to reject `session/new` and strand every healthy sibling's tools.
+	 * `MCPManager.connectServers` isolates per-server failures, but
+	 * `#configureMcpServers` threw whenever `errors` was non-empty and never
+	 * assigned the manager. It now surfaces the failures via the logger and
+	 * keeps the healthy servers' tools.
+	 */
+	it("keeps a healthy server's tools when a sibling server fails to connect", async () => {
+		const MANY_TOOLS_FIXTURE = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
+		const harness = await createHarness();
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{ name: "healthy", command: BUN_EXEC, args: [MANY_TOOLS_FIXTURE], env: [] },
+					{ name: "broken", command: path.join(harness.cwdA, "does-not-exist-mcp"), args: [], env: [] },
+				],
+			});
+			// The broken sibling must not reject session creation.
+			expectAcpStructure(zNewSessionResponse, created);
+			// The healthy server's tools must still reach the session registry.
+			await pollUntil(() =>
+				namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []).some(name => name.startsWith("mcp__healthy_")),
+			);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
 });

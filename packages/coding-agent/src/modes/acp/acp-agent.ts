@@ -2672,12 +2672,14 @@ export class AcpAgent implements Agent {
 		}
 
 		const result = await manager.connectServers(configs, sources);
+		// A server that fails to connect must not strand its healthy siblings:
+		// `connectServers` already isolates per-server failures, so surface them
+		// via the logger and keep the servers that did connect instead of
+		// rejecting the whole session (issue #10651).
 		if (result.errors.size > 0) {
-			throw new Error(
-				Array.from(result.errors.entries())
-					.map(([name, message]) => `${name}: ${message}`)
-					.join("; "),
-			);
+			logger.warn("ACP MCP servers failed to connect", {
+				errors: Array.from(result.errors.entries()).map(([server, error]) => ({ server, error })),
+			});
 		}
 
 		record.mcpManager = manager;
