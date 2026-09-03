@@ -19,8 +19,12 @@ describe("ssh file-transfer POSIX guard", () => {
 			compatEnabled: false,
 		});
 		const target: SSHConnectionTarget = { name: "winbox", host: "winbox" };
-		await expect(readRemoteFile(target, "C:/x.txt", { maxBytes: 1024 })).rejects.toThrow(/Windows host/);
-		await expect(writeRemoteFile(target, "C:/x.txt", new Uint8Array([1]), {})).rejects.toThrow(/Windows host/);
+		await expect(readRemoteFile(target, "C:/x.txt", { maxBytes: 1024 })).rejects.toThrow(
+			/Windows host.*use `bash` with a remote SSH command/,
+		);
+		await expect(writeRemoteFile(target, "C:/x.txt", new Uint8Array([1]), {})).rejects.toThrow(
+			/Windows host.*use `bash` with a remote SSH command/,
+		);
 		// Prove the guard ran through the stubbed transport rather than failing early
 		// for an unrelated reason (e.g. a future import refactor bypassing the mocks).
 		expect(ensureConnectionSpy).toHaveBeenCalled();
@@ -40,9 +44,11 @@ describe("ssh file-transfer POSIX guard", () => {
 			compatEnabled: false,
 		});
 		const target: SSHConnectionTarget = { name: "noshell", host: "noshell" };
-		await expect(readRemoteFile(target, "/etc/hosts", { maxBytes: 1024 })).rejects.toThrow(/no verified POSIX shell/);
+		await expect(readRemoteFile(target, "/etc/hosts", { maxBytes: 1024 })).rejects.toThrow(
+			/no verified POSIX shell.*use `bash` with a remote SSH command/,
+		);
 		await expect(writeRemoteFile(target, "/tmp/x", new Uint8Array([1]), {})).rejects.toThrow(
-			/no verified POSIX shell/,
+			/no verified POSIX shell.*use `bash` with a remote SSH command/,
 		);
 	});
 

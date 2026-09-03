@@ -40,7 +40,8 @@ const MAX_LIVE_WRITE_QUEUE_CHUNKS = 512;
 // so it is loaded lazily (and memoized) instead of weighing down CLI startup.
 let xtermTerminalCtor: typeof XtermModule.Terminal | undefined;
 
-async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> {
+/** Lazily load the headless xterm Terminal shared by PTY render paths. */
+export async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> {
 	if (!xtermTerminalCtor) {
 		const mod = (await import("@oh-my-pi/pi-utils/vterm")) as typeof XtermModule & { default?: typeof XtermModule };
 		xtermTerminalCtor = (mod.default ?? mod).Terminal;

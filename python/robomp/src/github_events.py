@@ -226,6 +226,8 @@ def route(
     reviewer_bots: frozenset[str] = frozenset(),
     resolve_issue_from_pr: PrIssueResolver = None,
     pr_review_enabled: bool = True,
+    release_sentinel_enabled: bool = False,
+    release_commit_prefix: str = "chore: bump version to ",
 ) -> RouteDecision:
     """Decide whether and how to handle a webhook event.
 
@@ -240,6 +242,31 @@ def route(
         return RouteDecision("skip", None, repo, None, "repo not on allowlist")
 
     action = str(payload.get("action") or "")
+
+    if event_type == "workflow_run":
+        if action != "completed":
+            return RouteDecision("skip", None, repo, None, f"workflow_run.{action} ignored")
+        if not release_sentinel_enabled:
+            return RouteDecision("skip", None, repo, None, "release sentinel disabled")
+        run = payload.get("workflow_run")
+        repository = payload.get("repository")
+        if not isinstance(run, Mapping) or not isinstance(repository, Mapping):
+            return RouteDecision("skip", None, repo, None, "workflow_run payload incomplete")
+        default_branch = str(repository.get("default_branch") or "")
+        head_branch = str(run.get("head_branch") or "")
+        if head_branch != default_branch and re.match(r"^v[0-9]", head_branch) is None:
+            return RouteDecision("skip", None, repo, None, "not a default-branch/tag run")
+        head_commit = run.get("head_commit")
+        message = str(head_commit.get("message") or "") if isinstance(head_commit, Mapping) else ""
+        if not message.startswith(release_commit_prefix):
+            return RouteDecision("skip", None, repo, None, "not a release commit")
+        return RouteDecision(
+            "queue",
+            "handle_release_ci",
+            repo,
+            f"{repo}#release",
+            f"workflow_run {run.get('name') or ''} {run.get('conclusion') or ''}",
+        )
 
     def _resolve_pr_key(pr_number: int) -> str:
         if resolve_issue_from_pr is not None:

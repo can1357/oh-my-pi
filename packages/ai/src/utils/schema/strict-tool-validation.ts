@@ -10,13 +10,13 @@
  *
  * xAI additionally rejects a leftover *root* `anyOf`/`oneOf` whose branches
  * are not objects ("tool parameter root must be an object type"). That class
- * is opt-in via {@link FindStrictToolSchemaViolationOptions.rejectXaiRootObjectUnion}
+ * is opt-in via {@link FindStrictToolSchemaViolationOptions.rejectRootObjectUnion}
  * so OpenAI/Azure/Codex keep valid object-root unions.
  */
 
 export interface FindStrictToolSchemaViolationOptions {
-	/** xAI (paid + OAuth) only: leftover object-root unions 400 the whole turn. */
-	rejectXaiRootObjectUnion?: boolean;
+	/** Reject leftover object-root unions; xAI (paid + OAuth) 400s the whole turn when they remain. */
+	rejectRootObjectUnion?: boolean;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -109,7 +109,7 @@ export function findStrictToolSchemaViolation(
 	// (or has properties) AND still carries an anyOf/oneOf with a typeless or
 	// non-object branch. Nested unions and pure root unions are not this error.
 	if (
-		options?.rejectXaiRootObjectUnion &&
+		options?.rejectRootObjectUnion &&
 		path === "#" &&
 		(types.includes("object") || (node.properties !== undefined && typeof node.properties === "object"))
 	) {

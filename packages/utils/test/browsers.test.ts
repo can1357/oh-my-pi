@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { encodeArchive } from "../src/ar";
 import {
 	Browser,
 	BrowserPlatform,
@@ -31,11 +32,6 @@ describe("Chrome-for-Testing layout goldens", () => {
 			platform: BrowserPlatform.LINUX,
 			url: `https://storage.googleapis.com/chrome-for-testing-public/${BUILD_ID}/linux64/chrome-linux64.zip`,
 			executable: `/cache/chrome/linux-${BUILD_ID}/chrome-linux64/chrome`,
-		},
-		{
-			platform: BrowserPlatform.LINUX_ARM,
-			url: `https://storage.googleapis.com/chrome-for-testing-public/${BUILD_ID}/linux64/chrome-linux64.zip`,
-			executable: `/cache/chrome/linux_arm-${BUILD_ID}/chrome-linux64/chrome`,
 		},
 		{
 			platform: BrowserPlatform.MAC,
@@ -72,6 +68,28 @@ describe("Chrome-for-Testing layout goldens", () => {
 			).toBe(golden.executable);
 		});
 	}
+});
+
+test("Chrome-for-Testing rejects linux/arm64 before producing archive or cache paths", async () => {
+	const unsupported = "Chrome for Testing does not provide linux/arm64 builds";
+	expect(() => getDownloadUrl(Browser.CHROME, BrowserPlatform.LINUX_ARM, BUILD_ID)).toThrow(unsupported);
+	expect(() =>
+		computeExecutablePath({
+			browser: Browser.CHROME,
+			platform: BrowserPlatform.LINUX_ARM,
+			buildId: BUILD_ID,
+			cacheDir: "/cache",
+		}),
+	).toThrow(unsupported);
+	await expect(
+		install({
+			browser: Browser.CHROME,
+			platform: BrowserPlatform.LINUX_ARM,
+			buildId: BUILD_ID,
+			cacheDir: "/cache",
+			baseUrl: "http://127.0.0.1:1",
+		}),
+	).rejects.toThrow(unsupported);
 });
 
 test("detectBrowserPlatform maps the current supported host", () => {
@@ -133,11 +151,36 @@ test("install streams and extracts stored, deflated, nested, executable, and sym
 	}
 });
 
+test("install extracts a member larger than the default 64 MiB archive cap", async () => {
+	// Regression for #9534: the managed Chrome-for-Testing binary (~269 MB)
+	// exceeds DEFAULT_ARCHIVE_LIMITS.maxMemberSize (64 MiB), so install() must
+	// extract with a ceiling sized for the trusted download.
+	const root = await makeRoot();
+	const bigSize = 65 * 1024 * 1024; // > 64 MiB default member cap
+	const zip = await encodeArchive("zip", [["chrome-linux64/chrome", new Uint8Array(bigSize)]]);
+	const server = Bun.serve({ port: 0, fetch: () => new Response(new Blob([zip])) });
+	try {
+		const installed = await install({
+			browser: Browser.CHROME,
+			platform: BrowserPlatform.LINUX,
+			buildId: BUILD_ID,
+			cacheDir: root,
+			baseUrl: String(server.url),
+		});
+		expect((await fs.stat(installed.executablePath)).size).toBe(bigSize);
+	} finally {
+		server.stop(true);
+	}
+});
+
 test("install rejects archive traversal", async () => {
 	const root = await makeRoot();
 	const fixture = Bun.file(path.join(import.meta.dir, "fixtures/browsers/traversal.zip"));
 	const server = Bun.serve({ port: 0, fetch: () => new Response(fixture) });
 	try {
+		// Traversal member names are dropped while indexing, so extraction
+		// succeeds without them and the install fails its executable check —
+		// nothing may escape the cache root either way.
 		await expect(
 			install({
 				browser: Browser.CHROME,
@@ -146,7 +189,7 @@ test("install rejects archive traversal", async () => {
 				cacheDir: root,
 				baseUrl: String(server.url),
 			}),
-		).rejects.toThrow("Unsafe path in ZIP archive");
+		).rejects.toThrow("did not contain its expected executable");
 		expect(await fs.readdir(root)).not.toContain("escaped.txt");
 	} finally {
 		server.stop(true);

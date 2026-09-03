@@ -8,10 +8,12 @@
 //! bit-identical to the TS versions and integer results are exactly equal.
 
 use napi::{
-	Error, Result, Status,
-	bindgen_prelude::{Float32Array, Float64Array, Uint32Array},
+	Error, JsString, Result, Status,
+	bindgen_prelude::{Array, Float32Array, Float64Array, Uint32Array},
 };
 use napi_derive::napi;
+
+use crate::js;
 
 fn invalid<T>(message: &str) -> Result<T> {
 	Err(Error::new(Status::InvalidArg, message))
@@ -261,20 +263,26 @@ fn jaccard_sorted(a: &[Box<str>], b: &[Box<str>]) -> f64 {
 	reason = "mul_add rounds differently; bit-exact with the TS loops is the contract"
 )]
 pub fn mmr_rerank_indices(
-	contents: Vec<String>,
+	#[napi(ts_arg_type = "Array<string>")] contents: Array,
 	scores: Float64Array,
 	lambda_param: f64,
 	top_k: u32,
 ) -> Result<Uint32Array> {
-	if scores.len() != contents.len() {
+	if scores.len() != contents.len() as usize {
 		return invalid("scores length must equal contents length");
 	}
 	let limit = top_k as usize;
-	let count = contents.len();
+	let count = contents.len() as usize;
 	if limit == 0 || count == 0 {
 		return Ok(Uint32Array::new(Vec::new()));
 	}
-	let sets: Vec<Vec<Box<str>>> = contents.iter().map(|text| word_set(text)).collect();
+	let mut sets = Vec::with_capacity(count);
+	for index in 0..contents.len() {
+		let content = contents
+			.get::<JsString>(index)?
+			.ok_or_else(|| Error::new(Status::InvalidArg, "contents changed during reranking"))?;
+		sets.push(word_set(&js::utf8(content)?));
+	}
 	let mut selected: Vec<u32> = Vec::with_capacity(limit.min(count));
 	selected.push(0);
 	let mut remaining: Vec<u32> = (1..count as u32).collect();

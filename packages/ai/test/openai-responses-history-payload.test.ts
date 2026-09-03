@@ -1220,6 +1220,16 @@ describe("OpenAI responses history payload", () => {
 				call_id: opaqueCustomCallId,
 				output: "patch applied",
 			},
+			{
+				type: "compaction",
+				encrypted_content: "encrypted-compaction",
+				status: "completed",
+			},
+			{
+				type: "compaction_summary",
+				summary: "compacted context",
+				status: "completed",
+			},
 			{ type: "item_reference", id: opaqueMessageId },
 		];
 		const context: Context = {
@@ -1237,6 +1247,8 @@ describe("OpenAI responses history payload", () => {
 		const functionCallOutputItem = findResponsesInputItem(payload.input, "function_call_output");
 		const customToolCallItem = findResponsesInputItem(payload.input, "custom_tool_call");
 		const itemReference = findResponsesInputItem(payload.input, "item_reference");
+		const compactionItem = findResponsesInputItem(payload.input, "compaction");
+		const compactionSummaryItem = findResponsesInputItem(payload.input, "compaction_summary");
 		const expectedCallId = truncateResponseItemId(opaqueCallId, "call");
 
 		expect(reasoningItem).toBeDefined();
@@ -1253,12 +1265,16 @@ describe("OpenAI responses history payload", () => {
 		expect(messageItem).not.toHaveProperty("status");
 		expect(functionCallItem).not.toHaveProperty("status");
 		expect(customToolCallItem).not.toHaveProperty("status");
+		expect(compactionItem).not.toHaveProperty("status");
+		expect(compactionSummaryItem).not.toHaveProperty("status");
 		expect(
 			(payload.input ?? []).some(
 				item => item && typeof item === "object" && "id" in (item as Record<string, unknown>),
 			),
 		).toBe(false);
 		expect(reasoningItem?.encrypted_content).toBe("enc_opaque");
+		expect(compactionItem?.encrypted_content).toBe("encrypted-compaction");
+		expect(compactionSummaryItem?.summary).toBe("compacted context");
 		expect(functionCallItem).toBeDefined();
 		expect(functionCallItem!.call_id).toBe(expectedCallId);
 		expect(functionCallOutputItem?.call_id).toBe(expectedCallId);
@@ -1274,7 +1290,9 @@ describe("OpenAI responses history payload", () => {
 		expect(replayHistoryItems[3]?.id).toBe("fco_should_be_removed");
 		expect(replayHistoryItems[3]?.call_id).toBe(opaqueCallId);
 		expect(replayHistoryItems[4]?.status).toBe("completed");
-		expect(replayHistoryItems[6]?.id).toBe(opaqueMessageId);
+		expect(replayHistoryItems[6]?.status).toBe("completed");
+		expect(replayHistoryItems[7]?.status).toBe("completed");
+		expect(replayHistoryItems[8]?.id).toBe(opaqueMessageId);
 	});
 
 	it("preserves the reasoning ID linked to a native computer call in the next request", async () => {

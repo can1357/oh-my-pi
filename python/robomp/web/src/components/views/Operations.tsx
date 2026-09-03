@@ -1,6 +1,7 @@
 import { type JSX } from "solid-js";
 
 import { Pipeline } from "../Pipeline";
+import { Releases } from "../Releases";
 import { Trigger } from "../Trigger";
 
 // Operations (default landing view). A single unified pipeline: a slim
@@ -14,6 +15,7 @@ export function Operations(): JSX.Element {
     <>
       <Trigger variant="bar" />
       <Pipeline />
+      <Releases />
     </>
   );
 }

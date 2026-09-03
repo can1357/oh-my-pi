@@ -143,6 +143,8 @@ If uninstall command fails, runtime state is not changed.
 
 `omp plugin list` combines this result with `MarketplaceManager.listInstalledPlugins()`.
 
+`PluginManager.getPlugin()` resolves one runtime package directly, including a marketplace symlink intentionally omitted from `list()`. Config commands use this path so marketplace settings remain addressable without duplicating marketplace entries in list and status output.
+
 ## Link flow (`PluginManager.link`)
 
 `link` supports local plugin development by symlinking a local package into `~/.omp/plugins/node_modules/<pkg.name>`.

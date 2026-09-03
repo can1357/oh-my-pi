@@ -50,11 +50,11 @@ function makeContext(content: (TextContent | ImageContent)[]): Context {
 	};
 }
 
-function findFunctionCallOutput(items: unknown[]): string | undefined {
+function findFunctionCallOutput(items: unknown[]): unknown {
 	for (const item of items) {
 		if (!item || typeof item !== "object") continue;
 		if (!("type" in item) || item.type !== "function_call_output") continue;
-		if ("output" in item && typeof item.output === "string") return item.output;
+		if ("output" in item) return item.output;
 	}
 	return undefined;
 }
@@ -74,9 +74,7 @@ describe("Responses API empty tool result", () => {
 		expect(findFunctionCallOutput(items)).toBe("");
 	});
 
-	it("keeps the placeholder when the result actually carries an image", () => {
-		// Images ride as a separate user message on the Responses API; the
-		// function output must point the model at them.
+	it("encodes an image-only result as native output content", () => {
 		const items = buildResponsesInput({
 			model,
 			context: makeContext([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]),
@@ -84,6 +82,8 @@ describe("Responses API empty tool result", () => {
 			supportsImageDetailOriginal: true,
 		});
 
-		expect(findFunctionCallOutput(items)).toBe("(see attached image)");
+		expect(findFunctionCallOutput(items)).toEqual([
+			{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,ZmFrZQ==" },
+		]);
 	});
 });

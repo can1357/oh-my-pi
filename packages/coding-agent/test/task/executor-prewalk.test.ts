@@ -76,6 +76,8 @@ function yieldEmittingSession(
 			}
 		},
 		waitForIdle: async () => {},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {},
 		dispose: async () => {},
@@ -377,7 +379,7 @@ describe("task tool plan-mode prewalk guard", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.mode": "none" }),
+			settings: Settings.isolated({ "task.isolation.enabled": false }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			getPlanModeState: () => (planMode ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),

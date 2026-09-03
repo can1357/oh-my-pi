@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent, type AgentMessage, type CompactionSummaryMessage, countTokens } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type CompactionSummaryMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { calculateContextTokens, estimateTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import { calculateContextTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -66,7 +66,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
 			"compaction.enabled": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": contextPromotionEnabled,
 		});
 		const agent = new Agent({
@@ -153,7 +153,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
 			"compaction.enabled": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": false,
 		});
 		settings.setModelRole("advisor", `${nativeModel.provider}/${nativeModel.id}`);
@@ -198,7 +198,8 @@ describe("AgentSession advisor context maintenance", () => {
 		const update = advisorCall.context.messages.find(message => message.role === "user");
 		if (!update) throw new Error("Expected the advisor's incremental update");
 		const threshold = resolveThresholdTokens(CONTEXT_WINDOW, settings.getGroup("compaction"));
-		const providerAndUpdateTokens = calculateContextTokens(anchor.usage) + estimateTokens(update as AgentMessage);
+		const providerAndUpdateTokens =
+			calculateContextTokens(anchor.usage) + advisor.tokenizer.countMessage(update as AgentMessage);
 		expect(calculateContextTokens(anchor.usage)).toBe(CACHE_READ_TOKENS + INPUT_TOKENS + OUTPUT_TOKENS);
 		expect(providerAndUpdateTokens).toBeGreaterThan(threshold);
 
@@ -249,8 +250,10 @@ describe("AgentSession advisor context maintenance", () => {
 		const { advisor, advisorMock, settings } = createHarness();
 		const seed: AgentMessage = { role: "user", content: "small stored advisor message", timestamp: 1 };
 		advisor.state.messages.push(seed);
-		const storedTokens = estimateTokens(seed, { excludeEncryptedReasoning: true });
-		const fixedPrefixTokens = countTokens(advisor.state.systemPrompt) + estimateToolSchemaTokens(advisor.state.tools);
+		const storedTokens = advisor.tokenizer.countMessage(seed, { excludeEncryptedReasoning: true });
+		const fixedPrefixTokens =
+			advisor.tokenizer.countTokens(advisor.state.systemPrompt) +
+			estimateToolSchemaTokens(advisor.state.tools, advisor.tokenizer);
 		const threshold = storedTokens + Math.floor(fixedPrefixTokens / 2);
 		settings.set("compaction.thresholdTokens", threshold);
 
@@ -259,7 +262,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const advisorCall = advisorMock.calls[0];
 		const update = advisorCall.context.messages.find(message => message.role === "user");
 		if (!update) throw new Error("Expected the advisor's incremental update");
-		const messagesOnlyTokens = storedTokens + estimateTokens(update as AgentMessage);
+		const messagesOnlyTokens = storedTokens + advisor.tokenizer.countMessage(update as AgentMessage);
 		expect(messagesOnlyTokens).toBeLessThan(threshold);
 		expect(messagesOnlyTokens + fixedPrefixTokens).toBeGreaterThan(threshold);
 		expect(JSON.stringify(advisor.state.messages)).not.toContain("small stored advisor message");
@@ -346,7 +349,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const settings = Settings.isolated({
 			"advisor.syncBacklog": "1",
 			"compaction.enabled": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"contextPromotion.enabled": false,
 		});
 		const agent = new Agent({

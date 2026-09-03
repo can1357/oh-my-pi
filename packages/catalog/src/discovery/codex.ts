@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
-import { parseKnownModel, semverEqual } from "../identity/classify";
+import { compareRevision, parseRevision } from "../compat/revision";
+import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
-import { resolveOpenAIDaybreakStandardCost } from "../openai-pricing";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
@@ -68,6 +68,7 @@ const codexModelEntrySchema = type({
 	"priority?": "unknown",
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
+	"tool_mode?": "unknown",
 });
 
 const codexModelsResponseSchema = type({
@@ -282,6 +283,7 @@ interface ParsedCodexModelEntry {
 	input: ("text" | "image")[];
 	preferWebsockets: boolean;
 	useResponsesLite: boolean;
+	toolMode: boolean;
 	priority: number;
 }
 
@@ -310,6 +312,7 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		input: normalizeInputModalities(payload.input_modalities),
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
+		toolMode: payload.tool_mode === "code_mode_only",
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
 	};
 }
@@ -332,9 +335,14 @@ function buildNormalizedCodexModel(
 	// the registry still declares the pre-1M 272000 window. Keyed on the
 	// canonical slug so a safe `gpt-5.6-luna-wm` row gets the same floor as its
 	// plain listing.
-	const parsedKnown = parseKnownModel(canonicalSlug);
+	const identity = classifyModel("openai-codex", canonicalSlug, { lenient: true });
+	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
+	const gpt56 = parseRevision("5.6");
 	const fallbackContextWindow =
-		parsedKnown.family === "openai" && semverEqual(parsedKnown.version, "5.6")
+		identity.class === "openai" &&
+		revision !== undefined &&
+		gpt56 !== undefined &&
+		compareRevision(revision, gpt56) === 0
 			? GPT_5_6_CONTEXT_WINDOW
 			: DEFAULT_CONTEXT_WINDOW;
 	const reportedContextWindow = parsed.contextWindow ?? fallbackContextWindow;
@@ -342,8 +350,6 @@ function buildNormalizedCodexModel(
 		? Math.max(reportedContextWindow, GPT_5_6_1M_CONTEXT_WINDOW)
 		: reportedContextWindow;
 	const maxTokens = Math.min(DEFAULT_MAX_TOKENS, contextWindow);
-	const daybreakCost = resolveOpenAIDaybreakStandardCost(canonicalSlug);
-
 	return {
 		priority: parsed.priority,
 		model: {
@@ -354,12 +360,15 @@ function buildNormalizedCodexModel(
 			baseUrl,
 			reasoning: parsed.reasoning,
 			input: parsed.input,
-			cost: daybreakCost ? { ...daybreakCost } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// Daybreak standard API pricing is rule-owned (`providers/openai-codex.kdl`
+			// cost-patch) and corrected at build time.
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			remoteCompaction: CODEX_REMOTE_COMPACTION,
 			contextWindow,
 			maxTokens,
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
+			...(parsed.toolMode ? { toolMode: "code_mode_only" as const } : {}),
 			...(parsed.priority !== Number.MAX_SAFE_INTEGER ? { priority: parsed.priority } : {}),
 		},
 	};

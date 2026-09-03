@@ -115,6 +115,7 @@ Core methods:
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`
+- `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
 - `getActiveTools`, `getAllTools`, `setActiveTools`
@@ -127,6 +128,50 @@ Core methods:
 - `events` (shared event bus)
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+
+### Provider registration
+
+`pi.registerProvider(name, config)` can include an optional `usage` field containing a
+`UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
+normalized credential and returns a normalized `UsageReport`; the result is then handled
+by the host's AuthStorage cache, history, and usage displays just like built-in provider
+usage.
+
+```ts
+pi.registerProvider("my-provider", {
+  baseUrl: "https://api.example.com/v1",
+  api: "openai-completions",
+  usage: {
+    id: "my-provider",
+    async fetchUsage(params, { fetch }) {
+      const response = await fetch("https://api.example.com/usage", {
+        headers: { Authorization: `Bearer ${params.credential.apiKey}` },
+      });
+      if (!response.ok) return null;
+      const payload = (await response.json()) as { used: number; limit: number };
+      return {
+        provider: "my-provider",
+        fetchedAt: Date.now(),
+        limits: [
+          {
+            id: "requests",
+            label: "Requests",
+            scope: { provider: "my-provider" },
+            amount: { used: payload.used, limit: payload.limit, unit: "requests" },
+          },
+        ],
+      };
+    },
+  },
+});
+```
+
+An extension usage provider overrides a built-in provider with the same name for as
+long as that extension registration is active. `pi.unregisterProvider(name)` (and
+extension source cleanup) removes only that runtime override, restoring the built-in
+or configured usage resolver.
+
+Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
@@ -145,9 +190,12 @@ Also exposed:
 - `deliverAs: "steer"` (default) — interrupts current run
 - `deliverAs: "followUp"` — queued to run after current run
 - `deliverAs: "nextTurn"` — stored and injected on the next user prompt
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it starts a turn (`triggerTurn` is ignored; plan mode folds it into context instead)
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
-`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes.
+`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual).
+
+Payloads passed to `pi.sendMessage` are normalized before delivery (`normalizeCustomMessagePayload` in `session/messages.ts`): non-object payloads are coerced to string content under the default custom type, missing `customType`/`attribution` fields are defaulted, and invalid content collapses to an empty string — malformed payloads no longer persist entries that crash later session resumes.
 
 ## 2) Handler context (`ExtensionContext`)
 
@@ -250,7 +298,7 @@ Cancelable pre-events:
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
-- `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations and never fires for task/subagent sessions
+- `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations, never fires for task/subagent sessions, and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`)
 - `turn_start` / `turn_end`
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
@@ -523,7 +571,7 @@ Current no-op methods in this controller:
 - `setFooter`
 - `setHeader`
 
-`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines).
+`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines). `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
 
 ### RPC mode (`rpc-mode.ts`)
 
@@ -575,6 +623,81 @@ pi.on("session_start", async (_event, ctx) => {
 ```
 
 ## Rendering extension points
+
+## Composer shape renderer
+
+`registerComposerShape` adds an extension-owned input-editor layout to **Appearance → Composer Shape**. Register it from the extension factory; the renderer is used by the live editor and its settings preview.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ComposerStyle } from "@oh-my-pi/pi-tui";
+
+const dockStyle: ComposerStyle = {
+  id: "acme-dock",
+  sideBorders: false,
+  verticalChrome: 1,
+  statusAttachment: "none",
+  bottomBar: "full",
+  bottomBarGap: true,
+  defaultPromptGutter: "❯ ",
+
+  defaultPaddingX: () => 0,
+  sideChromeWidth: () => 0,
+  renderTop: ({ box, width, borderColor }) =>
+    borderColor(box.horizontal.repeat(width)),
+  renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
+  renderBottom: () => undefined,
+};
+
+export default function (pi: ExtensionAPI) {
+  pi.registerComposerShape({
+    label: "Acme Dock",
+    description: "Prompt below a single rule",
+    style: dockStyle,
+  });
+}
+```
+
+`ComposerShapeDefinition` contains:
+
+- `label`: required selector label.
+- `description`: optional selector detail.
+- `style`: the complete `ComposerStyle` rendering contract. `style.id` is also the persisted `composer.shape` value.
+
+Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. If the extension is unavailable while its id remains configured, the editor falls back to `box`.
+
+### `ComposerStyle` layout metadata
+
+- `sideBorders`: whether content rows own side chrome. This controls cursor reserve, IME layout, and scrollbar behavior; it is not merely descriptive.
+- `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, or `2`) used for editor height budgeting.
+- `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
+- `bottomBar`: standalone status content below the editor: `"none"`, `"left"`, or `"full"`.
+- `bottomBarGap`: whether a blank row separates the editor from a standalone bottom status bar.
+- `defaultPromptGutter`: prompt text used when the host supplies no override.
+- `defaultPaddingX(themePaddingX)`: horizontal padding selected for this style.
+- `sideChromeWidth(paddingX)`: visible cells consumed on **each** side of a content row, including padding and border/rail glyphs.
+
+`renderTop` and `renderBottom` return one styled terminal row or `undefined`. `renderRow` returns one or more styled rows. Every normal rendered row must occupy exactly `ctx.width` visible cells; ANSI escape sequences have zero width. Preserve the supplied `gutter`, `text`, and `pad` instead of reflowing or truncating them.
+
+### Renderer context
+
+All render methods receive `width`, `paddingX`, the theme's `box` glyphs, and three styling functions:
+
+- `borderColor(text)`: ordinary frame/rule color.
+- `accentColor(text)`: stable accent for shape-defining rails or caps.
+- `surfaceColor(text)`: composer background fill that survives nested SGR resets in decorated input.
+
+`topBorder`, when present, is already-styled status content with its visible `width`. A top renderer owns its placement and must leave the final line at `ctx.width`.
+
+`renderRow` additionally receives:
+
+- `gutter`, `text`, and `pad`: pre-rendered content pieces.
+- `isLastRow`: last visible input row.
+- `cursorOverflow`: cells consumed from the right chrome by an end-of-line cursor.
+- `imeSafeCursorTail`: omit right-side cells after the cursor so terminal-local IME preedit cannot shift the chrome.
+- `scrollbarThumb`: this row intersects the editor scrollbar thumb.
+
+The built-in implementations in `packages/tui/src/components/composer/` are the reference for framed, rule, filled-surface, and IME-safe layouts.
 
 ## Custom message renderer
 

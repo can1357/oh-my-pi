@@ -589,6 +589,10 @@ Extensions in RPC mode use request/response UI frames.
 `RpcExtensionUIRequest` (`type: "extension_ui_request"`) methods:
 
 - `select`, `confirm`, `input`, `editor`, `cancel`
+  - `select` keeps labels in `options: string[]` and, when any option has a
+    description, emits a positionally aligned
+    `optionDetails: Array<{ description?: string }>` array. Hosts that do not
+    render descriptions can continue using `options` alone.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows)
 

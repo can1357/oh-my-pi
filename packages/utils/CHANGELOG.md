@@ -2,6 +2,139 @@
 
 ## [Unreleased]
 
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added the public `getTinyWorkerRuntimeDir()` utility, which returns the standard `~/.omp/run/tiny` directory for tiny-worker runtime data.
+
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added `IncomingDoc` (`@oh-my-pi/pi-utils/incoming-json`) for incrementally reading path-addressed JSON data as text arrives, including string chunks and lines, array elements, and keyed object values, with structured errors for missing, incomplete, aborted, malformed, or mismatched data.
+- Added `Serial` for running asynchronous operations sequentially in call order.
+
+### Fixed
+
+- Fixed relaxed JSON parsing for single-quoted strings followed by line or block comments.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added `TerminalQueryResponder` to `@oh-my-pi/pi-utils/vterm`, enabling headless PTY consumers to answer common terminal queries for cursor position, device status and attributes, and foreground/background colors without maintaining a screen buffer.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed retry-hint extraction for body-level millisecond hints and absolute quota-reset timestamps ([#10325](https://github.com/can1357/oh-my-pi/pull/10325) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added `postmortem.fatal` for terminal-safe top-level failure reporting.
+
+### Fixed
+
+- Fixed sub-second duration formatting so it no longer exposes floating-point precision noise.
+- Managed Chrome-for-Testing downloads now reject unsupported Linux ARM64 hosts instead of installing an incompatible x86_64 browser.
+- Fixed Markdown reference-link labels that match built-in `Object.prototype` names, such as `constructor` and `__proto__`, so they are no longer misidentified as definitions or emitted with an undefined URL ([#10283](https://github.com/can1357/oh-my-pi/issues/10283)).
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed runtime installation getting stuck for up to 60 seconds after an installer crash or forced termination, allowing subsequent installation attempts to proceed normally.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added `postmortem.drainStdout` to flush buffered standard output before process exit or exec-replacement.
+- Added an `exitOnly` option to `postmortem.register` for resources that should remain available during keep-alive cleanup and be released only on actual process exit.
+- Added `hexToOklch` and `oklchToHex` color conversion utilities with sRGB gamut mapping that reduces chroma when necessary.
+- Added `checkpointWal` to checkpoint committed SQLite WAL frames without blocking concurrent readers.
+
+### Fixed
+
+- Fixed repeatable `postmortem` cleanup behavior so persistent resources and callbacks registered during cleanup remain active until the eventual process exit.
+- Fixed asynchronous `postmortem` cleanup so callbacks registered during a cleanup pass are awaited before cleanup completes, including during signal-driven exits.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed error handling so unrelated aborted requests and closed-connection failures are no longer silently suppressed.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added the Linux `subreaper` spawn option to retain reparented descendants for process-tree cleanup.
+
+### Fixed
+
+- Keep project-directory state unchanged when changing directories fails.
+- Fixed `ptree` timeout cleanup and output capture so timed commands retain their deadline through descendant-held pipes and untimed commands read output to EOF.
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added `math-delimiters`, the LaTeX span/block delimiter grammar (`mathStartIndex`, `mathOpenerAt`, `mathSpanAt`, `mathBlockAt`) shared by every Markdown renderer: pandoc's anti-currency rules for `$…$`, own-line display blocks, and delimiters matched by backslash parity, so an escaped `\$x$` stays literal and a TeX row break cannot end a span early.
+- Added `RequestError.sessionBusy(message, data)` to represent ACP session-busy errors (`-32003`) through the shared JSON-RPC transport.
+- Exported `getComposerCacheDir` for resolving the per-project Composer cache directory, including support for `XDG_CACHE_HOME`.
+
+### Fixed
+
+- Fixed OMP sessions unexpectedly exiting during socket cleanup or optional-worker communication on Bun.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
+### Fixed
+
+- Fixed managed Chrome-for-Testing installation failures when extracting the trusted browser download.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Exported `getAvatarCacheDir` to resolve the avatar cache directory path.
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Mermaid ASCII renderer throwing on left-to-right diagrams containing a `subgraph`, which made the fenced block fall back to raw source in the terminal. `offsetDrawingForSubgraphs` shifts every drawing coordinate to make room for subgraph borders that extend past the origin, but the canvas had already been sized from the pre-shift grid extents, so edges routed to the outermost column wrote past the allocation and `drawLine` threw on the missing column. The canvas and role canvas now grow by the same shift. ([#9340](https://github.com/can1357/oh-my-pi/issues/9340))
+- Fixed child shell environments inheriting Bun-autoloaded `.env.<mode>.local` values from the launch directory. ([#9290](https://github.com/can1357/oh-my-pi/issues/9290))
+
+## [17.4.2] - 2026-08-21
+
+### Fixed
+
+- Made malformed advanced-serialization frames from a worker subprocess non-fatal: Bun surfaces an undecodable IPC frame as a process-level `uncaughtException` in the parent (oven-sh/bun#37287), which the postmortem handler treated as fatal and tore down every active session and subagent. The handler now recognizes the decode failure and, keeping the session alive, faults the active advanced-IPC worker subsystems so their clients reject in-flight requests and recycle the subprocess instead of awaiting forever — mirroring the existing ipc-send EPIPE containment. ([#9158](https://github.com/can1357/oh-my-pi/issues/9158))
+
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- New unified archive API `@oh-my-pi/pi-utils/ar`, providing an `openArchive`/`ArchiveReader` interface across formats (including ZIP/ZIP64, tar with gz/bz2/xz/zst compression, ASAR, RAR 4/5, 7z, ISO 9660, CAB, cpio, RPM, Unix ar, Debian packages, LZH, ARJ, and single-stream compressed files) with lazy ranged reads for local files or HTTP range requests via `httpByteSource`, size limits, symlink-safe extraction, and deterministic archive creation for zip, tar, tar.gz, tar.zst, and asar.
+
+## [17.3.8] - 2026-08-19
+
 ### Added
 
 - Exported `BINARY_SNIFF_BYTES`, the header window `isProbablyBinary` sniffs, so a caller holding the whole file in memory can classify the identical prefix through `isProbablyBinaryHeader` instead of reopening the file.

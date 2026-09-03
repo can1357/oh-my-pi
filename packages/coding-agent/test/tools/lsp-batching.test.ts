@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
+import { createLspWritethrough, FileFormatResult } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import type { LinterClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
@@ -135,6 +135,29 @@ describe("createLspWritethrough batching", () => {
 		const bytes = new Uint8Array(await Bun.file(fileA).arrayBuffer());
 		expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
 		expect(Buffer.from(bytes).toString("utf8")).toBe("\uFEFFconst value = 1;\n");
+	});
+	it("preserves formatter failures when merging batch results", async () => {
+		const formatter = createFormatter(async () => {
+			throw new Error("formatter crashed");
+		});
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+
+		const batchId = "formatter-failure";
+		await writethrough(path.join(tempDir.path(), "a.ts"), "const a=1\n", undefined, undefined, {
+			id: batchId,
+			flush: false,
+		});
+		const result = await writethrough(path.join(tempDir.path(), "b.ts"), "const b=1\n", undefined, undefined, {
+			id: batchId,
+			flush: true,
+		});
+
+		expect(result?.formatter).toBe(FileFormatResult.FAILED);
 	});
 
 	it("flushes earlier entries when the final batch write fails", async () => {

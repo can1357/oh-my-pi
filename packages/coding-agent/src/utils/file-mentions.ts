@@ -7,16 +7,11 @@
  */
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import {
-	formatHashlineHeader,
-	formatNumberedLines,
-	type SnapshotStore,
-	splitAddressableFileLines,
-} from "@oh-my-pi/hashline";
+import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
-import { canonicalSnapshotKey } from "../edit/file-snapshot-store";
+import { formatHashlineHeader, formatNumberedLines, splitAddressableFileLines } from "../tools/hashline-format";
 import { normalizeToLF } from "../edit/normalize";
 import type { FileMentionMessage } from "../session/messages";
 import {
@@ -27,6 +22,15 @@ import {
 } from "../session/streaming-output";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
+import {
+	VideoError,
+	buildVideoContactSheetPng,
+	createVideoPreviewImage,
+	formatVideoDetails,
+	isVideoPath,
+	probeVideo,
+	videoMimeForPath,
+} from "./video";
 
 /** Regex to match @filepath patterns in text */
 const FILE_MENTION_REGEX = /@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g;
@@ -192,7 +196,7 @@ export function extractFileMentions(text: string): string[] {
 export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
-	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: SnapshotStore },
+	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: EditStore },
 ): Promise<AgentMessage[]> {
 	if (filePaths.length === 0) return [];
 
@@ -253,6 +257,39 @@ export async function generateFileMentionMessages(
 				continue;
 			}
 
+			if (isVideoPath(absolutePath)) {
+				try {
+					const meta = await probeVideo(absolutePath);
+					const sheet = await buildVideoContactSheetPng(absolutePath, meta);
+					let image: ImageContent = { type: "image", data: sheet.png.data, mimeType: sheet.png.mimeType };
+					let dimensionNote: string | undefined;
+					if (autoResizeImages) {
+						try {
+							const resized = await resizeImage(image);
+							dimensionNote = formatDimensionNote(resized);
+							image = { type: "image", mimeType: resized.mimeType, data: resized.data };
+						} catch {
+							// Keep the extracted sheet when resize fails.
+						}
+					}
+					const details = formatVideoDetails(resolvedPath, meta, stat.size, videoMimeForPath(absolutePath));
+					files.push({
+						path: resolvedPath,
+						content: `${details}\nPreview grid: ${sheet.thumbs} frames (${sheet.cols}x${sheet.rows})${dimensionNote ? `\n${dimensionNote}` : ""}`,
+						image: createVideoPreviewImage(image, absolutePath),
+					});
+				} catch (error) {
+					const reason = error instanceof VideoError ? error.message : "video preview failed";
+					files.push({
+						path: resolvedPath,
+						content: `(skipped auto-read: ${reason})`,
+						byteSize: stat.size,
+						skippedReason: "binary",
+					});
+				}
+				continue;
+			}
+
 			if (stat.size > MAX_AUTO_READ_TEXT_BYTES) {
 				files.push({
 					path: resolvedPath,
@@ -276,9 +313,11 @@ export async function generateFileMentionMessages(
 			const snapshotStore = options?.useHashLines ? options.snapshotStore : undefined;
 			const normalized = snapshotStore ? normalizeToLF(content) : content;
 			const displayText = snapshotStore ? splitAddressableFileLines(normalized).join("\n") : normalized;
-			let { output, lineCount } = buildTextOutput(displayText);
+			const textOutput = buildTextOutput(displayText);
+			let { output } = textOutput;
+			const { lineCount } = textOutput;
 			if (snapshotStore) {
-				const tag = snapshotStore.record(canonicalSnapshotKey(absolutePath), normalized);
+				const tag = snapshotStore.recordSnapshot(absolutePath, normalized);
 				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(output)}`;
 			}
 			files.push({ path: resolvedPath, content: output, lineCount });

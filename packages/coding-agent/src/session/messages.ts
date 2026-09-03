@@ -45,6 +45,9 @@ export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
 
+/** Custom message type for the transient Vibe mode directive. */
+export const VIBE_MODE_CONTEXT_MESSAGE_TYPE = "vibe-mode-context";
+
 /**
  * Logs provider-error turns so their actual cause is available outside the
  * session transcript. No-op for non-error stop reasons.
@@ -1097,6 +1100,18 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 /** True for a `/skill:<name>` prompt the user invoked directly (attribution `user`), as opposed to an agent/autoload injection. */
 export function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
 	return message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user";
+}
+
+/**
+ * True for a custom message that initiates a user-attributed turn: a directly
+ * invoked `/skill:` prompt or a writable-collab peer's prompt. Agent redirects,
+ * reminders, and auto-continues are not turn starts.
+ */
+export function isUserTurnInitiator(message: CustomMessage): boolean {
+	return (
+		isUserInvokedSkillPrompt(message) ||
+		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")
+	);
 }
 
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {

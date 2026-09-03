@@ -876,6 +876,74 @@ def push(
     return PushResult(head=head, branch=branch)
 
 
+def push_release(
+    repo_dir: Path,
+    *,
+    branch: str,
+    tag: str,
+    expected_head: str,
+    token: str | None,
+    remote_url: str | None = None,
+    auth_url: str | None = None,
+    slot_uid: int | None = None,
+    safe_directory: Path | None = None,
+) -> PushResult:
+    """Atomically push a release branch and force its tag to the same commit."""
+    slot_kwargs = _slot_subprocess_kwargs(slot_uid)
+    git_safe_directory = safe_directory
+    if git_safe_directory is None and slot_kwargs:
+        git_safe_directory = repo_dir
+    head = rev_parse_head(repo_dir, safe_directory=git_safe_directory, **slot_kwargs)
+    if head != expected_head:
+        raise HeadDriftError(
+            ["git", "push"],
+            128,
+            "",
+            f"HEAD changed since preflight ({expected_head[:12]} → {head[:12]}); aborting push.",
+        )
+    if remote_url is None:
+        push_extra_env: dict[str, str] | None = None
+        origin = _run_git(
+            ["remote", "get-url", "origin"],
+            cwd=repo_dir,
+            token=None,
+            safe_directory=git_safe_directory,
+            **slot_kwargs,
+        )
+        if origin.returncode == 0:
+            local_remote = _local_remote_safe_directory(origin.stdout, cwd=repo_dir)
+            if local_remote is not None:
+                push_extra_env = {}
+                _append_safe_directory(push_extra_env, local_remote)
+        destination = "origin"
+    else:
+        push_extra_env = _explicit_remote_env(remote_url, cwd=repo_dir)
+        destination = remote_url
+    args = ["push", "--atomic"]
+    if token:
+        args.append("--no-verify")
+    args.extend(
+        [
+            destination,
+            f"refs/heads/{branch}:refs/heads/{branch}",
+            f"+{expected_head}:refs/tags/{tag}",
+        ]
+    )
+    _check(
+        _run_git(
+            args,
+            cwd=repo_dir,
+            token=token,
+            auth_url=auth_url,
+            extra_env=push_extra_env,
+            safe_directory=git_safe_directory,
+            **slot_kwargs,
+        ),
+        ["git", *args],
+    )
+    return PushResult(head=head, branch=branch)
+
+
 __all__ = [
     "AUTH_ENV_VAR",
     "DirtyState",
@@ -888,6 +956,7 @@ __all__ = [
     "fetch_ref",
     "inspect_dirty_state",
     "push",
+    "push_release",
     "redact_credentials",
     "rev_parse_head",
 ]

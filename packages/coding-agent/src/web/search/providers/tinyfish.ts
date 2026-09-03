@@ -35,6 +35,10 @@ export interface TinyFishSearchParams {
 	page?: number;
 	include_domains?: string[];
 	exclude_domains?: string[];
+	/** ISO 3166-1 alpha-2 region, e.g. `IT`. Geolocates results. */
+	location?: string;
+	/** ISO 639-1 language, e.g. `it`. */
+	language?: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	fetch?: FetchImpl;
@@ -73,6 +77,12 @@ async function callTinyFishSearch(apiKey: string, params: TinyFishSearchParams):
 	}
 	if (params.exclude_domains?.length) {
 		url.searchParams.set("exclude_domains", params.exclude_domains.join(","));
+	}
+	if (params.location) {
+		url.searchParams.set("location", params.location);
+	}
+	if (params.language) {
+		url.searchParams.set("language", params.language);
 	}
 	if (params.num_results !== undefined) {
 		url.searchParams.set("num_results", String(params.num_results));
@@ -133,6 +143,19 @@ function siteHosts(sites: readonly string[]): string[] {
 	return [...hosts];
 }
 
+/**
+ * Derive TinyFish `location` (ISO 3166-1 alpha-2, uppercase) and `language`
+ * (ISO 639-1, lowercase) from a parsed `lang:` directive. The region subtag is
+ * optional: `lang:it` yields language only, `lang:it-it` yields both. Non-region
+ * subtags (e.g. the script in `zh-hans`) never become a location.
+ */
+function tinyFishLocale(lang: string | undefined): { location?: string; language?: string } {
+	if (!lang) return {};
+	const match = /^([a-z]{2})(?:[-_]([a-z]{2}))?(?:[-_]|$)/.exec(lang.toLowerCase());
+	if (!match) return {};
+	return { language: match[1], location: match[2]?.toUpperCase() };
+}
+
 /** Execute TinyFish web search. */
 export async function searchTinyFish(params: SearchParams): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
@@ -152,6 +175,9 @@ export async function searchTinyFish(params: SearchParams): Promise<SearchRespon
 		if (includeDomains.length > 0) tinyFishParams.include_domains = includeDomains;
 		if (excludeDomains.length > 0) tinyFishParams.exclude_domains = excludeDomains;
 	}
+	const { location, language } = tinyFishLocale(parsed.lang);
+	if (location) tinyFishParams.location = location;
+	if (language) tinyFishParams.language = language;
 	const keyOrResolver: ApiKey = params.authStorage.resolver("tinyfish", {
 		sessionId: params.sessionId,
 	});

@@ -18,16 +18,16 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
-import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
-import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
+import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
@@ -46,6 +46,7 @@ import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
+import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
@@ -114,23 +115,13 @@ export type {
 	TaskParams,
 	TaskToolDetails,
 } from "./types";
+export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	taskSchema,
 } from "./types";
-
-/**
- * Preview text for a child result. Falls back to "(no output)" — annotated
- * with the request count when the child actually did work, so the parent can
- * tell a no-op child from one that burned requests before being cancelled.
- */
-export function formatResultOutputFallback(result: Pick<SingleResult, "output" | "stderr" | "requests">): string {
-	const base = result.output.trim() || result.stderr.trim();
-	if (base) return base;
-	return result.requests > 0 ? `(no output) after ${result.requests} req` : "(no output)";
-}
 
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
@@ -139,6 +130,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	evalToolsEnabled: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
@@ -174,6 +166,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		evalToolsEnabled: options.evalToolsEnabled,
 		asyncEnabled: options.asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		ircEnabled: options.ircEnabled,
@@ -277,6 +270,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
+	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
@@ -298,6 +292,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
@@ -442,31 +437,36 @@ class TaskJobError extends Error {}
 
 /**
  * Process-level create-time discovery memo and published reload snapshots,
- * keyed by resolved cwd.
+ * keyed by resolved cwd plus the exact effective `extensions` array.
  *
- * `TaskTool.create` runs for every (sub)agent session in this process and the
- * walk-up + plugin-registry scan in `discoverAgents` is identical for a given
- * cwd, so repeat creations reuse the first scan. Explicit plugin reloads
- * replace the matching snapshot so already-created tools advertise the latest
- * definitions. Execution-time discovery (`#runSpawn`) intentionally stays
- * fresh. The memo also tracks the live `discoverAgents` binding: test spies
- * swap that binding, which invalidates both caches automatically.
+ * `TaskTool.create` runs for every (sub)agent session in this process. Sessions
+ * may share a cwd while carrying different overlay/runtime extension settings,
+ * so cwd alone is not an isolation boundary. Explicit plugin reloads replace
+ * only the matching cwd+extensions snapshot. Execution-time discovery
+ * (`#runSpawn`) intentionally stays fresh. The memo also tracks the live
+ * `discoverAgents` binding: test spies swap that binding, which invalidates
+ * both caches automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 const discoverySnapshots = new Map<string, AgentDefinition[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
-function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
+/** Stable cache identity for the filesystem root and the full effective extension-root struct. */
+function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots): string {
+	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}`;
+}
+
+function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
 		discoverySnapshots.clear();
 	}
-	const key = path.resolve(cwd);
+	const key = discoveryCacheKey(cwd, extensionRoots);
 	let pending = discoveryMemo.get(key);
 	if (!pending) {
-		pending = fn(cwd);
+		pending = fn(cwd, undefined, extensionRoots);
 		discoveryMemo.set(key, pending);
 		pending.catch(() => {
 			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
@@ -476,10 +476,10 @@ function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 }
 
 /** Rescan one cwd and publish its definitions to existing and future task tools. */
-export async function refreshAgentDiscovery(cwd: string): Promise<void> {
-	const key = path.resolve(cwd);
+export async function refreshAgentDiscovery(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<void> {
+	const key = discoveryCacheKey(cwd, extensionRoots);
 	discoveryMemo.delete(key);
-	const pending = discoverAgentsForCreate(cwd);
+	const pending = discoverAgentsForCreate(cwd, extensionRoots);
 	const { agents } = await pending;
 	if (discoveryMemo.get(key) === pending) {
 		discoverySnapshots.set(key, agents);
@@ -582,12 +582,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
+		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.enabled");
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
+			evalToolsEnabled: evalToolsEnabled(this.session),
 			defaultAgent,
 		});
 	}
@@ -600,14 +601,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationMode = this.session.settings.get("task.isolation.mode");
+		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
 		return renderDescription({
-			agents: discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents,
-			isolationEnabled: !planMode && isolationMode !== "none",
+			agents:
+				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+				this.#discoveredAgents,
+			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
+			evalToolsEnabled: evalToolsEnabled(this.session),
 			asyncEnabled: this.session.settings.get("async.enabled"),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
@@ -667,7 +671,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd);
+		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
 		return new TaskTool(session, agents);
 	}
 
@@ -689,6 +693,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 
 		const spawnItems = resolveSpawnItems(params);
+		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
+		if (evalToolNames.length > 0) {
+			if (this.session.getPlanModeState?.()?.enabled === true) {
+				return createTaskModeError("Task execution failed: Eval-defined tools are unavailable in plan mode.");
+			}
+			try {
+				await describeEvalTools(this.session, evalToolNames, signal);
+			} catch (error) {
+				return createTaskModeError(
+					`Task execution failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
 		// Resolve every item before choosing an execution path. No executor or
@@ -878,7 +895,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let failedCount = 0;
 		let primaryJobId = asyncSpawns[0].agentId;
 		const syncResults: SingleResult[] = [];
+		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
 		let syncUsage: Usage | undefined;
+		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
 		let syncOutputPaths: string[] | undefined;
 		let syncProjectAgentsDir: string | null = null;
 		const buildAsyncDetails = (): TaskToolDetails => ({
@@ -1424,6 +1443,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...(params.tools?.length
+					? {
+							customTools: createEvalCustomTools(
+								this.session,
+								await describeEvalTools(this.session, params.tools, signal),
+							),
+						}
+					: {}),
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },
@@ -1478,45 +1505,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
-		const status = result.aborted
-			? "cancelled"
-			: result.exitCode === 0 && result.error
-				? "merge failed"
-				: result.exitCode === 0
-					? "completed"
-					: `failed (exit ${result.exitCode})`;
-		const output = formatResultOutputFallback(result);
-		const outputCharCount = result.outputMeta?.charCount ?? output.length;
-		const fullOutputThreshold = 5000;
-		let preview = output;
-		let truncated = false;
-		if (outputCharCount > fullOutputThreshold) {
-			const slice = output.slice(0, fullOutputThreshold);
-			const lastNewline = slice.lastIndexOf("\n");
-			preview = lastNewline >= 0 ? slice.slice(0, lastNewline) : slice;
-			truncated = true;
-		}
-		// A stopped-but-adopted agent (soft-budget stop) stays messageable; tell
-		// the parent so it can resume via irc instead of redoing the work.
-		const refStatus = AgentRegistry.global().get(result.id)?.status;
-		const resumable = result.aborted && (refStatus === "idle" || refStatus === "parked");
-		const summary = prompt.render(taskSummaryTemplate, {
-			agentName: result.agent,
-			id: result.id,
-			status,
-			duration: formatDuration(totalDurationMs),
-			abortReason: result.aborted ? result.abortReason : undefined,
-			resumable,
-			preview,
-			truncated,
-			meta: result.outputMeta
-				? {
-						lineCount: result.outputMeta.lineCount,
-						charSize: formatBytes(result.outputMeta.charCount),
-					}
-				: undefined,
-			mergeSummary,
-		});
+		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
 
 		return {
 			content: [{ type: "text", text: summary }],

@@ -2,9 +2,11 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import { colorLuma, logger, relativeLuminance } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { SessionAccentTheme } from "../../utils/session-color";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
-import type { ColorMode, ThemeBg, ThemeColor } from "./schema";
+import { type ColorMode, isValidThemeColor, type ThemeBg, type ThemeColor } from "./schema";
 import {
+	type SlashCommandIconName,
 	SPINNER_FRAMES,
 	type SpinnerType,
 	SYMBOL_PRESETS,
@@ -128,6 +130,9 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 	"lang.julia": "#9558b2",
 };
 
+const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
+const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
+
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
 	#bgColors: Record<ThemeBg, string>;
@@ -161,9 +166,12 @@ export class Theme {
 
 		this.#fgColors = {} as Record<ThemeColor, string>;
 		this.#hexFgColors = {} as Record<ThemeColor, string>;
-		for (const [key, value] of Object.entries(fgColors) as [ThemeColor, string | number][]) {
+		for (const key in fgColors) {
+			if (!isValidThemeColor(key)) continue;
+			const value = fgColors[key];
+			const hex = resolveToHex(value, slIsLight);
 			this.#fgColors[key] = fgAnsi(value, mode);
-			this.#hexFgColors[key] = resolveToHex(value, slIsLight);
+			this.#hexFgColors[key] = hex;
 		}
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
@@ -204,6 +212,14 @@ export class Theme {
 		const hex = this.#hexFgColors[color];
 		if (hex === undefined) throw new Error(`Unknown theme color: ${color}`);
 		return hex || (this.isLight ? "#000000" : "#e5e5e7");
+	}
+	/**
+	 * Get the resolved CSS hex string for a background theme color.
+	 */
+	getBgHex(color: ThemeBg): string {
+		const hex = this.#hexBgColors[color];
+		if (hex === undefined) throw new Error(`Unknown theme background color: ${color}`);
+		return hex || (this.isLight ? "#ffffff" : "#000000");
 	}
 
 	/**
@@ -260,6 +276,19 @@ export class Theme {
 	getAccentColorHex(): string {
 		return this.getColorHex("accent");
 	}
+	/**
+	 * Theme-derived inputs for `getSessionAccentHex`: the accent hex whose
+	 * OKLCH weight session accents adopt, the major colors they must not
+	 * hue-collide with, and the light-theme surface luminance to contrast
+	 * against.
+	 */
+	get sessionAccentInputs(): SessionAccentTheme {
+		return {
+			accentHex: this.getAccentColorHex(),
+			colorHexes: this.getMajorThemeColorHexes(),
+			surfaceLuminance: this.accentSurfaceLuminance,
+		};
+	}
 
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
@@ -267,10 +296,40 @@ export class Theme {
 		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
 	}
 
+	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
+	fgResolved(color: ThemeColor, text: string): string {
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		const resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
+		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
+	}
+
 	bg(color: ThemeBg, text: string): string {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
+	}
+
+	/**
+	 * Apply a background fill that resumes after nested full/background resets.
+	 *
+	 * Composer rows contain styled text and cursor escapes; a normal background
+	 * wrapper would otherwise stop at the first nested reset.
+	 */
+	bgFill(color: ThemeBg, text: string): string {
+		const ansi = this.#bgColors[color];
+		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+		return `${ansi}${text.replace(BACKGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[49m`;
+	}
+
+	/**
+	 * Apply a foreground over a controlled background, choosing a contrast-safe
+	 * fallback only when the theme token requests the terminal default and
+	 * reapplying it after nested full/foreground resets.
+	 */
+	fgOnBg(color: ThemeColor, background: ThemeBg, text: string): string {
+		const ansi = this.getFgOnBgAnsi(color, background);
+		return `${ansi}${text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[39m`;
 	}
 
 	bold(text: string): string {
@@ -303,6 +362,21 @@ export class Theme {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return ansi;
+	}
+
+	/**
+	 * Foreground ANSI for text rendered over a controlled theme background.
+	 * Explicit theme colors win; terminal-default tokens become black or near-white.
+	 */
+	getFgOnBgAnsi(color: ThemeColor, background: ThemeBg): string {
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		if (ansi !== "\x1b[39m") return ansi;
+		const backgroundAnsi = this.#bgColors[background];
+		if (!backgroundAnsi) throw new Error(`Unknown theme background color: ${background}`);
+		if (backgroundAnsi === "\x1b[49m") return ansi;
+		const backgroundLuma = colorLuma(this.getBgHex(background));
+		return colorToAnsi(backgroundLuma !== undefined && backgroundLuma > 0.5 ? "#000000" : "#e5e5e7", this.mode);
 	}
 
 	/**
@@ -423,6 +497,13 @@ export class Theme {
 		};
 	}
 
+	get progress() {
+		return {
+			filled: this.#symbols["progress.filled"],
+			empty: this.#symbols["progress.empty"],
+		};
+	}
+
 	get boxRound() {
 		return {
 			topLeft: this.#symbols["boxRound.topLeft"],
@@ -439,6 +520,17 @@ export class Theme {
 			teeUp: this.#symbols["boxSharp.teeUp"],
 			teeRight: this.#symbols["boxSharp.teeRight"],
 			teeLeft: this.#symbols["boxSharp.teeLeft"],
+		};
+	}
+
+	/**
+	 * Dotted rules/verticals for transient selection outlines. Corners come from
+	 * {@link boxRound} — Unicode has no rounded dotted corner glyphs.
+	 */
+	get boxDotted() {
+		return {
+			horizontal: this.#symbols["boxDotted.horizontal"],
+			vertical: this.#symbols["boxDotted.vertical"],
 		};
 	}
 
@@ -466,6 +558,7 @@ export class Theme {
 			powerlineRight: this.#symbols["sep.powerlineRight"],
 			powerlineThinLeft: this.#symbols["sep.powerlineThinLeft"],
 			powerlineThinRight: this.#symbols["sep.powerlineThinRight"],
+			powerlineCapLeft: this.#symbols["sep.powerlineCapLeft"],
 			block: this.#symbols["sep.block"],
 			space: this.#symbols["sep.space"],
 			asciiLeft: this.#symbols["sep.asciiLeft"],
@@ -491,11 +584,16 @@ export class Theme {
 			git: this.#symbols["icon.git"],
 			branch: this.#symbols["icon.branch"],
 			pr: this.#symbols["icon.pr"],
+			pin: this.#symbols["icon.pin"],
 			tokens: this.#symbols["icon.tokens"],
 			context: this.#symbols["icon.context"],
 			cost: this.#symbols["icon.cost"],
+			subscription: this.#symbols["icon.subscription"],
+			advisor: this.#symbols["icon.advisor"],
+			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
-			pi: this.#symbols["icon.pi"],
+			omp: this.#symbols["icon.omp"],
+			esc: this.#symbols["icon.esc"],
 			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
 			job: this.#symbols["icon.job"],
@@ -522,6 +620,81 @@ export class Theme {
 			extensionInstruction: this.#symbols["icon.extensionInstruction"],
 			mic: this.#symbols["icon.mic"],
 			camera: this.#symbols["icon.camera"],
+		};
+	}
+
+	/** Slash-command type-indicator glyphs for the autocomplete icon column. */
+	get cmd(): Record<SlashCommandIconName, string> {
+		return {
+			action: this.#symbols["cmd.action"],
+			prompt: this.#symbols["cmd.prompt"],
+			extension: this.#symbols["cmd.extension"],
+			settings: this.#symbols["cmd.settings"],
+			gear: this.#symbols["cmd.gear"],
+			shield: this.#symbols["cmd.shield"],
+			wave: this.#symbols["cmd.wave"],
+			compass: this.#symbols["cmd.compass"],
+			inbox: this.#symbols["cmd.inbox"],
+			swap: this.#symbols["cmd.swap"],
+			expand: this.#symbols["cmd.expand"],
+			computer: this.#symbols["cmd.computer"],
+			eye: this.#symbols["cmd.eye"],
+			todo: this.#symbols["cmd.todo"],
+			stats: this.#symbols["cmd.stats"],
+			news: this.#symbols["cmd.news"],
+			keyboard: this.#symbols["cmd.keyboard"],
+			export: this.#symbols["cmd.export"],
+			clipboard: this.#symbols["cmd.clipboard"],
+			share: this.#symbols["cmd.share"],
+			broadcast: this.#symbols["cmd.broadcast"],
+			globe: this.#symbols["cmd.globe"],
+			copy: this.#symbols["cmd.copy"],
+			plus: this.#symbols["cmd.plus"],
+			restart: this.#symbols["cmd.restart"],
+			eraser: this.#symbols["cmd.eraser"],
+			trash: this.#symbols["cmd.trash"],
+			compress: this.#symbols["cmd.compress"],
+			vibrate: this.#symbols["cmd.vibrate"],
+			handoff: this.#symbols["cmd.handoff"],
+			history: this.#symbols["cmd.history"],
+			question: this.#symbols["cmd.question"],
+			rocket: this.#symbols["cmd.rocket"],
+			stethoscope: this.#symbols["cmd.stethoscope"],
+			redo: this.#symbols["cmd.redo"],
+			bug: this.#symbols["cmd.bug"],
+			memory: this.#symbols["cmd.memory"],
+			pencil: this.#symbols["cmd.pencil"],
+			folderMove: this.#symbols["cmd.folderMove"],
+			folderPlus: this.#symbols["cmd.folderPlus"],
+			folderMinus: this.#symbols["cmd.folderMinus"],
+			hammer: this.#symbols["cmd.hammer"],
+			power: this.#symbols["cmd.power"],
+			cart: this.#symbols["cmd.cart"],
+			model: this.#symbols["icon.model"],
+			plan: this.#symbols["icon.plan"],
+			prewalk: this.#symbols["icon.prewalk"],
+			goal: this.#symbols["icon.goal"],
+			pause: this.#symbols["icon.pause"],
+			loop: this.#symbols["icon.loop"],
+			session: this.#symbols["icon.session"],
+			jobs: this.#symbols["icon.job"],
+			gauge: this.#symbols["icon.throughput"],
+			context: this.#symbols["icon.context"],
+			agents: this.#symbols["icon.agents"],
+			branch: this.#symbols["icon.branch"],
+			tree: this.#symbols["icon.worktree"],
+			signIn: this.#symbols["icon.input"],
+			signOut: this.#symbols["icon.output"],
+			advisor: this.#symbols["icon.advisor"],
+			host: this.#symbols["icon.host"],
+			package: this.#symbols["icon.package"],
+			fast: this.#symbols["icon.fast"],
+			voice: this.#symbols["icon.mic"],
+			tools: this.#symbols["icon.extensionTool"],
+			rule: this.#symbols["icon.extensionRule"],
+			skill: this.#symbols["icon.extensionSkill"],
+			mcp: this.#symbols["icon.extensionMcp"],
+			pin: this.#symbols["icon.pin"],
 		};
 	}
 

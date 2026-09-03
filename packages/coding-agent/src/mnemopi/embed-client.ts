@@ -3,6 +3,7 @@ import {
 	createUnavailableWorker,
 	createWorkerHandle,
 	createWorkerSubprocess,
+	inferenceWorkerEnv,
 	logWorkerMessage,
 	resolveWorkerSpawnCmd,
 	SMOKE_TEST_TIMEOUT_MS,
@@ -10,7 +11,6 @@ import {
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
 	type WorkerHandle,
-	workerEnvFromParent,
 } from "../subprocess/worker-client";
 import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
 
@@ -37,14 +37,14 @@ export const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 /**
  * Spawn the mnemopi embeddings worker as a subprocess. Exported for tests and
  * the smoke probe; production callers go through {@link spawnMnemopiEmbedWorker}.
- * The child inherits the parent env verbatim — fastembed honours `HF_HUB_*`,
+ * The child inherits the parent env — fastembed honours `HF_HUB_*`,
  * `HTTPS_PROXY`, etc., and our `loadFastembed()` reads the same `OMP_*`
  * runtime-install knobs the parent uses.
  */
 export function createMnemopiEmbedSubprocess(): SpawnedSubprocess<MnemopiEmbedWorkerOutbound> {
 	return createWorkerSubprocess<MnemopiEmbedWorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(MNEMOPI_EMBED_WORKER_ARG),
-		env: workerEnvFromParent(),
+		env: inferenceWorkerEnv(),
 		exitLabel: "mnemopi embed subprocess",
 	});
 }

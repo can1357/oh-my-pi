@@ -13,7 +13,7 @@ import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMeta
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { Settings } from "../../config/settings";
+import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
@@ -31,6 +31,7 @@ import type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	CompactOptions,
+	ComposerShapeDefinition,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
@@ -681,6 +682,8 @@ export class ExtensionRunner {
 		this.#abortFn = contextActions.abort;
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
+		this.#getContextUsageFn = contextActions.getContextUsage;
+		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
 
 		// Command context actions (optional, only for interactive mode)
@@ -976,6 +979,15 @@ export class ExtensionRunner {
 		if (firstFailure) throw firstFailure.reason;
 	}
 
+	/** Composer shapes registered during extension load, with later extensions winning id collisions. */
+	getComposerShapes(): ComposerShapeDefinition[] {
+		const shapes = new Map<string, ComposerShapeDefinition>();
+		for (const extension of this.extensions) {
+			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
+		}
+		return [...shapes.values()];
+	}
+
 	/**
 	 * Aggregate the registered CLI flags across a set of extensions (last write
 	 * wins on name collision). Static so callers that need the flag set before a
@@ -1123,6 +1135,17 @@ export class ExtensionRunner {
 	}
 
 	/**
+	 * Run an extension-owned callback within this session's settings scope, so a
+	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
+	 * session's manager rather than a same-cwd sibling's. Event handlers get this
+	 * scope via {@link #runHandlerWithTimeout}; slash commands and shortcuts are
+	 * invoked directly by their controllers and route through here instead.
+	 */
+	runScoped<T>(fn: () => T): T {
+		return withActiveSettings(this.settings, fn);
+	}
+
+	/**
 	 * Creates an extension context, optionally scoped to a provider request model.
 	 *
 	 * `delegation` wires the same-tool `ctx.invokeTool` for a re-registered built-in: when `toolName`
@@ -1154,6 +1177,7 @@ export class ExtensionRunner {
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
+			isProjectTrusted: () => true,
 			get model() {
 				return getModel();
 			},
@@ -1259,31 +1283,33 @@ export class ExtensionRunner {
 		let handlerResult: TResult | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await raceHandlerWithTimeout(
-				async (handlerSignal, budget) => {
-					registrationScope.signal = handlerSignal;
-					let result: TResult | undefined;
-					try {
-						result = await this.#toolRegistrationScope.run(registrationScope, () =>
-							handler(
-								event,
-								createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
-							),
-						);
-					} catch (error) {
-						handlerFailure = { error };
-					} finally {
-						registrationScope.closed = true;
-					}
-					try {
-						await this.#flushToolRegistrations(registrationScope.pending);
-					} catch (error) {
-						handlerFailure ??= { error };
-					}
-					return result;
-				},
-				timeoutMs,
-				signal,
+			handlerResult = await withActiveSettings(this.settings, () =>
+				raceHandlerWithTimeout(
+					async (handlerSignal, budget) => {
+						registrationScope.signal = handlerSignal;
+						let result: TResult | undefined;
+						try {
+							result = await this.#toolRegistrationScope.run(registrationScope, () =>
+								handler(
+									event,
+									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
+								),
+							);
+						} catch (error) {
+							handlerFailure = { error };
+						} finally {
+							registrationScope.closed = true;
+						}
+						try {
+							await this.#flushToolRegistrations(registrationScope.pending);
+						} catch (error) {
+							handlerFailure ??= { error };
+						}
+						return result;
+					},
+					timeoutMs,
+					signal,
+				),
 			);
 		} catch (error) {
 			handlerFailure = { error };
@@ -1665,8 +1691,9 @@ export class ExtensionRunner {
 		return currentPayload;
 	}
 
-	async emitAfterProviderResponse(response: ProviderResponseMetadata, _model?: Model): Promise<void> {
-		const ctx = this.createContext();
+	/** Runs response hooks with the model that produced that provider response. */
+	async emitAfterProviderResponse(response: ProviderResponseMetadata, model?: Model): Promise<void> {
+		const ctx = this.createContext(model);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("after_provider_response");

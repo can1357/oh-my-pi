@@ -8,7 +8,7 @@ let tempDir: TempDir | null = null;
 async function freshStorage(prefix = "omp-history-session-"): Promise<{ storage: HistoryStorage; dbPath: string }> {
 	tempDir = TempDir.createSync(`@${prefix}`);
 	const dbPath = tempDir.join("history.db");
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	return { storage: HistoryStorage.open(dbPath), dbPath };
 }
 
@@ -19,12 +19,12 @@ async function flush(...writes: Promise<void>[]): Promise<void> {
 }
 
 beforeEach(() => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	vi.useFakeTimers();
 });
 
 afterEach(async () => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	vi.useRealTimers();
 	if (tempDir) {
 		await Bun.sleep(0);
@@ -97,7 +97,7 @@ describe("HistoryStorage session linkage", () => {
 		legacyDb.prepare("INSERT INTO history (prompt, cwd) VALUES (?, ?)").run("legacy prompt", "/legacy");
 		legacyDb.close();
 
-		HistoryStorage.resetInstance();
+		HistoryStorage.close();
 		const storage = HistoryStorage.open(dbPath);
 		await flush(storage.add("new prompt", "/new", "session-xyz"));
 

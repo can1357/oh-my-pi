@@ -200,7 +200,12 @@ describe("OpenAI compat policy", () => {
 		expect(params.reasoning_effort).toBeUndefined();
 	});
 
-	function localQwenModel(id: string, provider: string, baseUrl: string): Model<"openai-completions"> {
+	function localQwenModel(
+		id: string,
+		provider: string,
+		baseUrl: string,
+		compat?: OpenAICompat,
+	): Model<"openai-completions"> {
 		return buildModel({
 			id,
 			name: id,
@@ -212,6 +217,7 @@ describe("OpenAI compat policy", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 262_144,
 			maxTokens: 32_768,
+			compat,
 		} satisfies ModelSpec<"openai-completions">);
 	}
 
@@ -250,6 +256,24 @@ describe("OpenAI compat policy", () => {
 			enable_thinking: true,
 			reasoning_effort: Effort.Medium,
 		});
+	});
+
+	it("honors a user compat override disabling the template effort dialect", () => {
+		// Escape hatch for strict local servers (Ninfer-style) that reject
+		// unknown chat_template_kwargs: `qwenTemplateReasoningEffort: false` in
+		// models.yml must suppress the kwarg and revert to the pre-effort wire
+		// shape without disturbing thinking or preserve_thinking.
+		const model = localQwenModel("qwen3.8-27b", "llama.cpp", "http://127.0.0.1:8080/v1", {
+			qwenTemplateReasoningEffort: false,
+		});
+		const params = chatParams();
+		applyChatCompletionsCompatPolicy(
+			params,
+			resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", reasoning: Effort.Medium }),
+		);
+		expect(params.enable_thinking).toBe(true);
+		expect(params.reasoning_effort).toBeUndefined();
+		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});
 
 	it("keeps pre-3.8 local Qwen on the bare enable_thinking toggle", () => {

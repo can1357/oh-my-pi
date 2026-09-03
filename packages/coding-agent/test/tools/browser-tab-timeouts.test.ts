@@ -45,9 +45,21 @@ describe("browser per-op fail-fast ceilings", () => {
 
 describe("browser scroll acknowledgement", () => {
 	it("returns after the acknowledgement deadline while the renderer remains stalled", async () => {
-		const acknowledgement = Promise.withResolvers<void>();
+		// Fake timers, not a real 1ms deadline: under the Bun test runner a real
+		// short-deadline timer wedges the timer queue while the never-settling
+		// dispatch member stays pending — the deadline never fires and the test
+		// hangs (Bun 1.3.14; long budgets like the supervisor's 750ms+ survive).
+		// Advancing the fake clock fires the deadline deterministically.
+		vi.useFakeTimers();
+		try {
+			const acknowledgement = Promise.withResolvers<void>();
+			const pending = dispatchScroll(() => acknowledgement.promise, 1);
+			vi.advanceTimersByTime(1);
 
-		await expect(dispatchScroll(() => acknowledgement.promise, 1)).resolves.toBeUndefined();
+			await expect(pending).resolves.toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("preserves wheel dispatch failures received before the acknowledgement deadline", async () => {

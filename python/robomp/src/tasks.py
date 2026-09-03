@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 from robomp import persona
 from robomp.config import Settings
 from robomp.db import Database, IssueRow, IssueState, issue_key
+from robomp.git_ops import rev_parse_head
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import (
     CommentInfo,
@@ -20,7 +21,7 @@ from robomp.github_client import (
     parse_issue_payload,
 )
 from robomp.sandbox import GitTransport, SandboxManager
-from robomp.worker import DirectiveInfo, TaskInputs, ThreadMessage, run_task
+from robomp.worker import DirectiveInfo, ReleaseTaskContext, TaskInputs, ThreadMessage, run_task
 
 log = logging.getLogger(__name__)
 
@@ -263,6 +264,210 @@ def _can_handle_pr_directly(*, settings: Settings, repo_full: str, pr: PullReque
         )
         return False
     return True
+
+
+_BLOCKING_RELEASE_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
+_FAILED_RELEASE_JOB_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
+
+
+async def _release_failure_dossier(
+    github: GitHubBackend,
+    repo: str,
+    *,
+    head_sha: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Collect bounded failing-job diagnostics for one release commit."""
+    runs = await github.list_workflow_runs(repo, head_sha=head_sha)
+    sections: list[str] = []
+    overflow: list[str] = []
+    run_urls: list[str] = []
+    included = 0
+    for run in runs:
+        if run.conclusion not in _BLOCKING_RELEASE_CONCLUSIONS:
+            continue
+        if run.html_url:
+            run_urls.append(run.html_url)
+        jobs = await github.list_workflow_jobs(repo, run.id)
+        for job in jobs:
+            if job.conclusion in _FAILED_RELEASE_JOB_CONCLUSIONS:
+                continue
+            if included >= 5:
+                overflow.append(f"- {run.name} / {job.name} (job {job.id}) — {job.html_url}")
+                continue
+            included += 1
+            log_tail = await github.get_job_log_tail(repo, job.id, tail_lines=120)
+            failed_steps = ", ".join(job.failed_steps) if job.failed_steps else "(not reported)"
+            sections.append(
+                f"## {run.name} / {job.name} ({job.conclusion or job.status}) — {job.html_url}\n"
+                f"Failed steps: {failed_steps}\n\n"
+                f"````text\n{log_tail}\n````"
+            )
+    if overflow:
+        sections.append("## Additional failing jobs\n" + "\n".join(overflow))
+    if not sections:
+        sections.append("No failing jobs were reported by the Actions jobs API.")
+    return "\n\n".join(sections), tuple(dict.fromkeys(run_urls))
+
+
+async def handle_release_ci(
+    *,
+    settings: Settings,
+    db: Database,
+    github: GitHubBackend,
+    sandbox: SandboxManager,
+    git_transport: GitTransport,
+    payload: Mapping[str, Any],
+    delivery_id: str,
+    attempts: int = 0,
+    slot_uid: int | None = None,
+) -> None:
+    """Advance one release tag from a completed GitHub Actions verdict."""
+    run = payload.get("workflow_run")
+    repository = payload.get("repository")
+    if not isinstance(run, Mapping) or not isinstance(repository, Mapping):
+        log.info("skip: incomplete release workflow payload")
+        return
+    repo_full = str(repository.get("full_name") or "")
+    default_branch = str(repository.get("default_branch") or "")
+    head_sha = str(run.get("head_sha") or "")
+    run_name = str(run.get("name") or "")
+    run_url = str(run.get("html_url") or "")
+    conclusion = str(run.get("conclusion") or "")
+    head_commit = run.get("head_commit")
+    message = str(head_commit.get("message") or "") if isinstance(head_commit, Mapping) else ""
+    if not repo_full or not default_branch or not head_sha or not message.startswith(settings.release_commit_prefix):
+        log.info("skip: unparseable release workflow", extra={"repo": repo_full, "sha": head_sha})
+        return
+    remainder = message.removeprefix(settings.release_commit_prefix).strip()
+    version_token = remainder.split(maxsplit=1)[0] if remainder else ""
+    version = version_token.removeprefix("v")
+    if not version:
+        log.info("skip: release message missing version", extra={"repo": repo_full, "sha": head_sha})
+        return
+    tag = f"v{version}"
+
+    remote_tag_sha = await github.get_tag_sha(repo_full, tag)
+    if remote_tag_sha is None:
+        log.info("skip: release tag absent", extra={"repo": repo_full, "tag": tag})
+        return
+    if head_sha != remote_tag_sha:
+        log.info(
+            "skip: stale release workflow",
+            extra={"repo": repo_full, "tag": tag, "event_sha": head_sha, "tag_sha": remote_tag_sha},
+        )
+        return
+
+    key = f"{repo_full}#{tag}"
+    active = db.get_active_release(repo_full)
+    row = db.get_release(key)
+    if row is None:
+        session_dir = sandbox.workspace_root(repo_full, "release") / f".omp-session-{tag}"
+        row = db.upsert_release(
+            repo=repo_full,
+            tag=tag,
+            version=version,
+            current_sha=head_sha,
+            session_dir=str(session_dir),
+        )
+    if active is not None and active.key != key:
+        db.set_release_state(active.key, "superseded")
+    if row.state in {"green", "failed", "superseded"}:
+        log.info("skip: release already terminal", extra={"key": key, "state": row.state})
+        return
+    if row.current_sha != head_sha:
+        db.set_release_sha(key, head_sha)
+        row = db.get_release(key) or row
+
+    if conclusion == "success":
+        runs = await github.list_workflow_runs(repo_full, head_sha=head_sha)
+        if any(other.status != "completed" for other in runs):
+            log.info("release waiting on workflow runs", extra={"key": key})
+            return
+        if any(other.conclusion in _BLOCKING_RELEASE_CONCLUSIONS for other in runs):
+            log.info("release waiting on failed workflow event", extra={"key": key})
+            return
+        release = await github.get_release_by_tag(repo_full, tag)
+        if release is None or release.draft:
+            db.set_release_state(key, "failed", error="CI green but GitHub Release missing/draft")
+            return
+        db.set_release_state(key, "green")
+        return
+
+    if conclusion in {"failure", "timed_out", "startup_failure"}:
+        if not (row.state == "fixing" and row.last_failed_sha == head_sha):
+            if row.rounds >= settings.release_max_rounds:
+                db.set_release_state(
+                    key,
+                    "failed",
+                    error=f"round cap {settings.release_max_rounds} reached; last: {run_name} {run_url}",
+                )
+                return
+            row = db.bump_release_round(key, failed_sha=head_sha)
+
+        clone_url = str(repository.get("clone_url") or "")
+        if clone_url:
+            repo_info = RepoInfo(
+                full_name=repo_full,
+                default_branch=default_branch,
+                clone_url=clone_url,
+                private=bool(repository.get("private")),
+            )
+        else:
+            repo_info = await github.get_repo(repo_full)
+        workspace = await _run_workspace_op(
+            sandbox.ensure_release_workspace,
+            repo=repo_full,
+            clone_url=repo_info.clone_url,
+            default_branch=default_branch,
+            tag=tag,
+            author_name=settings.resolved_author_name,
+            author_email=settings.git_author_email,
+            slot_uid=slot_uid,
+        )
+        workspace_head = await asyncio.to_thread(
+            rev_parse_head,
+            workspace.repo_dir,
+            safe_directory=workspace.repo_dir,
+        )
+        if workspace_head != head_sha:
+            db.set_release_state(key, "failed", error="main moved past release sha; human intervention")
+            return
+
+        failures_text, run_urls = await _release_failure_dossier(github, repo_full, head_sha=head_sha)
+        release_context = ReleaseTaskContext(
+            tag=tag,
+            version=version,
+            round=row.rounds,
+            max_rounds=settings.release_max_rounds,
+            head_sha=head_sha,
+            default_branch=default_branch,
+            failures_text=failures_text,
+            run_urls=run_urls,
+        )
+        inputs = TaskInputs(
+            settings=settings,
+            db=db,
+            github=github,
+            git_transport=git_transport,
+            repo=repo_info,
+            issue=None,
+            release=release_context,
+            workspace=workspace,
+            delivery_id=delivery_id,
+            attempts=attempts,
+            slot_uid=slot_uid,
+            natives_cache=sandbox.natives_cache,
+        )
+        await run_task(task_kind="handle_release_ci", inputs=inputs)
+        updated = db.get_release(key)
+        if updated is not None and updated.state == "fixing":
+            db.set_release_state(key, "failed", error="agent ended round without retagging")
+        return
+
+    if conclusion == "action_required":
+        db.set_release_state(key, "failed", error="run needs manual approval")
+        return
+    log.info("release conclusion ignored", extra={"key": key, "conclusion": conclusion})
 
 
 async def triage_issue(
@@ -858,6 +1063,7 @@ async def cleanup_workspace(
 __all__ = [
     "cleanup_workspace",
     "handle_comment",
+    "handle_release_ci",
     "handle_pr_conversation",
     "handle_review",
     "review_pr",

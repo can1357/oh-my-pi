@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -12,6 +12,7 @@ import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -21,6 +22,7 @@ function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated(),
 		...overrides,
+		canPromptUser: overrides.canPromptUser ?? overrides.hasUI ?? true,
 	};
 }
 
@@ -1584,6 +1586,50 @@ describe("AskTool rich ask dialog", () => {
 			note: "My Custom Note",
 			timedOut: undefined,
 		});
+	});
+
+	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
+		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "storage",
+					question: "Storage?",
+					options: ["SQLite", "PostgreSQL"],
+					multi: false,
+					selectedOptions: ["PostgreSQL"],
+				},
+			],
+		});
+		const tool = new AskTool(
+			createSession({
+				hasUI: false,
+				canPromptUser: true,
+				settings: Settings.isolated({ "ask.notify": "on" }),
+			}),
+		);
+
+		try {
+			await tool.execute(
+				"call-acp-dialog",
+				{
+					questions: [
+						{
+							id: "storage",
+							question: "Storage?",
+							options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+			expect(sendNotification).not.toHaveBeenCalled();
+		} finally {
+			sendNotification.mockRestore();
+		}
 	});
 
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {

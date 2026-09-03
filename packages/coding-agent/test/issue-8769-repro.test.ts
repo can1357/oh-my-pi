@@ -40,6 +40,7 @@ const ICON_PNG_BASE64 =
 function createCtx() {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
+	const insertAtom = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const pendingImages: ImageContent[] = [];
@@ -48,6 +49,7 @@ function createCtx() {
 		editor: {
 			pasteText,
 			insertText,
+			insertAtom,
 			imageLinks: undefined,
 			pendingImages,
 			pendingImageLinks,
@@ -59,7 +61,10 @@ function createCtx() {
 		} as unknown as InteractiveModeContext["sessionManager"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
-	return { ctx, spies: { pasteText, insertText, requestRender, showStatus, pendingImages, pendingImageLinks } };
+	return {
+		ctx,
+		spies: { pasteText, insertText, insertAtom, requestRender, showStatus, pendingImages, pendingImageLinks },
+	};
 }
 
 describe("InputController.handleImagePaste (issue #8769)", () => {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
-import { create, toBinary } from "@bufbuild/protobuf";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, CursorToolResultHandler, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -15,13 +15,16 @@ import {
 	TurnEndedUpdateSchema,
 	UpdateTodosArgsSchema,
 	UpdateTodosToolCallSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
+	| { kind: "connect-detailed-error-after-turn" }
+	| { kind: "connect-classification-detail-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
@@ -72,8 +75,11 @@ function turnEndedFrame(): Buffer {
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
 }
 
-function connectEndErrorFrame(code: string, message: string): Buffer {
-	const payload = Buffer.from(JSON.stringify({ error: { code, message } }), "utf8");
+function connectEndErrorFrame(code: string, message: string, details?: unknown): Buffer {
+	const payload = Buffer.from(
+		JSON.stringify({ error: { code, message, ...(details === undefined ? {} : { details }) } }),
+		"utf8",
+	);
 	return frameConnectMessage(payload, CONNECT_END_STREAM_FLAG);
 }
 
@@ -234,6 +240,26 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-detailed-error-after-turn") {
+			stream.write(
+				connectEndErrorFrame("invalid_argument", "Error", [
+					{ type: "google.rpc.ErrorInfo", value: "quota exceeded for request field tools" },
+				]),
+			);
+			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "connect-classification-detail-after-turn") {
+			stream.write(
+				connectEndErrorFrame("invalid_argument", "Error", [
+					{ type: "google.rpc.ErrorInfo", debug: "quota exceeded for this account" },
+				]),
+			);
+			stream.end();
+			return;
+		}
+
 		if (scenario.kind === "hang-after-turn") {
 			return;
 		}
@@ -331,6 +357,24 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Connect error unavailable: post-turn connect failure");
+	});
+
+	it("surfaces standard Connect detail values without changing recovery classification", async () => {
+		scenario = { kind: "connect-detailed-error-after-turn" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("google.rpc.ErrorInfo");
+		expect(result.errorMessage).toContain("quota exceeded for request field tools");
+		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
+	});
+
+	it("keeps appended Connect diagnostics out of recovery classification", async () => {
+		scenario = { kind: "connect-classification-detail-after-turn" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.errorMessage).toContain("quota exceeded for this account");
+		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
 	});
 
 	it("surfaces nonzero gRPC trailers that arrive after turnEnded", async () => {

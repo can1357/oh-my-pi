@@ -395,7 +395,6 @@ export class DapClient {
 			throw signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<TBody>();
-		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
 			unsubscribe();
 			this.#eventWaiterRejectors.delete(closeHandler);
@@ -424,7 +423,7 @@ export class DapClient {
 		if (signal) {
 			signal.addEventListener("abort", abortHandler, { once: true });
 		}
-		timeout = setTimeout(() => {
+		const timeout = setTimeout(() => {
 			cleanup();
 			reject(new Error(`DAP event ${event} timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
@@ -457,7 +456,6 @@ export class DapClient {
 		// receives the rejection normally; this handler is a passive guard.
 		promise.catch(() => {});
 
-		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
 			if (timeout) clearTimeout(timeout);
 			if (signal) {
@@ -469,7 +467,7 @@ export class DapClient {
 			cleanup();
 			reject(signal?.reason instanceof Error ? signal.reason : new ToolAbortError());
 		};
-		timeout = setTimeout(() => {
+		const timeout = setTimeout(() => {
 			if (!this.#pendingRequests.has(requestSeq)) return;
 			this.#pendingRequests.delete(requestSeq);
 			cleanup();

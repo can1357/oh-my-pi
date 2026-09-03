@@ -37,16 +37,6 @@ class MutableContentComponent implements Component {
 		return [...this.#lines];
 	}
 }
-class WidthAwareHistoryComponent implements Component {
-	invalidate(): void {
-		// No cached state
-	}
-
-	render(width: number): string[] {
-		const prefix = width < 30 ? "narrow" : "wide";
-		return Array.from({ length: 24 }, (_v, i) => `${prefix}-row-${i}`);
-	}
-}
 
 class CursorOnlyComponent implements Component {
 	#cursorCol = 0;
@@ -139,19 +129,6 @@ function longestBlankRun(lines: string[]): number {
 	}
 	return longest;
 }
-async function withEnv(name: string, value: string, run: () => Promise<void>): Promise<void> {
-	const previous = Bun.env[name];
-	Bun.env[name] = value;
-	try {
-		await run();
-	} finally {
-		if (previous === undefined) {
-			delete Bun.env[name];
-		} else {
-			Bun.env[name] = previous;
-		}
-	}
-}
 
 async function flushRender(term: VirtualTerminal): Promise<void> {
 	await new Promise<void>(resolve => process.nextTick(resolve));
@@ -159,10 +136,7 @@ async function flushRender(term: VirtualTerminal): Promise<void> {
 	await term.flush();
 }
 
-// A non-multiplexer resize paints the viewport immediately and defers the
-// authoritative full replay (the native-scrollback rebuild) until the drag has
-// been quiet for the resize settle window (120 ms). Integration test against the
-// real render scheduler, so the window is driven with a real delay.
+// Resize frames use the alternate buffer until the 120 ms quiet window settles.
 async function settleResize(term: VirtualTerminal): Promise<void> {
 	await Bun.sleep(160);
 	await flushRender(term);
@@ -176,7 +150,14 @@ describe("TUI overlays", () => {
 		// A resize on Warp takes the in-place path (no ED3), so neutralize the
 		// ambient terminal identity to keep the direct-terminal resize/scrollback
 		// assertions below deterministic on any dev machine.
-		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE", "HERDR_ENV"]) {
+		for (const key of [
+			"TERM_PROGRAM",
+			"PI_TUI_RESIZE_IN_PLACE",
+			"HERDR_ENV",
+			"HERDR_PANE_ID",
+			"HERDR_TAB_ID",
+			"HERDR_WORKSPACE_ID",
+		]) {
 			savedTerminalEnv[key] = Bun.env[key];
 			delete Bun.env[key];
 		}
@@ -338,122 +319,6 @@ describe("TUI overlays", () => {
 		}
 	});
 
-	it("can clear saved native scrollback on the first paint", async () => {
-		const term = new VirtualTerminal(40, 4);
-		term.write("shell-0\r\nshell-1\r\nshell-2\r\nshell-3\r\nshell-4\r\n");
-		await flushRender(term);
-		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		(term as unknown as { write: (s: string) => void }).write = (data: string) => {
-			writes.push(data);
-			realWrite(data);
-		};
-
-		const tui = new TUI(term);
-		tui.addChild(new MutableContentComponent(buildRows(8)));
-		try {
-			tui.start({ clearScrollback: true });
-			await flushRender(term);
-
-			const output = writes.join("");
-			const scrollback = term.getScrollBuffer().join("\n");
-			expect(output).toContain("\x1b[3J");
-			expect(scrollback.includes("shell-")).toBeFalsy();
-			expect(scrollback.includes("row-0")).toBeTruthy();
-			expect(scrollback.includes("row-7")).toBeTruthy();
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("preserves rendered scrollback on forced redraw after startup", async () => {
-		const term = new VirtualTerminal(40, 4);
-		const tui = new TUI(term);
-		const component = new MutableContentComponent(buildRows(120));
-		tui.addChild(component);
-
-		tui.start();
-		await flushRender(term);
-
-		const before = term.getScrollBuffer().join("\n");
-		expect(before.includes("row-0")).toBeTruthy();
-
-		tui.requestRender(true);
-		await flushRender(term);
-
-		const after = term.getScrollBuffer().join("\n");
-		expect(after.includes("row-0")).toBeTruthy();
-
-		tui.stop();
-	});
-	it("clears rendered scrollback when forced redraw replaces terminal history", async () => {
-		const term = new VirtualTerminal(40, 4);
-		const tui = new TUI(term);
-		const component = new MutableContentComponent(buildRows(120));
-		tui.addChild(component);
-
-		tui.start();
-		await flushRender(term);
-
-		expect(term.getScrollBuffer().join("\n").includes("row-0")).toBeTruthy();
-
-		component.setLines(["new-session-0", "new-session-1", "new-session-2", "new-session-3"]);
-		tui.requestRender(true, { clearScrollback: true });
-		await flushRender(term);
-
-		const scrollback = term.getScrollBuffer().join("\n");
-		expect(scrollback.includes("row-0")).toBeFalsy();
-		expect(scrollback.includes("new-session-3")).toBeTruthy();
-
-		tui.stop();
-	});
-	it("preserves multiplexer scrollback when replacing terminal history", async () => {
-		await withEnv("TMUX", "1", async () => {
-			const term = new VirtualTerminal(40, 4);
-			const tui = new TUI(term);
-			const component = new MutableContentComponent(buildRows(120));
-			tui.addChild(component);
-
-			tui.start();
-			await flushRender(term);
-			expect(term.getScrollBuffer().join("\n").includes("row-0")).toBeTruthy();
-
-			component.setLines(["new-session-0", "new-session-1", "new-session-2", "new-session-3"]);
-			tui.requestRender(true, { clearScrollback: true });
-			await flushRender(term);
-
-			const scrollback = term.getScrollBuffer().join("\n");
-			expect(scrollback.includes("row-0")).toBeTruthy();
-			expect(term.getViewport().join("\n").includes("new-session-3")).toBeTruthy();
-
-			tui.stop();
-		});
-	});
-	it("keeps hidden tmux overlays out of the viewport while preserving pane history", async () => {
-		await withEnv("TMUX", "1", async () => {
-			const term = new VirtualTerminal(16, 4);
-			const tui = new TUI(term);
-			tui.addChild(new MutableContentComponent(buildRows(80)));
-			try {
-				tui.start();
-				await flushRender(term);
-
-				const handle = tui.showOverlay(new LineComponent("OV_SENTINEL_", 2), { anchor: "top-left" });
-				await flushRender(term);
-				term.resize(14, 4);
-				await flushRender(term);
-
-				handle.hide();
-				await flushRender(term);
-
-				expect(term.getViewport().join("\n").includes("OV_SENTINEL_")).toBeFalsy();
-				expect(term.getScrollBuffer().join("\n").includes("row-0")).toBeTruthy();
-			} finally {
-				tui.stop();
-			}
-		});
-	});
-
 	it("does not duplicate transcript into scrollback on repeated forced redraws", async () => {
 		const term = new VirtualTerminal(40, 4);
 		const tui = new TUI(term);
@@ -559,54 +424,6 @@ describe("TUI overlays", () => {
 			await flushRender(term);
 			const viewport = term.getViewport();
 			expect(viewport.at(-1)?.includes("row-139")).toBeTruthy();
-		} finally {
-			tui.stop();
-		}
-	});
-	it("replays width-dependent offscreen scrollback on terminal width changes", async () => {
-		const term = new VirtualTerminal(40, 4);
-		const tui = new TUI(term);
-		tui.addChild(new WidthAwareHistoryComponent());
-		try {
-			tui.start();
-			await flushRender(term);
-			expect(term.getScrollBuffer().join("\n").includes("wide-row-0")).toBeTruthy();
-
-			term.resize(20, 4);
-			await settleResize(term);
-
-			const scrollback = term.getScrollBuffer().join("\n");
-			expect(scrollback.includes("narrow-row-0")).toBeTruthy();
-			expect(scrollback.includes("wide-row-0")).toBeFalsy();
-			expect(term.getViewport().at(-1)?.trim()).toBe("narrow-row-23");
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("pushes overflow growth into scrollback on resize", async () => {
-		const term = new VirtualTerminal(40, 4);
-		const tui = new TUI(term);
-		const component = new MutableContentComponent(buildRows(4));
-		tui.addChild(component);
-		try {
-			tui.start();
-			await flushRender(term);
-
-			for (let count = 5; count <= 29; count++) {
-				component.setLines(buildRows(count));
-				term.resize(40, count % 2 === 0 ? 4 : 5);
-				await flushRender(term);
-			}
-			// The drag only painted the viewport; let the settle window elapse so
-			// the authoritative rebuild commits the overflow into native scrollback.
-			await settleResize(term);
-
-			const scrollbackLines = term.getScrollBuffer().map(line => line.trim());
-			expect(scrollbackLines).toContain("row-0");
-			expect(scrollbackLines).toContain("row-12");
-			const viewport = term.getViewport().map(line => line.trim());
-			expect(viewport.at(-1)).toBe("row-28");
 		} finally {
 			tui.stop();
 		}

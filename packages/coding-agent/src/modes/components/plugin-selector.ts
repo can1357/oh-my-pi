@@ -4,9 +4,9 @@
  * Shows available plugins from all configured marketplaces in a SelectList.
  * Selecting a plugin triggers installation. Esc cancels.
  */
-import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
+import { type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme } from "../theme/theme";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 
 export interface PluginSelectorCallbacks {
@@ -21,7 +21,7 @@ export interface PluginItem {
 	scope?: "user" | "project";
 }
 
-export class PluginSelectorComponent extends Container {
+export class PluginSelectorComponent extends OverlayPanel {
 	#selectList: SelectList;
 
 	constructor(
@@ -30,7 +30,7 @@ export class PluginSelectorComponent extends Container {
 		installedIds: Set<string>,
 		callbacks: PluginSelectorCallbacks,
 	) {
-		super();
+		super("Plugins");
 
 		const items: SelectItem[] = plugins.map(({ plugin, marketplace, scope }) => {
 			// Encode scope into the value so onSelect can recover it without a parallel Map.
@@ -60,8 +60,6 @@ export class PluginSelectorComponent extends Container {
 			});
 		}
 
-		this.addChild(new DynamicBorder());
-
 		this.#selectList = new SelectList(items, Math.min(items.length, 20), getSelectListTheme());
 
 		this.#selectList.onSelect = item => {
@@ -77,7 +75,6 @@ export class PluginSelectorComponent extends Container {
 		};
 
 		this.addChild(this.#selectList);
-		this.addChild(new DynamicBorder());
 	}
 
 	getSelectList(): SelectList {

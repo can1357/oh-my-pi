@@ -14,4 +14,27 @@ describe("RpcClient.start", () => {
 
 		await expect(client.start()).rejects.toThrow(/Unknown provider.*__missing_provider__/);
 	});
+	test("launcher builder receives the complete agent argv", async () => {
+		let received: string[] | undefined;
+		using client = new RpcClient({
+			command: args => {
+				received = args;
+				return ["/usr/bin/false"];
+			},
+			provider: "openrouter",
+			model: "example/model",
+			args: ["--no-session"],
+		});
+
+		await expect(client.start()).rejects.toThrow(/exited with code 1/);
+		expect(received).toEqual([
+			"--mode",
+			"rpc",
+			"--provider",
+			"openrouter",
+			"--model",
+			"example/model",
+			"--no-session",
+		]);
+	});
 });

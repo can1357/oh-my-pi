@@ -137,6 +137,8 @@ function mergeDiagnostics(
 	let hasResults = false;
 	let hasFormatter = false;
 	let formatted = false;
+	let hasFailed = false;
+	let hasUnsupported = false;
 
 	for (const result of results) {
 		if (!result) continue;
@@ -156,6 +158,10 @@ function mergeDiagnostics(
 			hasFormatter = true;
 			if (result.formatter === FileFormatResult.FORMATTED) {
 				formatted = true;
+			} else if (result.formatter === FileFormatResult.FAILED) {
+				hasFailed = true;
+			} else if (result.formatter === FileFormatResult.UNSUPPORTED) {
+				hasUnsupported = true;
 			}
 		}
 	}
@@ -173,7 +179,16 @@ function mergeDiagnostics(
 		errored = summaryInfo.errored;
 		limitedMessages = limitDiagnosticMessages(messages);
 	}
-	const formatter = hasFormatter ? (formatted ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED) : undefined;
+	// Priority: FAILED > FORMATTED > UNCHANGED > UNSUPPORTED
+	const formatter = hasFormatter
+		? hasFailed
+			? FileFormatResult.FAILED
+			: formatted
+				? FileFormatResult.FORMATTED
+				: hasUnsupported && !formatted
+					? FileFormatResult.UNSUPPORTED
+					: FileFormatResult.UNCHANGED
+		: undefined;
 
 	return {
 		server: servers.size > 0 ? Array.from(servers).join(", ") : undefined,
@@ -360,9 +375,15 @@ async function runLspWritethrough(
 					formatContent(dst, content, cwd, customLinterServers, operationSignal),
 					minVersionsPromise,
 				]);
-				finalContent = formattedContent;
+				finalContent = formattedContent.content;
 				minVersions = capturedVersions;
-				formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				if (formattedContent.failed) {
+					formatter = FileFormatResult.FAILED;
+				} else if (formattedContent.unsupported) {
+					formatter = FileFormatResult.UNSUPPORTED;
+				} else {
+					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				}
 				if (!contentAlreadyWritten || finalContent !== content) await writeContent(finalContent);
 				await notifyWriteCommitted(operationSignal);
 				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
@@ -372,8 +393,15 @@ async function runLspWritethrough(
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
-					finalContent = await formatContent(dst, content, cwd, lspServers, operationSignal);
-					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+					const formatted = await formatContent(dst, content, cwd, lspServers, operationSignal);
+					finalContent = formatted.content;
+					if (formatted.failed) {
+						formatter = FileFormatResult.FAILED;
+					} else if (formatted.unsupported) {
+						formatter = FileFormatResult.UNSUPPORTED;
+					} else {
+						formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+					}
 				}
 
 				// 3. If formatted, sync formatted content to LSP servers

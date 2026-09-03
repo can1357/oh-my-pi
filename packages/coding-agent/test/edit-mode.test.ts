@@ -53,12 +53,14 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "xiaomi/MiMo-V2.5-Pro" }))).toBe("replace");
 	});
 
-	test("falls back from hashline to replace for DeepSeek V4 Flash models", () => {
+	test("falls back from hashline to replace for DeepSeek models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
 		expect(resolveEditMode(createSession({ activeModel: "tensormesh/deepseek-ai/DeepSeek-V4-Flash" }))).toBe(
 			"replace",
 		);
+		expect(resolveEditMode(createSession({ activeModel: "deepseek/deepseek-chat" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "deepseek/deepseek-reasoner" }))).toBe("replace");
 	});
 
 	test("falls back from hashline to replace for Step 3.7 Flash models", () => {

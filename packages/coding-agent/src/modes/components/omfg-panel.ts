@@ -1,7 +1,7 @@
-import { type Component, Container, Markdown, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { type Component, Markdown, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "../../tools/render-utils";
 import { getMarkdownTheme, theme } from "../theme/theme";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 export type OmfgPanelState =
 	| "generating"
@@ -18,8 +18,7 @@ interface OmfgPanelComponentOptions {
 	tui: TUI;
 }
 
-export class OmfgPanelComponent extends Container {
-	#complaint: string;
+export class OmfgPanelComponent extends OverlayPanel {
 	#tui: TUI;
 	#state: OmfgPanelState = "generating";
 	#status = "Generating TTSR rule…";
@@ -29,8 +28,7 @@ export class OmfgPanelComponent extends Container {
 	#closed = false;
 
 	constructor(options: OmfgPanelComponentOptions) {
-		super();
-		this.#complaint = options.complaint;
+		super(`/omfg ${replaceTabs(options.complaint)}`);
 		this.#tui = options.tui;
 		this.#rebuild();
 	}
@@ -94,16 +92,12 @@ export class OmfgPanelComponent extends Container {
 
 	#rebuild(): void {
 		this.clear();
-		this.addChild(new DynamicBorder(str => theme.fg("dim", str)));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("accent", replaceTabs(`/omfg ${this.#complaint}`)), 1, 0));
-		this.addChild(new Text(theme.fg("muted", replaceTabs(this.#status)), 1, 0));
+		this.addChild(new Text(theme.fg("muted", replaceTabs(this.#status)), 0, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(this.#contentComponent());
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(this.#footerLine(), 1, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder(str => theme.fg("dim", str)));
+		this.addChild(new Text(this.#footerLine(), 0, 0));
 		this.#tui.requestRender();
 	}
 
@@ -130,12 +124,12 @@ export class OmfgPanelComponent extends Container {
 
 	#contentComponent(): Component {
 		if (this.#state === "error") {
-			return new Text(theme.fg("error", replaceTabs(this.#errorMessage ?? "Unknown error")), 1, 0);
+			return new Text(theme.fg("error", replaceTabs(this.#errorMessage ?? "Unknown error")), 0, 0);
 		}
 		const text = replaceTabs(this.#preview).trim();
 		if (!text) {
-			return new Text(theme.fg("dim", `${theme.status.pending} Waiting for candidate rule…`), 1, 0);
+			return new Text(theme.fg("dim", `${theme.status.pending} Waiting for candidate rule…`), 0, 0);
 		}
-		return new Markdown(text, 1, 0, getMarkdownTheme());
+		return new Markdown(text, 0, 0, getMarkdownTheme());
 	}
 }

@@ -16,7 +16,7 @@ import type {
 	TextContent,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
-import type { KeyId } from "@oh-my-pi/pi-tui";
+import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
@@ -37,6 +37,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 import { resolvePath, withHostGuard } from "../utils";
 import type {
 	AssistantThinkingRenderer,
+	ComposerShapeDefinition,
 	Extension,
 	ExtensionAPI,
 	ExtensionContext,
@@ -44,6 +45,7 @@ import type {
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
+	PreparedExtension,
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
@@ -235,6 +237,20 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.assistantThinkingRenderers.push(renderer);
 	}
 
+	registerComposerShape(definition: ComposerShapeDefinition): void {
+		const id = definition.style.id;
+		if (id.length === 0 || id !== id.trim()) {
+			throw new TypeError("Composer shape id must be a non-empty trimmed string");
+		}
+		if (definition.label.trim().length === 0) {
+			throw new TypeError(`Composer shape "${id}" must have a label`);
+		}
+		if (isBuiltinComposerStyle(id)) {
+			throw new Error(`Cannot replace built-in composer shape "${id}"`);
+		}
+		this.extension.composerShapes.set(id, definition);
+	}
+
 	getFlag(name: string): boolean | string | undefined {
 		if (!this.extension.flags.has(name)) return undefined;
 		return this.runtime.flagValues.get(name);
@@ -242,14 +258,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 	): void {
 		this.runtime.sendMessage(message, options);
 	}
 
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp" | "aside" },
 	): void {
 		this.runtime.sendUserMessage(content, options);
 	}
@@ -332,6 +348,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
+		composerShapes: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
@@ -362,13 +379,7 @@ async function runExtensionFactory(
 	}
 }
 
-interface ImportedExtensionModule {
-	factory: ExtensionFactory | null;
-	resolvedPath: string;
-	error: string | null;
-}
-
-async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
+async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
@@ -376,22 +387,23 @@ async function importExtensionModule(extensionPath: string, cwd: string): Promis
 
 		if (typeof factory !== "function") {
 			return {
+				path: extensionPath,
 				factory: null,
 				resolvedPath,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
 			};
 		}
 
-		return { factory, resolvedPath, error: null };
+		return { path: extensionPath, factory, resolvedPath, error: null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
+		return { path: extensionPath, factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
 	}
 }
 
 async function bindExtension(
 	extensionPath: string,
-	imported: ImportedExtensionModule,
+	imported: PreparedExtension,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
@@ -437,19 +449,26 @@ export async function loadExtensionFromFactory(
  * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
 export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
+	return bindPreparedExtensions(preparedExtensions, cwd, eventBus);
+}
+
+/** Bind previously imported extension factories to a fresh session runtime. */
+export async function bindPreparedExtensions(
+	preparedExtensions: readonly PreparedExtension[],
+	cwd: string,
+	eventBus?: EventBus,
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
 
-	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
-
-	for (let i = 0; i < paths.length; i++) {
-		const extPath = paths[i]!;
-		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime);
+	for (const prepared of preparedExtensions) {
+		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime);
 
 		if (error) {
-			errors.push({ path: extPath, error });
+			errors.push({ path: prepared.path, error });
 			continue;
 		}
 
@@ -462,6 +481,7 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 		extensions,
 		errors,
 		runtime,
+		preparedExtensions: [...preparedExtensions],
 	};
 }
 
@@ -614,12 +634,9 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
  * `.omp`/`.pi` extension capabilities, JS/TS hook factories, the
  * installed-plugin tree, and any configured paths.
  *
- * Subagents reuse the parent's collected paths via the SDK's
- * `preloadedExtensionPaths` option, then call {@link loadExtensions} themselves
- * so each session rebuilds Extension instances bound to its OWN
- * `ExtensionAPI` (cwd, eventBus, runtime). Forwarding the parent's
- * `LoadExtensionsResult` directly would reuse handlers/tools/commands that
- * closed over the parent's `cwd` and event bus.
+ * The root session imports these paths once and forwards prepared factories to
+ * subagents. Each child rebinds fresh Extension instances to its OWN
+ * ExtensionAPI (cwd, eventBus, runtime) without re-evaluating the module graph.
  */
 export interface DiscoverExtensionPathOptions {
 	/** Include ambient native extensions, hooks, and installed plugins. */

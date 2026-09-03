@@ -36,12 +36,14 @@ import type {
 	Static,
 	TextContent,
 	TSchema,
+	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	Component,
+	ComposerStyle,
 	EditorTheme,
 	KeyId,
 	OverlayHandle,
@@ -368,6 +370,16 @@ export interface ExtensionUIContext {
 	setToolsExpanded(expanded: boolean): void;
 }
 
+/** Visual composer style and selector copy registered by an extension. */
+export interface ComposerShapeDefinition {
+	/** User-facing name shown in composer-shape selectors. */
+	label: string;
+	/** Optional detail shown under the selector label. */
+	description?: string;
+	/** Renderer contract; its id becomes the persisted `composer.shape` value. */
+	style: ComposerStyle;
+}
+
 // ============================================================================
 // Extension Context
 // ============================================================================
@@ -384,9 +396,9 @@ export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
-	 * Force a one-off compaction mode for this invocation, overriding the
-	 * configured `compaction.strategy` / `remoteEnabled` (the `/compact`
-	 * subcommands: `soft` | `remote` | `snapcompact`). Omitted = configured behavior.
+	 * Force a one-off compaction mode for this invocation, replacing the
+	 * configured `compaction.methodOrder` (`/compact soft`, `remote`, or
+	 * `snapcompact`). Omitted = configured preference order.
 	 */
 	mode?: CompactMode;
 	/**
@@ -510,6 +522,21 @@ export interface ExtensionContext {
 		params: Record<string, unknown>,
 		options?: { signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<TDetails> },
 	): Promise<AgentToolResult<TDetails>>;
+
+	/**
+	 * Whether project-local inputs for the current working directory (extensions, settings,
+	 * skills, resources) are trusted. Upstream `@earendil-works/pi-coding-agent` (>=0.79) asks the
+	 * user once per directory before loading project-local inputs and exposes the saved decision
+	 * here; extensions written against that API (e.g. Plannotator) feature-detect this method to
+	 * decide whether project-local config is safe to load, and warn when it is absent.
+	 *
+	 * OMP has no equivalent per-directory trust gate: `.omp/extensions`, `.omp/config.yml`, and
+	 * other project-local inputs are already discovered and loaded unconditionally (see
+	 * `docs/extension-loading.md`). This method exists for compatibility with that upstream surface
+	 * and always returns `true`, truthfully reflecting that OMP already trusts project-local inputs
+	 * by default -- it does not narrow or widen OMP's own security model.
+	 */
+	isProjectTrusted(): boolean;
 }
 
 /**
@@ -571,6 +598,16 @@ export interface ToolSessionEvent {
 	previousSessionFile: string | undefined;
 }
 
+/** Shell invocation details supplied to a registered tool's environment hook. */
+export interface ToolShellEnvironmentContext {
+	command: string;
+	cwd: string;
+	env: Record<string, string | undefined>;
+}
+
+/** Supplies environment values for a user-initiated shell invocation. */
+export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
+
 /**
  * Tool definition for registerTool().
  */
@@ -602,6 +639,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** Optional environment hook applied when the interactive user shell invokes this tool's shell surface. */
+	shellEnv?: ToolShellEnvironmentHook;
+	/** Authoritative originating file for a discovered custom-tool module. */
+	sourcePath?: string;
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,
@@ -1363,6 +1404,14 @@ export interface ExtensionAPI {
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
+	/**
+	 * Register a composer shape for the interactive editor.
+	 *
+	 * Registration happens during extension load. Built-in ids cannot be
+	 * replaced; when extensions reuse an id, the later extension wins.
+	 */
+	registerComposerShape(definition: ComposerShapeDefinition): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -1373,16 +1422,22 @@ export interface ExtensionAPI {
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
+	 *
+	 * `deliverAs: "aside"` injects the message at the next agent step boundary without interrupting
+	 * the in-flight tool batch; when the session is idle it starts a turn regardless of `triggerTurn`
+	 * (plan mode folds it into context instead).
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 	): void;
 
-	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set. */
+	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
+	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
+	 *  batch while streaming; idle still starts a turn. */
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
+		options?: { deliverAs?: "steer" | "followUp" | "aside" },
 	): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -1501,6 +1556,8 @@ export interface ProviderConfig {
 	authHeader?: boolean;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
+	/** Optional normalized usage fetcher used by AuthStorage for this provider. */
+	usage?: UsageProvider;
 	/** OAuth provider for /login support. */
 	oauth?: {
 		/** Display name in login UI. */
@@ -1518,7 +1575,8 @@ export interface ProviderConfig {
 	 * Async factory that fetches the live model list from the provider endpoint.
 	 * Runs through the same SQLite model-cache as built-in providers (keyed by
 	 * provider name, default 24 h TTL). Receives the resolved API key (undefined
-	 * when unauthenticated). Mutually exclusive with `models`.
+	 * when unauthenticated). When combined with `models`, the static models remain as fallbacks
+	 * alongside the live catalog.
 	 */
 	fetchDynamicModels?: (apiKey: string | undefined) => Promise<readonly ProviderModelConfig[]>;
 }
@@ -1545,6 +1603,8 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
+	/** Whether Codex requests should prefer WebSocket transport. */
+	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */
@@ -1589,13 +1649,17 @@ export type SendMessageHandler = <T = unknown>(
 	 * `deliverAs: "nextTurn"` queues hidden custom context for the next turn.
 	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
 	 * an internal continuation without surfacing the message in the editable pending queue.
+	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
+	 * tool batch; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 ) => void;
 
+/** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
+ *  batch while streaming; idle still starts a turn. */
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp" },
+	options?: { deliverAs?: "steer" | "followUp" | "aside" },
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
@@ -1693,9 +1757,22 @@ export interface Extension {
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
+	composerShapes: Map<string, ComposerShapeDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+}
+
+/**
+ * Imported extension factory detached from any session runtime. The same
+ * prepared module may be rebound to multiple session-scoped ExtensionAPI
+ * instances without evaluating its module graph again.
+ */
+export interface PreparedExtension {
+	path: string;
+	resolvedPath: string;
+	factory: ExtensionFactory | null;
+	error: string | null;
 }
 
 /** Result of loading extensions. */
@@ -1703,6 +1780,8 @@ export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	runtime: ExtensionRuntime;
+	/** Session-independent imported factories safe to rebind in child sessions. */
+	preparedExtensions?: PreparedExtension[];
 }
 
 // ============================================================================

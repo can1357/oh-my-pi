@@ -89,6 +89,49 @@ function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools:
 	return lines;
 }
 
+const CUSTOM_TYPE_ACRONYMS: Readonly<Record<string, string>> = {
+	acp: "ACP",
+	irc: "IRC",
+	lsp: "LSP",
+	mcp: "MCP",
+	rpc: "RPC",
+	ttsr: "TTSR",
+	tui: "TUI",
+	xdev: "XDev",
+};
+
+function systemNoticeTitle(customType: string): string {
+	const words = customType.split(/[^A-Za-z0-9]+/).filter(Boolean);
+	if (words.at(-1)?.toLowerCase() === "notice") words.pop();
+	const label = words
+		.map(word => CUSTOM_TYPE_ACRONYMS[word.toLowerCase()] ?? `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`)
+		.join(" ");
+	return label ? `System Notice: ${label}` : "System Notice";
+}
+
+function customMessageText(message: CustomMessage | HookMessage): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content.map(content => (content.type === "text" ? content.text : "[Image]")).join("\n");
+}
+
+function appendCustomMessage(lines: string[], message: CustomMessage | HookMessage): void {
+	const content = customMessageText(message);
+	if (!/^<system-notice(?:\s|>)/.test(content.trimStart())) {
+		lines.push(`## ${message.customType}\n`);
+		lines.push(content);
+		lines.push("\n");
+		return;
+	}
+
+	const longestBacktickRun = content.match(/`+/g)?.reduce((longest, run) => Math.max(longest, run.length), 0) ?? 0;
+	const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+	lines.push(`## ${systemNoticeTitle(message.customType)}\n`);
+	lines.push(`${fence}xml`);
+	lines.push(content);
+	lines.push(fence);
+	lines.push("\n");
+}
+
 /** Append the legacy per-message markdown-heading transcript (the pre-16.x `/dump` body). */
 function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessage[]): void {
 	for (const msg of messages) {
@@ -167,17 +210,7 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
 				lines.push("\n");
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {
-			const customMsg = msg as CustomMessage | HookMessage;
-			lines.push(`## ${customMsg.customType}\n`);
-			if (typeof customMsg.content === "string") {
-				lines.push(customMsg.content);
-			} else {
-				for (const c of customMsg.content) {
-					if (c.type === "text") lines.push(c.text);
-					else if (c.type === "image") lines.push("[Image]");
-				}
-			}
-			lines.push("\n");
+			appendCustomMessage(lines, msg as CustomMessage | HookMessage);
 		} else if (msg.role === "branchSummary") {
 			const branchMsg = msg as BranchSummaryMessage;
 			lines.push("## Branch Summary\n");

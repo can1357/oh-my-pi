@@ -1,23 +1,18 @@
 /**
- * Bounded retries for an empty assistant completion.
+ * Replay-safe retries for provider streams.
  *
- * Some providers — and especially flaky OpenAI-/Anthropic-compatible gateways —
- * intermittently return a benign terminal stop carrying no content and no usage
- * (e.g. a single OpenAI `delta: {}` + `finish_reason: "stop"` chunk). Delivered
- * as-is the agent loop has nothing to act on and silently halts mid-task, so the
- * request must be retried instead of surfaced.
+ * A provider attempt can be discarded only until meaningful assistant output is
+ * emitted. Pre-output markers are buffered so transient transport failures and
+ * benign empty completions can re-issue a fresh request without duplicating
+ * content; the first text, thinking, image, or tool event commits the attempt
+ * and restores live streaming.
  *
- * This wraps a single-attempt provider stream and re-invokes it (a fresh request
- * with its own message state) when an attempt produces no meaningful content.
- * Only a stream that streamed nothing meaningful is retried: the moment any
- * text/thinking/tool delta is forwarded the attempt is committed, so live
- * streaming (including thinking) is never delayed, retried, or duplicated.
- *
- * Mirrors the Gemini empty-response policy in `google-shared` (which keeps its
- * own integrated loop) and is shared by the OpenAI-completions and
- * Anthropic-messages providers.
+ * Empty-completion retries remain opt-in because a normal empty stop can be a
+ * valid provider result. Transient-error retries use the shared provider error
+ * classifier and are separately bounded by the caller's policy.
  */
 import { scheduler } from "node:timers/promises";
+import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 
@@ -60,28 +55,50 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 	}
 }
 
-interface EmptyCompletionRetryOptions {
+interface StreamRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
 }
 
+/** Controls which replay-safe provider results may issue a fresh request. */
+export interface ReplaySafeStreamRetryPolicy {
+	/** Retry benign terminal stops that contain no visible output. */
+	retryEmptyCompletion?: boolean;
+	/** Retry transient provider errors before output is committed. */
+	retryProviderErrors?: boolean;
+	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
+	maxProviderErrorRetries?: number;
+}
+
+class FinalizedProviderStreamError extends Error {
+	readonly status?: number;
+
+	constructor(message: string, status: number | undefined) {
+		super(message);
+		this.name = "FinalizedProviderStreamError";
+		this.status = status;
+	}
+}
+
 /**
- * Wrap a single-attempt provider stream with bounded empty-completion retries.
- * `attempt` MUST create a fresh request (and its own output message) on each
- * call so a retry never inherits stale metadata from an empty attempt.
+ * Re-issues a fresh provider request only while the current attempt remains
+ * replay-safe. Buffered pre-output events from discarded attempts never reach
+ * consumers.
  */
-export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOptions>(
+export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	model: M,
 	context: Context,
 	options: O | undefined,
 	attempt: (model: M, context: Context, options?: O) => AssistantMessageEventStream,
+	policy: ReplaySafeStreamRetryPolicy,
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
 	void (async () => {
-		for (let emptyAttempt = 0; ; emptyAttempt++) {
-			const inner = attempt(model, context, options);
+		let emptyRetries = 0;
+		let providerErrorRetries = 0;
+		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
 			let committed = options?.acceptEmptyResponse === true;
 			let terminal: AssistantMessageEvent | undefined;
@@ -89,14 +106,17 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 				for (const event of buffered) outer.push(event);
 				buffered.length = 0;
 			};
+			let inner: AssistantMessageEventStream;
 			try {
+				// The attempt factory can throw synchronously (e.g. a config error
+				// raised before it creates its stream); surface it on the outer stream
+				// rather than leaking an unhandled rejection that never settles.
+				inner = attempt(model, context, options);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;
 						break;
 					}
-					// Buffer pre-content events (start/*_start) so an empty attempt can
-					// be discarded; commit the moment real content streams.
 					if (!committed && !isMeaningfulCompletionEvent(event)) {
 						buffered.push(event);
 						continue;
@@ -112,29 +132,43 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 				return;
 			}
 
-			// Retry only a genuinely degenerate completion: a normal stop that
-			// produced no visible content and reported no generated content tokens.
-			// Some providers count the terminal EOS as one output token, so a
-			// one-token invisible stop is still the same empty-completion failure.
-			const message = terminal?.type === "done" ? terminal.message : undefined;
-			const isRetryableEmpty =
+			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
+			const retryEmpty =
+				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
-				message !== undefined &&
-				message.stopReason === "stop" &&
-				message.stopDetails?.type !== "pause_turn" &&
-				!message.errorMessage &&
-				(message.usage?.output ?? 0) <= 1 &&
-				!hasVisibleAssistantContent(message);
+				completedMessage !== undefined &&
+				completedMessage.stopReason === "stop" &&
+				completedMessage.stopDetails?.type !== "pause_turn" &&
+				!completedMessage.errorMessage &&
+				(completedMessage.usage?.output ?? 0) <= 1 &&
+				!hasVisibleAssistantContent(completedMessage) &&
+				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
+			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
+			const retryProviderError =
+				policy.retryProviderErrors === true &&
+				!committed &&
+				failedMessage?.stopReason === "error" &&
+				failedMessage.errorMessage !== undefined &&
+				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
+				AIError.isProviderRetryableError(
+					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
+				);
 
-			if (isRetryableEmpty && emptyAttempt < MAX_EMPTY_COMPLETION_RETRIES && !signal?.aborted) {
-				const delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyAttempt;
+			let delayMs: number | undefined;
+			if (retryEmpty) {
+				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
+				emptyRetries++;
+			} else if (retryProviderError) {
+				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
+				providerErrorRetries++;
+			}
+
+			if (delayMs !== undefined && !signal?.aborted) {
 				try {
 					if (options?.providerRetryWait) await options.providerRetryWait(delayMs, signal);
 					else await scheduler.wait(delayMs, { signal });
 				} catch (waitError) {
-					// Aborted during backoff: deliver the empty result rather than hang.
-					// Any other wait failure is a real error and must surface.
 					flush();
 					if (signal?.aborted) {
 						if (terminal) outer.push(terminal);
@@ -143,7 +177,6 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 					}
 					return;
 				}
-				// Discard the buffered `start` from this empty attempt and retry.
 				continue;
 			}
 

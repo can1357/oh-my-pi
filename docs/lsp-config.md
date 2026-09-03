@@ -219,7 +219,8 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `clangd`                      | C, C++, ObjC                  | `clangd`                          |
 | `zls`                         | Zig                           | `zls`                             |
 | `gopls`                       | Go                            | `gopls`                           |
-| `typescript-language-server`  | TypeScript, JavaScript        | `typescript-language-server`      |
+| `typescript-language-server`  | TypeScript, JavaScript (≤ 6)  | `typescript-language-server`      |
+| `typescript-native`           | TypeScript, JavaScript (7+)   | `tsc --lsp --stdio`               |
 | `denols`                      | TypeScript, JavaScript (Deno) | `deno`                            |
 | `biome`                       | TS/JS/JSON (linter)           | `biome`                           |
 | `eslint`                      | TS/JS/Vue/Svelte (linter)     | `vscode-eslint-language-server`   |
@@ -233,6 +234,7 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `pyright`                     | Python                        | `pyright-langserver`              |
 | `basedpyright`                | Python                        | `basedpyright-langserver`         |
 | `pylsp`                       | Python                        | `pylsp`                           |
+| `ty`                          | Python                        | `ty`                              |
 | `ruff`                        | Python (linter)               | `ruff`                            |
 | `jdtls`                       | Java                          | `jdtls`                           |
 | `kotlin-lsp`                  | Kotlin                        | `kotlin-lsp`                      |
@@ -268,3 +270,5 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `sourcekit-lsp`               | Swift                         | `sourcekit-lsp`                   |
 | `swiftlint`                   | Swift (linter)                | `swiftlint`                       |
 | `tlaplus`                     | TLA+                          | `tlapm_lsp`                       |
+
+Only one TypeScript server is kept per project: when the resolved `tsc` belongs to a TypeScript install without `lib/tsserver.js` (TypeScript 7+), `typescript-native` wins and `typescript-language-server` is dropped, since it cannot drive that install; otherwise `typescript-native` is dropped because older `tsc` rejects `--lsp`.

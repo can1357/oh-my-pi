@@ -1,7 +1,6 @@
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { disposeJuliaKernelSessionsByOwner } from "../eval/jl/executor";
 import { disposeVmContextsByOwner } from "../eval/js/context-manager";
 import { namespaceSessionId as namespacePythonSessionId } from "../eval/py";
 import {
@@ -9,7 +8,6 @@ import {
 	executePython as executePythonCommand,
 	type PythonResult,
 } from "../eval/py/executor";
-import { disposeRubyKernelSessionsByOwner } from "../eval/rb/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { outputMeta } from "../tools/output-meta";
@@ -180,8 +178,6 @@ export class EvalRunner {
 		}
 		const results = await Promise.allSettled([
 			disposeKernelSessionsByOwner(this.#kernelOwnerId),
-			disposeRubyKernelSessionsByOwner(this.#kernelOwnerId),
-			disposeJuliaKernelSessionsByOwner(this.#kernelOwnerId),
 			disposeVmContextsByOwner(this.#kernelOwnerId),
 		]);
 		const errors: unknown[] = [];

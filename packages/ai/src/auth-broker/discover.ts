@@ -42,8 +42,6 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 }
 
-const SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS = 500;
-
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
 export function getAuthBrokerTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
@@ -272,20 +270,23 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		}
 
 		let initialSnapshot = cachedSnapshot;
-		try {
-			const initialResult = await client.fetchSnapshot({
-				signal: cachedSnapshot ? AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS) : undefined,
-			});
+		if (!cachedSnapshot) {
+			// No usable cache: block on the broker so a misconfigured/unreachable
+			// broker or revoked token fails startup with an actionable error
+			// (issue #8096) instead of yielding an empty credential store.
+			const initialResult = await client.fetchSnapshot();
 			if (initialResult.status !== 200)
 				throw new AuthBrokerError("Auth broker returned no initial snapshot", {
 					status: initialResult.status,
 				});
 			initialSnapshot = initialResult.snapshot;
 			persist?.(initialSnapshot);
-		} catch (error) {
-			if (!cachedSnapshot || (error instanceof AuthBrokerError && [401, 403].includes(error.status ?? 0)))
-				throw error;
 		}
+		// Fresh cache: stale-while-revalidate. The store's constructor starts its
+		// background snapshot stream (or long-poll) immediately, which delivers
+		// the current generation within one RTT without blocking startup on a
+		// broker round trip. A token revoked since the cache was written surfaces
+		// through that background path exactly like a mid-session revocation.
 		const store = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,

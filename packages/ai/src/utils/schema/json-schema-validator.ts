@@ -21,11 +21,11 @@ export interface JsonSchemaValidationIssue {
 	expectedTypes?: string[];
 	keyword?: string;
 	/**
-	 * Marks issues that originate inside a failed `anyOf` / `oneOf` branch.
-	 * Consumers such as the tool-argument coercion layer use this to avoid
-	 * applying type repairs (e.g. singleton-array wrapping) that would be
-	 * authoritative outside of a combinator but are only one candidate
-	 * branch's expectation here.
+	 * Marks issues surfaced from a failed `anyOf` / `oneOf` branch (at any
+	 * depth). Such a diagnosis is one candidate branch's guess, not
+	 * authoritative: the tool-argument coercion layer keeps lossy repairs
+	 * (container stringification, unrecognized-key deletion, singleton-array
+	 * wrapping) off for these while still applying lossless ones.
 	 */
 	fromUnionBranch?: boolean;
 }
@@ -67,6 +67,35 @@ function getValueIdentity(ctx: ValidationContext, value: object): number {
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+/**
+ * Whether `value` matches every `const`/`enum` discriminator property the
+ * branch declares (with at least one such property present and matching).
+ * A uniquely tag-selected branch's validation issues are authoritative — the
+ * model named its intended variant — so the coercion layer may apply lossy
+ * repairs to them; without a unique tag, branch issues are guesses.
+ */
+function isTagSelectedBranch(branch: unknown, value: unknown): boolean {
+	if (!isJsonObject(branch) || !isJsonObject(value)) return false;
+	const props = branch.properties;
+	if (!isJsonObject(props)) return false;
+	let matched = false;
+	for (const key in props) {
+		const propSchema = props[key];
+		if (!isJsonObject(propSchema)) continue;
+		const hasConst = Object.hasOwn(propSchema, "const");
+		const enumValues = Array.isArray(propSchema.enum) ? propSchema.enum : undefined;
+		if (!hasConst && !enumValues) continue;
+		if (!Object.hasOwn(value, key)) return false;
+		const candidate = value[key];
+		if (hasConst) {
+			if (!areJsonValuesEqual(candidate, propSchema.const)) return false;
+		} else if (enumValues && !enumValues.some(entry => areJsonValuesEqual(entry, candidate))) {
+			return false;
+		}
+		matched = true;
+	}
+	return matched;
 }
 
 function pushIssue(
@@ -239,27 +268,35 @@ function validateSchemaNode(
 
 		let matches = 0;
 		let firstIssues: JsonSchemaValidationIssue[] | undefined;
+		let selectedIssues: JsonSchemaValidationIssue[] | undefined;
+		let selectedCount = 0;
 		for (const branch of branches) {
 			const branchIssues: JsonSchemaValidationIssue[] = [];
 			if (validateSchemaNode(branch, value, path, ctx, branchIssues)) {
 				matches += 1;
-			} else if (!firstIssues) {
-				firstIssues = branchIssues;
+				continue;
+			}
+			if (!firstIssues) firstIssues = branchIssues;
+			if (isTagSelectedBranch(branch, value)) {
+				selectedCount += 1;
+				if (selectedCount === 1) selectedIssues = branchIssues;
 			}
 		}
 		const branchValid = keyword === "anyOf" ? matches > 0 : matches === 1;
 		if (!branchValid) {
-			if (matches === 0 && firstIssues && firstIssues.length > 0) {
-				// Only tag issues that sit at the combinator's own path as
-				// union-branch; deeper issues describe a specific field within
-				// the failed branch and should remain individually repairable.
-				const unionDepth = path.length;
+			if (matches === 0 && selectedCount === 1 && selectedIssues && selectedIssues.length > 0) {
+				// A const/enum discriminator uniquely identifies the intended
+				// variant, so its diagnosis is authoritative: surface untagged and
+				// keep every repair (including lossy ones) available.
+				issues.push(...selectedIssues);
+			} else if (matches === 0 && firstIssues && firstIssues.length > 0) {
+				// No variant matched and no tag picks one: everything reported is
+				// the first failing branch's guess — another variant may accept the
+				// value as-is. Surface all issues (deep ones remain individually
+				// repairable by lossless coercions) but mark their provenance so
+				// lossy repairs (stringify, key deletion, singleton wrap) stay off.
 				for (const branchIssue of firstIssues) {
-					if (branchIssue.path.length === unionDepth) {
-						issues.push({ ...branchIssue, fromUnionBranch: true });
-					} else {
-						issues.push(branchIssue);
-					}
+					issues.push(branchIssue.fromUnionBranch ? branchIssue : { ...branchIssue, fromUnionBranch: true });
 				}
 			} else {
 				pushIssue(

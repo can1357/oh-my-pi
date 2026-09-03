@@ -61,6 +61,7 @@ async function runBiome(
 	args: string[],
 	cwd: string,
 	resolvedCommand?: string,
+	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
 	const command = resolvedCommand ?? "biome";
 
@@ -70,13 +71,16 @@ async function runBiome(
 			stdout: "pipe",
 			stderr: "pipe",
 			windowsHide: true,
+			signal,
 		});
 
 		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 		const exitCode = await proc.exited;
+		signal?.throwIfAborted();
 
 		return { stdout, stderr, success: exitCode === 0 };
 	} catch (err) {
+		if (signal?.aborted) throw err;
 		return { stdout: "", stderr: String(err), success: false };
 	}
 }
@@ -125,9 +129,14 @@ export class BiomeClient implements LinterClient {
 		return content;
 	}
 
-	async lint(filePath: string): Promise<Diagnostic[]> {
+	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
 		// Run biome lint with JSON reporter
-		const result = await runBiome(["lint", "--reporter=json", filePath], this.cwd, this.config.resolvedCommand);
+		const result = await runBiome(
+			["lint", "--reporter=json", filePath],
+			this.cwd,
+			this.config.resolvedCommand,
+			signal,
+		);
 
 		// Biome exits non-zero when diagnostics are found, so only an empty
 		// stdout signals an actual run failure (missing binary, CLI error).

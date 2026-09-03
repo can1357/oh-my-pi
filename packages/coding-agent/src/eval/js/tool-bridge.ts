@@ -2,10 +2,19 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
-import { EVAL_AGENT_BRIDGE_NAME, runEvalAgent } from "../agent-bridge";
+import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
-import { EVAL_COMPLETION_BRIDGE_NAME, runEvalCompletion } from "../completion-bridge";
-import { EVAL_CONCURRENCY_BRIDGE_NAME, type EvalConcurrencyResult, runEvalConcurrency } from "../concurrency-bridge";
+import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
+import {
+	EVAL_CANCEL_BRIDGE_NAME,
+	type EvalHandleSnapshot,
+	EVAL_STATUS_BRIDGE_NAME,
+	EVAL_WAIT_BRIDGE_NAME,
+	runEvalCancel,
+	runEvalStatus,
+	runEvalWait,
+} from "../handle-bridge";
+import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { JsStatusEvent } from "./shared/types";
 
 export type { JsStatusEvent } from "./shared/types";
@@ -19,7 +28,12 @@ interface ToolBridgeOptions {
 type ToolValue =
 	| string
 	| EvalBudgetResult
-	| EvalConcurrencyResult
+	| EvalAgentHandleResult
+	| EvalCompletionHandleResult
+	| EvalHandleSnapshot
+	| EvalWorkpoolResult
+	| { items: EvalHandleSnapshot[] }
+	| { cancelled: boolean }
 	| {
 			text: string;
 			details?: unknown;
@@ -37,7 +51,7 @@ function toolResultHasError(result: AgentToolResult): boolean {
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
-	const tool = session.getToolByName?.(name);
+	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
 	if (!tool) {
 		throw new ToolError(`Unknown tool from js runtime: ${name}`);
 	}
@@ -117,14 +131,34 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_BUDGET_BRIDGE_NAME) {
 		return await runEvalBudget(args, options);
 	}
-	if (name === EVAL_CONCURRENCY_BRIDGE_NAME) {
-		return runEvalConcurrency(args, options);
+	if (name === EVAL_WAIT_BRIDGE_NAME) {
+		return await runEvalWait(args, options);
+	}
+	if (name === EVAL_STATUS_BRIDGE_NAME) {
+		return runEvalStatus(args, options);
+	}
+	if (name === EVAL_CANCEL_BRIDGE_NAME) {
+		return runEvalCancel(args, options);
+	}
+	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
+		return await runEvalWorkpool(args, options);
+	}
+	if (name === "checkpoint" || name === "rewind") {
+		// The session recognizes checkpoint/rewind only as direct toolResult
+		// messages; a bridged call would report success without taking effect.
+		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const tool = getTool(options.session, name);
 	const normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	try {
-		const result = await tool.execute(toolCallId, normalizedArgs, options.signal);
+		const result = await tool.execute(
+			toolCallId,
+			normalizedArgs,
+			options.signal,
+			undefined,
+			options.session.getToolContext?.(),
+		);
 		const textBlocks = result.content.filter(
 			(content): content is { type: "text"; text: string } =>
 				content.type === "text" && typeof content.text === "string",

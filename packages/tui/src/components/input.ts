@@ -51,6 +51,19 @@ export class Input implements Component, Focusable {
 	getValue(): string {
 		return this.#value;
 	}
+	/** Return bounded input content and cursor state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#value.slice(0, 120),
+			textLength: this.#value.length,
+			previewTruncated: this.#value.length > 120,
+			cursor: this.#cursor,
+			cursorLine: 0,
+			selection: null,
+			placeholderActive: false,
+			masked: this.mask,
+		};
+	}
 
 	setValue(value: string): void {
 		this.#value = value;

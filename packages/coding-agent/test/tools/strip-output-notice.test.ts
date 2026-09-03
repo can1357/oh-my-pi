@@ -8,7 +8,12 @@
  * string twice — once from the body content, once as the styled warning line.
  */
 import { describe, expect, it } from "bun:test";
-import { formatOutputNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import {
+	formatOutputNotice,
+	type OutputMeta,
+	outputMeta,
+	stripOutputNotice,
+} from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 const truncation: OutputMeta = {
 	truncation: {
@@ -108,5 +113,32 @@ describe("stripOutputNotice", () => {
 		// command literally printed it) must be preserved when not at the tail.
 		const body = `prefix${noticeText} middle suffix`;
 		expect(stripOutputNotice(body, truncation)).toBe(body);
+	});
+
+	it("formats single-line byte windows without impossible line counts", () => {
+		const meta = outputMeta()
+			.truncation(
+				{
+					content: "head\n[…100B elided…]\ntail",
+					truncated: true,
+					truncatedBy: "middle",
+					totalLines: 1,
+					totalBytes: 200,
+					outputLines: 3,
+					outputBytes: 100,
+					elidedBytes: 100,
+					elidedLines: 0,
+					headLines: 1,
+					tailLines: 1,
+					partialByteWindows: true,
+				},
+				{ direction: "middle" },
+			)
+			.get();
+
+		const notice = formatOutputNotice(meta);
+
+		expect(notice).toContain("Showing head and tail bytes of 1 line");
+		expect(notice).not.toContain("Showing 3 of 1 lines");
 	});
 });

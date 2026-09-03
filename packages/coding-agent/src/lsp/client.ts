@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { isEnoent, logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
@@ -24,7 +24,15 @@ import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./util
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
-const clientLocks = new Map<string, Promise<LspClient>>();
+interface PendingClient {
+	promise: Promise<LspClient>;
+	cwd: string;
+	config: ServerConfig;
+	token: symbol;
+}
+const clientLocks = new Map<string, PendingClient>();
+const invalidatedClientKeys = new Set<string>();
+const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
 
 /** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
@@ -558,7 +566,7 @@ async function reconcileExecutedChanges(
 	);
 
 	for (const activeClient of activeClients) {
-		for (const uri of [...activeClient.openFiles.keys()]) {
+		for (const uri of Array.from(activeClient.openFiles.keys())) {
 			let deleted = false;
 			for (const root of deletedRoots) {
 				if (uriIsWithin(uri, root)) {
@@ -823,8 +831,98 @@ const PROJECT_LOAD_TIMEOUT_MS = 15_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 const EXIT_TIMEOUT_MS = 1_000;
 
+/**
+ * Identity of a server process *and* its initialization: everything that makes
+ * two configs unsafe to share one client. `command` + `cwd` alone handed a
+ * config with different args/settings the client another config had spawned
+ * (#8382), and left a changed config resolving to the stale client after
+ * `reload *` (#8384). The command component mirrors the spawn site
+ * (`resolvedCommand ?? command`), so two configs naming the same binary
+ * differently still share, while the same name resolving to different binaries
+ * does not. JSON-encoded so no value can forge the separator.
+ */
 function clientKey(config: ServerConfig, cwd: string): string {
-	return `${config.command}:${cwd}`;
+	const spawnCommand = config.resolvedCommand ?? config.command;
+	const identity = stableStringifyJson([
+		config.args ?? [],
+		config.initOptions ?? null,
+		config.settings ?? null,
+		config.languageId ?? null,
+	]);
+	return `${spawnCommand}:${cwd}:${identity}`;
+}
+
+/**
+ * Shut down clients for `cwd` whose identity is absent from `configs`, and
+ * return the server commands torn down.
+ *
+ * `reload *` re-reads config from disk. Identity-aware keys make a changed
+ * server resolve to a fresh client, but the process spawned from the old
+ * config would stay registered and running — the idle checker that would
+ * eventually reap it is opt-in and off by default.
+ */
+export function shutdownStaleClients(
+	cwd: string,
+	configs: readonly ServerConfig[],
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const fresh = new Set(configs.map(config => clientKey(config, cwd)));
+	const resolvedCwd = path.resolve(cwd);
+	const previousBarrier = clientReloadBarriers.get(resolvedCwd);
+	const cleanup = (async (): Promise<string[]> => {
+		if (previousBarrier) {
+			try {
+				await untilAborted(signal, previousBarrier);
+			} catch {
+				throwIfAborted(signal);
+				// A later explicit reload retries teardown after an earlier one
+				// failed; ordinary client creation remains blocked in between.
+			}
+		}
+		for (const key of fresh) invalidatedClientKeys.delete(key);
+		// Tombstone stale identities before awaiting initialization. Existing
+		// callers keep sharing their in-flight promise; later callers cannot spawn
+		// another stale process while reload is blocked on teardown.
+		const stalePending = Array.from(clientLocks.entries()).filter(
+			([key, pending]) => path.resolve(pending.cwd) === resolvedCwd && !fresh.has(key),
+		);
+		for (const [key] of stalePending) invalidatedClientKeys.add(key);
+		for (const client of clients.values()) {
+			if (path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name)) {
+				invalidatedClientKeys.add(client.name);
+			}
+		}
+		await Promise.all(
+			stalePending.map(async ([, pending]) => {
+				try {
+					await untilAborted(signal, pending.promise);
+				} catch {
+					throwIfAborted(signal);
+				}
+			}),
+		);
+
+		const stale = Array.from(clients.values()).filter(
+			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
+		);
+		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
+		const failed = stale.filter((_client, index) => results[index] !== true);
+		if (failed.length > 0) {
+			throw new Error(
+				"Failed to stop LSP server(s) with superseded configuration: " +
+					failed.map(client => client.config.command).join(", "),
+			);
+		}
+		return stale.map(client => client.config.command);
+	})();
+	clientReloadBarriers.set(resolvedCwd, cleanup);
+	void cleanup.then(
+		() => {
+			if (clientReloadBarriers.get(resolvedCwd) === cleanup) clientReloadBarriers.delete(resolvedCwd);
+		},
+		() => {},
+	);
+	return cleanup;
 }
 
 /** Allow an explicit user reload to retry a matching initialization failure immediately. */
@@ -849,10 +947,9 @@ export async function getOrCreateClient(
 	signal?: AbortSignal,
 ): Promise<LspClient> {
 	const key = clientKey(config, cwd);
-
 	// Check if client already exists
 	const existingClient = clients.get(key);
-	if (existingClient) {
+	if (existingClient && !invalidatedClientKeys.has(key)) {
 		existingClient.lastActivity = Date.now();
 		return existingClient;
 	}
@@ -860,7 +957,31 @@ export async function getOrCreateClient(
 	// Check if another coroutine is already creating this client
 	const existingLock = clientLocks.get(key);
 	if (existingLock) {
-		return existingLock;
+		return existingLock.promise;
+	}
+	if (invalidatedClientKeys.has(key)) {
+		throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
+	}
+
+	// Do not start a fresh identity until superseded processes are confirmed stopped.
+	const reloadBarrier = clientReloadBarriers.get(path.resolve(cwd));
+	if (reloadBarrier) {
+		try {
+			await untilAborted(signal, reloadBarrier);
+		} catch (error) {
+			throwIfAborted(signal);
+			throw error;
+		}
+		const clientAfterReload = clients.get(key);
+		if (clientAfterReload && !invalidatedClientKeys.has(key)) {
+			clientAfterReload.lastActivity = Date.now();
+			return clientAfterReload;
+		}
+		const lockAfterReload = clientLocks.get(key);
+		if (lockAfterReload) return lockAfterReload.promise;
+		if (invalidatedClientKeys.has(key)) {
+			throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
+		}
 	}
 
 	// Fail fast on a recent deterministic init failure instead of re-spawning
@@ -874,6 +995,7 @@ export async function getOrCreateClient(
 	}
 
 	// Create new client with lock
+	const lockToken = Symbol();
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
@@ -932,7 +1054,7 @@ export async function getOrCreateClient(
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
 			if (clients.get(key) === client) clients.delete(key);
-			if (clientLocks.get(key) === clientPromise) clientLocks.delete(key);
+			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 
 			// Reject any pending requests — the server is gone, they will never complete.
@@ -995,6 +1117,9 @@ export async function getOrCreateClient(
 			// Publish only after init succeeds: pre-init clients are reachable
 			// solely through clientLocks, so concurrent callers (warmup vs first
 			// tool call) wait for init instead of using an unacknowledged client.
+			if (invalidatedClientKeys.has(key)) {
+				throw new Error(`LSP configuration was superseded during initialization: ${config.command}`);
+			}
 			clients.set(key, client);
 			initFailures.delete(key);
 			return client;
@@ -1013,11 +1138,11 @@ export async function getOrCreateClient(
 			}
 			throw err;
 		} finally {
-			clientLocks.delete(key);
+			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 		}
 	})();
 
-	clientLocks.set(key, clientPromise);
+	clientLocks.set(key, { promise: clientPromise, cwd, config, token: lockToken });
 	return clientPromise;
 }
 
@@ -1037,7 +1162,7 @@ export async function getActiveOrPendingClient(
 	const pending = clientLocks.get(clientKey(config, cwd));
 	if (!pending) return undefined;
 	try {
-		return await untilAborted(signal, pending);
+		return await untilAborted(signal, pending.promise);
 	} catch {
 		throwIfAborted(signal);
 		return undefined;
@@ -1385,7 +1510,9 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 	}
 
 	client.proc.kill();
-	return await waitForExit(client, EXIT_TIMEOUT_MS);
+	const exited = await waitForExit(client, EXIT_TIMEOUT_MS);
+	if (!exited && !clients.has(client.name)) clients.set(client.name, client);
+	return exited;
 }
 
 /**
@@ -1541,12 +1668,14 @@ export async function sendNotification(
  */
 export async function shutdownAll(): Promise<void> {
 	stopIdleChecker();
+	invalidatedClientKeys.clear();
+	clientReloadBarriers.clear();
 	const clientsToShutdown = Array.from(clients.values());
 	clients.clear();
 	// Mid-initialize clients live only in clientLocks (publication is deferred
 	// until init succeeds) — without this, their server processes outlive
 	// shutdown. Failed init promises already cleaned up after themselves.
-	const pendingClients = Array.from(clientLocks.values());
+	const pendingClients = Array.from(clientLocks.values(), pending => pending.promise);
 	clientLocks.clear();
 	const seen = new Set<LspClient>(clientsToShutdown);
 	await Promise.allSettled([

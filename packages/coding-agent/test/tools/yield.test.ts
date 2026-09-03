@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -6,8 +8,10 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
-import { arrayValuedLabels } from "../../src/task/yield-assembly";
+import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
+import { arrayValuedLabels, assembleYieldResult } from "../../src/task/yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -53,10 +57,116 @@ function makeCodexModel(): Model<"openai-codex-responses"> {
 }
 
 describe("YieldTool", () => {
+	it("accepts one workpool item per yield and completes on the final item", async () => {
+		let items: Array<{ id: string; index: number }> = [];
+		const tool = new YieldTool(createSession({ getWorkPoolYieldItems: () => items }));
+		expect(toRecord(tool.parameters).required).toEqual(["result"]);
+
+		items = [
+			{ id: "review#1", index: 1 },
+			{ id: "review#2", index: 2 },
+		];
+		expect(toRecord(tool.parameters).required).toEqual(["key"]);
+		expect(tool.description).toContain("ONE workpool item at a time");
+		const first = await tool.execute("pool-1", { key: 1, data: "one" });
+		expect(first.content).toEqual([{ type: "text", text: "Item 1 submitted. Remaining item(s): 2." }]);
+		expect(first.details).toMatchObject({
+			status: "success",
+			type: ["review#1"],
+			complete: undefined,
+		});
+		await expect(tool.execute("pool-duplicate", { key: 1, data: { outcome: "again" } })).rejects.toThrow(
+			"already submitted",
+		);
+
+		const second = await tool.execute("pool-2", { key: 2, data: { outcome: "two" } });
+		expect(second.content).toEqual([
+			{ type: "text", text: "Item 2 submitted. All workpool items are complete; ending this turn." },
+		]);
+		expect(second.details).toMatchObject({ status: "success", type: ["review#2"], complete: true });
+
+		items = [{ id: "next#1", index: 1 }];
+		const next = await tool.execute("pool-next", { key: 1, data: { outcome: "new batch" } });
+		expect(next.details).toMatchObject({ type: ["next#1"], complete: true });
+	});
+
+	it("assembles per-key workpool yields into the batch output schema", () => {
+		const items = [
+			{ id: "review#1", index: 1 },
+			{ id: "review#2", index: 2 },
+		];
+		const schema = buildWorkPoolOutputSchema(items);
+		const assembled = assembleYieldResult(
+			[
+				{ status: "success", type: ["review#1"], data: { outcome: "one" } },
+				{ status: "success", type: ["review#2"], data: { outcome: "two" }, complete: true },
+			],
+			undefined,
+			arrayValuedLabels(schema),
+		);
+		expect(assembled?.data).toEqual({
+			"review#1": { outcome: "one" },
+			"review#2": { outcome: "two" },
+		});
+		const validator = buildOutputValidator(schema).validator;
+		expect(validator?.validate(assembled?.data).success).toBe(true);
+	});
+
 	it("accepts success payload with data", async () => {
 		const tool = new YieldTool(createSession());
 		const result = await tool.execute("call-1", { result: { data: { ok: true } } } as never);
 		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
+	});
+
+	it("commits a terminal yield emitted before parent steering lands (#10645)", async () => {
+		// The parent's `hub send` arrives while the child is still streaming its
+		// yield call. The already-generated yield must execute and settle the
+		// child instead of being skipped for the queued steer.
+		const tool = new YieldTool(createSession());
+		const yieldCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-yield-steering",
+			name: "yield",
+			arguments: { result: { data: { report: "finished" } } },
+		};
+		const mock = createMockModel({
+			responses: [{ content: [yieldCall] }, { content: ["parent steering handled"] }],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			interruptMode: "immediate",
+		});
+		const events: AgentEvent[] = [];
+		let steeringSent = false;
+		const unsubscribe = agent.subscribe(event => {
+			events.push(event);
+			if (
+				!steeringSent &&
+				event.type === "message_update" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(content => content.type === "toolCall" && content.name === "yield")
+			) {
+				steeringSent = true;
+				agent.steer({
+					role: "user",
+					content: "Wrap up now with your findings.",
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+			}
+		});
+
+		await agent.prompt("start");
+		unsubscribe();
+
+		expect(steeringSent).toBe(true);
+		const yieldEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === yieldCall.id,
+		);
+		expect(yieldEnd?.isError).toBe(false);
+		expect(yieldEnd?.result.details).toEqual({ data: { report: "finished" }, status: "success", error: undefined });
 	});
 
 	it("accepts aborted payload with error only", async () => {
@@ -75,6 +185,137 @@ describe("YieldTool", () => {
 			type: "summary",
 			useLastTurn: true,
 		});
+	});
+	it("finalizes type:'result' with the result wrapper omitted entirely as a last-turn yield", async () => {
+		// Gemini-flash traces: the description invites omitting `data`, and weak
+		// callers omit the whole `result` wrapper with it. Must not bounce with
+		// a retryable format error.
+		const tool = new YieldTool(createSession());
+		const result = await tool.execute("call-wrapperless-last-turn", { type: "result" } as never);
+		expect(result.details).toEqual({
+			data: undefined,
+			status: "success",
+			error: undefined,
+			type: "result",
+			useLastTurn: true,
+		});
+	});
+	it("rejects a schema-bound last-turn finalize with no accumulated sections as retryable", async () => {
+		// Instruction-followed punt observed in Gemini traces: `{type:"result"}`
+		// with a declared output schema. Accepting it terminates the child and
+		// finalization then fails post-mortem with an uncorrectable
+		// schema_violation; the tool must bounce it in-band instead.
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string" } },
+					required: ["summary"],
+				},
+			}),
+		);
+		await expect(tool.execute("call-schema-punt", { type: "result" } as never)).rejects.toThrow(
+			/structured output matching the declared schema/,
+		);
+	});
+
+	it("accepts a data-less finalize after incremental sections even when schema-bound", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { findings: { type: "array", items: { type: "string" } } },
+					required: ["findings"],
+				},
+			}),
+		);
+		const section = await tool.execute("call-section", {
+			type: ["findings"],
+			result: { data: "one finding" },
+		} as never);
+		expect(section.details?.status).toBe("success");
+		const finalize = await tool.execute("call-finalize", { type: "result" } as never);
+		expect(finalize.details).toEqual({
+			data: undefined,
+			status: "success",
+			error: undefined,
+			type: "result",
+			useLastTurn: true,
+		});
+	});
+
+	it("salvages a top-level data payload missing the result wrapper", async () => {
+		const tool = new YieldTool(createSession());
+		const result = await tool.execute("call-unwrapped-data", { data: { ok: true } } as never);
+		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
+	});
+
+	it("salvages a top-level error missing the result wrapper", async () => {
+		const tool = new YieldTool(createSession());
+		const result = await tool.execute("call-unwrapped-error", { error: "blocked" } as never);
+		expect(result.details).toEqual({ data: undefined, status: "aborted", error: "blocked" });
+	});
+
+	it("parses a JSON-string result envelope losslessly", async () => {
+		const tool = new YieldTool(createSession());
+		const result = await tool.execute("call-string-envelope", {
+			result: '{"data":{"ok":true}}',
+		} as never);
+		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
+	});
+
+	it("parses JSON-string data when the schema rejects the string form", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { n: { type: "number" } },
+					required: ["n"],
+				},
+			}),
+		);
+		const result = await tool.execute("call-string-data", { result: { data: '{"n":4}' } } as never);
+		expect(result.details).toEqual({ data: { n: 4 }, status: "success", error: undefined });
+	});
+
+	it("arg validation serializes object payloads for string-typed output fields", () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string" } },
+					required: ["summary"],
+				},
+			}),
+		);
+		expect(
+			validateToolArguments(tool as never, {
+				type: "toolCall",
+				id: "call-dict-summary",
+				name: "yield",
+				arguments: { result: { data: { summary: { purge: 13, keep: 20 } } } },
+			}),
+		).toEqual({ result: { data: { summary: '{"purge":13,"keep":20}' } } });
+	});
+
+	it("arg validation passes conforming args through unmodified", () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string" } },
+					required: ["summary"],
+				},
+			}),
+		);
+		const args = { result: { data: { summary: "all good" } } };
+		const validated = validateToolArguments(tool as never, {
+			type: "toolCall",
+			id: "call-clean",
+			name: "yield",
+			arguments: args,
+		});
+		expect(validated).toEqual(args);
 	});
 
 	it("passes array-typed success through as an incremental result", async () => {

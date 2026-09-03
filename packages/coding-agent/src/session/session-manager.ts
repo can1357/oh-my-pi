@@ -9,7 +9,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import {
-	directoryExists,
+	directoryIsEnterable,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -21,6 +21,7 @@ import {
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -43,6 +44,7 @@ import {
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type ModelUsageEntry,
 	type NewSessionOptions,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
@@ -74,6 +76,7 @@ import {
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import { prepareEntryForPersistence } from "./session-persistence";
+import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
@@ -86,6 +89,7 @@ import {
 	normalizeSessionWorkspace,
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
+import { recordSessionTitle } from "./title-index";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -174,6 +178,7 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 }
 
 function entryUsage(entry: SessionEntry): Usage | undefined {
+	if (entry.type === "model_usage") return entry.usage;
 	if (entry.type !== "message") return undefined;
 	const message = entry.message;
 	if (message.role === "assistant") return message.usage;
@@ -193,6 +198,19 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
+}
+
+/**
+ * Zero the monetary attribution on one usage record in place, leaving token
+ * counts untouched. Cost, credit meters, and premium-request counts describe
+ * billing; forks that must not inherit spend (see {@link SessionManager.forkFrom}
+ * `resetInheritedCost`) drop them while keeping the tokens compaction relies on.
+ */
+function resetUsageCost(usage: Usage | undefined): void {
+	if (!usage) return;
+	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	usage.credits = undefined;
+	usage.premiumRequests = undefined;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -358,6 +376,7 @@ class SessionEntryIndex {
 export type ReadonlySessionManager = Pick<
 	SessionManager,
 	| "getCwd"
+	| "getRecordedCwd"
 	| "getSessionDir"
 	| "getSessionId"
 	| "getSessionFile"
@@ -392,6 +411,7 @@ interface SessionManagerStateSnapshot {
 	onDisk: boolean;
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
+	fallbackRuntimeOnly: boolean;
 	header: SessionHeader;
 	entries: SessionEntry[];
 }
@@ -458,6 +478,7 @@ export class SessionManager {
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
+	#fallbackRuntimeOnly = false;
 	#sessionDir: string;
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
@@ -540,7 +561,7 @@ export class SessionManager {
 
 	#suppressBreadcrumb = false;
 	/**
-	 * The last breadcrumb this manager wrote marked a lazy `/new` boundary whose
+	 * The last breadcrumb this manager wrote marked a lazy fresh session whose
 	 * JSONL is not yet on disk. Cleared (and the crumb re-stamped non-fresh) once
 	 * the session materializes, so a materialized-then-deleted session still falls
 	 * back to the most-recent session instead of being treated as a fresh crumb.
@@ -565,7 +586,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Re-stamp a fresh `/new` breadcrumb as non-fresh once the session has
+	 * Re-stamp a fresh-session breadcrumb as non-fresh once the session has
 	 * materialized on disk. A no-op unless the current breadcrumb is still fresh.
 	 */
 	#materializeBreadcrumb(): void {
@@ -1087,6 +1108,7 @@ export class SessionManager {
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
+		this.#reconcileSessionDirForFallback();
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -1252,7 +1274,7 @@ export class SessionManager {
 	}
 
 	#notifySessionNameListeners(): void {
-		for (const callback of [...this.#sessionNameChangedCallbacks]) {
+		for (const callback of Array.from(this.#sessionNameChangedCallbacks)) {
 			try {
 				callback();
 			} catch (err) {
@@ -1291,9 +1313,12 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
-			// Snapshot header + entries by reference: switch/reload replaces the
-			// active header/array wholesale, so rollback needs no deep clone.
-			header: this.#header,
+			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
+			// Entries are snapshotted by reference (switch/reload replaces the
+			// array wholesale). The header is cloned: moveTo mutates it in place
+			// (cwd, additionalDirectories), so a by-reference capture would let
+			// a rollback observe the move it is undoing.
+			header: structuredClone(this.#header),
 			entries: [...this.#entries],
 		};
 	}
@@ -1330,9 +1355,11 @@ export class SessionManager {
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
+		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
+
 		this.#titleSource = snapshot.titleSource;
 		this.#titleUpdatedAt = snapshot.titleUpdatedAt;
 		this.#hasTitleSlot = snapshot.hasTitleSlot;
@@ -1343,6 +1370,38 @@ export class SessionManager {
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 	}
 
+	/**
+	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
+	 * session and artifacts back into the captured bucket, then restore the
+	 * captured metadata (cwd, header, additionalDirectories). The captured
+	 * header is persisted after relocation so a fresh open of the source
+	 * session sees the pre-move metadata, including workspace roots the move
+	 * filtered out. Rollbacks must not re-enter forward-move hooks, so this
+	 * bypasses AgentSession entirely. If the rename-back itself fails, the
+	 * manager stays pointed at the actual moved file (restoring the snapshot
+	 * would split the transcript across a recreated source and the stranded
+	 * target) and the error names where the session file actually lives.
+	 */
+	async rollbackMove(snapshot: SessionManagerStateSnapshot): Promise<void> {
+		try {
+			const targetSessionDir = snapshot.sessionFile ? path.dirname(snapshot.sessionFile) : snapshot.sessionDir;
+			await this.moveTo(snapshot.cwd, targetSessionDir);
+		} catch (error) {
+			const movedFile = this.getSessionFile();
+			throw new Error(
+				`could not relocate the session back to ${snapshot.sessionDir} (${error instanceof Error ? error.message : String(error)}); the session file remains at ${movedFile}`,
+			);
+		}
+		this.restoreState(snapshot);
+		// The inverse moveTo already rewrote the source file with the
+		// target-filtered header. Persist the captured one so disk and memory
+		// agree after a fresh open.
+		if (this.#persist && this.#sessionFile) {
+			this.#forceFileCreation = true;
+			this.#rewriteRequired = true;
+			await this.#rewriteAtomically();
+		}
+	}
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
 		await this.#setSessionFile(sessionFile);
@@ -1354,10 +1413,16 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
+		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		if (loaded.invalidHeader) {
+			throw new Error(
+				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+			);
+		}
+
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
@@ -1374,17 +1439,27 @@ export class SessionManager {
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
-		// Adopt the loaded session's working directory. Sessions live in a dir
-		// keyed by their cwd, so resuming a session from another project must
-		// re-point cwd/sessionDir at that project — unless that project directory
-		// no longer exists on disk, in which case adopting it (and the process
-		// chdir interactive mode then performs) would fail with ENOENT. Keep the
-		// current cwd so the resumed session stays where the user already is.
+		// Adopt the loaded session's working directory only when it is verifiably
+		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
+		// session from another project must re-point cwd/sessionDir at that
+		// project — but a deleted OR permission-blocked directory (macOS TCC
+		// denial) must not be adopted: callers without a cwd-change callback
+		// (extension UI, RPC) would otherwise track a directory the process
+		// cannot enter. Keep the current cwd so the session stays where the
+		// user already is.
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryExists(headerCwd))) {
+		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
 			this.#cwd = headerCwd;
 			this.#sessionDir = path.dirname(resolvedSessionFile);
+			this.#fallbackRuntimeOnly = false;
 			this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
+		} else if (headerCwd && headerCwd !== path.resolve(this.#cwd)) {
+			// Header cwd not enterable: keep runtime cwd but mark fallback
+			// so workspace changes stay runtime-only until the transcript
+			// is relocated.
+			this.#fallbackRuntimeOnly = true;
+		} else {
+			this.#fallbackRuntimeOnly = false;
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
@@ -1400,10 +1475,17 @@ export class SessionManager {
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 	}
 
-	/** Start a new session. Drains and closes any existing writer first. */
+	/**
+	 * Start a new session and persist its header before returning.
+	 *
+	 * The durable empty boundary prevents a later process on another terminal
+	 * from selecting the previous conversation as the most recent session.
+	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
-		return this.#resetToNewSession(options);
+		const sessionFile = this.#resetToNewSession(options);
+		await this.ensureOnDisk();
+		return sessionFile;
 	}
 
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
@@ -1427,6 +1509,7 @@ export class SessionManager {
 		const parentSessionId = this.#sessionId;
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
+		this.#reconcileSessionDirForFallback();
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
@@ -1459,26 +1542,27 @@ export class SessionManager {
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
 	}
 
-	/**
-	 * Move the session to a new working directory: relocate the session file and
-	 * artifacts on disk, update internal references, and rewrite the header cwd.
-	 */
+	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
-		if (
-			resolvedCwd === path.resolve(this.#cwd) &&
-			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir))
-		) {
-			return;
-		}
-
 		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
 		const nextSessionDir =
 			resolvedTargetDir ??
 			(managedRoot
 				? computeDefaultSessionDir(resolvedCwd, this.#storage, managedRoot)
 				: computeDefaultSessionDir(resolvedCwd, this.#storage));
+		const expectedSessionFile = this.#sessionFile
+			? path.join(nextSessionDir, path.basename(this.#sessionFile))
+			: undefined;
+		if (
+			resolvedCwd === path.resolve(this.#cwd) &&
+			!this.#fallbackRuntimeOnly &&
+			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir)) &&
+			(!expectedSessionFile || path.resolve(this.#sessionFile!) === path.resolve(expectedSessionFile))
+		) {
+			return;
+		}
 
 		let sessionFileExisted = false;
 		// Track source+dest for concurrent completed appends during relocation
@@ -1569,10 +1653,14 @@ export class SessionManager {
 			this.#cwd = resolvedCwd;
 			this.#sessionDir = nextSessionDir;
 			this.#header.cwd = resolvedCwd;
-			// Re-filter additional roots: the new cwd may have been an additional root,
-			// or it may now contain/subsume one. Re-normalize to keep the invariant
-			// that cwd is never also listed as an additional directory.
-			if (this.#additionalDirectories.length > 0) {
+			// Clear only after the rename has landed. If the move threw,
+			// keep the flag so the next relocation retries.
+			this.#fallbackRuntimeOnly = false;
+			if (this.#additionalDirectories.length === 0) {
+				this.#header.additionalDirectories = undefined;
+			} else {
+				// Re-filter additional roots: the new cwd may have been an
+				// additional root, or it may now contain one.
 				this.#additionalDirectories = this.#additionalDirectories.filter(d => d !== resolvedCwd);
 				this.#header.additionalDirectories =
 					this.#additionalDirectories.length > 0 ? this.#additionalDirectories : undefined;
@@ -1841,6 +1929,46 @@ export class SessionManager {
 		return this.#cwd;
 	}
 
+	/** Recorded cwd from the session header (original project), may differ from runtime {@link getCwd} when fallback retained launch cwd. */
+	getRecordedCwd(): string | undefined {
+		return this.#header?.cwd;
+	}
+
+	setCwdWithoutRelocation(newCwd: string): void {
+		const resolvedCwd = path.resolve(newCwd);
+		if (resolvedCwd === path.resolve(this.#cwd)) {
+			this.#fallbackRuntimeOnly = true;
+			return;
+		}
+		this.#cwd = resolvedCwd;
+		this.#fallbackRuntimeOnly = true;
+		if (this.#sessionFile) {
+			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
+		}
+	}
+	adoptRecordedCwd(): void {
+		const recordedCwd = this.#header.cwd;
+		if (!recordedCwd) return;
+		this.#cwd = path.resolve(recordedCwd);
+		if (this.#sessionFile) this.#sessionDir = path.dirname(this.#sessionFile);
+		this.#fallbackRuntimeOnly = false;
+		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+	}
+
+	/**
+	 * Re-anchor the session bucket to the runtime cwd after a fallback.
+	 * The fallback flag keeps the transcript at its recorded path (stale
+	 * bucket) while runtime cwd is the launch dir; only a true relocation
+	 * should recompute sessionDir. Workspace-dir mutations must not clear
+	 * it early.
+	 */
+	#reconcileSessionDirForFallback(): void {
+		if (this.#fallbackRuntimeOnly) {
+			this.#sessionDir = computeDefaultSessionDir(this.#cwd, this.#storage);
+			this.#fallbackRuntimeOnly = false;
+		}
+	}
+
 	/** Additional workspace directories beyond cwd (multi-root), absolute and normalized. */
 	getAdditionalDirectories(): string[] {
 		return [...this.#additionalDirectories];
@@ -1871,6 +1999,11 @@ export class SessionManager {
 		}
 		if (this.#additionalDirectories.includes(resolved)) return null;
 		this.#additionalDirectories = [...this.#additionalDirectories, resolved];
+		// In fallback the transcript is still in the stale bucket; keep
+		// workspace edits runtime-only until relocation.
+		if (this.#fallbackRuntimeOnly) {
+			return resolved;
+		}
 		this.#header.additionalDirectories = this.#additionalDirectories;
 		await this.#persistWorkspaceDirectoriesChange();
 		return resolved;
@@ -1886,6 +2019,10 @@ export class SessionManager {
 		const idx = this.#additionalDirectories.findIndex(p => path.resolve(p) === resolved);
 		if (idx === -1) return null;
 		this.#additionalDirectories = this.#additionalDirectories.filter((_, i) => i !== idx);
+		// In fallback keep edits runtime-only until relocation.
+		if (this.#fallbackRuntimeOnly) {
+			return resolved;
+		}
 		if (this.#additionalDirectories.length === 0) {
 			this.#header.additionalDirectories = undefined;
 		} else {
@@ -1899,6 +2036,11 @@ export class SessionManager {
 	async setAdditionalDirectories(directories: string[]): Promise<void> {
 		const workspace = normalizeSessionWorkspace({ cwd: this.#cwd, directories });
 		const next = additionalWorkspaceDirectories(workspace);
+		// In fallback keep edits runtime-only until relocation.
+		if (this.#fallbackRuntimeOnly) {
+			this.#additionalDirectories = next;
+			return;
+		}
 		if (
 			next.length === this.#additionalDirectories.length &&
 			next.every((d, i) => d === this.#additionalDirectories[i])
@@ -2104,6 +2246,11 @@ export class SessionManager {
 		this.#index.insert(entry);
 		this.#notifyEntryAppended(entry);
 		await this.#persistTitleChangeEntry(entry, { title, source, updatedAt: timestamp });
+		// Keep the recent-sessions title index current so welcome-screen lookups
+		// never have to content-scan this session's file.
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+			recordSessionTitle(this.#sessionId, title);
+		}
 
 		this.#notifySessionNameListeners();
 		return true;
@@ -2170,6 +2317,30 @@ export class SessionManager {
 		};
 		this.#recordEntry(entry);
 		this.#index.setLeaf(activeLeafId);
+		return entry.id;
+	}
+
+	/** Record usage on its initiating branch without moving a successor branch or session. */
+	appendModelUsage(
+		usage: Pick<
+			ModelUsageEntry,
+			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+		>,
+		owner: { sessionId: string; parentId: string | null },
+	): string | undefined {
+		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
+			return undefined;
+		}
+		const activeLeafId = this.#index.leafId();
+		const entry: ModelUsageEntry = {
+			type: "model_usage",
+			id: generateId(this.#index),
+			parentId: owner.parentId,
+			timestamp: nowIso(),
+			...usage,
+		};
+		this.#recordEntry(entry);
+		if (activeLeafId !== owner.parentId) this.#index.setLeaf(activeLeafId);
 		return entry.id;
 	}
 
@@ -2240,9 +2411,14 @@ export class SessionManager {
 		shortSummary: string | undefined,
 		firstKeptEntryId: string,
 		tokensBefore: number,
-		details?: T,
-		fromExtension?: boolean,
-		preserveData?: Record<string, unknown>,
+		options: {
+			details?: T;
+			fromExtension?: boolean;
+			preserveData?: Record<string, unknown>;
+			method?: CompactionMethod;
+			providerReplayThroughEntryId?: string;
+			tokensAfter?: number;
+		} = {},
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -2251,9 +2427,12 @@ export class SessionManager {
 			shortSummary,
 			firstKeptEntryId,
 			tokensBefore,
-			details,
-			fromExtension,
-			preserveData,
+			tokensAfter: options.tokensAfter,
+			method: options.method,
+			providerReplayThroughEntryId: options.providerReplayThroughEntryId,
+			details: options.details,
+			fromExtension: options.fromExtension,
+			preserveData: options.preserveData,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2300,8 +2479,10 @@ export class SessionManager {
 		display: boolean | undefined,
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
+		timestamp?: number,
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
+		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
 			customType: normalized.customType,
@@ -2310,7 +2491,11 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
-			...this.#freshEntryFields(),
+			...fresh,
+			// Prefer the initiating message's own timestamp: without it the entry
+			// records the emission time, which on rebuild excludes provider
+			// preparation / hook time from the prompt→yield anchor.
+			timestamp: timestamp !== undefined ? new Date(timestamp).toISOString() : fresh.timestamp,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2549,6 +2734,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		const newSessionId = mintSessionId();
+		this.#reconcileSessionDirForFallback();
 		const newSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${newSessionId}.jsonl`);
 		const header: SessionHeader = {
 			type: "session",
@@ -2659,7 +2845,12 @@ export class SessionManager {
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { copyArtifacts?: boolean; suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: {
+			copyArtifacts?: boolean;
+			suppressBreadcrumb?: boolean;
+			sessionFile?: string;
+			resetInheritedCost?: boolean;
+		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -2671,6 +2862,7 @@ export class SessionManager {
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
@@ -2699,6 +2891,21 @@ export class SessionManager {
 	}
 
 	/**
+	 * Zero the monetary attribution (cost, credits, premium requests) on the
+	 * forked history's assistant turns and completed `task` results, in place.
+	 *
+	 * A tan fork is a fresh agent that inherits the parent's transcript purely
+	 * for context; its spend must reflect only its own work. Session cost is
+	 * derived by summing `usage.cost` over the transcript, so without this the
+	 * clone's Agent Hub row would open at the parent's entire accumulated cost.
+	 * Token counts are left intact — compaction anchors and context math depend
+	 * on them — since only billing attribution is inherited, not context size.
+	 */
+	static #resetInheritedUsageCost(history: SessionEntry[]): void {
+		for (const entry of history) resetUsageCost(entryUsage(entry));
+	}
+
+	/**
 	 * Open a specific session file.
 	 * @param sessionDir Optional dir for /new or /branch; defaults to the file's parent.
 	 * @param options.initialCwd Cwd to use when the file is empty or missing.
@@ -2711,13 +2918,14 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		// Resume into the session's recorded cwd only when that directory still
-		// exists. A deleted project dir would make the constructor's #cwd — and the
-		// `setProjectDir` chdir interactive mode runs next — point at (and fail on)
-		// a missing path, so fall back to the launch cwd and anchor /new and /branch
-		// there too, keeping the resumed session where the user already is.
+		// Resume into the session's recorded cwd only when it is verifiably
+		// accessible. A deleted or permission-blocked (macOS TCC denial) project
+		// dir would make the constructor's #cwd — and the `setProjectDir` chdir
+		// interactive mode runs next — fail, so fall back to the launch cwd and
+		// anchor /new and /branch there too, keeping the resumed session where
+		// the user already is.
 		const recordedCwd = header?.cwd;
-		const recordedCwdUsable = !!recordedCwd && (await directoryExists(recordedCwd));
+		const recordedCwdUsable = !!recordedCwd && (await directoryIsEnterable(recordedCwd));
 		const cwd = recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir());
 		const dir =
 			sessionDir ??
@@ -2750,6 +2958,7 @@ export class SessionManager {
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
+			readOnly?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
@@ -2766,6 +2975,7 @@ export class SessionManager {
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
+			readOnly?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
@@ -2786,6 +2996,7 @@ export class SessionManager {
 					agent: entry.agent,
 					modelRole: entry.modelRole,
 					resolvedModel: entry.resolvedModel,
+					readOnly: entry.readOnly,
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
@@ -2818,12 +3029,12 @@ export class SessionManager {
 		let chosenSession: string | null | undefined;
 
 		if (breadcrumb) {
-			// A fresh `/new` boundary whose JSONL was never materialized (lazy
-			// new-session persistence, then a process exit before any assistant
-			// output). Honor the boundary: start fresh rather than falling back to
-			// findMostRecentSession(), which would resurrect the pre-`/new`
-			// transcript. A materialized (or genuinely stale/deleted) crumb reports
-			// exists=false only when fresh, so this never masks a real stale crumb.
+			// A lazy fresh-session boundary whose JSONL was never materialized
+			// (for example, initial creation followed by exit before any assistant
+			// output). Honor the boundary rather than falling back to
+			// findMostRecentSession(), which would resurrect an older transcript.
+			// Explicit newSession() boundaries are materialized before it returns so
+			// this remains correct even when the relaunch has a different terminal id.
 			if (breadcrumb.fresh && !breadcrumb.exists) {
 				const manager = new SessionManager(cwd, dir, true, storage);
 				manager.#resetToNewSession();
@@ -2908,12 +3119,14 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		return listSessions(dir, storage);
+		const sessions = await listSessions(dir, storage);
+		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 
-	/** List all sessions across all project directories. */
-	static listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-		return listAllSessions(storage);
+	/** List all sessions across all project directories, pinned sessions first. */
+	static async listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
+		const sessions = await listAllSessions(storage);
+		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 }
 

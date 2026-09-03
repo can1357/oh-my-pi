@@ -7,10 +7,24 @@
 
 use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
+use napi::{JsString, Result};
 use napi_derive::napi;
 use syntect::parsing::{
 	ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxReference, SyntaxSet,
 };
+
+use crate::{
+	js::{self, InlineStr},
+	task,
+};
+
+/// One theme colour: an ANSI escape sequence such as `\x1b[38;2;255;0;0m`.
+///
+/// Decoded inline, so a whole palette crosses the boundary without touching
+/// the heap. The longest sequence a theme can produce sets attributes plus
+/// truecolor foreground and background — `\x1b[1;3;4;38;2;255;255;255;48;2;
+/// 255;255;255m`, 42 bytes — which the 47 usable bytes cover.
+pub type Color = InlineStr<48>;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static SCOPE_MATCHERS: OnceLock<ScopeMatchers> = OnceLock::new();
@@ -27,6 +41,8 @@ const EXTRA_SYNTAXES: &[&str] = &[
 	include_str!("syntaxes/Julia.sublime-syntax"),
 	include_str!("syntaxes/Nix.sublime-syntax"),
 	include_str!("syntaxes/Mermaid.sublime-syntax"),
+	include_str!("syntaxes/TypeScript.sublime-syntax"),
+	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
 ];
 
 fn get_syntax_set() -> &'static SyntaxSet {
@@ -150,33 +166,46 @@ fn get_scope_matchers() -> &'static ScopeMatchers {
 #[napi(object)]
 pub struct HighlightColors {
 	/// ANSI color for comments.
-	pub comment:     String,
+	#[napi(ts_type = "string")]
+	pub comment:     Color,
 	/// ANSI color for keywords.
-	pub keyword:     String,
+	#[napi(ts_type = "string")]
+	pub keyword:     Color,
 	/// ANSI color for function names.
-	pub function:    String,
+	#[napi(ts_type = "string")]
+	pub function:    Color,
 	/// ANSI color for variables and identifiers.
-	pub variable:    String,
+	#[napi(ts_type = "string")]
+	pub variable:    Color,
 	/// ANSI color for string literals.
-	pub string:      String,
+	#[napi(ts_type = "string")]
+	pub string:      Color,
 	/// ANSI color for numeric literals.
-	pub number:      String,
+	#[napi(ts_type = "string")]
+	pub number:      Color,
 	/// ANSI color for type identifiers.
-	pub r#type:      String,
+	#[napi(ts_type = "string")]
+	pub r#type:      Color,
 	/// ANSI color for operators.
-	pub operator:    String,
+	#[napi(ts_type = "string")]
+	pub operator:    Color,
 	/// ANSI color for punctuation tokens.
-	pub punctuation: String,
+	#[napi(ts_type = "string")]
+	pub punctuation: Color,
 	/// ANSI color for diff inserted lines.
-	pub inserted:    Option<String>,
+	#[napi(ts_type = "string")]
+	pub inserted:    Option<Color>,
 	/// ANSI color for diff deleted lines.
-	pub deleted:     Option<String>,
+	#[napi(ts_type = "string")]
+	pub deleted:     Option<Color>,
 }
 
 /// Language alias mappings: (aliases, target syntax name).
 /// Used for languages not in syntect's default set or with non-standard names.
 const LANG_ALIASES: &[(&[&str], &str)] = &[
-	(&["ts", "tsx", "typescript", "js", "jsx", "javascript", "mjs", "cjs"], "JavaScript"),
+	(&["ts", "mts", "cts", "typescript"], "TypeScript"),
+	(&["tsx"], "TypeScriptReact"),
+	(&["js", "jsx", "javascript", "mjs", "cjs"], "JavaScript"),
 	(&["py", "python"], "Python"),
 	(&["rb", "ruby"], "Ruby"),
 	(&["jl", "julia"], "Julia"),
@@ -383,39 +412,62 @@ fn find_syntax<'a>(ss: &'a SyntaxSet, lang: &str) -> Option<&'a SyntaxReference>
 /// Highlighted code with ANSI color codes, or the original code if highlighting
 /// fails.
 #[napi]
-pub fn highlight_code(code: String, lang: Option<String>, colors: HighlightColors) -> String {
-	let inserted = colors.inserted.as_deref().unwrap_or("");
-	let deleted = colors.deleted.as_deref().unwrap_or("");
+pub fn highlight_code(
+	code: JsString,
+	lang: Option<JsString>,
+	colors: HighlightColors,
+) -> Result<String> {
+	let code = js::utf8(code)?;
+	let lang = lang.map(js::utf8).transpose()?;
+	Ok(highlight_code_impl(&code, lang.as_deref(), &colors))
+}
 
-	// Color palette as array for quick indexing
-	let palette = [
-		colors.comment.as_str(),     // 0
-		colors.keyword.as_str(),     // 1
-		colors.function.as_str(),    // 2
-		colors.variable.as_str(),    // 3
-		colors.string.as_str(),      // 4
-		colors.number.as_str(),      // 5
-		colors.r#type.as_str(),      // 6
-		colors.operator.as_str(),    // 7
-		colors.punctuation.as_str(), // 8
-		inserted,                    // 9
-		deleted,                     // 10
-	];
+/// Color palette as array for quick indexing.
+fn palette(colors: &HighlightColors) -> [&str; 11] {
+	[
+		&*colors.comment,                         // 0
+		&*colors.keyword,                         // 1
+		&*colors.function,                        // 2
+		&*colors.variable,                        // 3
+		&*colors.string,                          // 4
+		&*colors.number,                          // 5
+		&*colors.r#type,                          // 6
+		&*colors.operator,                        // 7
+		&*colors.punctuation,                     // 8
+		colors.inserted.as_deref().unwrap_or(""), // 9
+		colors.deleted.as_deref().unwrap_or(""),  // 10
+	]
+}
 
+fn highlight_code_impl(code: &str, lang: Option<&str>, colors: &HighlightColors) -> String {
+	let Some(lang) = lang else {
+		return code.to_owned();
+	};
 	let ss = get_syntax_set();
-
-	// Find syntax for the language
-	let syntax = match &lang {
-		Some(l) => find_syntax(ss, l),
-		None => None,
-	}
-	.unwrap_or_else(|| ss.find_syntax_plain_text());
+	let Some(syntax) = find_syntax(ss, lang) else {
+		return code.to_owned();
+	};
 
 	let mut parse_state = ParseState::new(syntax);
 	let mut scope_stack = ScopeStack::new();
 	let mut result = String::with_capacity(code.len() * 2);
+	highlight_into(code, ss, &mut parse_state, &mut scope_stack, &palette(colors), &mut result);
+	result
+}
 
-	for line in syntect::util::LinesWithEndings::from(code.as_str()) {
+/// Highlight `code` line by line, advancing `parse_state`/`scope_stack` and
+/// appending ANSI-colored output to `result`. Because syntect parses strictly
+/// forward, feeding a text in chunks of whole lines produces byte-identical
+/// output to feeding it at once — the contract [`HighlightStream`] relies on.
+fn highlight_into(
+	code: &str,
+	ss: &SyntaxSet,
+	parse_state: &mut ParseState,
+	scope_stack: &mut ScopeStack,
+	palette: &[&str; 11],
+	result: &mut String,
+) {
+	for line in syntect::util::LinesWithEndings::from(code) {
 		let Ok(ops) = parse_state.parse_line(line, ss) else {
 			// Parse error - append unhighlighted line and continue
 			result.push_str(line);
@@ -429,7 +481,7 @@ pub fn highlight_code(code: String, lang: Option<String>, colors: HighlightColor
 			// Output text BEFORE this operation using current scope
 			if offset > prev_end {
 				let text = &line[prev_end..offset];
-				let color_idx = scope_to_color_index(&scope_stack);
+				let color_idx = scope_to_color_index(scope_stack);
 
 				if color_idx < palette.len() && !palette[color_idx].is_empty() {
 					result.push_str(palette[color_idx]);
@@ -458,7 +510,7 @@ pub fn highlight_code(code: String, lang: Option<String>, colors: HighlightColor
 		// Output remaining text with current scope
 		if prev_end < line.len() {
 			let text = &line[prev_end..];
-			let color_idx = scope_to_color_index(&scope_stack);
+			let color_idx = scope_to_color_index(scope_stack);
 
 			if color_idx < palette.len() && !palette[color_idx].is_empty() {
 				result.push_str(palette[color_idx]);
@@ -469,24 +521,87 @@ pub fn highlight_code(code: String, lang: Option<String>, colors: HighlightColor
 			}
 		}
 	}
+}
 
-	result
+/// Warm syntax grammars and scope matchers on the native worker pool.
+#[napi]
+pub fn warm_highlighter() -> task::Promise<()> {
+	task::blocking("highlight.warm", (), move |_| {
+		let _ = get_syntax_set();
+		let _ = get_scope_matchers();
+		Ok(())
+	})
+}
+
+/// Stateful incremental syntax highlighter for streamed code.
+///
+/// Carries syntect parser state across [`HighlightStream::push`] calls so
+/// chunked highlighting of a growing buffer is byte-identical to highlighting
+/// the concatenated text in one call. Feed newline-terminated complete lines;
+/// only the final push may omit the trailing newline. An unresolved language
+/// echoes input unchanged.
+#[napi]
+pub struct HighlightStream {
+	state:  Option<(ParseState, ScopeStack)>,
+	colors: HighlightColors,
+}
+
+#[napi]
+impl HighlightStream {
+	/// Create a stream for `lang`; an unknown language yields a passthrough.
+	#[napi(constructor)]
+	pub fn new(lang: Option<JsString>, colors: HighlightColors) -> Result<Self> {
+		let lang = lang.map(js::utf8).transpose()?;
+		let state = lang
+			.as_deref()
+			.and_then(|l| find_syntax(get_syntax_set(), l))
+			.map(|syntax| (ParseState::new(syntax), ScopeStack::new()));
+		Ok(Self { state, colors })
+	}
+
+	/// Whether the language resolved to a grammar; `false` means passthrough.
+	#[napi(getter)]
+	pub const fn supported(&self) -> bool {
+		self.state.is_some()
+	}
+
+	/// Highlight the next chunk and advance parser state.
+	#[napi]
+	pub fn push(&mut self, chunk: JsString) -> Result<String> {
+		let chunk = js::utf8(chunk)?;
+		let Some((parse_state, scope_stack)) = self.state.as_mut() else {
+			return Ok(chunk.to_owned());
+		};
+		let mut result = String::with_capacity(chunk.len() * 2);
+		highlight_into(
+			&chunk,
+			get_syntax_set(),
+			parse_state,
+			scope_stack,
+			&palette(&self.colors),
+			&mut result,
+		);
+		Ok(result)
+	}
 }
 
 /// Check if a language is supported for highlighting.
 /// Returns true if the language has either direct support or a fallback
 /// mapping.
 #[napi]
-pub fn supports_language(lang: String) -> bool {
-	if is_known_alias(&lang) {
+pub fn supports_language(lang: JsString) -> Result<bool> {
+	Ok(supports_language_impl(&js::utf8(lang)?))
+}
+
+fn supports_language_impl(lang: &str) -> bool {
+	if is_known_alias(lang) {
 		return true;
 	}
 
 	// Fall back to direct syntax lookup
 	let ss = get_syntax_set();
-	find_syntax(ss, &lang).is_some()
+	find_syntax(ss, lang).is_some()
 }
-
 /// Get list of supported languages.
 #[napi]
 pub fn get_supported_languages() -> Vec<String> {
@@ -500,31 +615,48 @@ mod tests {
 
 	fn test_colors() -> HighlightColors {
 		HighlightColors {
-			comment:     "<c>".to_string(),
-			keyword:     "<k>".to_string(),
-			function:    "<f>".to_string(),
-			variable:    "<v>".to_string(),
-			string:      "<s>".to_string(),
-			number:      "<n>".to_string(),
-			r#type:      "<t>".to_string(),
-			operator:    "<o>".to_string(),
-			punctuation: "<p>".to_string(),
+			comment:     Color::new("<c>").unwrap(),
+			keyword:     Color::new("<k>").unwrap(),
+			function:    Color::new("<f>").unwrap(),
+			variable:    Color::new("<v>").unwrap(),
+			string:      Color::new("<s>").unwrap(),
+			number:      Color::new("<n>").unwrap(),
+			r#type:      Color::new("<t>").unwrap(),
+			operator:    Color::new("<o>").unwrap(),
+			punctuation: Color::new("<p>").unwrap(),
 			inserted:    None,
 			deleted:     None,
 		}
 	}
 
 	#[test]
+	fn stream_chunks_match_whole_text() {
+		let colors = test_colors();
+		let code = "def f():\n\t\"\"\"doc\n\tstring\"\"\"\n\treturn 1\n";
+		let whole = highlight_code_impl(code, Some("python"), &colors);
+
+		let ss = get_syntax_set();
+		let syntax = find_syntax(ss, "python").unwrap();
+		let mut parse_state = ParseState::new(syntax);
+		let mut scope_stack = ScopeStack::new();
+		let pal = palette(&colors);
+		let mut chunked = String::new();
+		for chunk in ["def f():\n", "\t\"\"\"doc\n\tstring\"\"\"\n", "\treturn 1\n"] {
+			highlight_into(chunk, ss, &mut parse_state, &mut scope_stack, &pal, &mut chunked);
+		}
+		assert_eq!(chunked, whole);
+	}
+
+	#[test]
 	fn highlights_nix_vendored_syntax() {
 		assert!(get_supported_languages().contains(&"Nix".to_string()));
-		assert!(supports_language("nix".to_string()));
+		assert!(supports_language_impl("nix"));
 
-		let out = highlight_code(
+		let out = highlight_code_impl(
 			"{ pkgs ? import <nixpkgs> {} }:\nlet message = \"hello\"; in pkgs.writeText \"msg\" \
-			 message # greeting\n"
-				.to_string(),
-			Some("nix".to_string()),
-			test_colors(),
+			 message # greeting\n",
+			Some("nix"),
+			&test_colors(),
 		);
 		assert!(out.contains("<k>let"));
 		assert!(out.contains("<s>hello"));
@@ -534,17 +666,36 @@ mod tests {
 	#[test]
 	fn highlights_mermaid_vendored_syntax() {
 		assert!(get_supported_languages().contains(&"Mermaid".to_string()));
-		assert!(supports_language("mermaid".to_string()));
-		assert!(supports_language("mmd".to_string()));
+		assert!(supports_language_impl("mermaid"));
+		assert!(supports_language_impl("mmd"));
 
-		let out = highlight_code(
-			"graph TD\n  A[\"Start\"] --> B\n  %% note\n".to_string(),
-			Some("mermaid".to_string()),
-			test_colors(),
+		let out = highlight_code_impl(
+			"graph TD\n  A[\"Start\"] --> B\n  %% note\n",
+			Some("mermaid"),
+			&test_colors(),
 		);
 		assert!(out.contains("<k>graph"));
 		assert!(out.contains("<s>Start"));
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
+	}
+	/// Regression: with the JavaScript grammar, TS type annotations
+	/// (generic return types, arrow-type params) corrupted parser state, and a
+	/// later template literal left an unterminated string scope that painted
+	/// the rest of the file as a string (issue seen in the git TUI diff pane).
+	#[test]
+	fn typescript_template_literal_does_not_leak_string_state() {
+		assert!(get_supported_languages().contains(&"TypeScript".to_string()));
+		assert!(supports_language_impl("ts"));
+		assert!(supports_language_impl("tsx"));
+
+		let code = "function icons(): Record<\"close\" | \"hunk\", string> {\n\treturn \
+		            {};\n}\nfunction chip(label: string): string {\n\tconst text = ` ${label} \
+		            `;\n\treturn text;\n}\nconst zzz = 1;\n";
+		let out = highlight_code_impl(code, Some("ts"), &test_colors());
+		let last = out.lines().last().unwrap();
+		assert!(last.contains("<k>const"), "trailing code lost keyword highlighting: {last}");
+		assert!(last.contains("<n>1"), "trailing code lost number highlighting: {last}");
+		assert!(!last.contains("<s>const"), "string scope leaked past template literal: {last}");
 	}
 }

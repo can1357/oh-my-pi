@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
@@ -12,7 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -42,7 +43,12 @@ interface FakeAcpBuiltinSession {
 	markMovedFromEmptySessionFile(sessionFile: string): void;
 	fork(): Promise<boolean>;
 	handoff(instr?: string): Promise<{ document: string; savedPath?: string } | undefined>;
+	dispose(): Promise<void>;
 	exportToHtml(outputPath?: string): Promise<string>;
+	effectiveExtensionRoots: unknown;
+	setTitleSystemPrompt(prompt: string | undefined): void;
+	setSlashCommands(commands: unknown[]): void;
+	refreshSkills(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
@@ -55,32 +61,9 @@ interface FakeAcpBuiltinSession {
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
 }
 
-interface FakeAcpBuiltinSessionManager {
-	_sessionFile: string | undefined;
-	_cwd: string;
-	_entries: { type: string }[];
-	_customEntries: Array<{ customType: string; data: unknown }>;
-	_movedTo: string | undefined;
-	_flushed: boolean;
-	_droppedSessions: string[];
-	_sessionName: string | undefined;
-	getSessionId(): string;
-	getSessionFile(): string | undefined;
-	getEntries(): { type: string }[];
-	getBranch(): { type: string }[];
-	appendCustomEntry(customType: string, data?: unknown): string;
-	flush(): Promise<void>;
-	moveTo(newCwd: string): Promise<void>;
-	setSessionFile(sessionFile: string): Promise<void>;
-	dropSession(sessionPath: string): Promise<void>;
-	getCwd(): string;
-	setSessionName(name: string, source: string): Promise<boolean>;
-}
-
 function createRuntime() {
 	const settings = Settings.isolated();
 	const output: string[] = [];
-	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
 		forcedToolChoice: undefined as string | undefined,
@@ -91,6 +74,11 @@ function createRuntime() {
 		_todoPhases: [],
 		_switchedTo: undefined,
 		_movedFromEmptySessionFile: undefined,
+		dispose: async () => {},
+		effectiveExtensionRoots: undefined,
+		setTitleSystemPrompt: (_prompt: string | undefined) => {},
+		setSlashCommands: (_commands: unknown[]) => {},
+		refreshSkills: async () => {},
 		toggleFastMode() {
 			this.fastMode = !this.fastMode;
 			return this.fastMode;
@@ -159,7 +147,7 @@ function createRuntime() {
 		async setModel(_model: unknown) {},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
-	fakeSessionManager = {
+	const fakeSessionManager = {
 		_sessionFile: undefined as string | undefined,
 		_cwd: "/tmp/project",
 		_entries: [] as { type: string }[],
@@ -190,6 +178,17 @@ function createRuntime() {
 		async moveTo(newCwd: string) {
 			this._cwd = newCwd;
 			this._movedTo = newCwd;
+		},
+		captureState() {
+			return { cwd: this._cwd, sessionDir: "/tmp/fake-sessions", movedTo: this._movedTo };
+		},
+		restoreState(snapshot: { cwd: string }) {
+			this._cwd = snapshot.cwd;
+			this._movedTo = snapshot.cwd;
+		},
+		async rollbackMove(snapshot: { cwd: string; sessionDir: string }) {
+			await this.moveTo(snapshot.cwd);
+			this.restoreState(snapshot);
 		},
 		async setSessionFile(sessionFile: string) {
 			this._sessionFile = path.resolve(sessionFile);
@@ -240,6 +239,24 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("toggles extended context with explicit controls and reports state", async () => {
+		const { output, runtime } = createRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/extended-context off", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context on", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context status", runtime)).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Extended context disabled.",
+			"Extended context enabled.",
+			"Extended context disabled.",
+			"Extended context is off.",
+		]);
 	});
 
 	it("forces a tool and returns remaining prompt text", async () => {
@@ -532,7 +549,6 @@ describe("ACP builtin slash commands", () => {
 			"/btw hi",
 			"/new",
 			"/drop",
-			"/handoff",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {
@@ -761,6 +777,13 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toContain("TUI editor");
 	});
 
+	it("/todo expand: returns HUD-only usage message in ACP mode", async () => {
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/todo expand", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("interactive HUD");
+	});
+
 	it("/todo unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/todo foobar", runtime);
@@ -807,6 +830,73 @@ describe("wave 3 commands", () => {
 		} finally {
 			setProjectDir(originalProjectDir);
 			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	// /wt
+	it("/wt: refuses outside a git checkout", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-plain-"));
+		fakeSessionManager._cwd = plainDir;
+		try {
+			const result = await executeAcpBuiltinSlashCommand("/wt feature", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Not inside a git repository");
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+		} finally {
+			await fs.rm(plainDir, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/x", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const movedTo = fakeSessionManager._movedTo;
+			expect(movedTo).toBeDefined();
+			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/x`);
+			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			const headRef = (await Bun.file(path.join(movedTo!, ".git")).text()).trim();
+			expect(headRef.startsWith("gitdir: ")).toBe(true);
+			const branches = await git("worktree", "list", "--porcelain");
+			expect(branches).toContain("branch refs/heads/feature/x");
+			// The source checkout is untouched.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("edited\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 
@@ -1149,7 +1239,7 @@ describe("wave 5 — adapters and polish", () => {
 			contextWindow: 200_000,
 		};
 		(session as unknown as Record<string, unknown>).skills = [];
-		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] } };
+		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] }, tokenizer: new Tokenizer() };
 		(session as unknown as Record<string, unknown>).systemPrompt = ["You are a helpful assistant."];
 		session.messages = [
 			{ role: "user", content: "Hello, how are you?" },
@@ -1197,6 +1287,27 @@ describe("wave 5 — adapters and polish", () => {
 });
 
 describe("/move preflight flush", () => {
+	it("disposes the session when headless workspace rollback cannot recover", async () => {
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-fatal-"));
+		const originalProjectDir = getProjectDir();
+		const { output, runtime, session } = createRuntime();
+		const dispose = spyOn(session, "dispose");
+		const reloadForCwd = spyOn(runtime.settings, "reloadForCwd").mockRejectedValue(
+			new Error("workspace reload failed"),
+		);
+		try {
+			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(dispose).toHaveBeenCalledTimes(1);
+			expect(output.some(text => text.includes("failed to re-align workspace"))).toBe(true);
+		} finally {
+			reloadForCwd.mockRestore();
+			dispose.mockRestore();
+			setProjectDir(originalProjectDir);
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
 	it("aborts text-mode /move when pending settings flush fails", async () => {
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-"));
 		try {
@@ -1229,6 +1340,9 @@ describe("/move preflight flush", () => {
 			expect(flushed).toBe(true);
 			expect(fakeSessionManager!._movedTo).toBe(targetDir);
 			expect(output[0]).toContain("Moved to");
+			// The success path must chdir the process and project-dir cache to the
+			// target; otherwise bash tools and discovery run in the wrong project.
+			expect(getProjectDir()).toBe(path.resolve(targetDir));
 		} finally {
 			setProjectDir(originalProjectDir);
 			await fs.rm(targetDir, { recursive: true, force: true });

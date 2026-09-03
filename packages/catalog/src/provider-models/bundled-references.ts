@@ -9,8 +9,18 @@ import type { Api, Model, ModelSpec } from "../types";
  * manager, which rebuilds via `buildModel`.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { compat: _compat, compatConfig, ...rest } = model;
-	return { ...rest, compat: compatConfig } as ModelSpec<TApi>;
+	const {
+		compat: _compat,
+		compatConfig,
+		supportsComputerUse: _derivedComputerUse,
+		supportsComputerUseConfig,
+		...rest
+	} = model;
+	return {
+		...rest,
+		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
+		compat: compatConfig,
+	} as ModelSpec<TApi>;
 }
 
 export function createBundledReferenceMap<TApi extends Api>(
@@ -35,7 +45,9 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			if (isZeroCostXaiOAuthReference(candidate)) {
+			// ClinePass limits, pricing, and reasoning controls are gateway-specific;
+			// matching them by bare id would contaminate unrelated proxy models.
+			if (candidate.provider === "cline-pass" || isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);

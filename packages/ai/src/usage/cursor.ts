@@ -295,42 +295,49 @@ export function parseCursorUsage(payload: unknown, fetchedAt = Date.now()): Usag
 			toNumber(value.amountLimit) ??
 			toNumber(value.usdLimit);
 
-		if (usedVal !== undefined && limitVal !== undefined) {
-			const isUsd =
-				key === "planUsage" ||
-				key.toLowerCase().includes("usd") ||
-				key.toLowerCase().includes("billing") ||
-				key.toLowerCase().includes("stripe");
+		if (usedVal === undefined) continue;
 
-			const unit = isUsd ? "usd" : "requests";
-			const cleanBucket = key.toLowerCase().trim();
-			const limitId = isUsd ? `cursor:usd:${cleanBucket}` : `cursor:requests:${cleanBucket}`;
+		const isUsd =
+			key === "planUsage" ||
+			key.toLowerCase().includes("usd") ||
+			key.toLowerCase().includes("billing") ||
+			key.toLowerCase().includes("stripe");
 
-			const label = isUsd ? `${key} spend` : `${key} requests`;
+		const unit = isUsd ? "usd" : "requests";
+		const cleanBucket = key.toLowerCase().trim();
+		const limitId = isUsd ? `cursor:usd:${cleanBucket}` : `cursor:requests:${cleanBucket}`;
 
-			const amount: UsageAmount = {
+		const label = isUsd ? `${key} spend` : `${key} requests`;
+
+		// Some Cursor plans report no legacy numeric cap (`maxRequestUsage: null`).
+		// Emit an uncapped, used-only meter for those buckets instead of dropping
+		// them, which used to collapse the whole account to "no usage data".
+		let amount: UsageAmount;
+		if (limitVal === undefined) {
+			amount = { used: usedVal, unit };
+		} else {
+			const remaining = Math.max(0, limitVal - usedVal);
+			amount = {
 				used: usedVal,
 				limit: limitVal,
-				remaining: Math.max(0, limitVal - usedVal),
+				remaining,
 				usedFraction: limitVal > 0 ? usedVal / limitVal : 0,
-				remainingFraction: limitVal > 0 ? Math.max(0, limitVal - usedVal) / limitVal : 0,
+				remainingFraction: limitVal > 0 ? remaining / limitVal : 0,
 				unit,
 			};
-
-			const status = usageStatus(amount.usedFraction);
-
-			limits.push({
-				id: limitId,
-				label,
-				scope: {
-					provider: "cursor",
-					...(window ? { windowId: window.id } : {}),
-				},
-				...(window ? { window } : {}),
-				amount,
-				status,
-			});
 		}
+
+		limits.push({
+			id: limitId,
+			label,
+			scope: {
+				provider: "cursor",
+				...(window ? { windowId: window.id } : {}),
+			},
+			...(window ? { window } : {}),
+			amount,
+			...(amount.usedFraction !== undefined ? { status: usageStatus(amount.usedFraction) } : {}),
+		});
 	}
 
 	if (limits.length === 0) {

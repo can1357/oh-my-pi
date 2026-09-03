@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import {
+	calculateContextTokens,
 	compact,
 	estimateTokens,
 	serializeConversation,
@@ -8,15 +11,20 @@ import {
 // Issue #6583: pi extensions import `estimateTokens` from
 // `@earendil-works/pi-coding-agent`, which aliases to this shim. Legacy pi
 // re-exported it from the coding-agent package root (via
-// `./core/compaction/index.ts`); in omp it lives in
-// `@oh-my-pi/pi-agent-core/compaction` and the coding-agent barrel does not
-// forward it, so `export * from "../index"` left the symbol off the shim
-// surface and a named import threw Bun's static "Export named X not found"
-// during plugin validation (e.g. `omp plugin install pi-blackhole`). This pins
-// the re-export through the public package specifier.
+// `./core/compaction/index.ts`); the core API has since become
+// `Tokenizer.countMessage`, so the shim now defines a compat wrapper that keeps
+// the legacy export surface — a named import must not throw Bun's static
+// "Export named X not found" during plugin validation (e.g.
+// `omp plugin install pi-blackhole`). This pins the export through the public
+// package specifier.
 describe("legacy shim compaction helpers", () => {
-	it("re-exports estimateTokens as a callable token estimator", () => {
+	it("exports estimateTokens as a callable token estimator", () => {
 		expect(typeof estimateTokens).toBe("function");
+		const tokens = estimateTokens({ role: "user", content: "hello world", timestamp: Date.now() }, new Tokenizer());
+		expect(tokens).toBeGreaterThan(0);
+	});
+
+	it("counts tokens without a tokenizer argument (the legacy pi call shape)", () => {
 		const tokens = estimateTokens({ role: "user", content: "hello world", timestamp: Date.now() });
 		expect(tokens).toBeGreaterThan(0);
 	});
@@ -34,5 +42,22 @@ describe("legacy shim compaction helpers", () => {
 	it("re-exports serializeConversation with legacy transcript formatting", () => {
 		const serialized = serializeConversation([{ role: "user", content: "summarize this", timestamp: 0 }]);
 		expect(serialized).toBe("[User]: summarize this");
+	});
+
+	// Issue #10278: `calculateContextTokens` is another package-root compaction
+	// helper (same `@oh-my-pi/pi-agent-core/compaction` module) used by
+	// pi-blackhole. Its absence made `omp plugin install pi-blackhole` fail Bun's
+	// static "Export named 'calculateContextTokens' not found" check.
+	it("re-exports calculateContextTokens with its usage-sizing behavior", () => {
+		expect(typeof calculateContextTokens).toBe("function");
+		const usage: Usage = {
+			input: 10,
+			output: 5,
+			cacheRead: 100,
+			cacheWrite: 0,
+			totalTokens: 115,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		expect(calculateContextTokens(usage)).toBe(115);
 	});
 });

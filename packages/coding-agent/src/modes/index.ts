@@ -5,6 +5,7 @@
  * barrel does not pull print, RPC server, or ACP server mode into the normal
  * TUI graph.
  */
+export * from "./composer";
 export * from "./interactive-mode";
 export * from "./rpc/rpc-client";
 export * from "./rpc/rpc-types";

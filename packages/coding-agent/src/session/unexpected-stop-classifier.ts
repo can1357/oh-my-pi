@@ -40,6 +40,7 @@ export interface ClassifyUnexpectedStopDeps {
 	signal?: AbortSignal;
 }
 
+/** Detects terminal turns eligible for mechanical recovery or smart classification. */
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	if (message.stopReason !== "stop") return false;
 	let hasContent = false;
@@ -106,6 +107,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 				},
 				{
 					apiKey: deps.registry.resolver(model, deps.sessionId),
+					sessionId: deps.sessionId,
 					maxTokens,
 					disableReasoning: true,
 					metadata,

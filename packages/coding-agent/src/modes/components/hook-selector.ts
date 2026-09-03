@@ -7,7 +7,6 @@ import {
 	Ellipsis,
 	extractPrintableText,
 	fuzzyFilter,
-	Markdown,
 	type MarkdownTheme,
 	matchesKey,
 	padding,
@@ -28,7 +27,7 @@ import {
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
 import { CountdownTimer } from "./countdown-timer";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 import { renderSegmentTrack } from "./segment-track";
 
 /** One segment of a {@link HookSelectorSlider} — a label and an optional
@@ -160,7 +159,7 @@ class OutlinedList extends Container {
  *  disabled-index lookups survive fuzzy filtering and reordering. */
 type FilteredOption = { option: HookSelectorOption; index: number };
 
-export class HookSelectorComponent extends Container {
+export class HookSelectorComponent extends OverlayPanel {
 	#options: HookSelectorOption[];
 	#filteredOptions: FilteredOption[];
 	#searchQuery = "";
@@ -174,7 +173,6 @@ export class HookSelectorComponent extends Container {
 	#outlinedList: OutlinedList | undefined;
 	#onSelectCallback: (option: string) => void;
 	#onCancelCallback: () => void;
-	#titleComponent: Markdown;
 	#baseTitle: string;
 	#countdown: CountdownTimer | undefined;
 	#onLeftCallback: (() => void) | undefined;
@@ -192,7 +190,7 @@ export class HookSelectorComponent extends Container {
 		onCancel: () => void,
 		opts?: HookSelectorOptions,
 	) {
-		super();
+		super(title.split(/\r?\n/, 1)[0] ?? "");
 
 		this.#options = options.map(normalizeHookSelectorOption);
 		this.#filteredOptions = this.#options.map((option, index) => ({ option, index }));
@@ -212,7 +210,7 @@ export class HookSelectorComponent extends Container {
 		this.#maxVisible = Math.max(3, opts?.maxVisible ?? 12);
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
-		this.#baseTitle = title;
+		this.#baseTitle = this.title;
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
@@ -222,15 +220,14 @@ export class HookSelectorComponent extends Container {
 			this.#sliderIndex = Math.max(0, Math.min(opts.slider.index, opts.slider.segments.length - 1));
 		}
 
-		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
-
-		this.#titleComponent = new Markdown(title, 1, 0, getMarkdownTheme(), { color: t => theme.fg("accent", t) });
-		this.addChild(this.#titleComponent);
+		for (const line of title.split(/\r?\n/).slice(1)) {
+			this.addChild(new Text(theme.fg("accent", line), 0, 0));
+		}
 		this.addChild(new Spacer(1));
 
 		if (this.#slider) {
-			this.#sliderComponent = new Text(this.#renderSliderLine(), 1, 0);
+			this.#sliderComponent = new Text(this.#renderSliderLine(), 0, 0);
 			this.addChild(this.#sliderComponent);
 			this.addChild(new Spacer(1));
 		}
@@ -240,7 +237,7 @@ export class HookSelectorComponent extends Container {
 			this.#countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
-				s => this.#titleComponent.setText(`${this.#baseTitle} (${s}s)`),
+				s => (this.title = `${this.#baseTitle} (${s}s)`),
 				() => {
 					opts?.onTimeout?.();
 					// Auto-select current option on timeout (typically the first/recommended option)
@@ -263,9 +260,8 @@ export class HookSelectorComponent extends Container {
 		}
 		this.addChild(new Spacer(1));
 		const controlsHint = opts?.helpText ?? "up/down navigate  enter select  esc cancel";
-		this.addChild(new Text(theme.fg("dim", controlsHint), 1, 0));
+		this.addChild(new Text(theme.fg("dim", controlsHint), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		this.#updateList();
 	}
@@ -637,6 +633,23 @@ export class HookSelectorComponent extends Container {
 		return true;
 	}
 
+	/** Jump to (and, for single-select menus, immediately confirm) the option
+	 *  whose label starts with the pressed digit and a period. Numbered options
+	 *  can follow unnumbered rows, as in `/review` after a detected PR. Once
+	 *  type-to-search is active, digits stay searchable. Checkbox menus only
+	 *  move the cursor — confirmation stays on `enter`. */
+	#handleQuickSelect(keyData: string): boolean {
+		if (this.#searchQuery.length > 0 || keyData.length !== 1 || keyData < "1" || keyData > "9") return false;
+		const targetIndex = this.#filteredOptions.findIndex(({ option }) => option.label.startsWith(`${keyData}. `));
+		if (targetIndex < 0) return false;
+		const target = this.#filteredOptions[targetIndex];
+		if (!target || this.#isDisabled(target.index)) return true;
+		this.#selectedIndex = targetIndex;
+		this.#updateList();
+		if (this.#selectionMarker !== "checkbox") this.#onSelectCallback(target.option.label);
+		return true;
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#countdown) {
 			this.#countdown.reset();
@@ -645,6 +658,10 @@ export class HookSelectorComponent extends Container {
 
 		if (matchesSelectCancel(keyData)) {
 			this.#onCancelCallback();
+			return;
+		}
+
+		if (this.#handleQuickSelect(keyData)) {
 			return;
 		}
 
@@ -677,12 +694,12 @@ export class HookSelectorComponent extends Container {
 	}
 
 	override render(width: number): readonly string[] {
-		const renderWidth = Math.max(1, width);
+		const renderWidth = Math.max(1, width - 4);
 		if (this.#lastRenderWidth !== renderWidth) {
 			this.#lastRenderWidth = renderWidth;
 			this.#updateList(renderWidth);
 		}
-		return super.render(renderWidth);
+		return super.render(width);
 	}
 
 	override dispose(): void {

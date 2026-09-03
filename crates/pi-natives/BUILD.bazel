@@ -18,6 +18,9 @@ rust_shared_library(
     compile_data = glob([
         "src/syntaxes/*.sublime-syntax",
         "src/fonts/*",
+        "data/*.bin.zst",
+        "src/utok/claude/testdata/*.json",
+        "fixtures/*.json",
     ]),
     crate_features = [],
     edition = "2024",
@@ -52,8 +55,11 @@ rust_shared_library(
     version = "17.1.5",
     deps = all_crate_deps(normal = True) + [
         "//crates/pi-ast",
+        "//crates/pi-diff",
+        "//crates/pi-edit",
         "//crates/pi-iso",
         "//crates/pi-shell",
+        "//crates/pi-vcs",
         "//crates/pi-voice",
         "//crates/pi-walker",
     ],

@@ -53,7 +53,7 @@ describe("issue #927 optimistic pending spinner", () => {
 
 	afterEach(async () => {
 		mode?.stop();
-		HistoryStorage.resetInstance();
+		HistoryStorage.close();
 		vi.restoreAllMocks();
 		await session?.dispose();
 		authStorage?.close();

@@ -107,6 +107,64 @@ describe("TinyFish web search provider", () => {
 		expect(captured[0].searchParams.get("query")).toBe("plain query with ordinary words");
 	});
 
+	it("maps a lang: locale directive onto location and language", async () => {
+		const captured: URL[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+			captured.push(url);
+			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchTinyFish({ ...makeParams("Best Cheap Android Tablet lang:it-it"), fetch: fetchMock });
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].searchParams.get("query")).toBe("Best Cheap Android Tablet");
+		expect(captured[0].searchParams.get("location")).toBe("IT");
+		expect(captured[0].searchParams.get("language")).toBe("it");
+		expectTinyFishParams(captured[0], ["query", "num_results", "page", "location", "language"]);
+	});
+
+	it("sends language only when the lang: directive omits a region", async () => {
+		const captured: URL[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+			captured.push(url);
+			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchTinyFish({ ...makeParams("cheap tablets lang:it"), fetch: fetchMock });
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].searchParams.get("language")).toBe("it");
+		expect(captured[0].searchParams.has("location")).toBe(false);
+		expectTinyFishParams(captured[0], ["query", "num_results", "page", "language"]);
+	});
+
+	it("never maps a script subtag onto location", async () => {
+		const captured: URL[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
+			captured.push(url);
+			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchTinyFish({ ...makeParams("cheap tablets lang:zh-hans"), fetch: fetchMock });
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0].searchParams.get("language")).toBe("zh");
+		expect(captured[0].searchParams.has("location")).toBe(false);
+		expectTinyFishParams(captured[0], ["query", "num_results", "page", "language"]);
+	});
+
 	it("passes TinyFish num_results and applies numSearchResults across pages", async () => {
 		const captured: { url: URL; init?: RequestInit }[] = [];
 		const pages = new Map([

@@ -71,7 +71,6 @@ interface Harness {
 function createHarness(): Harness {
 	const entries: SessionEntry[] = [];
 	let capturedActions: ExtensionActions | undefined;
-	let helpers!: UiHelpers;
 	const fakeRunner = {
 		initialize: (
 			a: ExtensionActions,
@@ -85,6 +84,7 @@ function createHarness(): Harness {
 		emit: async () => undefined,
 		getMessageRenderer: () => undefined,
 		getAssistantThinkingRenderers: () => undefined,
+		getComposerShapes: () => [],
 	};
 
 	const sessionMock = {
@@ -138,6 +138,7 @@ function createHarness(): Harness {
 		setWorkingMessage: vi.fn(),
 		setToolsExpanded: vi.fn(),
 		toolOutputExpanded: false,
+		syncComposerShape: vi.fn(),
 		hideThinkingBlock: false,
 		showError: vi.fn(),
 		editor: {
@@ -158,7 +159,7 @@ function createHarness(): Harness {
 			helpers.renderSessionContext(buildSessionContext(entries));
 		},
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 
 	const controller = new ExtensionUiController(ctx);
 

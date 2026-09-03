@@ -9,6 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
+import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -41,7 +42,8 @@ import {
 	type SingleResult,
 	type StructuredSubagentOutput,
 } from "./types";
-import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
+import type { WorkPoolYieldItem } from "./workpool-yield";
+import { type NestedRepoPatch, parseIsolationBackend } from "./worktree";
 
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
@@ -112,6 +114,10 @@ export interface StructuredSubagentRequest {
 	enableIrc?: boolean;
 	/** `0` disables executor wall-clock timeout. Undefined inherits settings. */
 	maxRuntimeMs?: number;
+	/** Kernel-defined tools explicitly exposed to this child. */
+	customTools?: CustomTool[];
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 }
@@ -200,6 +206,9 @@ function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
 
 function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode: boolean): void {
 	if (!planMode) return;
+	if (request.customTools?.length) {
+		throw new StructuredSubagentError("preflight", "Eval-defined tools are unavailable in plan mode.");
+	}
 	const isolation = request.isolation;
 	if (
 		isolation &&
@@ -252,7 +261,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd);
+	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
@@ -293,12 +302,12 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	const isolationMode = request.session.settings.get("task.isolation.mode");
+	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
 	const isIsolated = request.isolation?.requested === true;
-	if (isIsolated && isolationMode === "none") {
+	if (isIsolated && !isolationEnabled) {
 		throw new StructuredSubagentError(
 			"preflight",
-			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
+			"Subagent isolated execution requires task.isolation.enabled; it is currently false.",
 		);
 	}
 	return {
@@ -427,19 +436,27 @@ function buildExecutorOptions(
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
+		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
+		customTools: request.customTools,
+		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 		skills,
 		autoloadSkills,
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
+		// Root policy and module paths have separate jobs: the live policy drives
+		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
+		// parent-bound extension instances while constructing the child.
+		extensionRoots: session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+		preloadedPreparedExtensions: restrictToolNames ? [] : session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
@@ -555,6 +572,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
+	const onSubprocessResult =
+		request.invocationKind === "eval"
+			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
+			: undefined;
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
@@ -573,24 +594,29 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(
 					"isolation",
-					`Isolated subagent execution requires a git repository. ${message}`,
+					`Isolated subagent execution could not be prepared: ${message}`,
 					{ cause: error },
 				);
 			}
 		}
-		const result = !isolationContext
-			? await runSubprocess(baseOptions)
-			: await runIsolatedSubprocess({
-					baseOptions,
-					context: isolationContext,
-					preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
-					agentId: id,
-					mergeMode: policy.mergeMode,
-					artifactsDir: lease.artifactsDir,
-					description: trimToUndefined(request.identity?.label),
-					buildCommitMessage: makeIsolationCommitMessage(request.session),
-					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
-				});
+		let result: SingleResult;
+		if (!isolationContext) {
+			result = await runSubprocess(baseOptions);
+			onSubprocessResult?.(result);
+		} else {
+			result = await runIsolatedSubprocess({
+				baseOptions,
+				context: isolationContext,
+				preferredBackend: parseIsolationBackend(request.session.settings.get("isolation.backend")),
+				agentId: id,
+				mergeMode: policy.mergeMode,
+				artifactsDir: lease.artifactsDir,
+				description: trimToUndefined(request.identity?.label),
+				buildCommitMessage: makeIsolationCommitMessage(request.session),
+				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
+				onSubprocessResult,
+			});
+		}
 		attachStructuredOutputMetadata(result, policy.schema);
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&

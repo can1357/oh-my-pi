@@ -196,10 +196,19 @@ function makePlainUrlPunctuationSseResponse(model: string): string {
 }
 
 describe("searchCodex model selection", () => {
+	const residencyPayload = Buffer.from(
+		JSON.stringify({
+			"https://api.openai.com/auth": {
+				chatgpt_account_id: "acct-test",
+				chatgpt_data_residency: "us",
+			},
+		}),
+	).toString("base64url");
+	const residencyToken = `header.${residencyPayload}.signature`;
 	const fakeAuthStorage = {
 		async getOAuthAccess() {
 			return {
-				accessToken: "test-access-token",
+				accessToken: residencyToken,
 				accountId: "acct-test",
 			};
 		},
@@ -292,6 +301,7 @@ describe("searchCodex model selection", () => {
 
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+		expect(new Headers(capturedRequest?.headers).get("x-openai-internal-codex-residency")).toBe("us");
 		expect(capturedRequest?.body?.model).toBe("gpt-5.6-luna");
 		expect(result.model).toBe("gpt-5.6-luna");
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
@@ -355,6 +365,7 @@ describe("searchCodex model selection", () => {
 		expect(headers.get("authorization")).toBe("Bearer test-proxy-key");
 		expect(headers.get("x-proxy-tenant")).toBe("tenant-1");
 		expect(headers.has("chatgpt-account-id")).toBe(false);
+		expect(headers.has("x-openai-internal-codex-residency")).toBe(false);
 		expect(result.answer).toBe("Codex answer");
 	});
 

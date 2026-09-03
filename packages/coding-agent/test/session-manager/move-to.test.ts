@@ -110,21 +110,67 @@ describe("SessionManager.moveTo", () => {
 		expect(hasAssistantEntry(entries)).toBe(true);
 	});
 
-	it("makes the moved session visible to resume from the target cwd", async () => {
+	it("persists the captured header and workspace roots after a rollback relocation", async () => {
 		const session = SessionManager.create(cwdA);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		session.appendMessage(makeAssistantMessage());
+		await session.addWorkspaceDirectory(cwdB);
 		await session.flush();
-		const oldFile = session.getSessionFile()!;
+		const originalFile = session.getSessionFile()!;
+		const snapshot = session.captureState();
 
+		// Move to a target that is also an additional workspace root: moveTo
+		// filters it from #additionalDirectories in the rewritten header.
 		await session.moveTo(cwdB);
+		await session.rollbackMove(snapshot);
 
-		const movedFile = session.getSessionFile()!;
-		const sourceSessions = await SessionManager.list(cwdA);
-		const targetSessions = await SessionManager.list(cwdB);
+		// Reopen the restored source file: disk must carry the captured header,
+		// including the workspace root the forward move filtered out.
+		const entries = await loadEntriesFromFile(originalFile);
+		const header = getHeader(entries);
+		expect(header?.cwd).toBe(path.resolve(cwdA));
+		expect(header?.additionalDirectories ?? []).toContain(path.resolve(cwdB));
+		expect(session.getCwd()).toBe(path.resolve(cwdA));
+	});
+	it("relocates a fallback session whose bucket matches the runtime cwd", async () => {
+		const deniedDir = path.join(testAgentDir, "denied-project");
+		const deniedFile = path.join(deniedDir, "session.jsonl");
+		await fsp.mkdir(deniedDir);
+		await Bun.write(
+			deniedFile,
+			`${JSON.stringify({
+				type: "session",
+				id: "019e84ed-b4cc-7000-9c87-5afe6df992c1",
+				cwd: deniedDir,
+				timestamp: new Date(0).toISOString(),
+			})}\n`,
+		);
+		const realAccess = fs.promises.access.bind(fs.promises);
+		const access = spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
+			if (path.resolve(String(target)) === path.resolve(deniedDir)) {
+				throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+			}
+			return realAccess(target, mode);
+		});
+		try {
+			const session = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: cwdA });
+			try {
+				const snapshot = session.captureState();
+				await session.moveTo(cwdA);
+				const movedFile = session.getSessionFile()!;
+				expect(movedFile).not.toBe(deniedFile);
 
-		expect(sourceSessions.some(item => item.path === oldFile)).toBe(false);
-		expect(targetSessions.some(item => item.path === movedFile)).toBe(true);
+				await session.rollbackMove(snapshot);
+
+				expect(fs.existsSync(deniedFile)).toBe(true);
+				expect(fs.existsSync(movedFile)).toBe(false);
+				expect(session.getSessionFile()).toBe(deniedFile);
+			} finally {
+				await session.close();
+			}
+		} finally {
+			access.mockRestore();
+		}
 	});
 
 	it("succeeds on fresh session without ENOENT, then deferred persistence works", async () => {
@@ -484,5 +530,27 @@ describe("SessionManager.moveTo", () => {
 					entry.message.content === "during move crash window",
 			),
 		).toBe(true);
+	});
+
+	it("keeps the manager pointed at the moved file when the inverse relocation fails", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const snapshot = session.captureState();
+		await session.moveTo(cwdB);
+		const movedFile = session.getSessionFile()!;
+
+		// Make the inverse rename fail on the rollback call.
+		const moveTo = spyOn(session, "moveTo").mockRejectedValueOnce(new Error("rename denied"));
+		try {
+			await expect(session.rollbackMove(snapshot)).rejects.toThrow("the session file remains at");
+		} finally {
+			moveTo.mockRestore();
+		}
+
+		// The manager must keep pointing at the actual on-disk file so later
+		// appends continue there instead of splitting the transcript.
+		expect(session.getSessionFile()).toBe(movedFile);
 	});
 });

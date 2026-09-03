@@ -84,6 +84,10 @@ export async function renderPdfPageScreenshot(
 		import("./browser/registry"),
 		import("./browser/tab-supervisor"),
 	]);
+	// Capture the render deadline start so `acquireTab` counts its
+	// worker-init time against this same budget (browser acquisition above
+	// already consumed part of it) instead of restarting the clock.
+	const deadlineStart = performance.now();
 	const timeoutSignal = AbortSignal.timeout(PDF_RENDER_TIMEOUT_MS);
 	const renderSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const tabName = `read-pdf-${Bun.randomUUIDv7()}`;
@@ -105,6 +109,7 @@ export async function renderPdfPageScreenshot(
 				url: url.href,
 				waitUntil: "load",
 				timeoutMs: PDF_RENDER_TIMEOUT_MS,
+				deadlineStartMs: deadlineStart,
 				signal: renderSignal,
 				ownerSessionId: session.getSessionId?.() ?? undefined,
 			}),

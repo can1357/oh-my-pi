@@ -30,11 +30,12 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(
   {
     builtinRules: ttsrSettings.builtinRules,
     disabledRules: ttsrSettings.disabledRules,
+    agentName: resolvedAgentName,
   },
 );
 ```
 
-`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded `builtin-defaults` rules when `ttsr.builtinRules === false`, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
 
 ### Pre-registration dedupe behavior
 
@@ -55,7 +56,7 @@ With no explicit `scope`, a rule monitors assistant text and all tool arguments,
 
 ### AST conditions (`astCondition`)
 
-AST conditions only evaluate on tool-argument streams for tools that expose a reconstructed `matcherDigest` or per-file `matcherEntries`, and only when a candidate path supplies a usable file extension for language inference. Built-in edit/write tools provide these surfaces, but the coordinator resolves them generically from the active tool.
+AST conditions only evaluate on tool-argument streams for tools that expose a reconstructed `matcherDigest` or per-file `matcherEntries`, and only when a candidate path supplies a usable file extension for language inference. Built-in edit/write tools provide these surfaces, but the coordinator resolves them generically from the active tool. They match against the tool's reconstructed source snapshot — the per-file `matcherEntries` digests when available, else the combined `matcherDigest` — not the raw wire delta; streams without a usable file path (prose, thinking, path-less tool calls) skip AST conditions entirely. A rule may mix `condition` and `astCondition`: the regex paths keep working on every scope while AST paths apply only to those tool streams.
 
 The snapshot is source-bearing payload, not the whole prospective file: pre-existing target content is invisible unless the call repeats it. Current edit modes expose `new_string` for replace, added lines for JSON patch, hashline, and apply-patch forms, and full content for create forms; write exposes its entire `content`. Multi-file hashline/apply-patch calls are split into separate `{ path, digest }` entries, so AST language, path scope/globs, buffers, and matching are evaluated per file. Matching is in-memory through native `astMatch` with Smart strictness.
 
@@ -91,8 +92,11 @@ When assistant updates arrive and rules exist:
 
 - monitor `text_delta`, `thinking_delta`, and `toolcall_delta`
 - isolate buffers by source or tool-call stream key
-- if the active tool exposes per-file `matcherEntries`, replace each file-scoped buffer with its digest and call `checkSnapshot`; otherwise, use a single `matcherDigest` snapshot when available, falling back to appending the raw delta via `checkDelta`
-- when AST rules exist, run `checkAstSnapshot` on the same reconstructed per-file or single snapshot; identical consecutive snapshots for a stream key are skipped
+- the match context's file paths prefer the tool's `matcherPaths(args)` hook — edit strategies surface paths embedded in the wire payload (hashline `[path#TAG]` section headers, apply_patch `*** Add/Update/Delete File:` envelope markers), tolerant of partially streamed buffers — falling back to the generic top-level `path`/`paths` argument scan
+- for tools exposing `matcherEntries(args)`, the streamed payload is projected per touched file into `{ path, digest }` entries (added lines only, same-path sections/hunks merged); each entry is checked in isolation via `checkSnapshot(entry.digest, perFileContext)` under its own file path and stream key (`<toolcall>#<path>`), so a path-scoped rule like `tool:edit(*.ts)` never fires on text belonging to a sibling Markdown hunk in a multi-file payload
+- otherwise, for tools exposing a combined `matcherDigest` (edit/write), replace the scoped buffer with the reconstructed source snapshot and call `checkSnapshot(snapshot, matchContext)`; otherwise append the delta into the scoped manager buffer and call `checkDelta(delta, matchContext)` (synchronous regex matching either way)
+- `checkDelta` skips buffering entirely for text/thinking sources when no registered rule allows that source (`canMatchText`/`canMatchThinking`), so unmatched prose/thinking deltas pay no buffering cost
+- when AST rules exist, `checkAstSnapshot` runs (awaited) on the same reconstructed per-file or single snapshot; identical consecutive snapshots for a stream key are skipped
 
 `checkDelta()`/`checkSnapshot()` iterate registered rules and return all matching rules that pass scope, global path-glob, regex condition, and repeat policy checks. `checkAstSnapshot()` applies the same scope/path/repeat gates, infers language from the candidate file path, then tests each candidate rule's AST patterns. Regex and AST match arrays feed the same trigger-decision handler.
 
@@ -254,7 +258,8 @@ During the timer window, state can change. The retry is guarded by retry token, 
 - Duplicate names at manager layer: second registration is ignored.
 - `ttsr.disabledRules`: listed names are dropped before TTSR registration and are not surfaced through always-apply/rulebook buckets.
 - `ttsr.builtinRules: false`: embedded `builtin-defaults` rules are dropped before TTSR registration; user/project rules still load.
-- `globs` on a TTSR rule require at least one candidate file path matching either its normalized path or basename.
+- `globs` on a TTSR rule require at least one candidate file path matching either its normalized path or basename; for hashline/apply_patch edit streams those paths come from the tool's `matcherPaths` hook, not top-level arguments.
+- Tools without `matcherPaths`/`matcherEntries` keep the generic top-level path scan and combined `matcherDigest` behavior — the per-file hooks are additive.
 - Default scope monitors text and tools, not thinking.
 - `contextMode: "keep"`: partial violating output can remain in context before reminder retry.
 - `interruptMode: "never"`: prose-source matches queue a deferred hidden injection after a successful assistant message; tool-source matches fold an in-band `<system-reminder>` into the matched tool call's `toolResult` content via the `afterToolCall` hook (no mid-stream abort, no separate follow-up turn).

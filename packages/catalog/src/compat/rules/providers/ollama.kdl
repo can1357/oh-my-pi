@@ -1,0 +1,12 @@
+// Provider-wire compat for local Ollama: the runtime's effort vocabulary is
+// low/medium/high/max regardless of model; discovery still gates reasoning on
+// the /api/show `thinking` capability, so non-thinking models never surface
+// an effort ladder. priority=-1: this is a generic fallback, so any
+// unscoped class-lineage ladder (DeepSeek V4 low/high/max, GPT-OSS Harmony
+// low/medium/high) wins equal-rank ties instead of erroring.
+
+provider "ollama" priority=-1 {
+	// Replaces both Ollama empty-length finish baselines.
+	empty-length-finish-is-context-error #true
+	thinking-efforts "low" "medium" "high" "max"
+}

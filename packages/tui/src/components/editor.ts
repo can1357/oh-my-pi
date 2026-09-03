@@ -1,9 +1,11 @@
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import {
+	type AutocompleteItem,
 	type AutocompleteProvider,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
 	midPromptSkillTokenMatches,
+	SKILL_NAMESPACE,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
@@ -23,7 +25,21 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../utils";
+import {
+	borderlessComposerStyle,
+	type ComposerChromeContext,
+	type ComposerStyle,
+	type EditorBorderStyle,
+	type EditorTopBorder,
+	getComposerStyle,
+	isFilledComposerStyle,
+} from "./composer";
+
+export type { EditorBorderStyle, EditorTopBorder };
+
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
+
+const PASSTHROUGH_COLOR = (text: string): string => text;
 
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
@@ -33,6 +49,7 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
 	wrapDescription: true,
+	maxDescriptionRows: 2,
 	overflowSearch: false,
 };
 
@@ -366,6 +383,8 @@ interface LayoutLine {
 	text: string;
 	/** Exact `visibleWidth(text)` carried from wrap/layout, never re-derived. */
 	width: number;
+	sourceLine: number;
+	sourceStartCol: number;
 	hasCursor: boolean;
 	cursorPos?: number;
 }
@@ -379,20 +398,17 @@ interface WrapEntry {
 
 export interface EditorTheme {
 	borderColor: (str: string) => string;
+	/** Stable accent for composer chrome that should not follow the mutable border state. */
+	accentColor?: (str: string) => string;
+	/** Background fill used by filled composer styles. */
+	surfaceColor?: (str: string) => string;
+	/** Foreground used when the composer shape leaves its text surface transparent. */
+	textColor?: (str: string) => string;
 	selectList: SelectListTheme;
 	symbols: SymbolTheme;
 	editorPaddingX?: number;
 	/** Style function for inline hint/ghost text (dim text after cursor) */
 	hintStyle?: (text: string) => string;
-}
-
-export interface EditorTopBorder {
-	/** The status content (already styled) */
-	content: string;
-	/** Visible width of the content */
-	width: number;
-	/** Optional logical revision that changes independently of available width. */
-	revision?: number;
 }
 
 interface HistoryEntry {
@@ -404,7 +420,58 @@ interface HistoryStorage {
 	getRecent(limit: number): HistoryEntry[];
 }
 
+/** A synchronous replacement immediately before the editor cursor. */
+export interface EditorInlineReplacement {
+	/** UTF-16 code units to remove immediately before the cursor. */
+	replaceLen: number;
+	/** Literal text inserted where the removed suffix started. */
+	insert: string;
+}
+
+/** Replacement candidates and the current-line span they replace. */
+export interface EditorWordReplacements {
+	line: number;
+	startCol: number;
+	endCol: number;
+	items: readonly string[];
+}
+
+/** Source location for one visual text segment passed to `decorateText`. */
+export interface EditorTextDecorationContext {
+	line: number;
+	startCol: number;
+	endCol: number;
+}
+
+/**
+ * Optional prose assistance kept separate from command/file autocomplete.
+ * Hosts independently decide whether word completion and autocorrection are enabled.
+ */
+export interface EditorTextAssistProvider {
+	/** Return ghost-text suffix for the partial word at the cursor, or `null`. */
+	getWordCompletion?(lines: string[], cursorLine: number, cursorCol: number): string | null;
+	/** Return a correction after one single-character insertion, or `null`. */
+	tryAutocorrect?(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+	): EditorInlineReplacement | null | Promise<EditorInlineReplacement | null>;
+	/** Return replacement candidates for the misspelled word at the cursor. */
+	getWordReplacements?(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+	): EditorWordReplacements | null | Promise<EditorWordReplacements | null>;
+}
+
 type HistoryCursorAnchor = "start" | "end";
+type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
+
+/** What the paste transport knew about the input burst before the editor inserts the payload. */
+export interface PasteOptions {
+	/** A submit keypress arrived in the same input burst and will be dispatched right after the paste. */
+	submitAfterPaste?: boolean;
+}
 
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
@@ -412,9 +479,6 @@ export class Editor implements Component, Focusable {
 		cursorLine: 0,
 		cursorCol: 0,
 	};
-	#widthEpochText = "";
-	#widthEpochRevision = 0;
-
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
 
@@ -429,7 +493,7 @@ export class Editor implements Component, Focusable {
 	/** Optional hook that decorates displayed user text after source-text layout.
 	 *  Width-changing output is allowed on lines without the cursor; it is truncated
 	 *  to the content width rather than reflowed. Cursor glyphs and inline hints are excluded. */
-	decorateText: ((text: string) => string) | undefined;
+	decorateText: ((text: string, context: EditorTextDecorationContext) => string) | undefined;
 	#promptGutter: string | undefined;
 
 	// Store last layout width for cursor navigation
@@ -465,16 +529,31 @@ export class Editor implements Component, Focusable {
 
 	// Autocomplete support
 	#autocompleteProvider?: AutocompleteProvider;
+	#textAssistProvider?: EditorTextAssistProvider;
 	#autocompleteList?: SelectList;
-	#autocompleteState: "regular" | "force" | null = null;
+	#autocompleteState: "regular" | "force" | "assist" | null = null;
+	#textAssistReplacement:
+		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
+		| undefined;
 	#autocompletePrefix: string = "";
 	#autocompleteRequestId: number = 0;
-	#autocompleteMaxVisible: number = 5;
+	#autocompletePendingRequest: AutocompleteRequest | undefined;
+	#autocompleteRequestRunning = false;
+	#autocompleteAbortController: AbortController | undefined;
+	#autocompleteWaiters: Array<() => void> = [];
+	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
+	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
+	onTextAssistApplied?: () => void;
+	/** Terminal height source for clamping the autocomplete dropdown. Hosts wire this to their Terminal's rows. */
+	viewportRowsProvider?: () => number;
 
 	// Paste tracking for large pastes
 	#pastes: Map<number, string> = new Map();
 	#pasteCounter: number = 0;
+
+	// Host-registered atomic chip tokens: exact buffer label → expansion emitted on submit.
+	#atoms: Map<string, string> = new Map();
 
 	/** Optional pattern matching atomic placeholder tokens (e.g. `[Image #1, 800x600]` or
 	 *  `[Paste #2, +30 lines]`) that the editor treats as indivisible: a backspace or forward-delete
@@ -508,8 +587,9 @@ export class Editor implements Component, Focusable {
 	 *  the editor inserts nothing and records no undo state, leaving insertion to the host (e.g. a
 	 *  "wrap in a code block / XML / attach as file" menu for very large pastes), which re-inserts
 	 *  via {@link insertPaste} or {@link insertText}. Return `false` (or leave unset) for the
-	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count. */
-	onLargePaste?: (text: string, lineCount: number) => boolean;
+	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count;
+	 *  `options` carries what the paste transport knew about the burst. */
+	onLargePaste?: (text: string, lineCount: number, options: PasteOptions) => boolean;
 	onAutocompleteCancel?: () => void;
 	disableSubmit: boolean = false;
 
@@ -519,18 +599,53 @@ export class Editor implements Component, Focusable {
 	// per-event rebuilds down to one per rendered frame (see #4145).
 	#topBorderContent?: EditorTopBorder;
 	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | undefined;
-	#topBorderProviderWidth: number | undefined;
-	#topBorderProviderSignature: string | undefined;
-	#topBorderProviderRevision: number | undefined;
 	#borderVisible = true;
-
+	#borderStyle: EditorBorderStyle = "box";
 	constructor(theme: EditorTheme) {
+		this.#theme = theme;
+		this.borderColor = theme.borderColor;
+	}
+	/** Return bounded editor content, cursor, and transient child state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const lines = this.#state.lines;
+		let textLength = Math.max(0, lines.length - 1);
+		let textPreview = "";
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i] ?? "";
+			textLength += line.length;
+			if (textPreview.length >= 120) continue;
+			if (i > 0) textPreview += "\n";
+			textPreview += line.slice(0, 120 - textPreview.length);
+		}
+		return {
+			textPreview,
+			textLength,
+			previewTruncated: textLength > 120,
+			cursorLine: this.#state.cursorLine,
+			cursorCol: this.#state.cursorCol,
+			lineCount: lines.length,
+			selection: null,
+			placeholderActive: false,
+		};
+	}
+
+	/** Expose the active autocomplete list to the debug tree walker. */
+	get debugChildren(): readonly Component[] {
+		return this.#autocompleteList ? [this.#autocompleteList] : [];
+	}
+
+	setTheme(theme: EditorTheme): void {
 		this.#theme = theme;
 		this.borderColor = theme.borderColor;
 	}
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
 		this.#autocompleteProvider = provider;
+	}
+
+	/** Install prose assistance without changing command/file autocomplete. */
+	setTextAssistProvider(provider: EditorTextAssistProvider | undefined): void {
+		this.#textAssistProvider = provider;
 	}
 
 	/**
@@ -546,7 +661,6 @@ export class Editor implements Component, Focusable {
 		if (this.#topBorderContent?.content === content?.content && this.#topBorderContent?.width === content?.width)
 			return;
 		this.#topBorderContent = content;
-		this.#widthEpochRevision++;
 	}
 
 	/**
@@ -557,16 +671,10 @@ export class Editor implements Component, Focusable {
 	 * Use this when the top border derives from state that mutates far faster
 	 * than the render cadence (session events, streaming, subagent updates).
 	 * The TUI already throttles renders, so a provider is invoked exactly once
-	 * per frame and does no work between paints. Return a logical `revision` to
-	 * distinguish concurrent status mutations from pure width reflow.
-	 */
+	 * per frame and does no work between paints. 	 */
 	setTopBorderProvider(provider: ((availableWidth: number) => EditorTopBorder | undefined) | undefined): void {
 		if (this.#topBorderProvider === provider) return;
 		this.#topBorderProvider = provider;
-		this.#topBorderProviderWidth = undefined;
-		this.#topBorderProviderSignature = undefined;
-		this.#topBorderProviderRevision = undefined;
-		this.#widthEpochRevision++;
 	}
 
 	/**
@@ -575,11 +683,23 @@ export class Editor implements Component, Focusable {
 	setBorderVisible(borderVisible: boolean): void {
 		if (this.#borderVisible === borderVisible) return;
 		this.#borderVisible = borderVisible;
-		this.#widthEpochRevision++;
 	}
 
 	setPromptGutter(promptGutter: string | undefined): void {
 		this.#promptGutter = promptGutter;
+	}
+	getBorderStyle(): EditorBorderStyle {
+		return this.#borderStyle;
+	}
+
+	setBorderStyle(style: EditorBorderStyle): void {
+		if (this.#borderStyle === style) return;
+		this.#borderStyle = style;
+	}
+
+	/** True while the autocomplete/slash-command menu is open below the editor. */
+	isAutocompleteActive(): boolean {
+		return this.#autocompleteState !== null;
 	}
 
 	/**
@@ -598,14 +718,12 @@ export class Editor implements Component, Focusable {
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
 		if (this.#useTerminalCursor === useTerminalCursor) return;
 		this.#useTerminalCursor = useTerminalCursor;
-		this.#widthEpochRevision++;
 	}
 
 	/** Render a dedicated bottom border so terminal-local IME preedit cannot shift editor chrome. */
 	setImeSafeCursorLayout(enabled: boolean): void {
 		if (this.#imeSafeCursorLayout === enabled) return;
 		this.#imeSafeCursorLayout = enabled;
-		this.#widthEpochRevision++;
 	}
 
 	getUseTerminalCursor(): boolean {
@@ -615,7 +733,6 @@ export class Editor implements Component, Focusable {
 	setMaxHeight(maxHeight: number | undefined): void {
 		if (this.#maxHeight === maxHeight) return;
 		this.#maxHeight = maxHeight;
-		this.#widthEpochRevision++;
 		// Don't reset scrollOffset — #updateScrollOffset will clamp it on next render
 	}
 
@@ -633,16 +750,16 @@ export class Editor implements Component, Focusable {
 	}
 
 	setAutocompleteMaxVisible(maxVisible: number): void {
-		const newMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
+		const newMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 10;
 		if (this.#autocompleteMaxVisible !== newMaxVisible) {
 			this.#autocompleteMaxVisible = newMaxVisible;
 			if (this.#autocompleteState !== null) {
 				this.#autocompleteList?.setMaxVisible(newMaxVisible);
-				this.#widthEpochRevision++;
 			}
 		}
 	}
 
+	/** Loads persistent prompts for navigation and enables future persistence. */
 	setHistoryStorage(storage: HistoryStorage): void {
 		this.#historyStorage = storage;
 		const recent = storage.getRecent(100);
@@ -657,19 +774,20 @@ export class Editor implements Component, Focusable {
 	addToHistory(text: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		// Don't add consecutive duplicates
-		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
-		this.#history.unshift(trimmed);
-		// Limit history size
-		if (this.#history.length > 100) {
-			this.#history.pop();
-		}
 
 		const stor = this.#historyStorage;
 		if (stor) {
 			stor.add(trimmed, getProjectDir()).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
+		}
+
+		// Don't add consecutive duplicates
+		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
+		this.#history.unshift(trimmed);
+		// Limit history size
+		if (this.#history.length > 100) {
+			this.#history.pop();
 		}
 	}
 
@@ -724,31 +842,50 @@ export class Editor implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	/** Active chrome style; a hidden border collapses every shape to borderless. */
+	#effectiveStyle(): ComposerStyle {
+		return this.#borderVisible ? getComposerStyle(this.#borderStyle) : borderlessComposerStyle;
+	}
+
+	#getEffectivePromptGutter(): string | undefined {
+		const style = this.#effectiveStyle();
+		// The box frame never renders a gutter; hosts that set one expect it only
+		// in borderless contexts (hook editors, agents hub).
+		if (style.sideBorders) return undefined;
+		if (this.#promptGutter !== undefined) return this.#promptGutter;
+		// Legacy `setBorderVisible(false)` callers control the gutter themselves;
+		// only an explicitly selected composer shape gets the style default.
+		if (!this.#borderVisible) return undefined;
+		return style.defaultPromptGutter;
+	}
+
 	#getEditorPaddingX(): number {
-		const padding = this.#paddingXOverride ?? this.#theme.editorPaddingX ?? 2;
-		return Math.max(0, padding);
+		if (this.#paddingXOverride !== undefined) return Math.max(0, this.#paddingXOverride);
+		return this.#effectiveStyle().defaultPaddingX(this.#theme.editorPaddingX);
 	}
 
 	#getHorizontalChromeWidth(paddingX: number): number {
-		return this.#borderVisible ? paddingX + 1 : 0;
+		return this.#effectiveStyle().sideChromeWidth(paddingX);
 	}
 
 	#getPromptGutterWidth(width: number, paddingX: number): number {
-		if (this.#borderVisible || !this.#promptGutter) return 0;
+		const gutter = this.#getEffectivePromptGutter();
+		if (!gutter) return 0;
 		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX);
 		const availableWidth = Math.max(0, width - chromeWidth);
-		return Math.min(visibleWidth(this.#promptGutter), availableWidth);
+		return Math.min(visibleWidth(gutter), availableWidth);
 	}
 
 	#getPromptGutter(
 		width: number,
 		paddingX: number,
 	): { firstLine: string; continuation: string; width: number } | undefined {
-		if (this.#borderVisible || !this.#promptGutter) return undefined;
+		const gutter = this.#getEffectivePromptGutter();
+		if (!gutter) return undefined;
 		const gutterWidth = this.#getPromptGutterWidth(width, paddingX);
 		if (gutterWidth === 0) return undefined;
 		return {
-			firstLine: sliceByColumn(this.#promptGutter, 0, gutterWidth, true),
+			firstLine: sliceByColumn(gutter, 0, gutterWidth, true),
 			continuation: padding(gutterWidth),
 			width: gutterWidth,
 		};
@@ -761,17 +898,15 @@ export class Editor implements Component, Focusable {
 
 	#getLayoutWidth(width: number, paddingX: number): number {
 		const contentWidth = this.#getContentWidth(width, paddingX);
-		const cursorReserve = this.#borderVisible && paddingX === 0 ? 1 : 0;
+		const cursorReserve = this.#effectiveStyle().sideBorders && paddingX === 0 ? 1 : 0;
 		// Keep cursor/scroll layout addressable even when a borderless prompt gutter consumes every visible column.
 		return Math.max(1, contentWidth - cursorReserve);
 	}
 
 	#getVisibleContentHeight(contentLines: number): number {
 		if (this.#maxHeight === undefined) return contentLines;
-		const verticalChrome = this.#borderVisible ? 2 : 0;
-		return Math.max(1, this.#maxHeight - verticalChrome);
+		return Math.max(1, this.#maxHeight - this.#effectiveStyle().verticalChrome);
 	}
-
 	/** Apply the optional input decorator to a plain (ANSI-free) text segment.
 	 *  Decoration only adds zero-width SGR codes, so visible width is unchanged.
 	 *  Splits around CURSOR_MARKER so each user-text segment is decorated in
@@ -779,14 +914,38 @@ export class Editor implements Component, Focusable {
 	 *  the right boundary with `(?!\S)` would otherwise reject an otherwise-
 	 *  valid match at the cursor seam (e.g. `ultrathink` immediately followed
 	 *  by the marker stops glowing until a trailing character is typed). */
-	#decorate(text: string): string {
+	#decorate(text: string, context: EditorTextDecorationContext): string {
 		const decorate = this.decorateText;
 		if (decorate === undefined || text.length === 0) return text;
 		const idx = text.indexOf(CURSOR_MARKER);
-		if (idx === -1) return decorate(text);
+		const sourceLength = Math.max(0, context.endCol - context.startCol);
+		if (idx === -1) {
+			const decoratedLength = Math.min(text.length, sourceLength);
+			return (
+				decorate(text.slice(0, decoratedLength), {
+					...context,
+					endCol: context.startCol + decoratedLength,
+				}) + text.slice(decoratedLength)
+			);
+		}
 		const before = text.slice(0, idx);
 		const after = text.slice(idx + CURSOR_MARKER.length);
-		return (before.length > 0 ? decorate(before) : "") + CURSOR_MARKER + (after.length > 0 ? decorate(after) : "");
+		const beforeLength = Math.min(before.length, sourceLength);
+		const afterLength = Math.min(after.length, sourceLength - beforeLength);
+		const cursorCol = context.startCol + beforeLength;
+		return (
+			(beforeLength > 0 ? decorate(before.slice(0, beforeLength), { ...context, endCol: cursorCol }) : "") +
+			before.slice(beforeLength) +
+			CURSOR_MARKER +
+			(afterLength > 0
+				? decorate(after.slice(0, afterLength), {
+						...context,
+						startCol: cursorCol,
+						endCol: cursorCol + afterLength,
+					})
+				: "") +
+			after.slice(afterLength)
+		);
 	}
 
 	#getStyledInputCursor(): { text: string; width: number } {
@@ -882,20 +1041,16 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): readonly string[] {
+		const style = this.#effectiveStyle();
 		const paddingX = this.#getEditorPaddingX();
-		const borderVisible = this.#borderVisible;
+		const isSideBordered = style.sideBorders;
 		const promptGutter = this.#getPromptGutter(width, paddingX);
 		const contentAreaWidth = this.#getContentWidth(width, paddingX);
 		const layoutWidth = this.#getLayoutWidth(width, paddingX);
 		this.#lastLayoutWidth = layoutWidth;
 
-		// Box-drawing characters for rounded corners
 		const box = this.#theme.symbols.boxRound;
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
-		const topLeft = this.borderColor(`${box.topLeft}${box.horizontal.repeat(paddingX)}`);
-		const topRight = this.borderColor(`${box.horizontal.repeat(paddingX)}${box.topRight}`);
-		const bottomLeft = this.borderColor(`${box.bottomLeft}${box.horizontal}${padding(Math.max(0, paddingX - 1))}`);
-		const horizontal = this.borderColor(box.horizontal);
 
 		// Layout the text
 		const layoutLines = this.#layoutText(layoutWidth);
@@ -921,50 +1076,31 @@ export class Editor implements Component, Focusable {
 			scrollbarThumb = { start, end: start + thumbSize };
 		}
 
-		if (borderVisible) {
-			// Render top border: ╭─ [status content] ────────────────╮
-			const topFillWidth = Math.max(0, width - borderWidth * 2);
-			// Provider (lazy) wins over eager content — a host that installs both
-			// wants the coalesced path; falling back to eager keeps existing
-			// setTopBorder callers working unchanged.
-			let topBorder: EditorTopBorder | undefined;
+		// Resolve the custom top-border content once per frame; the style decides
+		// how (and whether) to draw it. Provider evaluation stays editor-owned,
+		// coalescing per-event rebuilds to one per painted frame.
+		const topFillWidth = Math.max(0, width - borderWidth * 2);
+		let topBorder: EditorTopBorder | undefined;
+		if (style.statusAttachment !== "none") {
 			if (this.#topBorderProvider) {
-				const previousWidth = this.#topBorderProviderWidth;
 				topBorder = this.#topBorderProvider(topFillWidth);
-				const signature = topBorder ? `${topBorder.width}\0${topBorder.content}` : "";
-				const revision = topBorder?.revision;
-				if (
-					(previousWidth !== undefined &&
-						revision !== undefined &&
-						this.#topBorderProviderRevision !== undefined &&
-						revision !== this.#topBorderProviderRevision) ||
-					(previousWidth === topFillWidth && signature !== this.#topBorderProviderSignature)
-				) {
-					this.#widthEpochRevision++;
-				}
-				this.#topBorderProviderWidth = topFillWidth;
-				this.#topBorderProviderSignature = signature;
-				this.#topBorderProviderRevision = revision;
 			} else {
 				topBorder = this.#topBorderContent;
 			}
-			if (topBorder) {
-				const { content, width: statusWidth } = topBorder;
-				if (statusWidth <= topFillWidth) {
-					// Status fits - add fill after it
-					const fillWidth = topFillWidth - statusWidth;
-					result.push(topLeft + content + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
-				} else {
-					// Status too long - truncate it
-					const truncated = truncateToWidth(content, Math.max(0, topFillWidth - 1));
-					const truncatedWidth = visibleWidth(truncated);
-					const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
-					result.push(topLeft + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
-				}
-			} else {
-				result.push(topLeft + horizontal.repeat(topFillWidth) + topRight);
-			}
 		}
+
+		const chromeCtx: ComposerChromeContext = {
+			width,
+			paddingX,
+			borderColor: (str: string) => this.borderColor(str),
+			accentColor: this.#theme.accentColor ?? this.borderColor,
+			surfaceColor: this.#theme.surfaceColor ?? PASSTHROUGH_COLOR,
+			box,
+			topBorder,
+		};
+
+		const topRow = style.renderTop(chromeCtx);
+		if (topRow !== undefined) result.push(topRow);
 
 		// Render each layout line
 		// Keep the hardware cursor at the text insertion point while autocomplete
@@ -980,6 +1116,11 @@ export class Editor implements Component, Focusable {
 			const layoutLine = visibleLayoutLines[visibleIndex]!;
 			let displayText = layoutLine.text;
 			let displayWidth = layoutLine.width;
+			const decorationContext: EditorTextDecorationContext = {
+				line: layoutLine.sourceLine,
+				startCol: layoutLine.sourceStartCol,
+				endCol: layoutLine.sourceStartCol + layoutLine.text.length,
+			};
 			let cursorPaddingOverflow = 0;
 			let decorated = false;
 			let imeSafeCursorTail = false;
@@ -991,12 +1132,12 @@ export class Editor implements Component, Focusable {
 			const hasCursor = layoutLine.hasCursor && layoutLine.cursorPos !== undefined;
 			const marker = emitCursorMarker ? CURSOR_MARKER : "";
 
-			if (!borderVisible && displayWidth > lineContentWidth) {
+			if (!isSideBordered && displayWidth > lineContentWidth) {
 				displayText = sliceByColumn(displayText, 0, lineContentWidth, true);
 				displayWidth = visibleWidth(displayText);
 			}
 
-			if (!borderVisible && lineContentWidth === 0) {
+			if (!isSideBordered && lineContentWidth === 0) {
 				if (hasCursor && !this.#useTerminalCursor) {
 					const zeroWidthCursorBudget = visibleWidth(gutterText);
 					const zeroWidthCursorReplacement = this.cursorOverride
@@ -1039,7 +1180,7 @@ export class Editor implements Component, Focusable {
 				if (marker) {
 					const before = displayText.slice(0, layoutLine.cursorPos);
 					const after = displayText.slice(layoutLine.cursorPos);
-					if (this.#imeSafeCursorLayout && after.length === 0 && borderVisible) {
+					if (this.#imeSafeCursorLayout && after.length === 0 && isSideBordered) {
 						// Terminal frontends render IME marked text locally before committed bytes
 						// reach the application. Keep the end-of-input cursor row empty to its
 						// right so that insertion cannot shift box chrome onto the next row.
@@ -1050,7 +1191,7 @@ export class Editor implements Component, Focusable {
 						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
 						displayText = before + marker + hintText;
 						displayWidth += Math.min(visibleWidth(inlineHint), availWidth);
-					} else if (after.length === 0 && !borderVisible && displayWidth >= lineContentWidth) {
+					} else if (after.length === 0 && !isSideBordered && displayWidth >= lineContentWidth) {
 						displayText = this.#renderTerminalCursorMarker(before, marker, lineContentWidth);
 					} else {
 						displayText = before + marker + after;
@@ -1070,13 +1211,20 @@ export class Editor implements Component, Focusable {
 					// Decorate the plain text on each side of the cursor glyph. The reverse-video
 					// reset (\x1b[0m) ends in "m" (a word char), so a boundary match on restAfter
 					// would fail in the whole-line fallback below — decorate the segments here.
-					displayText = this.#decorate(before) + marker + cursor + this.#decorate(restAfter);
+					displayText =
+						this.#decorate(before, { ...decorationContext, endCol: decorationContext.startCol + before.length }) +
+						marker +
+						cursor +
+						this.#decorate(restAfter, {
+							...decorationContext,
+							startCol: decorationContext.startCol + before.length + firstGrapheme.length,
+						});
 					decorated = true;
 					// displayWidth stays the same - we're replacing, not adding
 				} else if (this.cursorOverride) {
 					// Cursor override replaces the normal end-of-text cursor glyph
 					const overrideWidth = this.cursorOverrideWidth ?? 1;
-					if (!borderVisible && displayWidth + overrideWidth > lineContentWidth) {
+					if (!isSideBordered && displayWidth + overrideWidth > lineContentWidth) {
 						// Borderless editors have no spare padding cell for an end-of-line cursor glyph.
 						// Preserve cursorOverride by replacing the tail of the line with it.
 						const widthLimitedCursor = this.#renderEndOfLineCursorAtWidthLimit(before, marker, lineContentWidth, {
@@ -1097,7 +1245,7 @@ export class Editor implements Component, Focusable {
 				} else {
 					// Cursor is at the end - add thin cursor glyph
 					const { text: cursor, width: cursorWidth } = this.#getStyledInputCursor();
-					if (!borderVisible && displayWidth + cursorWidth > lineContentWidth) {
+					if (!isSideBordered && displayWidth + cursorWidth > lineContentWidth) {
 						// Borderless editors have no spare padding cell for an end-of-line cursor glyph.
 						// Highlight the last grapheme so the cursor stays visible without consuming width.
 						const widthLimitedCursor = this.#renderEndOfLineCursorAtWidthLimit(before, marker, lineContentWidth);
@@ -1122,7 +1270,7 @@ export class Editor implements Component, Focusable {
 			// the whole line. `#decorate` splits around CURSOR_MARKER so a keyword glued to
 			// the cursor still satisfies its right-boundary lookahead.
 			if (!decorated) {
-				displayText = this.#decorate(displayText);
+				displayText = this.#decorate(displayText, decorationContext);
 			}
 			if (!hasCursor) {
 				// Undecorated, unsliced lines keep their carried width; any
@@ -1133,49 +1281,38 @@ export class Editor implements Component, Focusable {
 					displayWidth = visibleWidth(displayText);
 				}
 			}
+			const renderedText = isFilledComposerStyle(style)
+				? displayText
+				: (this.#theme.textColor ?? PASSTHROUGH_COLOR)(displayText);
 
 			const linePad = padding(Math.max(0, lineContentWidth - displayWidth));
 
-			if (!borderVisible) {
-				result.push(gutterText + displayText + linePad);
-				continue;
-			}
-
-			// All lines have consistent borders based on padding. When the end-of-line cursor
-			// glyph (or a wide trailing grapheme) extends past `lineContentWidth`, shrink the
-			// right chrome by the exact overflow count: drop padding spaces first, then the
-			// trailing `─`, but never the corner/vertical bar itself.
-			const isLastLine = visibleIndex === visibleLayoutLines.length - 1;
-			const rightChromeCells = Math.max(1, paddingX + 1 - cursorPaddingOverflow);
-			if (isLastLine && imeSafeCursorTail) {
-				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
-				const bottomBorder = this.borderColor(
-					`${box.bottomLeft}${box.horizontal.repeat(Math.max(0, width - 2))}${box.bottomRight}`,
-				);
-				result.push(leftBorder + displayText);
-				result.push(bottomBorder);
-				continue;
-			}
-			if (isLastLine) {
-				const rightPad = Math.max(0, rightChromeCells - 2);
-				const includeHorizontal = rightChromeCells >= 2;
-				const bottomRightAdjusted = this.borderColor(
-					`${padding(rightPad)}${includeHorizontal ? box.horizontal : ""}${box.bottomRight}`,
-				);
-				result.push(`${bottomLeft}${displayText}${linePad}${bottomRightAdjusted}`);
-			} else {
-				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
-				// When scrollbar is active, replace the right border vertical with a
-				// thumb glyph (█) on lines inside the thumb range, keeping the track (│) elsewhere.
-				const inThumb = scrollbarThumb && visibleIndex >= scrollbarThumb.start && visibleIndex < scrollbarThumb.end;
-				const rightGlyph = inThumb ? "█" : box.vertical;
-				const rightBorder = this.borderColor(`${padding(Math.max(0, rightChromeCells - 1))}${rightGlyph}`);
-				result.push(leftBorder + displayText + linePad + rightBorder);
-			}
+			result.push(
+				...style.renderRow({
+					...chromeCtx,
+					text: renderedText,
+					pad: linePad,
+					gutter: gutterText,
+					isLastRow: visibleIndex === visibleLayoutLines.length - 1,
+					cursorOverflow: cursorPaddingOverflow,
+					imeSafeCursorTail,
+					scrollbarThumb:
+						scrollbarThumb !== null && visibleIndex >= scrollbarThumb.start && visibleIndex < scrollbarThumb.end,
+				}),
+			);
 		}
+
+		const bottomRow = style.renderBottom(chromeCtx);
+		if (bottomRow !== undefined) result.push(bottomRow);
 
 		// Add autocomplete list if active
 		if (this.#autocompleteState && this.#autocompleteList) {
+			// Clamp the dropdown to the terminal viewport: the editor rows already
+			// rendered above plus a small reserve must stay visible.
+			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
+			this.#autocompleteList.setMaxVisible(
+				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
+			);
 			const autocompleteResult = this.#autocompleteList.render(width);
 			result.push(...autocompleteResult);
 		}
@@ -1200,6 +1337,11 @@ export class Editor implements Component, Focusable {
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
+		// Input wins over a pending provider lookup. The next completable edit
+		// queues one fresh request after the stale request acknowledges abort.
+		if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
+			this.#invalidateAutocompleteRequests();
+		}
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.#jumpMode !== null) {
@@ -1262,11 +1404,31 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		if (kb.matchesCanonical(canonical, "tui.editor.spellingSuggestions")) {
+			void this.#showSpellingSuggestions();
+			return;
+		}
+
 		// Handle autocomplete special keys first (but don't block other input)
 		if (this.#autocompleteState && this.#autocompleteList) {
 			// Escape - cancel autocomplete
 			if (kb.matchesCanonical(canonical, "tui.select.cancel")) {
 				this.#cancelAutocomplete(true);
+				return;
+			}
+			// Right arrow at end of line accepts the selection like Tab (fish-style).
+			// Mid-line, right arrow keeps its cursor-movement role and falls through.
+			const rightArrowAccepts =
+				kb.matchesCanonical(canonical, "tui.editor.cursorRight") &&
+				this.#state.cursorCol >= (this.#state.lines[this.#state.cursorLine] ?? "").length;
+			if (
+				this.#autocompleteState === "assist" &&
+				(kb.matchesCanonical(canonical, "tui.input.submit") ||
+					data === "\n" ||
+					kb.matchesCanonical(canonical, "tui.input.tab") ||
+					rightArrowAccepts)
+			) {
+				this.#applySpellingSuggestion();
 				return;
 			}
 			// Let the autocomplete list handle navigation and selection
@@ -1277,7 +1439,8 @@ export class Editor implements Component, Focusable {
 				kb.matchesCanonical(canonical, "tui.select.pageDown") ||
 				kb.matchesCanonical(canonical, "tui.input.submit") ||
 				data === "\n" ||
-				kb.matchesCanonical(canonical, "tui.input.tab")
+				kb.matchesCanonical(canonical, "tui.input.tab") ||
+				rightArrowAccepts
 			) {
 				// Only pass navigation keys to the list, not Enter/Tab (we handle those directly)
 				if (
@@ -1287,13 +1450,12 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.select.pageDown")
 				) {
 					this.#autocompleteList.handleInput(data);
-					this.#widthEpochRevision++;
 					this.onAutocompleteUpdate?.();
 					return;
 				}
 
 				// If Tab was pressed, always apply the selection
-				if (kb.matchesCanonical(canonical, "tui.input.tab")) {
+				if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh
 					// (destructive keys or paste can outrun the debounced update).
@@ -1340,7 +1502,8 @@ export class Editor implements Component, Focusable {
 					(kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") &&
 					findLeadingSlashCommandStart(this.#autocompletePrefix) !== null &&
 					this.#isInSubmittedSlashCommandContext() &&
-					!this.#selectedCompletionIsPath()
+					!this.#selectedCompletionIsPath() &&
+					!this.#selectedCompletionIsSkillNamespace()
 				) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to debounce
@@ -1379,6 +1542,7 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
+							const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
 							const result = this.#autocompleteProvider.applyCompletion(
 								this.#state.lines,
 								this.#state.cursorLine,
@@ -1399,6 +1563,9 @@ export class Editor implements Component, Focusable {
 							}
 
 							result.onApplied?.();
+							if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
+								void this.#tryTriggerAutocomplete();
+							}
 						}
 						return;
 					}
@@ -1408,9 +1575,14 @@ export class Editor implements Component, Focusable {
 			// Let them fall through to normal character handling
 		}
 
+		if (this.#autocompleteState === "assist") {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
+
 		// Tab key - context-aware completion (but not when already autocompleting)
 		if (kb.matchesCanonical(canonical, "tui.input.tab") && !this.#autocompleteState) {
-			this.#handleTabCompletion();
+			void this.#handleTabCompletion();
 			return;
 		}
 
@@ -1458,14 +1630,19 @@ export class Editor implements Component, Focusable {
 				this.#addNewLine();
 			}
 		}
-		// New line
+		// New line. A key the user explicitly bound to `tui.input.submit` wins
+		// over these hardcoded newline fallbacks, so Ctrl/Shift+Enter can be
+		// remapped to submit (#8906). The bare-LF case is exempt: its canonical
+		// form is "enter" (indistinguishable from plain Enter), so gating it
+		// would hijack the default Enter=submit binding.
 		else if (
-			(data.charCodeAt(0) === 10 && data.length > 1) || // Ctrl+Enter with modifiers
-			matchesKey(data, "ctrl+enter") || // Ctrl+Enter (Kitty/modifyOtherKeys, including lock bits/keypad Enter)
-			data === "\x1b\r" || // Option+Enter in some terminals (legacy)
-			data === "\x1b[13;2~" || // Shift+Enter in some terminals (legacy format)
-			kb.matchesCanonical(canonical, "tui.input.newLine") || // Shift+Enter (Kitty protocol, handles lock bits)
-			(data.length > 1 && data.includes("\x1b") && data.includes("\r")) ||
+			(!kb.matchesCanonical(canonical, "tui.input.submit") &&
+				((data.charCodeAt(0) === 10 && data.length > 1) || // Ctrl+Enter with modifiers
+					matchesKey(data, "ctrl+enter") || // Ctrl+Enter (Kitty/modifyOtherKeys, including lock bits/keypad Enter)
+					data === "\x1b\r" || // Option+Enter in some terminals (legacy)
+					data === "\x1b[13;2~" || // Shift+Enter in some terminals (legacy format)
+					kb.matchesCanonical(canonical, "tui.input.newLine") || // Shift+Enter (Kitty protocol, handles lock bits)
+					(data.length > 1 && data.includes("\x1b") && data.includes("\r")))) ||
 			(data === "\n" && data.length === 1) // Shift+Enter from iTerm2 mapping
 		) {
 			if (this.#shouldSubmitOnBackslashEnter(data, kb)) {
@@ -1574,6 +1751,13 @@ export class Editor implements Component, Focusable {
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
 			// Right
+			// At end of line, accept the inline ghost word completion (IME-style) like Tab.
+			if (
+				this.#state.cursorCol >= (this.#state.lines[this.#state.cursorLine] ?? "").length &&
+				this.#acceptWordCompletion()
+			) {
+				return;
+			}
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left
@@ -1631,6 +1815,8 @@ export class Editor implements Component, Focusable {
 			layoutLines.push({
 				text: "",
 				width: 0,
+				sourceLine: 0,
+				sourceStartCol: 0,
 				hasCursor: true,
 				cursorPos: 0,
 			});
@@ -1649,6 +1835,8 @@ export class Editor implements Component, Focusable {
 					layoutLines.push({
 						text: line,
 						width: lineVisibleWidth,
+						sourceLine: i,
+						sourceStartCol: 0,
 						hasCursor: true,
 						cursorPos: this.#state.cursorCol,
 					});
@@ -1656,6 +1844,8 @@ export class Editor implements Component, Focusable {
 					layoutLines.push({
 						text: line,
 						width: lineVisibleWidth,
+						sourceLine: i,
+						sourceStartCol: 0,
 						hasCursor: false,
 					});
 				}
@@ -1697,6 +1887,8 @@ export class Editor implements Component, Focusable {
 						layoutLines.push({
 							text: chunk.text,
 							width: chunk.width,
+							sourceLine: i,
+							sourceStartCol: chunk.startIndex,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
 						});
@@ -1704,6 +1896,8 @@ export class Editor implements Component, Focusable {
 						layoutLines.push({
 							text: chunk.text,
 							width: chunk.width,
+							sourceLine: i,
+							sourceStartCol: chunk.startIndex,
 							hasCursor: false,
 						});
 					}
@@ -1718,15 +1912,6 @@ export class Editor implements Component, Focusable {
 		return this.#state.lines.join("\n");
 	}
 
-	getNativeScrollbackWidthEpochRevision(): number {
-		const text = this.getText();
-		if (text !== this.#widthEpochText) {
-			this.#widthEpochText = text;
-			this.#widthEpochRevision++;
-		}
-		return this.#widthEpochRevision;
-	}
-
 	/** Whether the buffer text equals `value`, without `getText()`'s full join —
 	 *  O(1) for the hot per-keystroke probes against short single-line values. */
 	textEquals(value: string): boolean {
@@ -1736,13 +1921,48 @@ export class Editor implements Component, Focusable {
 		return this.getText() === value;
 	}
 
+	/** Expand collapsed markers — `[Paste #N]` tokens and registered atom labels — into their
+	 *  stored content. Single pass so replaced content is never rescanned (a pasted body that
+	 *  happens to contain another token's label must survive verbatim). Longer atom labels are
+	 *  tried first so `#1` never shadows `#10`. */
 	#expandPasteMarkers(text: string): string {
-		let result = text;
-		for (const [pasteId, pasteContent] of this.#pastes) {
-			const markerRegex = new RegExp(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, () => pasteContent);
+		const sources: string[] = [];
+		for (const pasteId of this.#pastes.keys()) {
+			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
 		}
-		return result;
+		const labels = [...this.#atoms.keys()].sort((a, b) => b.length - a.length);
+		for (const label of labels) sources.push(RegExp.escape(label));
+		if (sources.length === 0) return text;
+		const markerRegex = new RegExp(sources.join("|"), "g");
+		return text.replace(markerRegex, match => {
+			const paste = /^\[Paste #(\d+)/.exec(match);
+			if (paste) return this.#pastes.get(Number(paste[1])) ?? match;
+			return this.#atoms.get(match) ?? match;
+		});
+	}
+
+	/** Register `label` as a collapsed atom expanding to `expansion` on submit, without inserting
+	 *  it — for hosts that re-collapse restored draft text via {@link setText}. */
+	registerAtom(label: string, expansion: string): void {
+		this.#atoms.set(label, expansion);
+	}
+
+	/** Insert `label` (plus a trailing space) at the cursor and register it as an atom expanding
+	 *  to `expansion` on submit. Pair with {@link atomicTokenPattern} so the label deletes as a
+	 *  unit. */
+	insertAtom(label: string, expansion: string): void {
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		this.registerAtom(label, expansion);
+		this.#withUndoSuspended(() => {
+			this.#insertTextAtCursor(`${label} `);
+		});
+	}
+
+	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
+	clearAtoms(): void {
+		this.#atoms.clear();
 	}
 
 	/**
@@ -1935,8 +2155,8 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports. */
-	pasteText(text: string): void {
-		this.#handlePaste(text);
+	pasteText(text: string, options: PasteOptions = {}): void {
+		this.#handlePaste(text, options);
 	}
 
 	/** Insert `content` as a collapsed `[Paste #N]` marker (stored for expansion on submit via
@@ -1952,6 +2172,27 @@ export class Editor implements Component, Focusable {
 	}
 
 	// All the editor methods from before...
+	#applyInlineReplacement(replacement: EditorInlineReplacement): boolean {
+		if (
+			!Number.isInteger(replacement.replaceLen) ||
+			replacement.replaceLen < 0 ||
+			replacement.replaceLen > this.#state.cursorCol
+		) {
+			return false;
+		}
+		const line = this.#state.lines[this.#state.cursorLine] || "";
+		const before = line.slice(0, this.#state.cursorCol - replacement.replaceLen);
+		const after = line.slice(this.#state.cursorCol);
+		this.#state.lines[this.#state.cursorLine] = before + replacement.insert + after;
+		this.#setCursorCol(before.length + replacement.insert.length);
+		this.onChange?.(this.getText());
+		if (this.#autocompleteState) {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
+		return true;
+	}
+
 	#insertCharacter(char: string): void {
 		this.#exitHistoryForEditing();
 		// Undo coalescing: consecutive word typing collapses into one undo unit
@@ -1977,22 +2218,30 @@ export class Editor implements Component, Focusable {
 		// Synchronous inline replacement (e.g. emoji shortcodes `:joy:` → 😂).
 		// Runs before autocomplete trigger so the popup doesn't briefly chase a
 		// prefix that's about to be rewritten.
-		if (char.length === 1 && this.#autocompleteProvider?.trySyncInlineReplace) {
+		if (char.length === 1) {
 			const replaceLine = this.#state.lines[this.#state.cursorLine] || "";
 			const textBeforeCursor = replaceLine.slice(0, this.#state.cursorCol);
-			const replacement = this.#autocompleteProvider.trySyncInlineReplace(textBeforeCursor);
-			if (replacement) {
-				const before = replaceLine.slice(0, this.#state.cursorCol - replacement.replaceLen);
-				const after = replaceLine.slice(this.#state.cursorCol);
-				this.#state.lines[this.#state.cursorLine] = before + replacement.insert + after;
-				this.#setCursorCol(before.length + replacement.insert.length);
-				if (this.onChange) {
-					this.onChange(this.getText());
-				}
-				if (this.#autocompleteState) {
-					this.#cancelAutocomplete();
-					this.onAutocompleteUpdate?.();
-				}
+			const inlineReplacement = this.#autocompleteProvider?.trySyncInlineReplace?.(textBeforeCursor);
+			if (inlineReplacement && this.#applyInlineReplacement(inlineReplacement)) return;
+			const cursorLine = this.#state.cursorLine;
+			const cursorCol = this.#state.cursorCol;
+			const currentLine = this.#state.lines[cursorLine] ?? "";
+			const autocorrection = this.#textAssistProvider?.tryAutocorrect?.(this.#state.lines, cursorLine, cursorCol);
+			if (autocorrection instanceof Promise) {
+				autocorrection
+					.then(replacement => {
+						if (
+							replacement &&
+							this.#state.cursorLine === cursorLine &&
+							this.#state.cursorCol === cursorCol &&
+							this.#state.lines[cursorLine] === currentLine &&
+							this.#applyInlineReplacement(replacement)
+						) {
+							this.onTextAssistApplied?.();
+						}
+					})
+					.catch(() => {});
+			} else if (autocorrection && this.#applyInlineReplacement(autocorrection)) {
 				return;
 			}
 		}
@@ -2047,7 +2296,7 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	#handlePaste(pastedText: string): void {
+	#handlePaste(pastedText: string, options: PasteOptions = {}): void {
 		let filteredText = this.#sanitizePastedText(pastedText);
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
@@ -2069,7 +2318,7 @@ export class Editor implements Component, Focusable {
 		// Let the host intercept marker-sized pastes (e.g. the large-paste menu). When it takes
 		// over, the editor inserts nothing and records no undo state — the host re-inserts via
 		// `insertPaste`/`insertText` once the user chooses.
-		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length)) {
+		if (isMarkerSized && this.onLargePaste?.(filteredText, pastedLines.length, options)) {
 			return;
 		}
 
@@ -2197,6 +2446,7 @@ export class Editor implements Component, Focusable {
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.#pastes.clear();
 		this.#pasteCounter = 0;
+		this.#atoms.clear();
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
@@ -3142,6 +3392,14 @@ export class Editor implements Component, Focusable {
 		if (!selected) return false;
 		return selected.value.startsWith("/") || selected.value.startsWith('"');
 	}
+	/**
+	 * Whether the current popup selection is the collapsed `/skill:` namespace
+	 * row. Accepting it expands the namespace (insert `/skill:`, reopen the
+	 * popup) instead of submitting, since the bare namespace is not a command.
+	 */
+	#selectedCompletionIsSkillNamespace(): boolean {
+		return this.#autocompleteList?.getSelectedItem()?.value === SKILL_NAMESPACE;
+	}
 
 	#isSlashCommandNameAutocompleteSelection(): boolean {
 		if (this.#autocompleteState !== "regular") {
@@ -3162,7 +3420,10 @@ export class Editor implements Component, Focusable {
 		}
 
 		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol).trimStart();
-		return this.#isInSubmittedSlashCommandContext() && /^\/\S+ $/.test(textBeforeCursor);
+		return (
+			this.#isInSubmittedSlashCommandContext() &&
+			(/^\/\S+ $/.test(textBeforeCursor) || textBeforeCursor === `/${SKILL_NAMESPACE}`)
+		);
 	}
 
 	// Autocomplete methods
@@ -3179,39 +3440,18 @@ export class Editor implements Component, Focusable {
 
 	async #tryTriggerAutocomplete(explicitTab: boolean = false): Promise<void> {
 		if (!this.#autocompleteProvider) return;
-		// Check if we should trigger file completion on Tab
-		if (explicitTab) {
-			const shouldTrigger =
-				!this.#autocompleteProvider.shouldTriggerFileCompletion ||
-				this.#autocompleteProvider.shouldTriggerFileCompletion(
-					this.#state.lines,
-					this.#state.cursorLine,
-					this.#state.cursorCol,
-				);
-			if (!shouldTrigger) {
-				return;
-			}
+		if (
+			explicitTab &&
+			this.#autocompleteProvider.shouldTriggerFileCompletion &&
+			!this.#autocompleteProvider.shouldTriggerFileCompletion(
+				this.#state.lines,
+				this.#state.cursorLine,
+				this.#state.cursorCol,
+			)
+		) {
+			return;
 		}
-
-		const requestId = ++this.#autocompleteRequestId;
-
-		const suggestions = await this.#autocompleteProvider.getSuggestions(
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
-		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = "regular";
-			this.#widthEpochRevision++;
-			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-		}
+		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab });
 	}
 	#createAutocompleteList(
 		prefix: string,
@@ -3222,6 +3462,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #handleTabCompletion(): Promise<void> {
+		if (this.#acceptWordCompletion()) return;
 		if (!this.#autocompleteProvider) return;
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
@@ -3238,49 +3479,98 @@ export class Editor implements Component, Focusable {
 			await this.#forceFileAutocomplete();
 		}
 	}
+	/** Insert the inline ghost word completion at the cursor, if any. Shared by Tab and right-arrow accept. */
+	#acceptWordCompletion(): boolean {
+		const wordCompletion = this.#getWordCompletion();
+		if (!wordCompletion) return false;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const after = currentLine.slice(this.#state.cursorCol);
+		this.#insertTextAtCursor(wordCompletion + (/^[\s.,;:!?"\])}]/.test(after) ? "" : " "));
+		return true;
+	}
+
+	async #showSpellingSuggestions(): Promise<void> {
+		const cursorLine = this.#state.cursorLine;
+		const cursorCol = this.#state.cursorCol;
+		const lines = [...this.#state.lines];
+		const result = this.#textAssistProvider?.getWordReplacements?.(lines, cursorLine, cursorCol);
+		const replacements = result instanceof Promise ? await result.catch(() => null) : result;
+		if (
+			!replacements ||
+			this.#state.cursorLine !== cursorLine ||
+			this.#state.cursorCol !== cursorCol ||
+			this.#state.lines[replacements.line] !== lines[replacements.line] ||
+			replacements.line < 0 ||
+			replacements.line >= this.#state.lines.length ||
+			replacements.startCol < 0 ||
+			replacements.endCol <= replacements.startCol ||
+			replacements.items.length === 0
+		) {
+			return;
+		}
+		const line = this.#state.lines[replacements.line] ?? "";
+		if (replacements.endCol > line.length) return;
+		const original = line.slice(replacements.startCol, replacements.endCol);
+		this.#autocompletePrefix = original;
+		this.#autocompleteList = this.#createAutocompleteList(
+			original,
+			replacements.items.map(value => ({ value, label: value })),
+		);
+		this.#autocompleteState = "assist";
+		this.#textAssistReplacement = {
+			line: replacements.line,
+			startCol: replacements.startCol,
+			endCol: replacements.endCol,
+			original,
+			cursorOffset:
+				replacements.line === this.#state.cursorLine ? Math.max(0, this.#state.cursorCol - replacements.endCol) : 0,
+		};
+		this.onAutocompleteUpdate?.();
+	}
+
+	#applySpellingSuggestion(): void {
+		const replacement = this.#textAssistReplacement;
+		const selected = this.#autocompleteList?.getSelectedItem();
+		if (!replacement || !selected) {
+			this.#cancelAutocomplete();
+			return;
+		}
+		const line = this.#state.lines[replacement.line] ?? "";
+		if (line.slice(replacement.startCol, replacement.endCol) !== replacement.original) {
+			this.#cancelAutocomplete();
+			return;
+		}
+		this.#recordUndoState();
+		this.#state.lines[replacement.line] =
+			line.slice(0, replacement.startCol) + selected.value + line.slice(replacement.endCol);
+		this.#state.cursorLine = replacement.line;
+		this.#setCursorCol(replacement.startCol + selected.value.length + replacement.cursorOffset);
+		this.#lastAction = null;
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+		this.onChange?.(this.getText());
+	}
 	async #handleSlashCommandCompletion(): Promise<void> {
 		await this.#tryTriggerAutocomplete();
 	}
 
 	async #forceFileAutocomplete(): Promise<void> {
 		if (!this.#autocompleteProvider) return;
-
-		// File-aware providers expose getForceFileSuggestions; slash-only ones fall back to regular completion.
-		const getForceFileSuggestions = this.#autocompleteProvider.getForceFileSuggestions;
-		if (typeof getForceFileSuggestions !== "function") {
+		if (typeof this.#autocompleteProvider.getForceFileSuggestions !== "function") {
 			await this.#tryTriggerAutocomplete(true);
 			return;
 		}
-
-		const requestId = ++this.#autocompleteRequestId;
-		const suggestions = await getForceFileSuggestions.call(
-			this.#autocompleteProvider,
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
-		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = "force";
-			this.#widthEpochRevision++;
-			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-		}
+		await this.#queueAutocompleteRequest({ kind: "force" });
 	}
 
 	#cancelAutocomplete(notifyCancel: boolean = false): void {
 		const wasAutocompleting = this.#autocompleteState !== null;
 		this.#clearAutocompleteTimeout();
-		this.#autocompleteRequestId += 1;
+		this.#invalidateAutocompleteRequests();
 		this.#autocompleteState = null;
 		this.#autocompleteList = undefined;
+		this.#textAssistReplacement = undefined;
 		this.#autocompletePrefix = "";
-		if (wasAutocompleting) this.#widthEpochRevision++;
 		if (notifyCancel && wasAutocompleting) {
 			this.onAutocompleteCancel?.();
 		}
@@ -3291,33 +3581,97 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #updateAutocomplete(): Promise<void> {
-		if (!this.#autocompleteState || !this.#autocompleteProvider) return;
-
-		// In force mode, use forceFileAutocomplete to get suggestions
+		if (!this.#autocompleteState || !this.#autocompleteProvider || this.#autocompleteState === "assist") return;
 		if (this.#autocompleteState === "force") {
-			this.#forceFileAutocomplete();
+			await this.#forceFileAutocomplete();
+			return;
+		}
+		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab: false });
+	}
+
+	#queueAutocompleteRequest(request: AutocompleteRequest): Promise<void> {
+		const waiter = Promise.withResolvers<void>();
+		this.#autocompleteWaiters.push(waiter.resolve);
+		this.#autocompletePendingRequest = request;
+		this.#autocompleteRequestId++;
+		this.#autocompleteAbortController?.abort();
+		if (!this.#autocompleteRequestRunning) void this.#drainAutocompleteRequests();
+		return waiter.promise;
+	}
+
+	async #drainAutocompleteRequests(): Promise<void> {
+		if (this.#autocompleteRequestRunning) return;
+		this.#autocompleteRequestRunning = true;
+		try {
+			while (this.#autocompletePendingRequest) {
+				const request = this.#autocompletePendingRequest;
+				this.#autocompletePendingRequest = undefined;
+				const requestId = this.#autocompleteRequestId;
+				const controller = new AbortController();
+				this.#autocompleteAbortController = controller;
+				await this.#runAutocompleteRequest(request, requestId, controller.signal);
+				if (this.#autocompleteAbortController === controller) {
+					this.#autocompleteAbortController = undefined;
+				}
+			}
+		} finally {
+			this.#autocompleteRequestRunning = false;
+			const waiters = this.#autocompleteWaiters.splice(0);
+			for (const resolve of waiters) resolve();
+		}
+	}
+
+	async #runAutocompleteRequest(request: AutocompleteRequest, requestId: number, signal: AbortSignal): Promise<void> {
+		const provider = this.#autocompleteProvider;
+		if (!provider) return;
+		const lines = [...this.#state.lines];
+		const cursorLine = this.#state.cursorLine;
+		const cursorCol = this.#state.cursorCol;
+		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
+		try {
+			if (request.kind === "force") {
+				const getForceFileSuggestions = provider.getForceFileSuggestions;
+				if (!getForceFileSuggestions) return;
+				suggestions = await getForceFileSuggestions.call(provider, lines, cursorLine, cursorCol, signal);
+			} else {
+				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal);
+			}
+		} catch (error) {
+			if (!signal.aborted && requestId === this.#autocompleteRequestId) {
+				logger.debug("Autocomplete provider failed", { error: String(error) });
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+			}
+			return;
+		}
+		if (
+			signal.aborted ||
+			requestId !== this.#autocompleteRequestId ||
+			cursorLine !== this.#state.cursorLine ||
+			cursorCol !== this.#state.cursorCol ||
+			lines.length !== this.#state.lines.length ||
+			lines.some((line, index) => line !== this.#state.lines[index])
+		) {
 			return;
 		}
 
-		const requestId = ++this.#autocompleteRequestId;
-
-		const suggestions = await this.#autocompleteProvider.getSuggestions(
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
 		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
 			this.#autocompletePrefix = suggestions.prefix;
-			// Always create new SelectList to ensure update
 			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#widthEpochRevision++;
+			this.#autocompleteState = request.kind === "force" ? "force" : "regular";
 			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
+			return;
 		}
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+	}
+
+	#invalidateAutocompleteRequests(): void {
+		this.#autocompletePendingRequest = undefined;
+		this.#autocompleteRequestId++;
+		this.#autocompleteAbortController?.abort();
+		const waiters = this.#autocompleteWaiters.splice(0);
+		for (const resolve of waiters) resolve();
 	}
 
 	#debouncedUpdateAutocomplete(): void {
@@ -3325,7 +3679,7 @@ export class Editor implements Component, Focusable {
 			clearTimeout(this.#autocompleteTimeout);
 		}
 		this.#autocompleteTimeout = setTimeout(() => {
-			this.#updateAutocomplete();
+			void this.#updateAutocomplete();
 			this.#autocompleteTimeout = undefined;
 		}, 100);
 	}
@@ -3350,13 +3704,23 @@ export class Editor implements Component, Focusable {
 
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
-			return this.#autocompleteProvider.getInlineHint(
+			const hint = this.#autocompleteProvider.getInlineHint(
 				this.#state.lines,
 				this.#state.cursorLine,
 				this.#state.cursorCol,
 			);
+			if (hint) return hint;
 		}
 
-		return null;
+		return this.#getWordCompletion();
+	}
+	#getWordCompletion(): string | null {
+		return (
+			this.#textAssistProvider?.getWordCompletion?.(
+				this.#state.lines,
+				this.#state.cursorLine,
+				this.#state.cursorCol,
+			) ?? null
+		);
 	}
 }

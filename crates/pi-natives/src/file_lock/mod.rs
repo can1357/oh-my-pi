@@ -5,7 +5,10 @@
 //! on a persistent sidecar because they lack a process-owned in-memory name
 //! registry with automatic crash recovery.
 
+use napi::JsString;
 use napi_derive::napi;
+
+use crate::js;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -48,9 +51,13 @@ pub struct FileLock {
 impl FileLock {
 	/// Try to acquire `path` without blocking.
 	#[napi(factory)]
-	pub fn try_acquire(path: String) -> napi::Result<Self> {
+	pub fn try_acquire(path: JsString) -> napi::Result<Self> {
+		let path = js::utf8(path)?;
 		let inner = platform::try_acquire(&path).map_err(|error| {
-			napi::Error::from_reason(format!("Failed to acquire native file lock for {path}: {error}"))
+			napi::Error::from_reason(format!(
+				"Failed to acquire native file lock for {}: {error}",
+				&*path
+			))
 		})?;
 		Ok(Self { inner })
 	}

@@ -130,7 +130,6 @@ describe("AgentSession eager task prelude", () => {
 			? [todoTool as unknown as AgentTool, mockTaskTool, mockBashTool]
 			: [mockTaskTool, mockBashTool];
 
-		let session: AgentSession;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -170,7 +169,7 @@ describe("AgentSession eager task prelude", () => {
 		]);
 		if (todoTool) toolRegistry.set(todoTool.name, todoTool as unknown as AgentTool);
 
-		session = new AgentSession({
+		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,

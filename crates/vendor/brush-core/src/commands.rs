@@ -20,7 +20,7 @@ use crate::{
 	interp::{self, Execute, ExternalCommandInfo, ExternalCommandOutputMarkers, ProcessGroupPolicy},
 	openfiles::{self, OpenFiles},
 	pathsearch, processes,
-	results::ExecutionSpawnResult,
+	results::{ExecutionSpawnResult, ExecutionWaitResult},
 	sys, trace_categories, traps, variables,
 };
 
@@ -512,32 +512,60 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		self,
 		func_registration: functions::Registration,
 	) -> Result<ExecutionSpawnResult, error::Error> {
-		let mut shell = self.shell;
 		let mut params = self.params;
 		params.disable_command_output_marking();
 
 		let last_arg = Self::take_last_arg(&self.args);
 
-		let cmd_context = ExecutionContext {
-			shell:        &mut shell,
-			command_name: self.command_name,
-			params,
-		};
+		match self.shell {
+			// The function runs in an owned subshell (a pipeline stage or
+			// async job): execute it as a task, mirroring
+			// `execute_via_builtin_in_owned_shell`, so all pipeline stages run
+			// concurrently and its output streams to the next stage as it is
+			// produced.
+			ShellForCommand::OwnedShell { target, .. } => {
+				let mut shell = *target;
+				let command_name = self.command_name;
+				let args = self.args;
+				let join_handle = tokio::spawn(async move {
+					let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
+					let result =
+						invoke_shell_function(func_registration, cmd_context, &args[1..]).await;
 
-		// Strip the function name off args.
-		let result = invoke_shell_function(func_registration, cmd_context, &self.args[1..]).await;
+					// $_ is reset *after* the function body runs; see the
+					// parent-shell path below.
+					shell.update_last_arg_variable(last_arg);
 
-		// $_ is reset *after* the function body runs, to the last argument of
-		// the invocation (or the function name itself if zero args). Any
-		// mutations made inside the body are overwritten — this matches bash,
-		// where the caller observes only the invocation's last argument.
-		shell.update_last_arg_variable(last_arg);
+					match result?.wait().await? {
+						ExecutionWaitResult::Completed(result) => Ok(result),
+						ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
+					}
+				});
+				Ok(ExecutionSpawnResult::StartedTask(join_handle))
+			},
+			mut shell => {
+				let cmd_context = ExecutionContext {
+					shell:        &mut shell,
+					command_name: self.command_name,
+					params,
+				};
 
-		if let Some(post_execute) = self.post_execute {
-			let _ = post_execute(&mut shell);
+				// Strip the function name off args.
+				let result = invoke_shell_function(func_registration, cmd_context, &self.args[1..]).await;
+
+				// $_ is reset *after* the function body runs, to the last argument of
+				// the invocation (or the function name itself if zero args). Any
+				// mutations made inside the body are overwritten — this matches bash,
+				// where the caller observes only the invocation's last argument.
+				shell.update_last_arg_variable(last_arg);
+
+				if let Some(post_execute) = self.post_execute {
+					let _ = post_execute(&mut shell);
+				}
+
+				result
+			},
 		}
-
-		result
 	}
 
 	fn execute_via_external(self, path: &Path) -> Result<ExecutionSpawnResult, error::Error> {

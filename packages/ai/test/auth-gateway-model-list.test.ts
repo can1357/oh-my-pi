@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 test("model listing exposes one provider-qualified route per upstream model", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-model-list-"));
@@ -26,9 +27,58 @@ test("model listing exposes one provider-qualified route per upstream model", as
 		expect(await response.json()).toEqual({
 			object: "list",
 			data: [
-				{ id: "anthropic/shared-model", object: "model", owned_by: "anthropic", api: "mock" },
-				{ id: "devin/shared-model", object: "model", owned_by: "devin", api: "mock" },
+				{
+					id: "anthropic/shared-model",
+					object: "model",
+					owned_by: "anthropic",
+					api: "mock",
+					display_name: "shared-model",
+					context_length: 200_000,
+					max_output_tokens: 32_768,
+					input_modalities: ["text"],
+				},
+				{
+					id: "devin/shared-model",
+					object: "model",
+					owned_by: "devin",
+					api: "mock",
+					display_name: "shared-model",
+					context_length: 200_000,
+					max_output_tokens: 32_768,
+					input_modalities: ["text"],
+				},
 			],
+		});
+	} finally {
+		await handle.close();
+		storage.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("model listing preserves bundled multimodal context limits", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-model-capabilities-"));
+	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+	const sol = getBundledModel("openai-codex", "gpt-5.6-sol");
+	if (!sol) throw new Error("expected bundled GPT-5.6 Sol model");
+	const handle = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: [],
+		storage,
+		resolveModel: () => sol,
+		listModels: () => [sol],
+		version: "test",
+	});
+
+	try {
+		const response = await fetch(`${handle.url}/v1/models`);
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as { data: Array<Record<string, unknown>> };
+		expect(body.data).toHaveLength(1);
+		expect(body.data[0]).toMatchObject({
+			id: "openai-codex/gpt-5.6-sol",
+			context_length: 1_000_000,
+			input_modalities: ["text", "image"],
 		});
 	} finally {
 		await handle.close();

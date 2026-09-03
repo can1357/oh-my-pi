@@ -42,7 +42,7 @@ describe("formatJavaScriptForDisplay", () => {
 	it("does not split literals, templates, regexes, or comments", () => {
 		const doubleQuoted = String.raw`"a\";{b}"`;
 		const singleQuoted = String.raw`'a\';{b}'`;
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: sample source-code string contains template placeholder
+		// oxlint-disable-next-line no-template-curly-in-string -- sample source-code string contains template placeholder
 		const template = '`raw;{${fn({ value: "}" })}}`';
 		const regex = "/[;{}]+/g";
 		const lineComment = "// keep ; { }";
@@ -82,7 +82,7 @@ describe("formatJavaScriptForDisplay", () => {
 	});
 
 	it("never changes already committed lines while a prefix grows", () => {
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: sample source-code string contains template placeholder
+		// oxlint-disable-next-line no-template-curly-in-string -- sample source-code string contains template placeholder
 		const source = "if(flag){const value={text:`a;${item}`};run(value);}else{for(;;){tick();}}";
 		let committed: string[] = [];
 

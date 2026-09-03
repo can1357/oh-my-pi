@@ -80,6 +80,8 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 			});
 		},
 		waitForIdle: async () => {},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {},
 		dispose: async () => {},

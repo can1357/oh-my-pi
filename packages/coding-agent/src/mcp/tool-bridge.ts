@@ -21,6 +21,7 @@ import type { OutputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
+import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
 import type {
 	MCPAuthChallenge,
@@ -50,9 +51,19 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
-
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (error instanceof MCPTransportError) {
+		if (
+			error.failure === "connect" ||
+			error.failure === "reset" ||
+			error.failure === "eof" ||
+			error.failure === "closed"
+		) {
+			return error.retryable;
+		}
+		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
 	if (/^http (404|502|503):/.test(msg)) return true;
@@ -227,6 +238,43 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
 }
 
+/**
+ * Serialize an MCP result's structured payload as a fenced JSON block so it
+ * reaches the model through the standard content channel — and the eval
+ * `tool.*` and subagent proxy bridges that read the same result. Subject to the
+ * usual spill/byte-cap machinery like any other text block.
+ */
+function formatStructuredContent(structured: Record<string, unknown>): string {
+	let json: string;
+	try {
+		json = JSON.stringify(structured, null, 2);
+	} catch {
+		return "";
+	}
+	return `\`\`\`json\n${json}\n\`\`\``;
+}
+
+/**
+ * True when a text block already carries the structured payload verbatim. A
+ * spec-compliant server duplicates `structuredContent` into a TextContent block
+ * for back-compat; detecting that avoids emitting the JSON twice.
+ */
+function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+	for (const item of content) {
+		if (item.type !== "text") continue;
+		const trimmed = item.text.trim();
+		if (trimmed.length === 0) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		if (Bun.deepEquals(parsed, structured)) return true;
+	}
+	return false;
+}
+
 /** Build a CustomToolResult from a callTool response. */
 function buildResult(
 	result: MCPToolCallResult,
@@ -252,6 +300,13 @@ function buildResult(
 			content.unshift({ type: "text", text: "Error:" });
 		}
 	}
+	const structured = result.structuredContent;
+	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
+		const rendered = formatStructuredContent(structured);
+		if (rendered.length > 0) {
+			content.push({ type: "text", text: rendered });
+		}
+	}
 	const toolResult: CustomToolResult<MCPToolDetails> = { content, details };
 	if (result.isError) {
 		toolResult.isError = true;
@@ -267,9 +322,9 @@ function buildErrorResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const message = error instanceof Error ? error.message : String(error);
+	const message = formatMCPToolFailure(error, serverName, mcpToolName);
 	return {
-		content: [{ type: "text", text: `MCP error: ${message}` }],
+		content: [{ type: "text", text: message }],
 		details: { serverName, mcpToolName, isError: true, provider, providerName },
 		isError: true,
 	};
@@ -358,6 +413,29 @@ function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	return sanitized.length > 0 ? sanitized : fallback;
 }
 
+/**
+ * Longest tool name strict validators accept. OpenAI Responses/Completions and
+ * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
+ * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
+ */
+const MAX_MCP_TOOL_NAME_LENGTH = 64;
+/** Length of the deterministic hash suffix appended when a minted name overflows. */
+const MCP_TOOL_NAME_HASH_LENGTH = 8;
+
+/**
+ * Cap a minted MCP tool name at {@link MAX_MCP_TOOL_NAME_LENGTH}. An overlong
+ * name keeps a readable prefix and gains a deterministic base-36 hash suffix of
+ * the full name, so distinct long names stay unique and the same name is stable
+ * across turns — the model must call the exact registry key, and the hash is
+ * seed-fixed so it never shifts between processes.
+ */
+function capMCPToolNameLength(name: string): string {
+	if (name.length <= MAX_MCP_TOOL_NAME_LENGTH) return name;
+	const hash = Bun.hash(name).toString(36).slice(0, MCP_TOOL_NAME_HASH_LENGTH);
+	const keep = MAX_MCP_TOOL_NAME_LENGTH - hash.length - 1;
+	return `${name.slice(0, keep)}_${hash}`;
+}
+
 export function createMCPToolName(serverName: string, toolName: string): string {
 	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
 	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
@@ -370,7 +448,7 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
 	}
 
-	return `mcp__${sanitizedServerName}_${normalizedToolName}`;
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
 }
 
 export interface MCPToolOriginSource {

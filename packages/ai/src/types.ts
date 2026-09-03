@@ -32,9 +32,8 @@ import type {
 	ShellResult,
 	WriteArgs,
 	WriteResult,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
@@ -151,7 +150,15 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "id">;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "identity">;
+// The service-tier matrix below intentionally stays in TypeScript rather than
+// the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
+// (agent telemetry, google-shared header placement) and the stats parser
+// rebuilds slim `{ provider, api, identity }` models from historical session
+// JSONL — neither path holds a resolved compat record, so a KDL axis would
+// merely duplicate this table as its own fallback. The functions branch on
+// structured `classifyModel` facts, api, and a short provider list, which is
+// the sanctioned mechanism layer.
 
 function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";
@@ -167,7 +174,7 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 	return (
 		!excludesInferredOpenAIServiceTier(model.provider) &&
 		isOpenAIServiceTierApi(model.api) &&
-		isOpenAIModelId(model.id)
+		model.identity.class === "openai"
 	);
 }
 
@@ -185,10 +192,9 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
 	const provider = model.provider;
 	if (provider === "openrouter") {
-		const id = model.id.toLowerCase();
-		if (id.startsWith("anthropic/")) return "anthropic";
-		if (id.startsWith("google/")) return "google";
-		if (id.startsWith("openai/")) return "openai";
+		if (model.identity.class === "anthropic") return "anthropic";
+		if (model.identity.class === "gemini") return "google";
+		if (model.identity.class === "openai") return "openai";
 		return undefined;
 	}
 	if (provider === "openai" || provider === "openai-codex") return "openai";
@@ -204,7 +210,7 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
  */
 export function resolveModelServiceTier(
 	tiers: ServiceTierByFamily | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): ServiceTier | undefined {
 	if (!tiers) return undefined;
 	const family = serviceTierFamily(model);
@@ -251,7 +257,7 @@ export function shouldSendServiceTier(
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;
@@ -277,7 +283,7 @@ export function realizesPriorityServiceTier(
  */
 export function getPriorityPremiumRequests(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): number {
 	if (!realizesPriorityServiceTier(serviceTier, model)) return 0;
 	const provider = model.provider;
@@ -420,6 +426,11 @@ export interface StreamOptions {
 	 * Side-channel and advisor requests must leave it unset.
 	 */
 	anthropicCacheRefresh?: boolean;
+	/**
+	 * Anthropic preserved-thinking behavior when a signed block no longer matches
+	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
+	 */
+	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
 	/**
@@ -501,6 +512,8 @@ export interface StreamOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Canonical Codex compaction classification; ignored by other providers. */
 	codexCompaction?: CodexCompactionRequestContext;
+	/** Codex Code Mode tool exposure snapshot emitted as `tool_namespaces_info` turn metadata; ignored by other providers. */
+	toolNamespacesInfo?: unknown;
 	/**
 	 * Optional per-provider concurrent request cap for LLM stream calls. Keys are
 	 * provider ids (`model.provider`); positive numeric values cap in-flight
@@ -633,6 +646,23 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
+	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	cursorExternalToolExecutor?: boolean;
+	/**
+	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
+	 * dispatch directly to the Bedrock provider. Model-level values take
+	 * precedence when both are present.
+	 */
+	guardrailIdentifier?: string;
+	guardrailVersion?: string;
+	guardrailTrace?: "enabled" | "disabled" | "enabled_full";
+	/**
+	 * Bedrock invocation-log tags forwarded through transports that do not dispatch
+	 * directly to the Bedrock provider. Unlike the guardrail fields above, these
+	 * MERGE per key with the model's own `requestMetadata` (these win) rather than
+	 * replacing it wholesale — they are independent attribution tags, not one value.
+	 */
+	requestMetadata?: Record<string, string>;
 	/** Optional tool choice override for compatible providers */
 	toolChoice?: ToolChoice;
 	/** OpenAI service tier for processing priority/cost control. Ignored by non-OpenAI providers. */
@@ -738,6 +768,14 @@ export interface AnthropicServerToolContent {
 		  };
 }
 
+/** Provider-native uploaded file reference for image reuse without retransmitting bytes. */
+export interface ProviderFileReference {
+	provider: "openai" | "anthropic" | "google";
+	id?: string;
+	uri?: string;
+	expiresAt?: number;
+}
+
 export interface ImageContent {
 	type: "image";
 	data: string; // base64 encoded image data
@@ -748,6 +786,18 @@ export interface ImageContent {
 	 * default `auto` downscale). Providers without a detail knob ignore it.
 	 */
 	detail?: "auto" | "low" | "high" | "original";
+	/** Provider-native file reference preferred only by its matching provider. */
+	providerFile?: ProviderFileReference;
+	/**
+	 * Optional https mirror of `data`, served by a caller-run blob server.
+	 * Providers whose API fetches remote images send this URL instead of the
+	 * base64 payload; every other provider ignores it. `data` remains the
+	 * source of truth — the URL must serve exactly those bytes, and callers
+	 * are responsible for keeping it stable across turns (prefix caches hash
+	 * the URL string, and Anthropic silently forgets images when a resent
+	 * turn differs byte-wise).
+	 */
+	url?: string;
 }
 
 export type ComputerAction =
@@ -828,7 +878,23 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload;
+/** Anthropic-only controls attached to a mid-conversation system message. */
+export interface AnthropicMessagePayload {
+	type: "anthropicMessage";
+	clearAt?: "never" | "next_user_message";
+	effort?: "low" | "medium" | "high" | "xhigh" | "max";
+	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
+}
+
+export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload;
+
+/** Provider-reported rewrite applied to request content before inference. */
+export interface ProviderInputTransformation {
+	type: string;
+	path?: string;
+	reason?: string;
+	[key: string]: unknown;
+}
 
 export interface UserMessage {
 	role: "user";
@@ -837,6 +903,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** Timestamp of a client-side history rewrite represented by this message. */
+	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -849,6 +917,10 @@ export interface DeveloperMessage {
 	content: string | (TextContent | ImageContent)[];
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** True if the message was injected by the system (e.g., auto-continue) and initiates a fresh run rather than continuing the current one. */
+	synthetic?: boolean;
+	/** True when the synthetic prompt was a deliberate operator action (`.`, `c` continue shortcut) rather than an automatic continuation — its timestamp is the turn's prompt time. */
+	userInitiated?: boolean;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
@@ -886,6 +958,13 @@ export interface ContextSnapshot {
 	nonMessageTokens: number; // estimated non-message total at send time
 	/** Estimated prompt tokens removed by local history rewrites after this provider snapshot was recorded. */
 	historyRewriteTokensRemoved?: number;
+	/**
+	 * Compaction epoch current when this snapshot's provider request was recorded.
+	 * A later compaction bumps the session epoch, so an anchor whose epoch is
+	 * older than the current in-flight snapshot describes pre-compaction history
+	 * and must not override the rebased estimate.
+	 */
+	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
 }
 
@@ -914,10 +993,14 @@ export interface AssistantMessage {
 	 * providers that expose no such field.
 	 */
 	upstreamProvider?: string;
+	/** Provider-reported concrete model when a router selected one for this turn. */
+	upstreamModel?: string;
 	usage: Usage;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
 	errorMessage?: string;
+	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
+	errorClassificationMessage?: string;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
 	toolCallAbortMessages?: Record<string, string>;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
@@ -932,11 +1015,15 @@ export interface AssistantMessage {
 	 * server's actual state.
 	 */
 	disabledFeatures?: string[];
+	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
+	inputTransformations?: ProviderInputTransformation[];
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
+	/** Local wall-clock time the response finished streaming (ms since epoch); stamped by the session at message_end so prompt→yield timing never depends on provider-reported duration. */
+	completedAt?: number;
 }
 
 export interface ToolResultMessage<TDetails = unknown> {
@@ -1205,6 +1292,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
+	/** Withhold this Anthropic tool until a `tool_addition` message references it. */
+	deferLoading?: boolean;
 	/**
 	 * Optional grammar constraint for OpenAI custom-tool emission.
 	 * When set, providers that support grammar-constrained tools (currently only

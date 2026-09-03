@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import { escapeXmlAttribute, escapeXmlText } from "@oh-my-pi/pi-utils";
 import adviseDescription from "../prompts/advisor/advise-tool.md" with { type: "text" };
+import { normalizeAdvisorNote } from "./emission-guard";
 
 const adviseSchema = type({
 	note: type("string").describe(
@@ -156,11 +157,13 @@ export function deriveAdvisorTelemetry(
  * The tools an advisor receives by default when its config omits `tools` — the
  * read-only investigative set. The full available pool is every built tool the
  * session has (the advisor is a full agent); a config's `tools` selects from it.
+ * The runtime build additionally admits `recall` into the default set when the
+ * active memory backend built it (hindsight/mnemopi).
  */
 export const ADVISOR_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob"]);
 
 function advisorNoteDedupeKey(note: string): string {
-	return note.trim().replace(/\s+/g, " ");
+	return normalizeAdvisorNote(note);
 }
 
 /** Rank advisor severities so the dedupe state can detect a real escalation
@@ -183,8 +186,26 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
+	/** Notes withheld while the primary was mid-turn, in arrival order. Flushed
+	 *  deterministically on the first `beginUpdate(false)` so delivery does not
+	 *  depend on the advisor model choosing to re-raise (it may not, since the
+	 *  tool previously returned "Recorded." for a note that was never routed).
+	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
+	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
 
-	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
+	/**
+	 * @param onAdvice Route an accepted note to the primary (channel selection +
+	 *   delivery). Never re-filters — the note already cleared `accept`.
+	 * @param accept The emission guard's noise/empty/dedupe filter plus the
+	 *   one-advise-per-update budget, consumed the moment a note is emitted
+	 *   (live or deferred). A suppressed note returns `false` without spending
+	 *   the budget, so it cannot burn an update's slot ahead of a real concern.
+	 *   Defaults to always-accept for standalone use/tests without a guard.
+	 */
+	constructor(
+		private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void,
+		private readonly accept: (note: string) => boolean = () => true,
+	) {}
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
@@ -192,13 +213,24 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 * not interrupt the primary before it can finish its planned steps.
 	 */
 	beginUpdate(inProgress: boolean): void {
+		const wasInProgress = this.#inProgressUpdate;
 		this.#inProgressUpdate = inProgress;
+		// Turn just completed: flush everything withheld mid-turn, oldest first.
+		// Each note already cleared the emission guard (filter + per-update budget)
+		// when it was reserved, so the flush routes it without re-accepting — a
+		// backlog of one note per originating update reaches the primary intact.
+		if (wasInProgress && !inProgress && this.#deferredNotes.length > 0) {
+			const pending = this.#deferredNotes;
+			this.#deferredNotes = [];
+			for (const { note, severity } of pending) this.#deliver(note, severity, true);
+		}
 	}
 
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
 	resetDeliveredNotes(): void {
 		this.#deliveredNoteSeverities.clear();
 		this.#inProgressUpdate = false;
+		this.#deferredNotes = [];
 	}
 
 	async execute(
@@ -209,28 +241,66 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
+			// Withheld, not delivered: queue for the deterministic flush on the next
+			// completed update. Skip if an identical note is already pending so a
+			// long mid-turn can't pile up 20 copies of the same advice. Tell the
+			// advisor the truth — the previous "Recorded." made it believe the note
+			// reached the primary, so it never re-raised and the advice was lost.
+			const key = advisorNoteDedupeKey(args.note);
+			const pending = this.#deferredNotes.find(item => item.key === key);
+			if (pending) {
+				// Escalating an already-queued note reuses its slot; never a new one.
+				if (advisorSeverityRank(args.severity) > advisorSeverityRank(pending.severity))
+					pending.severity = args.severity;
+			} else if (this.accept(args.note)) {
+				// Reserve the update's one slot now (the emission guard filters noise
+				// and enforces the per-update budget at the moment the note is emitted,
+				// exactly like the live path); hold it for the flush. A suppressed or
+				// over-budget note fails `accept` here and is dropped without a slot.
+				this.#deferredNotes.push({ key, note: args.note, severity: args.severity });
+			}
 			return {
-				content: [{ type: "text", text: "Recorded." }],
+				content: [
+					{
+						type: "text",
+						text: "Deferred — primary is mid-turn; this note will be delivered automatically when the turn completes. Do not re-raise the same point.",
+					},
+				],
 				details: { note: args.note, severity: args.severity },
 				useless: true,
 			};
 		}
+		// Live path (completed update, or a blocker that must interrupt now). If the
+		// note already holds a deferred reservation, it cleared the emission guard
+		// when reserved — pull it from the backlog and deliver without re-accepting,
+		// so a blocker escalation of a still-queued nit/concern interrupts at its
+		// blocker severity instead of being rejected as already-seen and arriving
+		// late at the lower deferred severity.
 		const key = advisorNoteDedupeKey(args.note);
-		const rank = advisorSeverityRank(args.severity);
-		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
-		if (rank <= previousRank) {
-			return {
-				content: [{ type: "text", text: "Duplicate advice ignored." }],
-				details: { note: args.note, severity: args.severity },
-				useless: true,
-			};
-		}
-		this.#deliveredNoteSeverities.set(key, rank);
-		this.onAdvice(args.note, args.severity);
+		const reservedIndex = this.#deferredNotes.findIndex(item => item.key === key);
+		if (reservedIndex !== -1) this.#deferredNotes.splice(reservedIndex, 1);
+		const delivered = this.#deliver(args.note, args.severity, reservedIndex !== -1);
 		return {
-			content: [{ type: "text", text: "Recorded." }],
+			content: [{ type: "text", text: delivered ? "Recorded." : "Duplicate advice ignored." }],
 			details: { note: args.note, severity: args.severity },
 			useless: true,
 		};
+	}
+
+	/** Run one note through the escalation-rank dedupe and, if it passes, route it
+	 *  to the primary. Returns true when the note was actually delivered. Shared by
+	 *  the live path (`execute`) and the deferred flush (`beginUpdate(false)`). */
+	#deliver(note: string, severity?: AdviseDetails["severity"], alreadyAccepted = false): boolean {
+		const key = advisorNoteDedupeKey(note);
+		const rank = advisorSeverityRank(severity);
+		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
+		if (rank <= previousRank) return false;
+		// Live notes clear the emission guard here; deferred notes already cleared
+		// it when reserved, so the flush passes `alreadyAccepted` to avoid a second
+		// (budget-consuming, dedupe-rejecting) pass.
+		if (!alreadyAccepted && !this.accept(note)) return false;
+		this.#deliveredNoteSeverities.set(key, rank);
+		this.onAdvice(note, severity);
+		return true;
 	}
 }

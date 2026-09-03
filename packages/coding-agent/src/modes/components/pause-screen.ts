@@ -114,6 +114,7 @@ export function renderPauseScreen(width: number, height: number, elapsedMs: numb
 	}
 
 	const topPad = Math.max(0, Math.floor((height - content.length) / 2));
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const lines: string[] = new Array(topPad).fill("");
 	lines.push(...content);
 	while (lines.length < height) lines.push("");

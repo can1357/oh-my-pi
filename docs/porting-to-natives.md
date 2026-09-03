@@ -14,12 +14,22 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 
 - eager root: `native/index.js` with generated `native/index.d.ts`;
 - lazy desktop wrapper: `native/desktop.js` / `desktop.d.ts`;
-- lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`.
+- lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`;
+- lazy vcs wrapper: `native/vcs.js` / `vcs.d.ts` (`@oh-my-pi/pi-natives/vcs`).
+
+The vcs subpath exposes the backend-neutral `Vcs*` repository API (added in
+18.0.9, with `VcsGitRepo.mergeBase()` following in 18.0.10): discovery and
+Git/Jujutsu operations through `git()` / `repo()` / `require()` / `requireGit()`
+returning `VcsGitRepo` / `VcsRepo` / `VcsJjWorkspace` handles (refs and status,
+diffs, staging, commits, branches, worktrees, patch application, stash,
+cherry-pick, CLI-backed push/fetch/clone, all cancellation-aware), plus the
+JS-side error helpers (`isVcsError`) and the `watch(repo, onChange)` head-change
+watcher built on `VcsRepo.watchTarget()`.
 
 Two commands serve different purposes:
 
 - `bun --cwd=packages/natives run build:bindings` runs napi-rs for the host, installs a local variant addon and generated declarations, and regenerates explicit ESM/enum exports. Use this when the Rust public type surface changes.
-- `bun --cwd=packages/natives run build` invokes `scripts/bazel-natives.ts host --dest native`. It builds the shipping-style host addon but does not regenerate declarations.
+- `bun --cwd=packages/natives run build` invokes `scripts/bazel-natives.ts host --dest native`. The host target builds through the local cargo/napi-rs backend by default (`OMP_NATIVE_BUILD_BACKEND=bazel` opts into bazel) but does not regenerate declarations.
 
 Release builds use Bazel targets and publish `.node` files in platform leaf packages. The core publish rewrite removes addons and injects lockstep optional dependencies generated from `LEAF_TARGETS` in `gen-npm-packages.ts`.
 

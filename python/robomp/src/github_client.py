@@ -82,6 +82,46 @@ class PullRequestFileInfo:
 
 
 @dataclass(slots=True, frozen=True)
+class WorkflowRunInfo:
+    """GitHub Actions workflow run for release verdict aggregation."""
+
+    id: int
+    name: str
+    event: str
+    status: str
+    conclusion: str | None
+    head_branch: str | None
+    head_sha: str
+    html_url: str
+    run_attempt: int
+
+
+@dataclass(slots=True, frozen=True)
+class WorkflowJobInfo:
+    """GitHub Actions job with its failed step names."""
+
+    id: int
+    run_id: int
+    name: str
+    status: str
+    conclusion: str | None
+    html_url: str
+    failed_steps: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ReleaseInfo:
+    """Published GitHub Release metadata for a tag."""
+
+    tag: str
+    name: str | None
+    draft: bool
+    prerelease: bool
+    html_url: str
+    asset_names: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
 class ReviewCommentInfo:
     """In-line PR review comment (attached to a file/line)."""
 
@@ -320,10 +360,104 @@ class GitHubClient:
                 await asyncio.sleep(delay)
         raise last_exc  # type: ignore[misc]
 
+    async def _request_text_tail(self, path: str, *, max_bytes: int) -> str:
+        """Stream a text response while retaining at most its final bytes."""
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                async with self._async_client() as client:
+                    async with client.stream("GET", path) as resp:
+                        if resp.status_code >= 300:
+                            await resp.aread()
+                            self._check(resp)
+                        tail = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            tail.extend(chunk)
+                            overflow = len(tail) - max_bytes
+                            if overflow > 0:
+                                del tail[:overflow]
+                        return tail.decode("utf-8", errors="replace")
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "transient text fetch error, retrying",
+                    extra={"path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                await asyncio.sleep(delay)
+            except GitHubError as exc:
+                if delay is None or not self._transient_5xx("GET", exc):
+                    raise
+                last_exc = exc
+                log.warning(
+                    "transient github text fetch 5xx, retrying",
+                    extra={"path": path, "attempt": attempt + 1, "delay": delay, "status": exc.status},
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
     # ---- repos / issues / comments / PRs ----
     async def get_repo(self, repo: str) -> RepoInfo:
         data = await self.request("GET", f"/repos/{repo}")
         return _repo_from_payload(data)
+
+    async def list_workflow_runs(self, repo: str, *, head_sha: str) -> list[WorkflowRunInfo]:
+        """List workflow runs attached to one commit."""
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/actions/runs",
+            params={"head_sha": head_sha, "per_page": 100},
+        )
+        return [_workflow_run_from_payload(item) for item in (data or {}).get("workflow_runs") or []]
+
+    async def list_workflow_jobs(self, repo: str, run_id: int) -> list[WorkflowJobInfo]:
+        """List the latest jobs for a workflow run."""
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/actions/runs/{run_id}/jobs",
+            params={"filter": "latest", "per_page": 100},
+        )
+        return [_workflow_job_from_payload(item) for item in (data or {}).get("jobs") or []]
+
+    async def get_job_log_tail(self, repo: str, job_id: int, *, tail_lines: int = 200) -> str:
+        """Return the final lines of a GitHub Actions job log."""
+        limit = max(0, int(tail_lines))
+        if limit == 0:
+            return ""
+        text = await self._request_text_tail(
+            f"/repos/{repo}/actions/jobs/{job_id}/logs",
+            max_bytes=4 * 1024 * 1024,
+        )
+        return "\n".join(text.splitlines()[-limit:])
+
+    async def get_tag_sha(self, repo: str, tag: str) -> str | None:
+        """Resolve a lightweight or annotated tag to its commit SHA."""
+        encoded_tag = quote(tag, safe="")
+        try:
+            data = await self.request("GET", f"/repos/{repo}/git/ref/tags/{encoded_tag}")
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        obj = (data or {}).get("object") or {}
+        sha = str(obj.get("sha") or "")
+        if obj.get("type") == "tag" and sha:
+            annotated = await self.request("GET", f"/repos/{repo}/git/tags/{sha}")
+            obj = (annotated or {}).get("object") or {}
+            sha = str(obj.get("sha") or "")
+        return sha or None
+
+    async def get_release_by_tag(self, repo: str, tag: str) -> ReleaseInfo | None:
+        """Return the GitHub Release for a tag when one exists."""
+        encoded_tag = quote(tag, safe="")
+        try:
+            data = await self.request("GET", f"/repos/{repo}/releases/tags/{encoded_tag}")
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        return _release_from_payload(data)
 
     async def get_issue(self, repo: str, number: int) -> IssueInfo:
         data = await self.request("GET", f"/repos/{repo}/issues/{number}")
@@ -662,6 +796,51 @@ class GitHubClient:
         return str(data["login"])
 
 
+def _workflow_run_from_payload(data: Mapping[str, Any]) -> WorkflowRunInfo:
+    return WorkflowRunInfo(
+        id=int(data.get("id") or 0),
+        name=str(data.get("name") or ""),
+        event=str(data.get("event") or ""),
+        status=str(data.get("status") or ""),
+        conclusion=str(data["conclusion"]) if data.get("conclusion") is not None else None,
+        head_branch=str(data["head_branch"]) if data.get("head_branch") is not None else None,
+        head_sha=str(data.get("head_sha") or ""),
+        html_url=str(data.get("html_url") or ""),
+        run_attempt=int(data.get("run_attempt") or 1),
+    )
+
+
+def _workflow_job_from_payload(data: Mapping[str, Any]) -> WorkflowJobInfo:
+    failed_steps = tuple(
+        str(step.get("name") or "")
+        for step in data.get("steps") or []
+        if isinstance(step, Mapping) and step.get("conclusion") not in {"success", "skipped"}
+    )
+    return WorkflowJobInfo(
+        id=int(data.get("id") or 0),
+        run_id=int(data.get("run_id") or 0),
+        name=str(data.get("name") or ""),
+        status=str(data.get("status") or ""),
+        conclusion=str(data["conclusion"]) if data.get("conclusion") is not None else None,
+        html_url=str(data.get("html_url") or ""),
+        failed_steps=failed_steps,
+    )
+
+
+def _release_from_payload(data: Mapping[str, Any]) -> ReleaseInfo:
+    name = data.get("name")
+    return ReleaseInfo(
+        tag=str(data.get("tag_name") or ""),
+        name=str(name) if name is not None else None,
+        draft=bool(data.get("draft")),
+        prerelease=bool(data.get("prerelease")),
+        html_url=str(data.get("html_url") or ""),
+        asset_names=tuple(
+            str(asset.get("name") or "") for asset in data.get("assets") or [] if isinstance(asset, Mapping)
+        ),
+    )
+
+
 def _repo_from_payload(data: Mapping[str, Any]) -> RepoInfo:
     return RepoInfo(
         full_name=str(data["full_name"]),
@@ -839,12 +1018,15 @@ __all__ = [
     "IssueIndexEntry",
     "IssueInfo",
     "IssueSummary",
+    "ReleaseInfo",
     "PullRequestFileInfo",
     "PullRequestInfo",
     "PullRequestReviewInfo",
     "ReactionInfo",
     "RepoInfo",
     "ReviewCommentInfo",
+    "WorkflowJobInfo",
+    "WorkflowRunInfo",
     "index_entry_from_issue_object",
     "index_entry_from_pr_object",
     "parse_issue_payload",

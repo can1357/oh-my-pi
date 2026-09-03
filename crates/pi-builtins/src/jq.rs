@@ -624,7 +624,7 @@ mod filter {
 			});
 			Block::new(idx, labels).unwrap().map_code(|c| {
 				let c = c.replace('\t', "    ");
-				let w = unicode_width::UnicodeWidthStr::width(&*c);
+				let w = xutf::width_str(&c);
 				CodeWidth::new(c, core::cmp::max(w, 1))
 			})
 		}
@@ -839,11 +839,10 @@ mod output {
 		}
 	}
 
-	/// Runs `f` with buffered standard output.
+	/// Runs `f` with standard output.
 	pub fn with_stdout<T>(stdout: &mut dyn Write, f: impl FnOnce(&mut dyn Write) -> T) -> T {
-		let mut out = io::BufWriter::new(stdout);
-		let res = f(&mut out);
-		let _ = out.flush();
+		let res = f(stdout);
+		let _ = stdout.flush();
 		res
 	}
 
@@ -928,7 +927,8 @@ impl Utility for Jq {
 		let _runtime = RuntimeGuard::install(host);
 		color::set(!cli.in_place && cli.color_if(|| stdout_is_terminal));
 
-		let result = real_main(&cli, host);
+		let mut stdout = host.stdout_writer();
+		let result = real_main(&cli, host, &mut stdout);
 		if let Some(code) = filter::take_halt() {
 			return code;
 		}
@@ -1036,7 +1036,7 @@ mod color {
 	}
 }
 
-fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
+fn real_main(cli: &Cli, host: &mut Host, stdout: &mut dyn Write) -> Result<i32, Error> {
 	if let Some(test_files) = &cli.run_tests {
 		return Ok(match test_files.last() {
 			Some(file) => {
@@ -1072,7 +1072,7 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 
 	let last = if cli.files.is_empty() {
 		let inputs = read::buffered(cli, io::BufReader::new(&mut host.stdin));
-		output::with_stdout(&mut host.stdout, |out| {
+		output::with_stdout(stdout, |out| {
 			filter::run(cli, &filter, ctx, inputs, |v| output::print(out, cli, &v))
 		})?
 	} else {
@@ -1104,7 +1104,7 @@ fn real_main(cli: &Cli, host: &mut Host) -> Result<i32, Error> {
 				tmp.persist(path).map_err(Error::Persist)?;
 				std::fs::set_permissions(path, perms)?;
 			} else {
-				last = output::with_stdout(&mut host.stdout, |out| {
+				last = output::with_stdout(stdout, |out| {
 					filter::run(cli, &filter, ctx.clone(), inputs, |v| output::print(out, cli, &v))
 				})?;
 			}

@@ -8,9 +8,10 @@ import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
+import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -192,10 +193,12 @@ describe("ReviewCommand", () => {
 
 	it("uses JJ diff for uncommitted review prompts", async () => {
 		const dir = await createTempDir();
-		const jjRepoSpy = spyOn(jj.repo, "is").mockResolvedValue(true);
-		const jjDiffSpy = spyOn(jj, "diff").mockResolvedValue(SAMPLE_JJ_DIFF);
-		const gitStatusSpy = spyOn(git, "status").mockResolvedValue(" M src/workspace.ts\n");
-		const gitDiffSpy = spyOn(git, "diff").mockResolvedValue("");
+		const jjDiffSpy = vi.fn(async () => SAMPLE_JJ_DIFF);
+		const jjRepoSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "jj",
+			uncommittedDiff: jjDiffSpy,
+		} as unknown as VcsRepo);
+		const gitRepoSpy = spyOn(vcs, "requireGit");
 		try {
 			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 			const ctx = createContext({
@@ -209,23 +212,23 @@ describe("ReviewCommand", () => {
 			expect(promptText).toContain("src/workspace.ts");
 			expect(promptText).toContain("+1/-1");
 			expect(promptText).toContain("MAY read full file context as needed via `read`");
-			expect(jjDiffSpy).toHaveBeenCalledWith(dir);
-			expect(gitStatusSpy).not.toHaveBeenCalled();
-			expect(gitDiffSpy).not.toHaveBeenCalled();
+			expect(jjDiffSpy).toHaveBeenCalledWith([]);
+			expect(gitRepoSpy).not.toHaveBeenCalled();
 		} finally {
 			jjRepoSpy.mockRestore();
 			jjDiffSpy.mockRestore();
-			gitStatusSpy.mockRestore();
-			gitDiffSpy.mockRestore();
+			gitRepoSpy.mockRestore();
 		}
 	});
 
 	it("includes JJ diff context for custom review prompts", async () => {
 		const dir = await createTempDir();
-		const jjRepoSpy = spyOn(jj.repo, "is").mockResolvedValue(true);
-		const jjDiffSpy = spyOn(jj, "diff").mockResolvedValue(SAMPLE_JJ_DIFF);
-		const gitStatusSpy = spyOn(git, "status").mockResolvedValue("");
-		const gitDiffSpy = spyOn(git, "diff").mockResolvedValue("");
+		const jjDiffSpy = vi.fn(async () => SAMPLE_JJ_DIFF);
+		const jjRepoSpy = spyOn(vcs, "require").mockReturnValue({
+			kind: () => "jj",
+			uncommittedDiff: jjDiffSpy,
+		} as unknown as VcsRepo);
+		const gitRepoSpy = spyOn(vcs, "requireGit");
 		try {
 			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 			const ctx = createContext({
@@ -238,13 +241,11 @@ describe("ReviewCommand", () => {
 			const promptText = result!;
 			expect(promptText).toContain("Check workspace state transitions");
 			expect(promptText).toContain("src/workspace.ts");
-			expect(gitStatusSpy).not.toHaveBeenCalled();
-			expect(gitDiffSpy).not.toHaveBeenCalled();
+			expect(gitRepoSpy).not.toHaveBeenCalled();
 		} finally {
 			jjRepoSpy.mockRestore();
 			jjDiffSpy.mockRestore();
-			gitStatusSpy.mockRestore();
-			gitDiffSpy.mockRestore();
+			gitRepoSpy.mockRestore();
 		}
 	});
 
@@ -560,9 +561,16 @@ describe("ReviewCommand", () => {
 
 	it("keeps base branch review mode working", async () => {
 		const dir = await createTempDir();
-		spyOn(git.branch, "list").mockResolvedValue(["main"]);
-		spyOn(git.branch, "current").mockResolvedValue("feature");
-		const diffSpy = spyOn(git, "diff").mockResolvedValue(SAMPLE_PR_DIFF);
+		const diffSpy = vi.fn(async () => SAMPLE_PR_DIFF);
+		const mergeBaseSpy = vi.fn(async () => "basesha");
+		const repository = {
+			currentBranch: async () => "feature",
+			mergeBase: mergeBaseSpy,
+			diffText: diffSpy,
+			listBranches: async () => ["main"],
+		} as unknown as VcsGitRepo;
+		spyOn(vcs, "git").mockReturnValue(repository);
+		spyOn(vcs, "requireGit").mockReturnValue(repository);
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
 			selectResults: ["1. Review against a base branch (PR Style)", "main"],
@@ -573,13 +581,105 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("Reviewing changes between `main` and `feature`");
 		expect(result!).toContain("src/pr.ts");
-		expect(diffSpy).toHaveBeenCalledWith(dir, { base: "main...feature" });
+		expect(mergeBaseSpy).toHaveBeenCalledWith("main", "feature");
+		expect(diffSpy).toHaveBeenCalledWith({ base: "basesha", head: "feature" });
+	});
+
+	it("resolves base-branch review against a real repo without a range revspec", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-real-"));
+		try {
+			await $`git init -q -b main`.cwd(dir).quiet();
+			await $`git config user.email test@example.com`.cwd(dir).quiet();
+			await $`git config user.name Test`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(dir).quiet();
+			await $`git commit -q -m init`.cwd(dir).quiet();
+
+			// Same branch selected as base: must report no changes, not crash on
+			// a `main...main` revspec that rev_parse_single cannot resolve.
+			const sameBranch = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const notices: NotifyCall[] = [];
+			const sameResult = await sameBranch.execute(
+				[],
+				createContext({
+					selectResults: ["1. Review against a base branch (PR Style)", "main"],
+					onNotify: call => notices.push(call),
+				}),
+			);
+			expect(sameResult).toBeUndefined();
+			expect(notices).toEqual([{ message: "No changes between main and main", type: "warning" }]);
+
+			// Feature branch changes a.txt; main independently advances with a
+			// base-only file. PR-style (merge-base) review must show only the
+			// feature change, never main's base-only file. A two-tree
+			// (`base head`) diff would surface base-only.txt as a reverse
+			// deletion — the regression this asserts against.
+			await $`git checkout -q -b feature`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
+			await $`git commit -q -am feature-change`.cwd(dir).quiet();
+			await $`git checkout -q main`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "base-only.txt"), "base\n");
+			await $`git add base-only.txt`.cwd(dir).quiet();
+			await $`git commit -q -m base-advance`.cwd(dir).quiet();
+			await $`git checkout -q feature`.cwd(dir).quiet();
+			const feature = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const featureResult = await feature.execute(
+				[],
+				createContext({
+					selectResults: ["1. Review against a base branch (PR Style)", "main"],
+				}),
+			);
+			expect(featureResult).toContain("Reviewing changes between `main` and `feature`");
+			expect(featureResult).toContain("a.txt");
+			expect(featureResult).not.toContain("base-only.txt");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("rejects base-branch review when histories share no merge base", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-orphan-"));
+		try {
+			await $`git init -q -b main`.cwd(dir).quiet();
+			await $`git config user.email test@example.com`.cwd(dir).quiet();
+			await $`git config user.name Test`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(dir).quiet();
+			await $`git commit -q -m init`.cwd(dir).quiet();
+
+			// Orphan branch: no common ancestor with main, so PR-style review
+			// must abort instead of comparing the two unrelated trees.
+			await $`git checkout -q --orphan orphan`.cwd(dir).quiet();
+			await $`git rm -q -rf .`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "b.txt"), "other\n");
+			await $`git add b.txt`.cwd(dir).quiet();
+			await $`git commit -q -m orphan`.cwd(dir).quiet();
+
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const notices: NotifyCall[] = [];
+			const result = await command.execute(
+				[],
+				createContext({
+					selectResults: ["1. Review against a base branch (PR Style)", "main"],
+					onNotify: call => notices.push(call),
+				}),
+			);
+			expect(result).toBeUndefined();
+			expect(notices).toEqual([{ message: "No common history between main and orphan", type: "error" }]);
+		} finally {
+			await removeWithRetries(dir);
+		}
 	});
 
 	it("keeps specific commit review mode working", async () => {
 		const dir = await createTempDir();
-		spyOn(git.log, "onelines").mockResolvedValue(["abc1234 Fix review command"]);
-		const showSpy = spyOn(git, "show").mockResolvedValue(SAMPLE_PR_DIFF);
+		const showSpy = vi.fn(async () => ({ data: Buffer.from(SAMPLE_PR_DIFF), truncated: false }));
+		spyOn(vcs, "require").mockReturnValue({
+			logOnelines: async () => ["abc1234 Fix review command"],
+		} as unknown as VcsRepo);
+		spyOn(vcs, "requireGit").mockReturnValue({
+			showCommit: showSpy,
+		} as unknown as VcsGitRepo);
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
 			selectResults: ["3. Review a specific commit", "abc1234 Fix review command"],
@@ -590,7 +690,7 @@ describe("ReviewCommand", () => {
 		expect(result).toBeDefined();
 		expect(result!).toContain("Reviewing commit `abc1234`");
 		expect(result!).toContain("src/pr.ts");
-		expect(showSpy).toHaveBeenCalledWith(dir, "abc1234", { format: "" });
+		expect(showSpy).toHaveBeenCalledWith("abc1234");
 	});
 	it("renders headless review requests through the reviewer task prompt", async () => {
 		const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);

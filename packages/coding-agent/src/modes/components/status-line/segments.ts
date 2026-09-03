@@ -1,9 +1,9 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
-import { type ThemeColor, theme } from "../../../modes/theme/theme";
+import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -17,8 +17,34 @@ export type { SegmentContext } from "./types";
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+const STARTUP_PLACEHOLDER = "…";
+
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+
+function statusValue(ctx: SegmentContext, value: string): string {
+	return ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : value;
+}
+/**
+ * Hash-derived accent ANSI for the session title (or preview stand-in title).
+ * Undefined when `statusLine.sessionAccent` is off or the session is unnamed,
+ * so callers fall back to their theme color.
+ */
+function sessionAccentAnsi(ctx: SegmentContext): string | undefined {
+	if (ctx.sessionAccent === false) return undefined;
+	const name = ctx.session?.sessionManager?.getSessionName() || ctx.previewTitle;
+	if (!name) return undefined;
+	return getSessionAccentAnsi(getSessionAccentHex(name, theme.sessionAccentInputs));
+}
+/**
+ * `theme.fg` for accent-role text: the hash-derived session accent when
+ * enabled, else the given theme color. Callers route only the parts that
+ * should carry the session identity color through this (pi icon, model name,
+ * PR link, mode badges, session title) — status colors stay `theme.fg`.
+ */
+function accentFg(ctx: SegmentContext, color: ThemeColor, text: string): string {
+	return `${sessionAccentAnsi(ctx) ?? theme.getFgAnsi(color)}${text}\x1b[39m`;
 }
 
 /** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
@@ -48,6 +74,39 @@ function stripDisplayRoot(pwd: string): string {
 
 function normalizePremiumRequests(value: number): number {
 	return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+function formatSpend(amount: number, usingSubscription: boolean, uiTheme: Theme): string {
+	const formatted = amount.toFixed(2);
+	if (!usingSubscription) return `$${formatted}`;
+	if (uiTheme.getSymbolPreset() === "nerd") {
+		const icon = uiTheme.icon.subscription;
+		return icon ? `${icon} ${formatted}` : `S${formatted}`;
+	}
+	return `S${formatted}`;
+}
+
+function formatAdvisorSpend(amount: number, usingSubscription: boolean, uiTheme: Theme): string {
+	const spend = formatSpend(amount, usingSubscription, uiTheme);
+	const icon = uiTheme.icon.advisor;
+	if (icon && icon !== "(adv)") {
+		return `${icon} ${spend}`;
+	}
+	return `${spend} (adv)`;
+}
+
+function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
+	if (!usingSubscription) return "$…";
+	if (uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription) {
+		return `${uiTheme.icon.subscription} …`;
+	}
+	return "S…";
+}
+
+function formatAdvisorSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
+	const spend = formatSpendPlaceholder(usingSubscription, uiTheme);
+	const icon = uiTheme.icon.advisor;
+	if (icon && icon !== "(adv)") return `${icon} ${spend}`;
+	return `${spend} (adv)`;
 }
 
 const SCRATCH_ROOTS: readonly string[] = (() => {
@@ -86,10 +145,52 @@ const piSegment: StatusLineSegment = {
 	render(ctx) {
 		if (ctx.focusedAgentId) {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
-			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
+			return {
+				content: theme.fg("warning", `${icon}${statusValue(ctx, ctx.focusedAgentId)} `),
+				visible: true,
+			};
 		}
-		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
-		return { content: theme.fg("accent", content), visible: true };
+		// Brand fg fades between dim gray (idle) and the accent (working) across
+		// turn edges; the component samples the tween into `brandFgAnsi`.
+		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
+		// While a turn runs the brand icon becomes a braille spinner plus a
+		// whole-unit turn timer (port of rust omp's status-band active brand).
+		const content =
+			ctx.turnElapsedMs != null
+				? `${brandSpinnerFrame(ctx.now?.getTime())} ${statusValue(ctx, brandTimer(ctx.turnElapsedMs))} `
+				: theme.icon.omp
+					? `${theme.icon.omp} `
+					: "";
+		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
+	},
+};
+/** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
+function brandSpinnerFrame(nowMs = Date.now()): string {
+	const frames = theme.getSpinnerFrames("activity");
+	return frames[Math.floor(nowMs / SPINNER_ADVANCE_MS) % frames.length] ?? "";
+}
+
+/** Turn timer in omp's brand format: whole seconds → minutes → hours (capped at 99h). */
+function brandTimer(elapsedMs: number): string {
+	const seconds = Math.floor(elapsedMs / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+	return `${Math.min(99, Math.floor(seconds / 3600))}h`;
+}
+
+const statusSegment: StatusLineSegment = {
+	id: "status",
+	render(ctx) {
+		let text = "";
+		for (const status of ctx.hookStatuses ?? []) {
+			const sanitized = sanitizeStatusText(status);
+			if (!sanitized) continue;
+			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+		}
+		return {
+			content: text ? accentFg(ctx, "accent", text) : "",
+			visible: text.length > 0,
+		};
 	},
 };
 
@@ -103,6 +204,7 @@ const modelSegment: StatusLineSegment = {
 		if (modelName.startsWith("Claude ")) {
 			modelName = modelName.slice(7);
 		}
+		modelName = statusValue(ctx, modelName);
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
@@ -124,14 +226,18 @@ const modelSegment: StatusLineSegment = {
 			}
 		}
 
+		if (ctx.startupPlaceholder && thinkingDisplay) {
+			thinkingDisplay = withIcon(thinkingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
+		}
+
 		// Compact mode swaps the model icon for the thinking-level glyph and drops
 		// the " · <level>" tail, keeping the level visible as a single icon.
 		const compact = ctx.compactThinkingLevel && thinkingDisplay !== "";
 		const modelIcon = compact ? thinkingGlyph(thinkingDisplay) : theme.icon.model;
 
 		// Fast-mode icon and thinking-level suffix trail the model name and are
-		// colored together with it as `statusLineModel`. The advisor "++" badge
-		// sits between the name and that tail, so it reads as a distinct marker.
+		// colored together with it as `statusLineModel`. The advisor symbol sits
+		// between the name and that tail, so it reads as a distinct marker.
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
 		let tail = "";
@@ -144,8 +250,8 @@ const modelSegment: StatusLineSegment = {
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
-		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
-		// Advisor "++" badge, colored by the worst status in the roster:
+		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
+		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in
 		// `/advisor status`.
@@ -161,10 +267,14 @@ const modelSegment: StatusLineSegment = {
 					: statuses.includes("running")
 						? "success"
 						: "dim";
-			content += theme.fg(badgeColor, "++");
+			// Closed eye once every advisor has finished reviewing the yielded
+			// turn — no more comments until a new primary turn starts.
+			const allYielded = advisorStats.advisors.every(a => a.yielded);
+			const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
+			if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
 		}
 		if (tail) {
-			content += theme.fg("statusLineModel", tail);
+			content += accentFg(ctx, "statusLineModel", tail);
 		}
 
 		return { content, visible: true };
@@ -207,16 +317,22 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	const parts: string[] = [withIcon(icon, "Goal")];
 	const showBudget = ctx.session.settings.get("goal.statusInFooter") === true;
 	if (showBudget && goal) {
-		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));
+		parts.push(statusValue(ctx, formatGoalBudget(goal.tokensUsed, goal.tokenBudget)));
 	}
-	return { content: theme.fg(color, parts.join(" ")), visible: true };
+	return {
+		content: color === "accent" ? accentFg(ctx, color, parts.join(" ")) : theme.fg(color, parts.join(" ")),
+		visible: true,
+	};
 }
 
-function formatLoopLimit(limit: NonNullable<SegmentContext["loopMode"]>["limit"]): string | undefined {
+function formatLoopLimit(
+	limit: NonNullable<SegmentContext["loopMode"]>["limit"],
+	nowMs = Date.now(),
+): string | undefined {
 	if (!limit) return undefined;
 	if (limit.kind === "iterations") return `${limit.remaining}/${limit.initial}`;
 
-	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - Date.now()) / 1_000));
+	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - nowMs) / 1_000));
 	const hours = Math.floor(totalSeconds / 3_600);
 	const minutes = Math.floor((totalSeconds % 3_600) / 60);
 	const seconds = totalSeconds % 60;
@@ -234,14 +350,16 @@ const modeSegment: StatusLineSegment = {
 		if (plan && (plan.enabled || plan.paused)) {
 			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
 			const content = withIcon(theme.icon.plan, label);
-			const color = plan.paused ? "warning" : "accent";
-			return { content: theme.fg(color, content), visible: true };
+			return {
+				content: plan.paused ? theme.fg("warning", content) : accentFg(ctx, "accent", content),
+				visible: true,
+			};
 		}
 
 		const prewalk = ctx.prewalk;
 		if (prewalk?.enabled) {
 			const content = withIcon(theme.icon.prewalk, "Prewalk");
-			return { content: theme.fg("accent", content), visible: true };
+			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
 		const goal = ctx.goalMode;
@@ -252,16 +370,16 @@ const modeSegment: StatusLineSegment = {
 		const vibe = ctx.vibeMode;
 		if (vibe?.enabled) {
 			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: theme.fg("accent", content), visible: true };
+			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
 		const loop = ctx.loopMode;
 		if (loop) {
 			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
 			const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
-			const parts = [withIcon(icon, `Loop ${loop.state}`)];
-			const limit = formatLoopLimit(loop.limit);
-			if (limit) parts.push(limit);
+			const parts = [withIcon(icon, `Loop ${statusValue(ctx, loop.state)}`)];
+			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
+			if (limit) parts.push(statusValue(ctx, limit));
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
 		}
 
@@ -282,7 +400,9 @@ const pathSegment: StatusLineSegment = {
 		if (stripPrefix && ctx.worktree) {
 			const { projectName, worktreeName } = ctx.worktree;
 			const label = ctx.git.branch === worktreeName ? projectName : `${projectName}/${worktreeName}`;
-			const text = fileHyperlink(getProjectDir(), clampPathLength(label, opts.maxLength ?? 40));
+			const text = ctx.startupPlaceholder
+				? STARTUP_PLACEHOLDER
+				: fileHyperlink(getProjectDir(), clampPathLength(label, opts.maxLength ?? 40));
 			const content = withIcon(theme.icon.worktree, text);
 			return { content: theme.fg("statusLinePath", content), visible: true };
 		}
@@ -307,7 +427,8 @@ const pathSegment: StatusLineSegment = {
 
 		const showScratchIcon = scratch && stripPrefix;
 		const icon = showScratchIcon ? theme.icon.scratchFolder : theme.icon.folder;
-		const content = withIcon(icon, `${fileHyperlink(projectDir, pwd)}${repoSuffix}`);
+		const text = ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : `${fileHyperlink(projectDir, pwd)}${repoSuffix}`;
+		const content = withIcon(icon, text);
 		return { content: theme.fg("statusLinePath", content), visible: true };
 	},
 };
@@ -325,20 +446,20 @@ const gitSegment: StatusLineSegment = {
 		const showBranch = opts.showBranch !== false;
 		let content = "";
 		if (showBranch && branch) {
-			content = withIcon(theme.icon.branch, branch);
+			content = withIcon(theme.icon.branch, statusValue(ctx, branch));
 		}
 
 		// Add status indicators
 		if (gitStatus) {
 			const indicators: string[] = [];
 			if (opts.showUnstaged !== false && gitStatus.unstaged > 0) {
-				indicators.push(theme.fg("statusLineDirty", `*${gitStatus.unstaged}`));
+				indicators.push(theme.fg("statusLineDirty", `*${statusValue(ctx, `${gitStatus.unstaged}`)}`));
 			}
 			if (opts.showStaged !== false && gitStatus.staged > 0) {
-				indicators.push(theme.fg("statusLineStaged", `+${gitStatus.staged}`));
+				indicators.push(theme.fg("statusLineStaged", `+${statusValue(ctx, `${gitStatus.staged}`)}`));
 			}
 			if (opts.showUntracked !== false && gitStatus.untracked > 0) {
-				indicators.push(theme.fg("statusLineUntracked", `?${gitStatus.untracked}`));
+				indicators.push(theme.fg("statusLineUntracked", `?${statusValue(ctx, `${gitStatus.untracked}`)}`));
 			}
 			if (indicators.length > 0) {
 				const indicatorText = indicators.join(" ");
@@ -363,9 +484,10 @@ const prSegment: StatusLineSegment = {
 		const { pr } = ctx.git;
 		if (!pr) return { content: "", visible: false };
 
-		const label = withIcon(theme.icon.pr, `#${pr.number}`);
-		const content = TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
-		return { content: theme.fg("accent", content), visible: true };
+		const label = withIcon(theme.icon.pr, `#${statusValue(ctx, `${pr.number}`)}`);
+		const content =
+			!ctx.startupPlaceholder && TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
+		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 };
 
@@ -375,7 +497,7 @@ const subagentsSegment: StatusLineSegment = {
 		if (ctx.subagentCount === 0) {
 			return { content: "", visible: false };
 		}
-		const content = withIcon(theme.icon.agents, `${ctx.subagentCount}`);
+		const content = withIcon(theme.icon.agents, statusValue(ctx, `${ctx.subagentCount}`));
 		return { content: theme.fg("statusLineSubagents", content), visible: true };
 	},
 };
@@ -386,7 +508,7 @@ const tokenInSegment: StatusLineSegment = {
 		const { input } = ctx.usageStats;
 		if (!input) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.input, formatNumber(input));
+		const content = withIcon(theme.icon.input, statusValue(ctx, formatNumber(input)));
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
 };
@@ -397,7 +519,7 @@ const tokenOutSegment: StatusLineSegment = {
 		const { output } = ctx.usageStats;
 		if (!output) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.output, formatNumber(output));
+		const content = withIcon(theme.icon.output, statusValue(ctx, formatNumber(output)));
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
 };
@@ -413,7 +535,7 @@ const tokenTotalSegment: StatusLineSegment = {
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.tokens, formatNumber(total));
+		const content = withIcon(theme.icon.tokens, statusValue(ctx, formatNumber(total)));
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
 };
@@ -424,7 +546,7 @@ const tokenRateSegment: StatusLineSegment = {
 		const { tokensPerSecond } = ctx.usageStats;
 		if (!tokensPerSecond) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.throughput, `${tokensPerSecond.toFixed(1)} tok/s`);
+		const content = withIcon(theme.icon.throughput, `${statusValue(ctx, tokensPerSecond.toFixed(1))} tok/s`);
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
 };
@@ -436,17 +558,40 @@ const costSegment: StatusLineSegment = {
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
-		const usingSubscription = state.model ? ctx.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
 		}
 
 		const billingParts: string[] = [];
-		if (cost) billingParts.push(`$${cost.toFixed(2)}`);
-		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-		if (usingSubscription) billingParts.push("(sub)");
-		if (advisorCost) billingParts.push(`${billingParts.length ? "+ " : ""}$${advisorCost.toFixed(2)} (adv)`);
+		if (cost) {
+			billingParts.push(
+				ctx.startupPlaceholder
+					? formatSpendPlaceholder(usingSubscription, theme)
+					: formatSpend(cost, usingSubscription, theme),
+			);
+		} else if (usingSubscription) {
+			billingParts.push(
+				theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? theme.icon.subscription : "(sub)",
+			);
+		}
+		if (normalizedPremiumRequests) {
+			billingParts.push(`★ ${statusValue(ctx, formatNumber(normalizedPremiumRequests))}`);
+		}
+		if (advisorCost) {
+			const prefix = billingParts.length ? "+ " : "";
+			// Resolve the advisor subscription flag lazily: with no active advisor
+			// it walks the whole model catalog (getAvailable → hasAuth per provider
+			// → credential-file reads), and the status line re-renders at the
+			// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
+			const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
+			const spend = ctx.startupPlaceholder
+				? formatAdvisorSpendPlaceholder(advisorUsingSubscription, theme)
+				: formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme);
+			billingParts.push(`${prefix}${spend}`);
+		}
+		if (billingParts.length === 0) return { content: "", visible: false };
 
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},
@@ -458,11 +603,28 @@ const contextPctSegment: StatusLineSegment = {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
 
-		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
-		const text = `${formatContextUsage(pct, window, ctx.contextTokens)}${autoIcon}`;
-
 		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
-		const content = withIcon(theme.icon.context, theme.fg(color, text));
+		// Async-compaction indicator: pulse the auto icon while a background
+		// speculation runs, hold it in accent once a result is armed.
+		let autoIcon = "";
+		if (ctx.autoCompactEnabled && theme.icon.auto) {
+			const speculation = ctx.compactionSpeculation;
+			const accentIcon = accentFg(ctx, "accent", theme.icon.auto);
+			autoIcon = ` ${
+				speculation === "running"
+					? ctx.speculationBlinkOn
+						? accentIcon
+						: theme.fg("muted", theme.icon.auto)
+					: speculation === "armed"
+						? accentIcon
+						: theme.fg(color, theme.icon.auto)
+			}`;
+		}
+		const text = theme.fg(
+			color,
+			ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : formatContextUsage(pct, window, ctx.contextTokens),
+		);
+		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };
 	},
@@ -474,7 +636,7 @@ const contextTotalSegment: StatusLineSegment = {
 		const window = ctx.contextWindow;
 		if (!window) return { content: "", visible: false };
 		return {
-			content: theme.fg("statusLineContext", withIcon(theme.icon.context, formatNumber(window))),
+			content: theme.fg("statusLineContext", withIcon(theme.icon.context, statusValue(ctx, formatNumber(window)))),
 			visible: true,
 		};
 	},
@@ -492,7 +654,7 @@ const timeSpentSegment: StatusLineSegment = {
 	id: "time_spent",
 	render(ctx) {
 		if (ctx.activeMs < 1000) return { content: "", visible: false };
-		return { content: withIcon(theme.icon.time, formatDuration(ctx.activeMs)), visible: true };
+		return { content: withIcon(theme.icon.time, statusValue(ctx, formatDuration(ctx.activeMs))), visible: true };
 	},
 };
 
@@ -500,7 +662,7 @@ const timeSegment: StatusLineSegment = {
 	id: "time",
 	render(ctx) {
 		const opts = ctx.options.time ?? {};
-		const now = new Date();
+		const now = ctx.now ?? new Date();
 
 		let hours = now.getHours();
 		let suffix = "";
@@ -516,7 +678,7 @@ const timeSegment: StatusLineSegment = {
 		}
 		timeStr += suffix;
 
-		return { content: withIcon(theme.icon.time, timeStr), visible: true };
+		return { content: withIcon(theme.icon.time, statusValue(ctx, timeStr)), visible: true };
 	},
 };
 
@@ -525,7 +687,7 @@ const sessionSegment: StatusLineSegment = {
 	render(ctx) {
 		const sessionManager = ctx.session.sessionManager;
 		const sessionId = sessionManager?.getSessionId?.();
-		const display = sessionId?.slice(0, 8) || "new";
+		const display = statusValue(ctx, sessionId?.slice(0, 8) || "new");
 
 		return { content: withIcon(theme.icon.session, display), visible: true };
 	},
@@ -533,9 +695,11 @@ const sessionSegment: StatusLineSegment = {
 
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
-	render(_ctx) {
-		const name = os.hostname().split(".")[0];
-		return { content: withIcon(theme.icon.host, name), visible: true };
+	render(ctx) {
+		const name = statusValue(ctx, ctx.hostname ?? os.hostname().split(".")[0]);
+		const content = withIcon(theme.icon.host, name);
+		const ansi = sessionAccentAnsi(ctx);
+		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
 	},
 };
 
@@ -545,7 +709,7 @@ const cacheReadSegment: StatusLineSegment = {
 		const { cacheRead } = ctx.usageStats;
 		if (!cacheRead) return { content: "", visible: false };
 
-		const parts = [theme.icon.cache, formatNumber(cacheRead)].filter(Boolean);
+		const parts = [theme.icon.cache, statusValue(ctx, formatNumber(cacheRead))].filter(Boolean);
 		const content = parts.join(" ");
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
@@ -557,7 +721,7 @@ const cacheWriteSegment: StatusLineSegment = {
 		const { cacheWrite } = ctx.usageStats;
 		if (!cacheWrite) return { content: "", visible: false };
 
-		const parts = [theme.icon.cache, formatNumber(cacheWrite)].filter(Boolean);
+		const parts = [theme.icon.cache, statusValue(ctx, formatNumber(cacheWrite))].filter(Boolean);
 		const content = parts.join(" ");
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
@@ -577,7 +741,7 @@ const cacheHitSegment: StatusLineSegment = {
 		const total = cacheRead + cacheWrite + input;
 
 		const rate = (cacheRead / total) * 100;
-		const rateStr = rate.toFixed(2);
+		const rateStr = statusValue(ctx, rate.toFixed(2));
 
 		const parts: string[] = [theme.icon.cache];
 		parts.push(theme.fg("statusLineSpend", `${rateStr}%`));
@@ -589,16 +753,11 @@ const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
 	render(ctx) {
 		const sessionManager = ctx.session.sessionManager;
-		const name = sessionManager?.getSessionName();
+		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		const accentEnabled = ctx.sessionAccent !== false;
-		const ansi = accentEnabled
-			? (getSessionAccentAnsi(
-					getSessionAccentHex(name, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance),
-				) ?? theme.getFgAnsi("accent"))
-			: theme.getFgAnsi("accent");
-		return { content: `${ansi}${sanitizeStatusText(name)}\x1b[39m`, visible: true };
+		const content = ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : sanitizeStatusText(name);
+		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 };
 
@@ -606,11 +765,9 @@ const collabSegment: StatusLineSegment = {
 	id: "collab",
 	render(ctx) {
 		if (!ctx.collab) return { content: "", visible: false };
-		const label =
-			ctx.collab.role === "host"
-				? `⇄ collab:${ctx.collab.participantCount}`
-				: `⇄ collab guest:${ctx.collab.participantCount}`;
-		return { content: theme.fg("accent", label), visible: true };
+		const participants = statusValue(ctx, `${ctx.collab.participantCount}`);
+		const label = ctx.collab.role === "host" ? `⇄ collab:${participants}` : `⇄ collab guest:${participants}`;
+		return { content: accentFg(ctx, "accent", label), visible: true };
 	},
 };
 
@@ -622,7 +779,7 @@ function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 
 function formatUsageReset(value: number, unit: "m" | "h"): string {
 	if (unit === "m") {
-		// total minutes (5h window: max 300)
+		// Short-window reset timers retain minute precision.
 		if (value < 60) return `${value}m`;
 		const hours = Math.floor(value / 60);
 		const mins = value % 60;
@@ -639,29 +796,49 @@ const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
 		const u = ctx.usage;
-		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
+		if (!u || (!u.fiveHour && !u.daily && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
 		const parts: string[] = [];
 		if (u.tier) {
-			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
-			if (tier) parts.push(theme.fg("accent", tier));
+			const tier = ctx.startupPlaceholder
+				? STARTUP_PLACEHOLDER
+				: truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
+			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
 			const reset =
 				u.fiveHour.resetMinutes !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`,
+						)
 					: "";
 			parts.push(`5h ${pctText}${reset}`);
 		}
+		if (u.daily) {
+			const pct = u.daily.percent;
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
+			const reset =
+				u.daily.resetMinutes !== undefined
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.daily.resetMinutes, "m")})`,
+						)
+					: "";
+			parts.push(`1d ${pctText}${reset}`);
+		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
 			const reset =
 				u.sevenDay.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`,
+						)
 					: "";
 			parts.push(`7d ${pctText}${reset}`);
 		}
@@ -670,10 +847,13 @@ const usageSegment: StatusLineSegment = {
 			// Cursor and OpenCode Go (normalize gates monthly to those providers).
 			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
 			// "1% used"; OpenCode's endpoint already emits floored integers).
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.floor(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.floor(pct)}`)}%`);
 			const reset =
 				u.monthly.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.monthly.resetHours, "h")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.monthly.resetHours, "h")})`,
+						)
 					: "";
 			parts.push(`mo ${pctText}${reset}`);
 		}
@@ -688,6 +868,7 @@ const usageSegment: StatusLineSegment = {
 
 export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	pi: piSegment,
+	status: statusSegment,
 	model: modelSegment,
 	mode: modeSegment,
 	path: pathSegment,

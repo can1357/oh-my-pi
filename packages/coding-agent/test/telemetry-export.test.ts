@@ -107,6 +107,9 @@ describe("initTelemetryExport signals export path", () => {
 			probes.map(async ([name, relativePath]) => {
 				const probe = fileURLToPath(new URL(relativePath, import.meta.url));
 				const proc = Bun.spawn([process.execPath, probe], {
+					// Bun otherwise inherits the process's original native environment,
+					// including external OTEL kill-switches removed in beforeEach.
+					env: { ...process.env },
 					stdin: "ignore",
 					stdout: "ignore",
 					stderr: "ignore",

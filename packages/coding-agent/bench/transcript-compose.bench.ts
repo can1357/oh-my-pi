@@ -85,12 +85,6 @@ function measure(n: number): { median: number; p95: number } {
 	tail.updateContent(makeTextMessage(tailCorpus.slice(0, revealed)), { transient: true });
 
 	// Warm every block's markdown L1 cache and establish the assembled frame,
-	// then commit exactly the seam the container reports (what the TUI does):
-	// every finalized-history row plus the separator before the live tail. The
-	// container compacts that committed prefix on the next render.
-	container.render(WIDTH);
-	const committed = container.getNativeScrollbackLiveRegionStart() ?? 0;
-	container.setNativeScrollbackCommittedRows(committed);
 	container.render(WIDTH);
 
 	const tick = () => {

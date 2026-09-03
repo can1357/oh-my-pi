@@ -60,8 +60,11 @@ function createPathContext(): SegmentContext {
 		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
+		compactionSpeculation: "idle",
+		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs: 0,
+		turnElapsedMs: null,
 		activeRepo: null,
 		worktree: null,
 		git: {
