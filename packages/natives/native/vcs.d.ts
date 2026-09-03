@@ -6,6 +6,8 @@ import type {
 	VcsHunkSelectionError,
 	VcsJjWorkspace,
 	VcsRepo,
+	VcsWorktreeAddOptions,
+	VcsWorktreeAddResult,
 } from "./index.js";
 /** Portable capabilities that differ between Git and Jujutsu. */
 export type VcsFeature = "stagedDiff" | "revDiff";
@@ -70,6 +72,15 @@ export declare function clone(
 	options?: VcsCloneOptions,
 	signal?: AbortSignal,
 ): Promise<void>;
+
+/** Add a linked worktree, bridging the previous release addon's boolean signature. */
+export declare function addWorktree(
+	repo: VcsGitRepo,
+	path: string,
+	refName: string,
+	options: VcsWorktreeAddOptions,
+	signal?: AbortSignal,
+): Promise<VcsWorktreeAddResult>;
 
 /** Sever a copied working tree from shared git metadata. */
 export declare function detachGitDir(

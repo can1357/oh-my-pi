@@ -68,6 +68,24 @@ describe("Muse Code OAuth", () => {
 		expect(new Headers(requests[2]!.init?.headers).get("x-api-version")).toBe("1.0.0");
 	});
 
+	test("classifies malformed verification URLs as OAuth validation failures", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				response({
+					device_code: "device-token",
+					user_code: "ABCD-EFGH",
+					verification_uri: "not a URL",
+					expires_in: 600,
+				}),
+			);
+
+		await expect(loginMetaMuse({ fetch: fetchImpl })).rejects.toMatchObject({
+			name: "OAuthError",
+			kind: "validation",
+			provider: "meta",
+		});
+	});
+
 	test("rejects key exchanges without a stable account identity", async () => {
 		const fetchImpl: FetchImpl = () => Promise.resolve(response({ api_key: "LLM|identityless-key" }));
 

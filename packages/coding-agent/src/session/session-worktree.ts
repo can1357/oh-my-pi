@@ -64,7 +64,7 @@ export async function createSessionWorktree(cwd: string, settings: Settings, bra
 	await fs.mkdir(path.dirname(worktreePath), { recursive: true });
 
 	await repository.createBranch(branch, "HEAD", false);
-	const result = await repository.worktreeAdd(worktreePath, branch, {
+	const result = await vcs.addWorktree(repository, worktreePath, branch, {
 		detach: false,
 		clone: settings.get("worktree.clone"),
 		backend: parseIsolationBackend(settings.get("isolation.backend")),

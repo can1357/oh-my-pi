@@ -494,7 +494,8 @@ export async function checkoutPullRequest(
 			if (!existingWorktree) {
 				finalWorktreePath = await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
 				await fs.mkdir(path.dirname(finalWorktreePath), { recursive: true });
-				const result = await repository.worktreeAdd(
+				const result = await vcs.addWorktree(
+					repository,
 					finalWorktreePath,
 					localBranch,
 					{

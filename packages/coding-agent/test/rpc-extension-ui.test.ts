@@ -101,19 +101,14 @@ describe("RPC extension UI", () => {
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("forwards an explicitly selected API-key login prompt to the RPC client", async () => {
-		const requestInput = vi.fn((_title: string, _placeholder?: string) => Promise.resolve("meta-api-key"));
+	it("forwards an explicitly selected login prompt to the RPC client", async () => {
+		const requestInput = vi.fn((_title: string, _placeholder?: string) => Promise.resolve("fixture-api-key"));
+		const prompt = { message: "Fixture login prompt", placeholder: "Fixture placeholder" };
 
-		await expect(
-			requestRpcLoginPrompt(
-				"meta",
-				{ message: "Paste your Meta Model API key", placeholder: "Model API key" },
-				false,
-				"api-key",
-				requestInput,
-			),
-		).resolves.toBe("meta-api-key");
-		expect(requestInput).toHaveBeenCalledWith("Paste your Meta Model API key", "Model API key");
+		await expect(requestRpcLoginPrompt("fixture-provider", prompt, false, "api-key", requestInput)).resolves.toBe(
+			"fixture-api-key",
+		);
+		expect(requestInput).toHaveBeenCalledWith(prompt.message, prompt.placeholder);
 	});
 
 	it("rejects an unannounced provider prompt without an explicit auth method", async () => {

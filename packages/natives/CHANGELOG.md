@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed linked-worktree creation when pull-request checks run against the previous release native addon.
+
 ## [18.1.5] - 2026-09-03
 
 ### Changed

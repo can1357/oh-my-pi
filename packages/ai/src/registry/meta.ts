@@ -6,6 +6,7 @@ import metaApiKeyInstructions from "./meta-api-key-instructions.md" with { type:
 import metaApiKeyPlaceholder from "./meta-api-key-placeholder.md" with { type: "text" };
 import metaApiKeyPrompt from "./meta-api-key-prompt.md" with { type: "text" };
 import metaLoginPrompt from "./meta-login.md" with { type: "text" };
+import metaLoginPlaceholder from "./meta-login-placeholder.md" with { type: "text" };
 import { loginMetaMuse } from "./oauth/meta-muse";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
@@ -32,7 +33,7 @@ export async function loginMeta(callbacks: OAuthController): Promise<OAuthCreden
 		(
 			await callbacks.onPrompt({
 				message: metaLoginPrompt,
-				placeholder: "1 or 2",
+				placeholder: metaLoginPlaceholder,
 			})
 		).trim();
 	if (callbacks.signal?.aborted || method.length === 0) throw new AIError.LoginCancelledError();

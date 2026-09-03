@@ -122,7 +122,16 @@ function parseDeviceAuthorization(payload: unknown): DeviceAuthorization {
 			provider: PROVIDER,
 		});
 	}
-	const url = new URL(verificationUri);
+	let url: URL;
+	try {
+		url = new URL(verificationUri);
+	} catch (cause) {
+		throw new AIError.OAuthError("Meta device authorization returned an invalid verification URL", {
+			kind: "validation",
+			provider: PROVIDER,
+			cause,
+		});
+	}
 	if (url.protocol !== "https:" || url.hostname !== "auth.meta.com") {
 		throw new AIError.OAuthError("Meta device authorization returned an untrusted verification URL", {
 			kind: "validation",
