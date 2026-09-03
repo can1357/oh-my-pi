@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added runtime model discovery for the z.AI provider (`ZAI_API_KEY`): the authenticated `/v1/models` catalog is fetched live and treated as authoritative, retiring bundled ids the endpoint no longer serves. Bundled `glm-5.3` / `glm-5.3-flash` references seed context limits, multimodal input, and the `low`/`high`/`max` reasoning-effort ladder onto discovered ids ([#8540](https://github.com/can1357/oh-my-pi/issues/8540), [#8518](https://github.com/can1357/oh-my-pi/issues/8518)).
+
 ## [18.1.6] - 2026-09-03
 
 ### Added
@@ -149,7 +153,6 @@
 ### Fixed
 
 - Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
-
 ## [18.0.5] - 2026-08-25
 
 ### Added

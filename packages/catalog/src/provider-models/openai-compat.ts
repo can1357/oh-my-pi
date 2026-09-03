@@ -608,6 +608,19 @@ type SimpleProviderConfig = {
 	baseUrl?: string;
 	fetch?: FetchImpl;
 	headers?: SimpleProviderDiscoveryHeaders;
+	/**
+	 * Optional post-normalization discovery filter; return false to drop the
+	 * model. Runs before the discovered catalog is cached, so it also gates
+	 * the authoritative runtime list.
+	 */
+	filterModel?: (entry: OpenAICompatibleModelRecord, model: ModelSpec<Api>) => boolean;
+	/**
+	 * Optional post-map transform applied to every discovered row after the
+	 * bundled-reference merge (anthropic-messages factory). Use for
+	 * provider-specific capability floors that must survive even when no
+	 * bundled reference exists for a newly launched id.
+	 */
+	transformModel?: (model: ModelSpec<"anthropic-messages">) => ModelSpec<"anthropic-messages">;
 };
 
 function resolveSimpleProviderHeaders(
@@ -680,11 +693,29 @@ export function createSimpleOpenAICompletionsOptions(
 		config,
 		headers: config?.headers,
 		requireApiKey: true,
+		filterModel: config?.filterModel,
 		mapModel: mapWithBundledReference,
 	});
 }
 
-function createSimpleAnthropicProviderOptions(
+/**
+ * Builds {@link ModelManagerOptions} for an Anthropic-messages provider whose
+ * live catalog is discovered from the endpoint's OpenAI-shaped `/v1/models`.
+ *
+ * - **API-key gating**: `fetchDynamicModels` is attached only when
+ *   `config.apiKey` is set; keyless callers keep the bundled/static catalog.
+ * - **Discovery URL normalization**: the configured base URL is normalized
+ *   against `defaultBaseUrlFallback` (`normalizeAnthropicBaseUrl`) and remapped
+ *   via `toAnthropicDiscoveryBaseUrl` to the host serving `/v1/models`, while
+ *   discovered rows keep the chat `baseUrl` for actual requests.
+ * - **Bundled-reference merge**: every discovered row is mapped through
+ *   `mapWithBundledReference`, so limits, modalities, pricing, and thinking
+ *   metadata missing from the discovery payload fall back to the bundled
+ *   reference for the same id; the endpoint's `display_name` wins for `name`.
+ * - **Discovery filter**: `config.filterModel` (optional) drops unusable ids
+ *   (e.g. Z.AI's context-tier `[1m]` variants) before the catalog is cached.
+ */
+export function createSimpleAnthropicProviderOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
 	defaultBaseUrlFallback: string,
 	config?: SimpleProviderConfig,
@@ -702,14 +733,16 @@ function createSimpleAnthropicProviderOptions(
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
 					headers: buildAnthropicDiscoveryHeaders(apiKey),
+					filterModel: config?.filterModel,
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const model = mapWithBundledReference(entry, defaults, reference);
-						return {
+						const mapped = {
 							...model,
 							name: toModelName(entry.display_name, model.name),
 							baseUrl,
 						};
+						return config?.transformModel ? config.transformModel(mapped) : mapped;
 					},
 					fetch: config?.fetch,
 				}),

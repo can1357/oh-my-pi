@@ -590,44 +590,49 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
-	// Seed GLM-5.3 on the z.AI provider. GLM-5.3 is live on the Anthropic and
-	// coding endpoints but not yet advertised in `/v1/models` (which still tops
-	// out at glm-5.2), so endpoint discovery misses it. The zai provider is not
-	// authoritative, so the seed survives regeneration; thinking metadata
-	// (low/high/max uniform ladder, mandatory reasoning, defaultLevel=max) is
-	// derived by rebakeModelThinking from the identity classifiers.
-	allModels.push({
-		id: "glm-5.3",
-		name: "GLM-5.3",
-		api: "anthropic-messages",
-		provider: "zai",
-		baseUrl: "https://api.z.ai/api/anthropic",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
-		contextWindow: 1_000_000,
-		maxTokens: 131_072,
-	} as ModelSpec<"anthropic-messages">);
-	// GLM-5.3-Flash is absent from `/v1/models`-derived upstream metadata.
-	// It is the first natively multimodal GLM coding SKU — its id carries no
-	// `v` marker — so the seed declares image input directly instead of
-	// inheriting the text-only default. Its API route is model-specific because
-	// Z.AI serves this SKU on the native endpoint rather than the Anthropic
-	// coding endpoint. Use the documented list price from
-	// https://docs.z.ai/guides/overview/pricing rather than the 50%-off launch
-	// promotion, which expires on 2026-09-09.
-	const zaiGlm53FlashApi = resolveZaiApi("glm-5.3-flash");
-	allModels.push({
-		id: "glm-5.3-flash",
-		name: "GLM-5.3-Flash",
-		...zaiGlm53FlashApi,
-		provider: "zai",
-		reasoning: true,
-		input: ["text", "image"],
-		cost: { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
-		contextWindow: 1_000_000,
-		maxTokens: 131_072,
-	} satisfies ModelSpec<Api>);
+	// Seed GLM-5.3 on the z.AI provider so a fresh install (and a regen without
+	// a ZAI_API_KEY) still resolves the descriptor's defaultModel synchronously
+	// at boot. GLM-5.3 is live on the Anthropic and coding endpoints but not
+	// yet advertised in `/v1/models` (which still tops out at glm-5.2), so
+	// endpoint discovery misses it; thinking metadata (low/high/max uniform
+	// ladder, mandatory reasoning, defaultLevel=max) is derived by
+	// rebakeModelThinking from the identity classifiers. If live /v1/models
+	// discovery succeeds, zai is authoritative and stale seed IDs must stay out
+	// (mirrors the gmi-cloud default-model seed).
+	if (!authoritativeCatalogProviders.has("zai")) {
+		allModels.push({
+			id: "glm-5.3",
+			name: "GLM-5.3",
+			api: "anthropic-messages",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/anthropic",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+		} as ModelSpec<"anthropic-messages">);
+		// GLM-5.3-Flash is absent from `/v1/models`-derived upstream metadata.
+		// It is the first natively multimodal GLM coding SKU — its id carries no
+		// `v` marker — so the seed declares image input directly instead of
+		// inheriting the text-only default. Its API route is model-specific because
+		// Z.AI serves this SKU on the native endpoint rather than the Anthropic
+		// coding endpoint. Use the documented list price from
+		// https://docs.z.ai/guides/overview/pricing rather than the 50%-off launch
+		// promotion, which expires on 2026-09-09.
+		const zaiGlm53FlashApi = resolveZaiApi("glm-5.3-flash");
+		allModels.push({
+			id: "glm-5.3-flash",
+			name: "GLM-5.3-Flash",
+			...zaiGlm53FlashApi,
+			provider: "zai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+		} satisfies ModelSpec<Api>);
+	}
 	// Mantle's catalog endpoint is account/API-key scoped. Keep the generated
 	// bundle deterministic; authenticated runtime discovery may replace this seed.
 	allModels.push(...BEDROCK_MANTLE_STATIC_MODELS);
