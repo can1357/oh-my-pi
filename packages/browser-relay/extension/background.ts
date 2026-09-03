@@ -859,13 +859,16 @@ async function attachTabOperation(
 	try {
 		await trackAttachments([tabId]);
 	} catch (error) {
+		const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
 		guardDetachments.add(tabId);
 		await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(
 			async () => {
 				guardDetachments.delete(tabId);
 				const targets = await chrome.debugger.getTargets().catch(() => null);
-				if (shouldRetrackAfterDetachFailure(targets, tabId)) {
-					const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+				if (
+					(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch &&
+					shouldRetrackAfterDetachFailure(targets, tabId)
+				) {
 					attachmentGuard.retry(
 						tabId,
 						() =>
