@@ -188,6 +188,22 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		expect(getCached(REPO, "pr", 3, true)?.rendered).toBe(`pr-${REPO}-3`);
 	});
 
+	it("skips relationship flag values before the positional issue number", () => {
+		seedIssue(23);
+		seedIssue(100);
+		invalidateGithubCacheForBashCommand("gh issue edit --parent 100 23");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 100, true)?.rendered).toBe(`issue-${REPO}-100`);
+	});
+
+	it("drops cache for every positional issue number", () => {
+		seedIssue(23);
+		seedIssue(34);
+		invalidateGithubCacheForBashCommand("gh issue edit 23 34 --add-label bug");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 34, true)).toBeNull();
+	});
+
 	it("falls back to repo-wide invalidation for current-branch `gh pr merge`", () => {
 		seedPr(7);
 		invalidateGithubCacheForBashCommand("gh pr merge --squash --delete-branch");

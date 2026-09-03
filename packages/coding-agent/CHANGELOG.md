@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Bash `gh issue` and `gh pr` cache invalidation so option values are not mistaken for targets and every positional issue or pull request is refreshed ([#10626](https://github.com/can1357/oh-my-pi/issues/10626)).
+
 ## [18.1.5] - 2026-09-03
 
 ### Added
