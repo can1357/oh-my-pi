@@ -194,11 +194,11 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
-	/** Notes withheld while the primary was mid-turn, in arrival order. Flushed
-	 *  deterministically on the first `beginUpdate(false)` so delivery does not
-	 *  depend on the advisor model choosing to re-raise (it may not, since the
-	 *  tool previously returned "Recorded." for a note that was never routed).
-	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
+	/** Nits withheld while the primary was mid-turn, in arrival order. A concern
+	 *  never enters this queue: it takes the live path and routing delivers it to
+	 *  a streaming primary as a next-step aside. Flushed deterministically on the
+	 *  first `beginUpdate(false)`; cleared on `resetDeliveredNotes` alongside the
+	 *  delivered-rank map. */
 	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
 
 	/**
@@ -217,8 +217,8 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are withheld until a completed update so partial work does
-	 * not interrupt the primary before it can finish its planned steps.
+	 * Nits are withheld until a completed update so partial work is not
+	 * nitpicked; concerns and blockers are always routed immediately.
 	 */
 	beginUpdate(inProgress: boolean): void {
 		const wasInProgress = this.#inProgressUpdate;
@@ -248,19 +248,14 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
-		if (this.#inProgressUpdate && args.severity !== "blocker") {
-			// Withheld, not delivered: queue for the deterministic flush on the next
-			// completed update. Skip if an identical note is already pending so a
-			// long mid-turn can't pile up 20 copies of the same advice. Tell the
-			// advisor the truth — the previous "Recorded." made it believe the note
-			// reached the primary, so it never re-raised and the advice was lost.
+		if (this.#inProgressUpdate && advisorSeverityRank(args.severity) === ADVISOR_SEVERITY_RANK.nit) {
+			// Withheld, not delivered: only nits queue here, for the deterministic
+			// flush on the next completed update. Skip if an identical nit is
+			// already pending so a long mid-turn can't pile up 20 copies of the
+			// same advice.
 			const key = advisorNoteDedupeKey(args.note);
 			const pending = this.#deferredNotes.find(item => item.key === key);
-			if (pending) {
-				// Escalating an already-queued note reuses its slot; never a new one.
-				if (advisorSeverityRank(args.severity) > advisorSeverityRank(pending.severity))
-					pending.severity = args.severity;
-			} else if (this.accept(args.note)) {
+			if (!pending && this.accept(args.note)) {
 				// Reserve the update's one slot now (the emission guard filters noise
 				// and enforces the per-update budget at the moment the note is emitted,
 				// exactly like the live path); hold it for the flush. A suppressed or
@@ -278,11 +273,11 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 				useless: true,
 			};
 		}
-		// Live path (completed update, or a blocker that must interrupt now). If the
+		// Live path (completed update, or a mid-turn concern or blocker). If the
 		// note already holds a deferred reservation, it cleared the emission guard
 		// when reserved — pull it from the backlog and deliver without re-accepting,
-		// so a blocker escalation of a still-queued nit/concern interrupts at its
-		// blocker severity instead of being rejected as already-seen and arriving
+		// so a concern or blocker escalation of a still-queued nit interrupts at
+		// its higher severity instead of being rejected as already-seen and arriving
 		// late at the lower deferred severity.
 		const key = advisorNoteDedupeKey(args.note);
 		const reservedIndex = this.#deferredNotes.findIndex(item => item.key === key);
