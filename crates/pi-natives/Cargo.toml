@@ -43,6 +43,8 @@ image = { workspace = true, features = ["bmp"] }
 resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
 zune-jpeg.workspace = true
+# Upstream pinning only (see workspace manifest): tinyvec 1.13.0 is broken upstream.
+tinyvec.workspace = true
 inferno.workspace = true
 napi.workspace = true
 napi-derive.workspace = true

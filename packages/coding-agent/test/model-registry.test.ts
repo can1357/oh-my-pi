@@ -737,6 +737,8 @@ describe("ModelRegistry", () => {
 		});
 
 		test("catalog metrics enrich models discovered through a custom provider", async () => {
+			// Metrics only fill unscored models, so the id must be absent from the
+			// bundled catalog — otherwise a regen that scores it silently wins here.
 			writeRawModelsJson({
 				cliproxy: {
 					baseUrl: "https://proxy.example/v1",
@@ -754,9 +756,9 @@ describe("ModelRegistry", () => {
 							id: "openai",
 							name: "OpenAI",
 							models: {
-								"gpt-5.6-sol": {
-									id: "gpt-5.6-sol",
-									name: "GPT-5.6 Sol",
+								"gpt-5.7-sol": {
+									id: "gpt-5.7-sol",
+									name: "GPT-5.7 Sol",
 									tool_call: true,
 									int: 60.9,
 									tps: 70.4,
@@ -766,7 +768,7 @@ describe("ModelRegistry", () => {
 					});
 				}
 				if (url === "https://proxy.example/v1/models") {
-					return Response.json({ data: [{ id: "gpt-5.6-sol" }] });
+					return Response.json({ data: [{ id: "gpt-5.7-sol" }] });
 				}
 				throw new Error(`Unexpected URL: ${url}`);
 			};
@@ -774,7 +776,7 @@ describe("ModelRegistry", () => {
 
 			await registry.refresh("online");
 
-			const model = registry.find("cliproxy", "gpt-5.6-sol");
+			const model = registry.find("cliproxy", "gpt-5.7-sol");
 			expect(model?.int).toBe(60.9);
 			expect(model?.tps).toBe(70.4);
 		});

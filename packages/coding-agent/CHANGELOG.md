@@ -6,6 +6,17 @@
 
 - Fixed sessions with skills disabled still advertising unavailable `skill://` resources ([#10215](https://github.com/can1357/oh-my-pi/issues/10215)).
 
+## [18.1.8] - 2026-09-03
+
+### Fixed
+
+- Improved background task results with structured output schemas: parsed results are now available through the `agent://<id>` resource, while large or invalid inline JSON is replaced with a reliable pointer to the complete result.
+- Background task artifacts are retained long enough for follow-up turns to read them, including failed tasks that lack valid structured output, and are cleaned up without blocking shutdown or leaking resources.
+- Fixed context compaction incorrectly accepting archived history that was larger because of opaque reasoning data, allowing the next compaction strategy to run instead.
+- Fixed the Model Hub sidebar jumping to the top when provider refreshes rebuild the list; the focused model, or its nearest remaining entry, is now preserved.
+- Fixed the `inspect_image` status hint showing the wrong model after switching between image-capable model roles.
+- Fixed multi-minute TUI freezes during subagent activity and batch execution.
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes
@@ -31,16 +42,6 @@
 
 ### Fixed
 
-- Fixed embedded title models receiving online few-shot examples and failing on tokenizer templates containing generation-mask statements.
-- Fixed Alt+P model searches retaining the current model's list position after results changed; selection now moves to the best match unless every preceding choice remains unchanged
-- Fixed model picker searches ignoring provider preferences; explicitly ordered, role-assigned, and recently used providers now rank first among similarly relevant matches
-- Fixed `/new` reviving the previous conversation in-process or after a restart, including across terminal changes and delayed extension events
-- Fixed protocol handler incorrectly escaping raw text content from agent responses
-- Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
-- Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
-- Fixed the status line missing from the first frame at startup; its normal icons, colors, and chrome now appear immediately with ellipses in dynamic fields until the live values replace them in place.
-- Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
-- Fixed provider-qualified model roles written with a dotted revision (`anthropic/claude-fable-5.1:high`) silently resolving to OpenRouter's same-named flat id instead of the first-party `claude-fable-5-1`, which surfaced when a plan-mode tier or cycle-order role was applied; the dotted spelling now binds inside the named provider and fails closed when that provider is unavailable.
 - Fixed transient provider retries incorrectly failing with an “Agent is already processing” error.
 - Fixed user-scope marketplace plugins installed through omp losing their skills when the Claude plugin source was not separately enabled.
 - Fixed hashline edits failing when targets included apply_patch markers, while rejecting ambiguous bracketed targets instead of editing the wrong path.

@@ -40,7 +40,7 @@ provider "openai" {
 				reasoning-disable-mode "none-effort"
 			}
 		}
-		revision ">=5 <6" {
+		revision ">=5 <7" {
 			apply-patch-tool-type "freeform"
 		}
 	}
