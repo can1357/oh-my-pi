@@ -20,6 +20,7 @@ import {
 	enableProvider,
 	getAllProvidersInfo,
 	isProviderEnabled,
+	isProviderSourceEnabled,
 	loadCapability,
 } from "../../../discovery";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
@@ -67,7 +68,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const id = makeExtensionId(kind, item.name);
 			const isDisabled = disabledExtensions.has(id);
 			const isShadowed = (item as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(item._source.provider);
+			const providerEnabled = isProviderSourceEnabled(item._source);
 
 			let state: ExtensionState;
 			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
@@ -173,7 +174,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const sourceSaysDisabled = server.enabled === false && !forced;
 			const isDisabled = mcpDisabledNames.has(server.name) || disabledExtensions.has(id) || sourceSaysDisabled;
 			const isShadowed = (server as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(server._source.provider);
+			const providerEnabled = isProviderSourceEnabled(server._source);
 
 			let state: ExtensionState;
 			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
@@ -243,7 +244,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const id = makeExtensionId("hook", `${hook.type}:${hook.tool}:${hook.name}`);
 			const isDisabled = disabledExtensions.has(id);
 			const isShadowed = (hook as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(hook._source.provider);
+			const providerEnabled = isProviderSourceEnabled(hook._source);
 
 			let state: ExtensionState;
 			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
@@ -288,7 +289,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 			const id = makeExtensionId("context-file", `${file.level}:${name}`);
 			const isDisabled = disabledExtensions.has(id);
 			const isShadowed = (file as { _shadowed?: boolean })._shadowed;
-			const providerEnabled = isProviderEnabled(file._source.provider);
+			const providerEnabled = isProviderSourceEnabled(file._source);
 
 			let state: ExtensionState;
 			let disabledReason: "shadowed" | "provider-disabled" | "item-disabled" | undefined;
@@ -552,7 +553,7 @@ export function applyDisabledExtensionsToState(state: DashboardState, disabledId
 		}
 
 		if (ext.state !== "disabled" || ext.disabledReason !== "item-disabled") return ext;
-		if (!isProviderEnabled(ext.source.provider)) {
+		if (!isProviderSourceEnabled(ext.source)) {
 			return { ...ext, state: "disabled", disabledReason: "provider-disabled" };
 		}
 

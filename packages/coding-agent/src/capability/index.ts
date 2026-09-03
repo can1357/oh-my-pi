@@ -392,6 +392,15 @@ export function isProviderEnabled(providerId: string): boolean {
 }
 
 /**
+ * Check whether one discovered source is enabled. Foreign provider opt-ins
+ * apply only to user-level sources; project configuration stays active.
+ */
+export function isProviderSourceEnabled(source: Pick<SourceMeta, "provider" | "level">): boolean {
+	if (disabledProviders.has(source.provider)) return false;
+	return source.level !== "user" || isUserSourceEnabled(source.provider);
+}
+
+/**
  * Get list of all disabled provider IDs.
  */
 export function getDisabledProviders(): string[] {

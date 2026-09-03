@@ -58,6 +58,7 @@ export {
 	initializeWithSettings,
 	invalidate,
 	isProviderEnabled,
+	isProviderSourceEnabled,
 	isUserSourceEnabled,
 	listCapabilities,
 	// Loading API
