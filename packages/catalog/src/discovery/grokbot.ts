@@ -199,7 +199,7 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 			sandParameterDefaults: collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults,
 			sandMaxMode,
 			sandVariantStringRepresentation: !legacySlug && Boolean(variantString),
-			contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
+			contextWindow: resolveGrokbotContextWindow(row, sandMaxMode === true),
 			aliases: undefined,
 		});
 	}
@@ -268,7 +268,7 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: str
 		...(thinking ? { thinking } : undefined),
 		input: row.supportsImages === true ? ["text", "image"] : ["text"],
 		cost: COST,
-		contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
+		contextWindow: resolveGrokbotContextWindow(row, sandMaxMode === true),
 		// Do not invent an output cap AvailableModels never supplied; reviewed
 		// offline seed caps stay on static seeds / optional KDL limits-patch.
 		maxTokens: null,

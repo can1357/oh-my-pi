@@ -88,7 +88,8 @@ class "gemini" {
 		// Replaces the Gemini 3+ mandatory-reasoning fallback.
 		thinking-requires-effort #true
 	}
-	// Only public-Gemini-compatible transports accept the bypass sentinel for unsigned calls.
+	// Public Gemini requires the bypass sentinel on every unsigned call. The
+	// Cloud Code Assist first-call variant is a host contract in providers/.
 	on "google" "opencode-zen" {
 		revision ">=3" {
 			requires-skip-thought-signature #true

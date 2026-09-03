@@ -214,13 +214,13 @@ describe("grokbot backend URL join", () => {
 
 	test("mintGrokbotAccessToken posts to the path-preserving renewal URL", async () => {
 		const seen: string[] = [];
-		const fetchImpl: typeof fetch = async url => {
+		const fetchImpl = Object.assign(async (url: string | URL | Request) => {
 			seen.push(String(url));
 			return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		};
+		}, { preconnect: fetch.preconnect }) as typeof fetch;
 		await mintGrokbotAccessToken(
 			{ renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" },
 			fetchImpl,
@@ -231,13 +231,13 @@ describe("grokbot backend URL join", () => {
 
 	test("mintGrokbotAccessToken forwards caller headers under provider-owned headers", async () => {
 		let captured: Record<string, string> | undefined;
-		const fetchImpl: typeof fetch = async (_url, init) => {
+		const fetchImpl = Object.assign(async (_url: string | URL | Request, init?: RequestInit) => {
 			captured = init?.headers as Record<string, string>;
 			return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		};
+		}, { preconnect: fetch.preconnect }) as typeof fetch;
 		await mintGrokbotAccessToken(
 			{ renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" },
 			fetchImpl,
@@ -254,13 +254,13 @@ describe("grokbot backend URL join", () => {
 
 	test("mintGrokbotAccessToken replaces Content-Type case-insensitively", async () => {
 		let captured: Record<string, string> | undefined;
-		const fetchImpl: typeof fetch = async (_url, init) => {
+		const fetchImpl = Object.assign(async (_url: string | URL | Request, init?: RequestInit) => {
 			captured = init?.headers as Record<string, string>;
 			return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		};
+		}, { preconnect: fetch.preconnect }) as typeof fetch;
 		await mintGrokbotAccessToken(
 			{ renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" },
 			fetchImpl,
@@ -276,14 +276,14 @@ describe("grokbot backend URL join", () => {
 
 	test("JWT cache is scoped by caller/proxy headers", async () => {
 		const seen: string[] = [];
-		const fetchImpl: typeof fetch = async (_url, init) => {
+		const fetchImpl = Object.assign(async (_url: string | URL | Request, init?: RequestInit) => {
 			const headers = init?.headers as Record<string, string>;
 			seen.push(headers?.["x-tenant"] ?? "");
 			return new Response(JSON.stringify({ accessToken: `tok-${seen.length}`, expiresAtMs: Date.now() + 600_000 }), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		};
+		}, { preconnect: fetch.preconnect }) as typeof fetch;
 		const cfg = { renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" };
 		const first = await mintGrokbotAccessToken(cfg, fetchImpl, "https://proxy.example/grokbot", undefined, {
 			"x-tenant": "a",
@@ -321,7 +321,7 @@ describe("grokbot AvailableModels headers", () => {
 		process.env.GROKBOT_NAMESPACE = "prod";
 		process.env.GROKBOT_CLIENT_VERSION = "0.30.0";
 		const seen: Array<{ url: string; headers: Record<string, string> }> = [];
-		const fetchImpl: typeof fetch = async (url, init) => {
+		const fetchImpl = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
 			seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
 			if (String(url).includes("inference-credential")) {
 				return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
@@ -333,7 +333,7 @@ describe("grokbot AvailableModels headers", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		};
+		}, { preconnect: fetch.preconnect }) as typeof fetch;
 		const models = await fetchGrokbotAvailableModels({
 			apiKey: "renewer",
 			baseUrl: "https://proxy.example/grokbot",
@@ -352,7 +352,7 @@ describe("grokbot AvailableModels headers", () => {
 		process.env.GROKBOT_NAMESPACE = "prod";
 		process.env.GROKBOT_CLIENT_VERSION = "0.30.0";
 		let mintCount = 0;
-		const fetchImpl: typeof fetch = async url => {
+		const fetchImpl = Object.assign(async (url: string | URL | Request) => {
 			if (String(url).includes("inference-credential")) {
 				mintCount += 1;
 				return new Response(
@@ -367,7 +367,7 @@ describe("grokbot AvailableModels headers", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		};
+		}, { preconnect: fetch.preconnect }) as typeof fetch;
 		const first = await fetchGrokbotAvailableModels({
 			apiKey: "renewer",
 			baseUrl: "https://proxy.example/grokbot",

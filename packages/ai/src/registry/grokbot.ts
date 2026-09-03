@@ -4,10 +4,9 @@
  */
 import { prompt, shortenPath } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { grokbotSecretsPath, loadGrokbotConfig, resolveGrokbotEnvApiKey } from "../providers/grokbot/auth";
+import { grokbotSecretsPath, loadGrokbotConfig } from "../providers/grokbot/auth";
 import hostInstallPrompt from "../providers/grokbot/host-install-prompt.md" with { type: "text" };
-import type { OAuthLoginCallbacks } from "./oauth/types";
-import type { ProviderDefinition } from "./types";
+import type { OAuthController } from "./oauth/types";
 
 export { hostInstallPrompt as GROKBOT_HOST_INSTALL_PROMPT };
 
@@ -15,9 +14,9 @@ export { hostInstallPrompt as GROKBOT_HOST_INSTALL_PROMPT };
  * Show the host-install prompt for use **inside** the Grok Bot system, wait
  * for Enter, then verify `secrets/grokbot.env` (or env) has renewer + machine id.
  * Returns `""` so AuthStorage does not duplicate secrets; availability comes
- * from {@link resolveGrokbotEnvApiKey}.
+ * from the grokbot env hook (`resolveGrokbotEnvApiKey`).
  */
-export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string> {
+export async function loginGrokbot(options: OAuthController): Promise<string> {
 	if (options.signal?.aborted) {
 		throw new AIError.LoginCancelledError();
 	}
@@ -52,20 +51,7 @@ export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string
 	return "";
 }
 
-/**
- * Grok Bot provider — `grokbot` / `grokbot-sand`.
- *
- * Distinct from:
- * - `cursor` / Cursor CLI (`cursor-agent` AgentService/Run)
- * - `xai` / `xai-oauth` / Grok CLI (xAI API keys or SuperGrok OAuth)
- *
- * Auth is a Grok Bot renewal credential (+ machine id checksum), not Cursor OAuth and not xAI.
- * Usage allowances are independent of Cursor and of xAI / Grok CLI — each has its own quota.
- * `/login grokbot` shows a prompt to run inside the Grok Bot system to write host secrets.
- */
-export const grokbotProvider = {
-	id: "grokbot",
-	name: "Grok Bot (not Cursor, not xAI)",
-	envKeys: resolveGrokbotEnvApiKey,
-	login: loginGrokbot,
-} as const satisfies ProviderDefinition;
+/** Auth-engine login hook (`login "custom" hook="grokbot"`). */
+export async function loginGrokbotHook(callbacks: OAuthController): Promise<string> {
+	return loginGrokbot(callbacks);
+}

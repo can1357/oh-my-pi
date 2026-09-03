@@ -547,7 +547,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra") ||
 		(existingModel.provider === "grokbot" && dynamicModel.provider === "grokbot");
 	const dynamicLimitsAuthoritative =
-		resolveModelPolicy(dynamicModel).catalog.credentialScopedCatalog === true;
+		resolveModelPolicy(dynamicModel as unknown as ModelSpec<TApi>).catalog.credentialScopedCatalog === true;
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");

@@ -519,8 +519,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.output(await formatGrokbotStatus({ renewalCredential, baseUrl }));
 		},
 		handleTui: async (_command, runtime) => {
-			const renewalCredential = await runtime.session.modelRegistry.authStorage.peekApiKey("grokbot");
-			const baseUrl = runtime.session.modelRegistry.getEffectiveProviderBaseUrl("grokbot");
+			const renewalCredential = await runtime.ctx.session.modelRegistry.authStorage.peekApiKey("grokbot");
+			const baseUrl = runtime.ctx.session.modelRegistry.getEffectiveProviderBaseUrl("grokbot");
 			runtime.ctx.showStatus(await formatGrokbotStatus({ renewalCredential, baseUrl }));
 			runtime.ctx.editor.setText("");
 		},

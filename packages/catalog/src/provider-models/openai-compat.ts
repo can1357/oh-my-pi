@@ -12,7 +12,7 @@ import {
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
-import { classifyModel, discoveryVocabulary } from "../compat/taxonomy";
+import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 	fetchOpenAICompatibleModels,
@@ -33,9 +33,11 @@ import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gat
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
+	COPILOT_DISCOVERY_HEADERS,
 	discoverGitHubCopilotApiEndpoint,
 	getGitHubCopilotBaseUrl,
 	isPersonalGitHubCopilotBaseUrl,
+	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
@@ -3059,13 +3061,13 @@ function openCodeModelManagerOptions(
 						// stencil fallback; the fallback never selects a transport.
 						const api = resolveApi(defaults.id, defaults.api);
 						const baseUrl = openCodeBaseUrlForApi(api, basePath);
-						const identity = classifyModel(providerId, defaults.id, { lenient: true });
-						if (identity.class === "meta" && identity.family === undefined) {
-							// Gateway lists these as bare ids with no capability
-							// metadata and no local bundled row, so the generic
-							// defaults would hide the effort dial
-							// (`reasoning: false`). Keep the pinned/fallback route
-							// and restore the documented thinking surface.
+						const lineage = museSparkLineageSpec(defaults.id);
+						if (lineage) {
+							// Gateway lists Muse Spark as bare ids with no capability
+							// metadata and often no local bundled row, so the generic
+							// defaults would hide the effort dial (`reasoning: false`).
+							// Keep the pinned/fallback route and restore the lineage's
+							// thinking surface.
 							return {
 								...(reference ?? defaults),
 								id: defaults.id,
@@ -3074,10 +3076,16 @@ function openCodeModelManagerOptions(
 								provider: providerId,
 								baseUrl,
 								reasoning: true,
-								input: reference?.input ?? ["text", "image"],
-								thinking: reference?.thinking ?? META_MUSE_SPARK_THINKING,
-								contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? 1_048_576),
-								maxTokens: toPositiveNumber(entry.max_completion_tokens, reference?.maxTokens ?? 131_072),
+								input: reference?.input ?? lineage.input,
+								thinking: reference?.thinking ?? lineage.thinking,
+								contextWindow: toPositiveNumber(
+									entry.context_length,
+									reference?.contextWindow ?? lineage.contextWindow,
+								),
+								maxTokens: toPositiveNumber(
+									entry.max_completion_tokens,
+									reference?.maxTokens ?? lineage.maxTokens,
+								),
 							};
 						}
 						if (!reference) {
@@ -4352,64 +4360,67 @@ export function coreWeaveModelManagerOptions(
 
 const META_MODEL_API_BASE_URL = "https://api.meta.ai/v1";
 const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+// Contributor SKUs (`-contributor`): same model, discounted because prompts
+// are used for training.
+const META_MUSE_SPARK_CONTRIBUTOR_COST = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 } as const;
 const META_MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 };
 
+function museSparkSpec(revision: string, tier: "standard" | "contributor"): ModelSpec<"openai-responses"> {
+	const contributor = tier === "contributor";
+	return {
+		id: contributor ? `muse-spark-${revision}-contributor` : `muse-spark-${revision}`,
+		name: contributor ? `Muse Spark ${revision} (C)` : `Muse Spark ${revision}`,
+		api: "openai-responses",
+		provider: "meta",
+		baseUrl: META_MODEL_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: contributor ? META_MUSE_SPARK_CONTRIBUTOR_COST : META_MUSE_SPARK_COST,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		thinking: META_MUSE_SPARK_THINKING,
+		compat: {
+			supportsReasoningEffort: true,
+			includeEncryptedReasoning: true,
+		},
+	};
+}
+
+/**
+ * Muse Spark revisions served by Meta's first-party Responses API. Meta's
+ * `/v1/models` lists bare ids with no capability metadata, so every revision
+ * must be seeded here or discovery yields a text-only, non-reasoning model
+ * with an unknown context window.
+ */
 export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
-	{
-		id: "muse-spark-1.1",
-		name: "Muse Spark 1.1",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: META_MUSE_SPARK_COST,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
-	},
-	{
-		id: "muse-spark-1.2",
-		name: "Muse Spark 1.2",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: META_MUSE_SPARK_COST,
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
-	},
-	{
-		id: "muse-spark-1.2-contributor",
-		name: "Muse Spark 1.2 Contributor (Data Used for Training)",
-		api: "openai-responses",
-		provider: "meta",
-		baseUrl: META_MODEL_API_BASE_URL,
-		reasoning: true,
-		input: ["text", "image"],
-		cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-		contextWindow: 1_048_576,
-		maxTokens: 131_072,
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
-	},
+	museSparkSpec("1.1", "standard"),
+	museSparkSpec("1.2", "standard"),
+	museSparkSpec("1.2", "contributor"),
+	museSparkSpec("1.3", "standard"),
+	museSparkSpec("1.3", "contributor"),
 ];
+
+const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses">>> = Object.fromEntries(
+	META_MUSE_STATIC_MODELS.map(model => [model.id, model]),
+);
+
+/**
+ * Lineage reference for a Muse Spark revision Meta ships before the seed
+ * lists it. Every revision so far has kept the 1M window, the effort ladder,
+ * and per-tier pricing, so a new one inherits them (with its own display
+ * name) instead of surfacing as a text-only model with no limits. Only ids
+ * that classify into the `muse-spark` family with a revision qualify.
+ */
+function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undefined {
+	const identity = classifyModel("meta", id, { lenient: true });
+	if (identity.family !== "muse-spark" || identity.revision === undefined) return undefined;
+	const [major, minor, patch] = parseRevision(identity.revision) ?? [0, 0, 0];
+	const revision = patch === 0 ? `${major}.${minor}` : identity.revision;
+	return museSparkSpec(revision, billingVariantPlain(id) === undefined ? "standard" : "contributor");
+}
 
 // ---------------------------------------------------------------------------
 // 15.76 Amazon Bedrock Mantle
@@ -4545,7 +4556,15 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 			defaultBaseUrl: META_MODEL_API_BASE_URL,
 			config,
 			requireApiKey: true,
-			mapModel: mapWithBundledReference,
+			filterModel: (_entry, model) => !isExcludedModel("meta", model.id),
+			// The seed backs ids the bundle has not been regenerated with yet;
+			// the lineage spec backs revisions the seed has not been taught.
+			mapModel: (entry, defaults, reference) =>
+				mapWithBundledReference(
+					entry,
+					defaults,
+					reference ?? META_MUSE_MODEL_BY_ID[defaults.id] ?? museSparkLineageSpec(defaults.id),
+				),
 		}),
 		staticModels: META_MUSE_STATIC_MODELS,
 	};
@@ -4892,7 +4911,114 @@ export function aiandModelManagerOptions(config?: AiandModelManagerConfig): Mode
 }
 
 // ---------------------------------------------------------------------------
-// 16.7 Yolo-Auto (yolo-auto.com)
+// 16.7 Abliteration (abliteration.ai)
+// ---------------------------------------------------------------------------
+
+const ABLITERATION_DEFAULT_BASE_URL = "https://api.abliteration.ai/v1";
+const ABLITERATION_MODEL_COST = { input: 3, output: 3, cacheRead: 0.3, cacheWrite: 0 } as const;
+const ABLITERATION_LARGE_COST = { input: 5, output: 5, cacheRead: 0.5, cacheWrite: 0 } as const;
+
+function normalizeAbliterationBaseUrl(baseUrl: string | undefined): string {
+	const value = baseUrl?.trim() || ABLITERATION_DEFAULT_BASE_URL;
+	const normalized = value.replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function createAbliterationStaticModel(
+	id: string,
+	name: string,
+	cost: ModelSpec<"openai-responses">["cost"],
+	contextWindow: number,
+	maxTokens: number,
+	input: ModelSpec<"openai-responses">["input"],
+): ModelSpec<"openai-responses"> {
+	return {
+		id,
+		name,
+		api: "openai-responses",
+		provider: "abliteration",
+		baseUrl: ABLITERATION_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: [...input],
+		cost: { ...cost },
+		contextWindow,
+		maxTokens,
+	};
+}
+
+/**
+ * Documented abliteration.ai catalog (docs.abliteration.ai/models, 2026-09)
+ * bundled so the provider is usable when generation and first boot have no
+ * live key. The `/v1/models` response is authoritative once discovery runs.
+ * Rows carry only the documented limits and pricing; the per-model reasoning
+ * ladders, alias map and wire quirks come from `rules/classes/glm.kdl` and
+ * `rules/providers/abliteration.kdl` via `buildModel`.
+ */
+export const ABLITERATION_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	createAbliterationStaticModel("abliterated-model", "Abliterated Model", ABLITERATION_MODEL_COST, 262_144, 262_134, [
+		"text",
+		"image",
+	]),
+	createAbliterationStaticModel(
+		"abliterated-model-large-v2",
+		"Abliterated Model Large V2",
+		ABLITERATION_LARGE_COST,
+		1_000_000,
+		999_990,
+		["text"],
+	),
+	createAbliterationStaticModel(
+		"abliterated-model-large",
+		"Abliterated Model Large",
+		ABLITERATION_LARGE_COST,
+		1_000_000,
+		999_990,
+		["text"],
+	),
+];
+
+const ABLITERATION_STATIC_MODEL_BY_ID = new Map(ABLITERATION_STATIC_MODELS.map(model => [model.id, model] as const));
+const ABLITERATION_STATIC_MODEL_IDS = ABLITERATION_STATIC_MODELS.map(model => model.id);
+
+export interface AbliterationModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function abliterationModelManagerOptions(
+	config?: AbliterationModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeAbliterationBaseUrl(config?.baseUrl);
+	const references = createBundledReferenceMap<"openai-responses">("abliteration");
+	return {
+		providerId: "abliteration",
+		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: ABLITERATION_STATIC_MODEL_IDS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-responses",
+					provider: "abliteration",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? ABLITERATION_STATIC_MODEL_BY_ID.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						// Every abliteration.ai model reasons; `/v1/models` carries no
+						// capability metadata, so an unseeded id would otherwise lose
+						// its effort dial.
+						return reference ? model : { ...model, reasoning: true };
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 16.8 Yolo-Auto (yolo-auto.com)
 // ---------------------------------------------------------------------------
 
 const YOLO_AUTO_BASE_URL = "https://yolo-auto.com/v1";
@@ -6061,8 +6187,8 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
-		// COPILOT_API_HEADERS are compile-time constants (User-Agent + API
-		// version), not credentials. The cache omits all request headers for
+		// COPILOT_API_HEADERS are compile-time wire identity constants, not
+		// credentials. The cache omits all request headers for
 		// safety and can only restore them from a bundled static entry — so a
 		// Copilot model with no bundled reference (e.g. a freshly served
 		// claude-opus-5 and its synthesized -1m sibling) is dropped on offline
@@ -6082,7 +6208,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					provider: "github-copilot",
 					baseUrl: requestBaseUrl,
 					apiKey,
-					headers: COPILOT_API_HEADERS,
+					headers: COPILOT_DISCOVERY_HEADERS,
 					mapModel: (
 						entry: OpenAICompatibleModelRecord,
 						defaults: ModelSpec<Api>,
@@ -6156,10 +6282,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: {
-										...COPILOT_API_HEADERS,
-										...getProviderReferences().get(defaults.id)?.headers,
-									},
+									headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers),
 									...(api === "openai-completions"
 										? {
 												compat: {
@@ -6178,7 +6301,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: { ...COPILOT_API_HEADERS },
+									headers: mergeCopilotApiHeaders(),
 									// Copilot's `/models` advertises no reasoning bit, so a
 									// thinking-capable Claude with no bundled reference would
 									// fall back to `reasoning: false` and lose its effort dial.
@@ -6516,7 +6639,7 @@ const COPILOT_BASE_URL = "https://api.githubcopilot.com";
 
 const ZAI_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
 // The `zai` catalog provider is the GLM Coding Plan: `/login zai` validates and
-// stores credentials against the coding-plan endpoint (see registry/zai.ts), so
+// stores credentials against the coding-plan endpoint (see auth/zai.kdl), so
 // the native OpenAI transport must ride the coding-plan base rather than the
 // general PAYG `/api/paas/v4`, which would bypass plan quota or fail auth.
 const ZAI_OPENAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4";

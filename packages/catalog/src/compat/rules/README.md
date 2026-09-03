@@ -8,6 +8,7 @@ There are three ownership strata:
 - `classes/*.kdl` defines model-lineage truths: behavior inherent to a model line, optionally scoped to the providers where the census established it.
 - `providers/*.kdl` defines deployment contracts: behavior imposed by a host, plus documented per-model residue that taxonomy cannot express exactly.
 - `runtime/behavior.kdl` defines heuristics used before or outside exact model lookup: responses routing, API routes, quota tiers, plan requirements, model limits, roster exclusions, hosted defaults, pricing peers.
+- `auth/<provider>.kdl` defines the provider's auth contract: display name, env-var fallback, credential storage/format, and the declarative login / refresh flow that `@oh-my-pi/pi-ai`'s registry engines interpret (see [Auth grammar](#auth-grammar)).
 
 Do not move a statistically common provider behavior into a class file, or a lineage truth into a provider file. Absence is not evidence that a capability is stripped. Preserve comments that record census provenance, reviewed exceptions, and why a `models` residue remains.
 
@@ -69,7 +70,7 @@ family "flash" glob="*flash*"
 family "lite" glob="*flash-lite*" priority=10
 ```
 
-The glob is anchored, ASCII-case-insensitive, and matched against the lowercased bare name. Matching families rank by `(priority, non-wildcard byte count in the glob)`. Equal ranks belonging to different family IDs are an ambiguity error. No match produces no family. Repeating rules for the same family ID is allowed, as in the checked-in `o-series` taxonomy.
+The glob is anchored, ASCII-case-insensitive, and matched against the lowercased bare name. Matching families rank by `(priority, non-wildcard byte count in the glob)`. When equal-ranked family globs tie, a leading `class.` or `class:` namespace matching one of the selected class's tokens is removed and family matching is retried; a remaining tie is an ambiguity error. No match produces no family. Repeating rules for the same family ID is allowed, as in the checked-in `o-series` taxonomy.
 
 ### Revision extraction
 
@@ -116,13 +117,14 @@ collapse {
     effort-suffix "-minimal" tier="minimal"
     effort-suffix "-max" tier="max" except-bare-prefix="qwen"
     effort-lane-suffix "-fast" "cursor" bare-prefix="cursor-grok"
-    effort-family "google-antigravity" "gemini-3.7-flash" "gemini-3.7-flash-tiered"
+    effort-family "cursor" "gpt-5.6-luna"
     routing-variant-suffix "-wm" "openai-codex" "openai-codex-device"
     variant-family "devin" "claude-opus-5" name="Claude Opus 5" { /* reviewed routing */ }
+    variant-family "google-antigravity" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" { /* per-revision template */ }
     provider-alias "devin" "opus" "claude-opus-5"
 }
 ```
-`variant-family` declares one reviewed provider-scoped collapsed family: positional provider and logical id, `name=` display name, and a body of `members "a" "b" …` (wire ids in priority order), `route "<tier>" "<wire-id>"` per effort tier (`off` included), and optional `mode`, `efforts`, `default-level`, `default-member`, `retired-members`, `effort-budget "<tier>" <n>`, `requires-effort`, `suppress-when-off`, `no-thinking`, `preserve-absent-effort-routes`, and `extra-aliases`. `provider-alias` maps one provider-scoped selector spelling onto a logical id without making it a family member.
+`variant-family` declares one reviewed provider-scoped collapsed family: positional provider and logical id, `name=` display name, and a body of `members "a" "b" …` (wire ids in priority order), `route "<tier>" "<wire-id>"` per effort tier (`off` included), and optional `mode`, `efforts`, `default-level`, `default-member`, `retired-members`, `effort-budget "<tier>" <n>`, `requires-effort`, `suppress-when-off`, `no-thinking`, `preserve-absent-effort-routes`, and `extra-aliases`. A `{rev}` placeholder in the logical id makes the node a **template**: it is instantiated once per revision found in live ids (`gemini-{rev}-flash` matches `gemini-3.8-flash-low` → family `gemini-3.8-flash`), every wire id in the body and the `name=` carry the same placeholder, and an optional `revision=` constraint (`">=3.6"`) bounds the generations it applies to. A concrete family with the same instantiated id wins over the template. `provider-alias` maps one provider-scoped selector spelling onto a logical id without making it a family member.
 
 `thinking-suffix` accepts one non-empty suffix and no properties. `pair-token` declares bounded (possibly infix) tokens naming the thinking sibling of a live bare twin (`sonar-reasoning-pro` beside `sonar-pro`); it drives thinking-pair derivation only — never identity suffix collapse — and negated `no-`/`non-` forms never match. `effort-suffix` additionally requires `tier` with one of the effort values above, and may have `except-bare-prefix`. `routing-variant-suffix` takes one non-empty suffix followed by one or more provider IDs: a wire identifier carrying the suffix on one of those providers is a **routing variant** of its plain identifier — discovery derives base-model metadata from the plain bundled SKU while keeping the suffixed wire identifier for requests; routing variants never participate in effort collapse. `effort-lane-suffix` takes one non-empty lane suffix followed by one or more provider IDs, plus an optional `bare-prefix` gate: on a declared provider, an identifier ending in the lane suffix collapses the effort suffix wedged before the lane token while keeping the lane on the logical id. `effort-family` takes a provider, the canonical logical id, and zero or more exact aliases that fold onto it.
 
@@ -252,6 +254,61 @@ behavior {
 ```
 
 Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+
+## Auth grammar
+
+Every provider has exactly one `auth "<id>" { … }` node under `auth/`; `auth/_order.kdl` holds a single `login-order "id" …` node pinning the `/login` roster order (every provider with a `login` and `show-in-login-list` unset/true must appear; providers without a login sort alphabetically after it). Runtime accessors live in `src/compat/auth.ts`; the id unions in the generated `src/compat/auth-ids.ts`. Every provider in `provider-models/descriptors.ts` needs an auth node (`@oh-my-pi/pi-ai` type-checks this).
+
+```kdl
+auth "anthropic" {
+    name "Anthropic (Claude Pro/Max)"
+    env hook="anthropic-foundry"                 // or: env "ANTHROPIC_OAUTH_TOKEN" "ANTHROPIC_API_KEY"
+    login "oauth-code" {
+        client-id "OWQxYzI1…" encoding="base64"  // env="VAR" adds an override; child `env "A" "B"` an ordered list
+        authorize-url "https://claude.ai/oauth/authorize"
+        scopes "org:create_api_key" "user:profile"      // separator=" " default
+        pkce #true
+        state "hex"                              // hex | uuid | none
+        authorize-params { code "true" }         // standard=#false drops client_id/response_type/redirect_uri/scope/PKCE/state
+        instructions "Complete login in your browser…"
+        callback port=54545 path="/callback" hostname="localhost" redirect-uri="…" redirect-uri-env="VAR" port-fallback=#true manual-only=#false
+        token url="https://api.anthropic.com/v1/oauth/token" body="json" { params { state "{state}" } headers { X "y" } }
+        credential {
+            access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
+            refresh "refresh_token"
+            expires "seconds" path="expires_in" from="created_at" skew-ms=300000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
+            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
+        }
+        userinfo url="https://…/userinfo" email="email" account-id="sub"
+        after-exchange hook="anthropic-identity"
+        paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
+    }
+    refresh {                                   // or `refresh "none"` / `refresh hook="name"`
+        token url="…" body="json" { headers { anthropic-beta "oauth-2025-04-20" } }   // defaults to the login token request
+        require "projectId"
+        credential { … }                        // defaults to the login map
+        after-refresh hook="…"
+    }
+    store-as "openai-codex"                      // persist under another provider id
+    callback-port 54545                          // defaults to the oauth-code callback port
+    paste-code #true                             // defaults to #true for oauth-code logins
+    api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
+    expiry "jwt-or-never"                        // session-JWT expiry policy
+    result "api-key"                             // OAuth login persists only credentials.access as a plain API key
+    allows-missing-api-key #true
+    available #false
+    show-in-login-list #false
+}
+```
+
+Login kinds:
+
+- `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= headers-hook=`; all accept `label=` (error-message label, defaults to `name`) and `optional=#true` (only auth failures reject).
+- `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
+- `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
+- `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
+
+Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registry/hooks` by that package's `auth-hooks-registry` test. Values marked `encoding="base64"` are public OAuth client ids stored obfuscated to keep secret scanners quiet; they are decoded at runtime.
 
 ## Vendoring provenance
 

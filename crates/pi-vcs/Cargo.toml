@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 gix.workspace = true
 jj-lib.workspace = true
+pi-iso.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

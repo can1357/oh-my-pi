@@ -77,8 +77,8 @@ describe("anthropic sand tool wire", () => {
 		const names = (wired.tools as Array<{ name: string }>).map(t => t.name);
 		expect(names).toContain("Shell");
 		expect(names).toContain("Read");
-		const shell = (wired.tools as Array<{ parameters: Record<string, unknown> }>).find(
-			t => (t as { name: string }).name === "Shell",
+		const shell = (wired.tools as Array<{ name: string; parameters: Record<string, unknown> }>).find(
+			t => t.name === "Shell",
 		);
 		expect(shell?.parameters).toHaveProperty("jsonSchema");
 	});

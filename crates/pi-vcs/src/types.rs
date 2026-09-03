@@ -107,6 +107,35 @@ pub struct WorktreeEntry {
 	pub detached: bool,
 }
 
+/// Clone strategy for linked-worktree creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeClone {
+	/// Materialize the target tree from the object database.
+	Off,
+	/// Try every available copy-on-write tree-cloning backend.
+	Auto,
+	/// Try this backend first, then other available cloning backends.
+	Prefer(pi_iso::BackendKind),
+}
+
+/// Options for linked-worktree creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeAddOptions {
+	pub detach:       bool,
+	pub clone:        WorktreeClone,
+	/// Carry the source checkout's staged, unstaged, and untracked changes
+	/// into the new worktree instead of starting from a clean tree. Requires
+	/// the target ref to resolve to the source `HEAD` commit.
+	pub keep_changes: bool,
+}
+
+/// Outcome of linked-worktree creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeAddResult {
+	pub cloned_with: Option<pi_iso::BackendKind>,
+	pub clone_error: Option<String>,
+}
+
 /// Commit authorship for commit creation and replay flows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitAuthor {

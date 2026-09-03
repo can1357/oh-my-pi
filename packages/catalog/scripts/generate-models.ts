@@ -36,6 +36,7 @@ import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
+	ABLITERATION_STATIC_MODELS,
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
@@ -67,6 +68,7 @@ import {
 } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
+import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
 import {
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
@@ -269,6 +271,7 @@ function applyGlobalModelsDevFallback(
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
 			model.provider === "baseten" ||
+			model.provider === "meta" ||
 			resolveModelPolicy(model).catalog.credentialScopedCatalog === true
 		) {
 			return model;
@@ -563,8 +566,11 @@ async function generateModels() {
 	const gitLabDuoModels = getGitLabDuoModels().map(model => toModelSpec(model));
 	// Combine models. stencil.so has priority unless a provider's successful endpoint
 	// discovery is authoritative; those endpoint snapshots replace stencil.so rows.
+	// Meta's reviewed first-party seed goes first: it carries the documented
+	// Responses capabilities and display names, and keeps first-run selection
+	// independent of credentials or live discovery.
 	let allModels = applyGlobalModelsDevFallback(
-		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		[...META_MUSE_STATIC_MODELS, ...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
 		modelsDevModels,
 	);
 
@@ -633,9 +639,6 @@ async function generateModels() {
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 	} satisfies ModelSpec<Api>);
-	// Seed Meta's documented Muse model so first-run selection does not depend on
-	// credentials or live discovery.
-	allModels.push(...META_MUSE_STATIC_MODELS);
 	// Mantle's catalog endpoint is account/API-key scoped. Keep the generated
 	// bundle deterministic; authenticated runtime discovery may replace this seed.
 	allModels.push(...BEDROCK_MANTLE_STATIC_MODELS);
@@ -650,6 +653,12 @@ async function generateModels() {
 	// authoritative and replaces the seed.
 	if (!authoritativeCatalogProviders.has("aiand")) {
 		allModels.push(...AIAND_STATIC_MODELS);
+	}
+	// Seed Abliteration's documented catalog so the provider is usable when
+	// generation has no ABLITERATION_API_KEY. A live `/v1/models` snapshot is
+	// authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("abliteration")) {
+		allModels.push(...ABLITERATION_STATIC_MODELS);
 	}
 	// Seed Yolo-Auto's documented catalog so the provider is usable when
 	// generation has no YOLO_AUTO_API_KEY. A live `/v1/models` snapshot is
@@ -739,6 +748,11 @@ async function generateModels() {
 	);
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
+	// every bundled Copilot model onto the same identity used by live discovery.
+	allModels = allModels.map(model =>
+		model.provider === "github-copilot" ? { ...model, headers: mergeCopilotApiHeaders(model.headers) } : model,
+	);
 	// Seed QwenCloud's documented Token Plan models when credentialed
 	// discovery is unavailable. A successful `/models` response is authoritative
 	// for the subscribed edition and must not be widened by the fallback.

@@ -1,0 +1,20 @@
+auth "openai-codex-device" {
+	name "ChatGPT Plus/Pro (Codex, headless/device)"
+	login "custom" hook="openai-codex-device"
+	refresh {
+		token url="https://auth.openai.com/oauth/token" body="form" standard=#false timeout-ms=15000 {
+			params {
+				grant_type "refresh_token"
+				refresh_token "{refresh_token}"
+				client_id "app_EMoamEEZ73f0CkXaXp7hrann"
+			}
+		}
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=0
+		}
+		after-refresh hook="openai-codex-profile"
+	}
+	store-as "openai-codex"
+}

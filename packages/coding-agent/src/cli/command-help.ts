@@ -126,5 +126,5 @@ export const usageHelp = {
 } satisfies CommandMetadata;
 
 export const worktreeHelp = {
-	description: "List or clear agent-managed git worktrees (~/.omp/wt)",
+	description: "Add, list, or clear git worktrees (clone-first when enabled)",
 } satisfies CommandMetadata;

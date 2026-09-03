@@ -833,6 +833,73 @@ describe("wave 3 commands", () => {
 		}
 	});
 
+	// /wt
+	it("/wt: refuses outside a git checkout", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-plain-"));
+		fakeSessionManager._cwd = plainDir;
+		try {
+			const result = await executeAcpBuiltinSlashCommand("/wt feature", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Not inside a git repository");
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+		} finally {
+			await fs.rm(plainDir, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/x", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const movedTo = fakeSessionManager._movedTo;
+			expect(movedTo).toBeDefined();
+			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/x`);
+			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			const headRef = (await Bun.file(path.join(movedTo!, ".git")).text()).trim();
+			expect(headRef.startsWith("gitdir: ")).toBe(true);
+			const branches = await git("worktree", "list", "--porcelain");
+			expect(branches).toContain("branch refs/heads/feature/x");
+			// The source checkout is untouched.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("edited\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	// /memory
 	it("/memory unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();

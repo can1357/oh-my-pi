@@ -44,6 +44,12 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
+import {
+	createSessionWorktree,
+	defaultSessionWorktreeBranch,
+	formatSessionWorktreeSummary,
+	type SessionWorktree,
+} from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "../../slash-commands/helpers/format";
@@ -1192,11 +1198,71 @@ export class CommandController {
 				return;
 			}
 		}
+		if (await this.#relocateSession(resolvedPath)) {
+			this.ctx.present([
+				new Spacer(1),
+				new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
+			]);
+		}
+	}
+
+	/**
+	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
+	 * then relocate the session there like `/move`.
+	 */
+	async handleWorktreeCommand(branch?: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
+			return;
+		}
+		const branchName = branch?.trim() || defaultSessionWorktreeBranch();
+		const cwd = this.ctx.sessionManager.getCwd();
+		this.ctx.statusContainer.disposeChildren();
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			`Creating worktree on ${branchName}…`,
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(loader);
+		this.ctx.ui.requestRender();
+		let worktree: SessionWorktree;
+		try {
+			worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+		} catch (err) {
+			this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		} finally {
+			loader.stop();
+			this.ctx.statusContainer.disposeChildren();
+		}
+		if (worktree.cloneError) {
+			logger.warn("worktree clone fell back to plain checkout", { path: worktree.path, error: worktree.cloneError });
+		}
+		if (await this.#relocateSession(worktree.path)) {
+			this.ctx.present([
+				new Spacer(1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree)}`)}`,
+					1,
+					1,
+				),
+			]);
+		}
+	}
+
+	/**
+	 * Move the session and process cwd to an existing directory, rolling back
+	 * on failure. Returns true when the session now lives at `resolvedPath`.
+	 */
+	async #relocateSession(resolvedPath: string): Promise<boolean> {
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
 			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
 
 		const previousState = this.ctx.sessionManager.captureState();
@@ -1204,28 +1270,24 @@ export class CommandController {
 			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
 		let applied = false;
 		try {
 			applied = await this.ctx.applyCwdChange(resolvedPath);
 		} catch (error) {
 			await this.#restoreAfterMoveFailure(previousState, error);
-			return;
+			return false;
 		}
 		if (!applied) {
 			await this.#restoreAfterMoveFailure(previousState);
-			return;
+			return false;
 		}
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender();
-
-		this.ctx.present([
-			new Spacer(1),
-			new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
-		]);
+		return true;
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {

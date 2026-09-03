@@ -22,6 +22,19 @@ describe("rewriteCopilotError", () => {
 		expect(rewriteCopilotError("server error", err, "github-copilot")).toBe("server error");
 	});
 
+	it("keeps GitHub's 400 model rejection bodies verbatim", () => {
+		for (const [code, message] of [
+			["model_not_supported", "400 The requested model is not supported."],
+			[
+				"model_not_available_for_integrator",
+				'400 The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]',
+			],
+		] as const) {
+			const err = errorWithStatus(400, { message, code });
+			expect(rewriteCopilotError(message, err, "github-copilot")).toBe(message);
+		}
+	});
+
 	it("rewrites message for 401 with github-copilot provider", () => {
 		const err = errorWithStatus(401);
 		const result = rewriteCopilotError("401 Unauthorized: ...", err, "github-copilot");
@@ -35,39 +48,5 @@ describe("rewriteCopilotError", () => {
 		expect(result).toContain("GitHub Copilot access denied (HTTP 403)");
 		expect(result).not.toContain("GitHub Copilot authentication failed");
 		expect(result).not.toContain("/login github-copilot");
-	});
-
-	it("rewrites 400 model_not_supported with fleet-skew guidance", () => {
-		const err = errorWithStatus(400, {
-			message: "400 The requested model is not supported.",
-			code: "model_not_supported",
-		});
-		const result = rewriteCopilotError("original", err, "github-copilot");
-		expect(result).toContain("HTTP 400");
-		expect(result).toContain("only part of its fleet");
-		expect(result).not.toContain("authentication failed");
-	});
-
-	it("preserves per-integrator entitlement details and available models", () => {
-		const message =
-			'400 The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]';
-		const err = errorWithStatus(400, { message, code: "model_not_available_for_integrator" });
-		expect(rewriteCopilotError(message, err, "github-copilot")).toBe(message);
-	});
-
-	it("leaves non-copilot 400 model_not_supported untouched", () => {
-		const err = errorWithStatus(400, {
-			message: "400 model_not_supported",
-			code: "model_not_supported",
-		});
-		expect(rewriteCopilotError("orig", err, "openai")).toBe("orig");
-	});
-
-	it("leaves 400 without model_not_supported code untouched", () => {
-		const err = errorWithStatus(400, {
-			message: "400 invalid request",
-			code: "invalid_request_body",
-		});
-		expect(rewriteCopilotError("orig", err, "github-copilot")).toBe("orig");
 	});
 });
