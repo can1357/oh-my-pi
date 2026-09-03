@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import {
 	type PendingExtensionRequest,
 	requestRpcDialog,
+	requestRpcLoginPrompt,
 	requestRpcSelect,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 
@@ -98,5 +99,29 @@ describe("RPC extension UI", () => {
 			targetId: request.id,
 		});
 		expect(pendingRequests.size).toBe(0);
+	});
+
+	it("forwards an explicitly selected API-key login prompt to the RPC client", async () => {
+		const requestInput = vi.fn((_title: string, _placeholder?: string) => Promise.resolve("meta-api-key"));
+
+		await expect(
+			requestRpcLoginPrompt(
+				"meta",
+				{ message: "Paste your Meta Model API key", placeholder: "Model API key" },
+				false,
+				"api-key",
+				requestInput,
+			),
+		).resolves.toBe("meta-api-key");
+		expect(requestInput).toHaveBeenCalledWith("Paste your Meta Model API key", "Model API key");
+	});
+
+	it("rejects an unannounced provider prompt without an explicit auth method", async () => {
+		const requestInput = vi.fn((_title: string, _placeholder?: string) => Promise.resolve("unused"));
+
+		await expect(
+			requestRpcLoginPrompt("custom-provider", { message: "Secret" }, false, undefined, requestInput),
+		).rejects.toThrow("requires interactive prompts");
+		expect(requestInput).not.toHaveBeenCalled();
 	});
 });

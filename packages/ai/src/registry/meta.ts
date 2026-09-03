@@ -1,23 +1,29 @@
+import type { CompiledApiKeyLogin } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../error";
+import type { ProviderTransport } from "./build";
+import { createApiKeyLogin } from "./engine/api-key";
 import metaLoginPrompt from "./meta-login.md" with { type: "text" };
-import { loginMetaMuse, refreshMetaMuseToken } from "./oauth/meta-muse";
-import { createApiKeyLogin } from "./api-key-login";
-import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
-import type { ProviderDefinition } from "./types";
+import { loginMetaMuse } from "./oauth/meta-muse";
+import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
-const loginMetaApiKey = createApiKeyLogin({
-	providerLabel: "Meta Model API",
-	authUrl: "https://developer.meta.com/ai/",
-	instructions: "Create or copy your key from the Meta Model API dashboard",
-	promptMessage: "Paste your Meta Model API key",
-	placeholder: "Model API key",
-	validation: {
-		kind: "models-endpoint",
-		provider: "Meta Model API",
-		modelsUrl: "https://api.meta.ai/v1/models",
-	},
-});
-export async function loginMeta(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string> {
+const loginMetaApiKey = createApiKeyLogin(
+	{
+		kind: "api-key",
+		authUrl: "https://developer.meta.com/ai/",
+		instructions: "Create or copy your key from the Meta Model API dashboard",
+		prompt: "Paste your Meta Model API key",
+		placeholder: "Model API key",
+		validate: {
+			kind: "models-endpoint",
+			label: "Meta Model API",
+			url: "https://api.meta.ai/v1/models",
+		},
+	} satisfies CompiledApiKeyLogin,
+	"Meta Model API",
+);
+
+export async function loginMeta(callbacks: OAuthController): Promise<OAuthCredentials | string> {
+	if (!callbacks.onPrompt) throw new AIError.OnPromptRequiredError("Meta");
 	const method =
 		callbacks.authMethod ??
 		(
@@ -32,13 +38,10 @@ export async function loginMeta(callbacks: OAuthLoginCallbacks): Promise<OAuthCr
 	throw new AIError.ConfigurationError("Choose 1 for Muse Code or 2 for a Model API key");
 }
 
-export const metaProvider = {
-	id: "meta",
-	name: "Meta",
-	login: (cb: OAuthLoginCallbacks) => loginMeta(cb),
-	refreshToken: (credentials, signal) => refreshMetaMuseToken(credentials, undefined, signal),
+/** Meta uses the Model API key minted beside the Muse OAuth credential. */
+export const metaTransport: ProviderTransport = {
 	getApiKey: credentials => {
 		if (!credentials.apiKey) throw new Error("Muse Code OAuth credential is missing its Model API key");
 		return credentials.apiKey;
 	},
-} as const satisfies ProviderDefinition;
+};

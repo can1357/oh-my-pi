@@ -136,7 +136,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("cline-pass", "kimi-k3")).toBeDefined();
 	});
 
-	test("unions every Muse account roster before authoritative Meta refresh", async () => {
+	test("unions every Muse and PAYG roster before authoritative Meta refresh", async () => {
 		await authStorage.set("meta", [
 			{
 				type: "oauth",
@@ -154,7 +154,13 @@ describe("ModelRegistry runtime provider registration", () => {
 				apiKey: "LLM|subscription-catalog-b",
 				accountId: "meta-account-b",
 			},
+			{
+				type: "api_key",
+				key: "LLM|payg-catalog",
+				source: "login",
+			},
 		]);
+		authStorage.setRuntimeApiKey("meta", "LLM|runtime-payg-catalog");
 		const authorizations: string[] = [];
 		const oauthRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
 			fetch: (input, init) => {
@@ -165,25 +171,36 @@ describe("ModelRegistry runtime provider registration", () => {
 					const data =
 						authorization === "Bearer LLM|subscription-catalog-a"
 							? [{ id: "muse-spark-1.3" }, { id: "muse-image-1.0" }]
-							: [{ id: "muse-spark-1.3-contributor" }, { id: "muse-voice-transcribe-1.0" }];
+							: authorization === "Bearer LLM|subscription-catalog-b"
+								? [{ id: "muse-spark-1.3-contributor" }, { id: "muse-voice-transcribe-1.0" }]
+								: authorization === "Bearer LLM|runtime-payg-catalog"
+									? [{ id: "muse-spark-2.0.1" }]
+									: [{ id: "muse-spark-1.4-preview" }];
 					return Promise.resolve(Response.json({ data }));
 				}
 				return Promise.reject(new Error(`network disabled for ${url}`));
 			},
 		});
-		const oauthAccessSpy = vi.spyOn(authStorage, "getOAuthAccesses");
+		const discoveryKeysSpy = vi.spyOn(authStorage, "getModelDiscoveryApiKeys");
 		await oauthRegistry.refreshProvider("meta", "offline");
-		expect(oauthAccessSpy).not.toHaveBeenCalled();
-		oauthAccessSpy.mockRestore();
+		expect(discoveryKeysSpy).not.toHaveBeenCalled();
+		discoveryKeysSpy.mockRestore();
 
 		await oauthRegistry.refreshProvider("meta", "online");
 
-		expect(authorizations.sort()).toEqual(["Bearer LLM|subscription-catalog-a", "Bearer LLM|subscription-catalog-b"]);
+		expect(authorizations).toEqual(
+			expect.arrayContaining([
+				"Bearer LLM|payg-catalog",
+				"Bearer LLM|runtime-payg-catalog",
+				"Bearer LLM|subscription-catalog-a",
+				"Bearer LLM|subscription-catalog-b",
+			]),
+		);
 		expect(
 			getProviderModels(oauthRegistry, "meta")
 				.map(model => model.id)
 				.sort(),
-		).toEqual(["muse-image-1.0", "muse-spark-1.3", "muse-spark-1.3-contributor", "muse-voice-transcribe-1.0"]);
+		).toEqual(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.4-preview", "muse-spark-2.0.1"]);
 	});
 
 	test("validates provider config before mutating custom API state", () => {

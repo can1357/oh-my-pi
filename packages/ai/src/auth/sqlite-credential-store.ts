@@ -115,6 +115,12 @@ function normalizeStoredIdentityKey(identityKey: string | null | undefined): str
 	return normalized && normalized.length > 0 ? normalized : null;
 }
 
+function validateCredentialForProvider(provider: string, credential: AuthCredential): void {
+	if (credential.type === "oauth" && usesOAuthMintedApiKeyWithDirectApiKey(provider) && !credential.apiKey?.trim()) {
+		throw new AIError.ConfigurationError(`${provider} OAuth credentials require a minted API key`);
+	}
+}
+
 export function serializeCredential(provider: string, credential: AuthCredential): SerializedCredentialRecord | null {
 	if (credential.type === "api_key") {
 		const data = {
@@ -1250,6 +1256,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	replaceAuthCredentialsForProvider(provider: string, credentials: AuthCredential[]): StoredAuthCredential[] {
+		for (const credential of credentials) validateCredentialForProvider(provider, credential);
 		const replace = this.#db.transaction((providerName: string, items: AuthCredential[]) => {
 			const existingRows = this.#listActiveByProviderStmt.all(providerName) as AuthRow[];
 			const existing = existingRows.map(row => ({
@@ -1301,6 +1308,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	upsertAuthCredentialForProvider(provider: string, credential: AuthCredential): StoredAuthCredential[] {
+		validateCredentialForProvider(provider, credential);
 		const upsert = this.#db.transaction((providerName: string, item: AuthCredential) => {
 			const serialized = serializeCredential(providerName, item);
 			if (!serialized) return this.listAuthCredentials(providerName);

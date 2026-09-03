@@ -1856,19 +1856,16 @@ export class ModelRegistry {
 				canUseSharedCatalogWithoutAuth
 			) {
 				const unionOAuthRosters = strategy !== "offline" && unionsOAuthModelRosters(descriptor.providerId);
-				const oauthAccesses = unionOAuthRosters
-					? await this.authStorage.getOAuthAccesses(descriptor.providerId)
-					: [];
-				const apiKeys = new Set<string>();
+				const discoveryKeys = unionOAuthRosters
+					? await this.authStorage.getModelDiscoveryApiKeys(descriptor.providerId)
+					: { apiKeys: [], complete: true };
+				const apiKeys = new Set(discoveryKeys.apiKeys);
 				if (isDiscoveryBearerApiKey(apiKey)) apiKeys.add(apiKey);
-				for (const access of oauthAccesses) {
-					if (access.ok && access.apiKey) apiKeys.add(access.apiKey);
-				}
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					...(unionOAuthRosters && {
 						apiKeys: [...apiKeys],
-						apiKeysComplete: oauthAccesses.every(access => access.ok),
+						apiKeysComplete: discoveryKeys.complete,
 					}),
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,

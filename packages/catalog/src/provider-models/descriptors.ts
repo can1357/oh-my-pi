@@ -308,10 +308,9 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "meta",
-		defaultModel: "muse-spark-1.3",
+		defaultModel: "muse-spark-1.1",
 		envVars: ["MODEL_API_KEY", "META_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => metaModelManagerOptions(config),
-		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Meta Model API" },
 	},
 	{

@@ -903,6 +903,12 @@ export interface OAuthAccountIdentity {
 
 export type OAuthAccessResolution = ({ ok: true } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
 
+export interface ModelDiscoveryApiKeys {
+	apiKeys: string[];
+	/** False when at least one stored credential could not be resolved. */
+	complete: boolean;
+}
+
 /**
  * Read-only identity of one stored OAuth account, in stable storage order.
  * Returned by {@link AuthStorage.listOAuthAccounts}; `position` (0-based) is the
@@ -4759,18 +4765,32 @@ export class AuthStorage {
 		if (result.switched || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) return result;
 		const fallbackType = credentialType === "oauth" ? "api_key" : "oauth";
 		const fallbackRouting = this.#credentialBlockRouting(provider, fallbackType, options?.modelId);
-		const hasCrossTypeFallback = this.#getCredentialsForProvider(provider).some(
-			(credential, index) =>
-				credential.type === fallbackType &&
-				(fallbackType !== "api_key" || (credential.type === "api_key" && credential.source === "login")) &&
-				!this.#isCredentialBlocked(
-					provider,
-					fallbackRouting.providerKey,
-					index,
-					fallbackRouting.siblingBlockScopes,
-				),
-		);
-		return hasCrossTypeFallback ? { switched: true } : result;
+		let crossTypeRetryAtMs: number | undefined;
+		const credentials = this.#getCredentialsForProvider(provider);
+		for (let index = 0; index < credentials.length; index++) {
+			const credential = credentials[index];
+			if (
+				credential?.type !== fallbackType ||
+				(fallbackType === "api_key" && credential.type === "api_key" && credential.source !== "login")
+			) {
+				continue;
+			}
+			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				fallbackRouting.providerKey,
+				index,
+				fallbackRouting.siblingBlockScopes,
+			);
+			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (crossTypeRetryAtMs === undefined || candidateBlockedUntil < crossTypeRetryAtMs) {
+				crossTypeRetryAtMs = candidateBlockedUntil;
+			}
+		}
+		if (crossTypeRetryAtMs === undefined) return result;
+		if (result.retryAtMs === undefined || crossTypeRetryAtMs < result.retryAtMs) {
+			return { switched: false, retryAtMs: crossTypeRetryAtMs };
+		}
+		return result;
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -6131,6 +6151,46 @@ export class AuthStorage {
 				this.#resolveStoredOAuthAccess(provider, selection, providerKey, options),
 			),
 		);
+	}
+
+	/**
+	 * Resolves every direct and OAuth-minted key that can expose an
+	 * account-scoped model roster. Discovery intentionally ignores normal
+	 * request precedence: an explicit PAYG override must not hide stored Muse
+	 * accounts, and a preferred Muse login must not hide env/PAYG credentials.
+	 */
+	async getModelDiscoveryApiKeys(provider: string, options?: AuthApiKeyOptions): Promise<ModelDiscoveryApiKeys> {
+		const apiKeys = new Set<string>();
+		const runtimeKey = this.#runtimeOverrides.get(provider);
+		const configKey = this.#configOverrides.get(provider);
+		const envKey = getEnvApiKey(provider);
+		if (runtimeKey) apiKeys.add(runtimeKey);
+		if (configKey) apiKeys.add(configKey);
+		if (envKey) apiKeys.add(envKey);
+
+		const directCredentials = this.#getCredentialsForProvider(provider).filter(
+			(credential): credential is ApiKeyCredential => credential.type === "api_key",
+		);
+		const oauthProviderKey = this.#getProviderTypeKey(provider, "oauth");
+		const [directKeys, oauthAccesses] = await Promise.all([
+			Promise.all(directCredentials.map(credential => this.#configValueResolver(credential.key))),
+			Promise.all(
+				this.#getStoredOAuthSelections(provider).map(selection =>
+					this.#resolveStoredOAuthAccess(provider, selection, oauthProviderKey, options),
+				),
+			),
+		]);
+		for (const directKey of directKeys) {
+			if (directKey) apiKeys.add(directKey);
+		}
+		for (const access of oauthAccesses) {
+			if (access.ok && access.apiKey) apiKeys.add(access.apiKey);
+		}
+		return {
+			apiKeys: [...apiKeys],
+			complete:
+				directKeys.every(key => key !== undefined && key.length > 0) && oauthAccesses.every(access => access.ok),
+		};
 	}
 
 	/**

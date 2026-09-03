@@ -4,13 +4,15 @@ import { describe, expect, test, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { refreshMetaMuseToken } from "@oh-my-pi/pi-ai/registry/oauth/meta-muse";
-import { loginMeta, metaProvider } from "@oh-my-pi/pi-ai/registry/meta";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry/registry";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
-import { rpcDefaultAuthMethodFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { META_MUSE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+const metaProvider = getProviderDefinition("meta")!;
+const loginMeta = metaProvider.login!;
 
 const context: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
@@ -78,8 +80,28 @@ describe("Meta login", () => {
 		expect(apiKey).toBe("meta-rpc-key");
 	});
 
-	test("declares the legacy RPC login default in provider policy", () => {
-		expect(rpcDefaultAuthMethodFor("meta")).toBe("api-key");
+	test("rejects keyless Muse OAuth credentials before replacing stored login keys", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		try {
+			await storage.reload();
+			await storage.set("meta", [{ type: "api_key", key: "LLM|payg-key", source: "login" }]);
+			const invalidOAuth = {
+				type: "oauth" as const,
+				access: "meta-access",
+				refresh: "meta-refresh",
+				expires: Date.now() + 3_600_000,
+			};
+			expect(() => store.replaceAuthCredentialsForProvider("meta", [invalidOAuth])).toThrow(
+				"meta OAuth credentials require a minted API key",
+			);
+			expect(() => store.upsertAuthCredentialForProvider("meta", invalidOAuth)).toThrow(
+				"meta OAuth credentials require a minted API key",
+			);
+			expect(store.listAuthCredentials("meta").map(row => row.credential.type)).toEqual(["api_key"]);
+		} finally {
+			storage.close();
+		}
 	});
 
 	test("uses one provider for Muse subscriptions and Model API keys", () => {
@@ -203,6 +225,50 @@ describe("Meta login", () => {
 				}),
 			).toBe(true);
 			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("reports the earlier cross-type retry after both Meta login sources are blocked", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "oauth",
+					access: "meta-account-access",
+					refresh: "meta-account-refresh",
+					expires: Date.now() + 3_600_000,
+					apiKey: "LLM|subscription-key",
+					authorizedAt: 1,
+				},
+				{
+					type: "api_key",
+					key: "LLM|payg-key",
+					source: "login",
+					authorizedAt: 2,
+				},
+			]);
+			const sessionId = "cross-type-retry";
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
+			const firstBlockedAt = Date.now();
+			expect(
+				await storage.markUsageLimitReached("meta", sessionId, {
+					apiKey: "LLM|payg-key",
+					retryAfterMs: 10_000,
+				}),
+			).toMatchObject({ switched: true });
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
+			const exhausted = await storage.markUsageLimitReached("meta", sessionId, {
+				apiKey: "LLM|subscription-key",
+				retryAfterMs: 60_000,
+			});
+			expect(exhausted.switched).toBe(false);
+			expect(exhausted.retryAtMs).toBeGreaterThanOrEqual(firstBlockedAt + 10_000);
+			expect(exhausted.retryAtMs).toBeLessThan(firstBlockedAt + 20_000);
 		} finally {
 			storage.close();
 		}

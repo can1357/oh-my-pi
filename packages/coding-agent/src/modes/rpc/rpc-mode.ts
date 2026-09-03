@@ -766,6 +766,22 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+export async function requestRpcLoginPrompt(
+	providerId: string,
+	prompt: { message: string; placeholder?: string },
+	authEmitted: boolean,
+	authMethod: string | undefined,
+	requestInput: (title: string, placeholder?: string) => Promise<string | undefined>,
+): Promise<string> {
+	if (!authEmitted && authMethod === undefined) {
+		throw new Error(
+			`Provider '${providerId}' requires interactive prompts ` +
+				"which are not supported in RPC mode. Use the terminal UI to log in.",
+		);
+	}
+	return (await requestInput(prompt.message, prompt.placeholder)) ?? "";
+}
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -1519,6 +1535,7 @@ export async function runRpcMode(
 				// input before a browser URL cannot be satisfied headlessly; after
 				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
 				let authEmitted = false;
+				const authMethod = command.authMethod ?? rpcDefaultAuthMethodFor(command.providerId);
 				try {
 					await session.modelRegistry.authStorage.login(command.providerId, {
 						onAuth: info => {
@@ -1537,20 +1554,11 @@ export async function runRpcMode(
 						},
 						// Provider policy preserves non-interactive defaults for RPC
 						// clients that predate multi-method login.
-						authMethod: command.authMethod ?? rpcDefaultAuthMethodFor(command.providerId),
-						onPrompt: async prompt => {
-							if (!authEmitted) {
-								// onPrompt called before any auth URL — provider requires
-								// interactive input that cannot be satisfied headlessly.
-								return Promise.reject(
-									new Error(
-										`Provider '${command.providerId}' requires interactive prompts ` +
-											"which are not supported in RPC mode. Use the terminal UI to log in.",
-									),
-								);
-							}
-							return (await uiCtx.input(prompt.message, prompt.placeholder, { timeout: 600_000 })) ?? "";
-						},
+						authMethod,
+						onPrompt: prompt =>
+							requestRpcLoginPrompt(command.providerId, prompt, authEmitted, authMethod, (title, placeholder) =>
+								uiCtx.input(title, placeholder, { timeout: 600_000 }),
+							),
 					});
 					// Provider-scoped online refresh so the just-persisted credential
 					// re-runs discovery instead of reusing a fresh authoritative cache

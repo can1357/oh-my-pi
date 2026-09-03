@@ -5,6 +5,11 @@
 ### Added
 
 - Added Muse Code subscriptions as a Meta login option, with subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
+### Changed
+
+- Provider login and token-refresh flows are now driven by the catalog's `auth/*.kdl` rules through generic API-key, authorization-code and device-code engines; hand-written per-provider registry modules were removed and provider-specific residue lives in named hooks
+- OpenRouter, Kimi and xAI sign-in report generic validation/progress messages from the shared login engines
+
 ### Fixed
 
 - GitHub Copilot `HTTP 400 model_not_supported` now fails immediately with GitHub's own response instead of being retried eight times per request, re-run by the turn-level retry, and replaced with a hardcoded "only part of its fleet" message ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
@@ -13,6 +18,7 @@
 - Resolved an issue where unmetered autocomplete models surfaced as exhausted when quota is limited
 - Fixed Gemini 3 cross-model sessions on Cloud Code Assist failing with `400 INVALID_ARGUMENT` when the first replayed tool call has no thought signature ([#10602](https://github.com/can1357/oh-my-pi/issues/10602)).
 - Fixed Cursor models behind auth-gateway retrying client-declared tool calls after the gateway incorrectly reported them as missing.
+- Reasoning from models whose chat template prefills `<think>` (DeepSeek-R1, Qwen3-Thinking on hosts that stream it inline) is now shown as a thinking block instead of leaking into the answer with a stray `</think>`.
 
 ## [18.1.3] - 2026-09-02
 

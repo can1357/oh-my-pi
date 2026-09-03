@@ -1,0 +1,5 @@
+auth "meta" {
+	name "Meta"
+	login "custom" hook="meta"
+	refresh hook="meta"
+}

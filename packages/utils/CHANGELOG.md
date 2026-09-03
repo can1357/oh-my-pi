@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `TerminalQueryResponder` in `@oh-my-pi/pi-utils/vterm`: answers cursor-position, device-status, device-attribute, and OSC 10/11 color queries from a headless PTY's output without maintaining a screen.
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed
