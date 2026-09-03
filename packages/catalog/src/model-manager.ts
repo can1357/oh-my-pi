@@ -1,5 +1,6 @@
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
+import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import type { Api, Model, ModelCost, ModelSpec, Provider, TokenCost } from "./types";
@@ -476,32 +477,7 @@ function mergeCatalogMetrics<TApi extends Api>(
 	catalogModels: readonly Model<TApi>[],
 ): Model<TApi>[] {
 	if (models.length === 0 || catalogModels.length === 0) return models;
-	const metrics = new Map<string, Pick<Model<TApi>, "int" | "tps">>();
-	for (const model of catalogModels) {
-		if (model.int == null && model.tps == null) continue;
-		metrics.set(model.id, { int: model.int, tps: model.tps });
-	}
-	if (metrics.size === 0) return models;
-
-	let merged: Model<TApi>[] | undefined;
-	for (let index = 0; index < models.length; index++) {
-		const model = models[index];
-		const metric = metrics.get(model.id);
-		if (!metric) continue;
-		if (
-			(metric.int === undefined || metric.int === model.int) &&
-			(metric.tps === undefined || metric.tps === model.tps)
-		) {
-			continue;
-		}
-		merged ??= [...models];
-		merged[index] = {
-			...model,
-			...(metric.int !== undefined ? { int: metric.int } : {}),
-			...(metric.tps !== undefined ? { tps: metric.tps } : {}),
-		};
-	}
-	return merged ?? models;
+	return applyCatalogMetrics(models, new CatalogMetricsIndex(catalogModels));
 }
 
 function mergeDynamicModels<TApi extends Api>(

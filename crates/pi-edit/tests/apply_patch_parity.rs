@@ -172,7 +172,7 @@ fn seek_sequence_parity() {
 
 #[tokio::test]
 async fn dry_run_preview_does_not_modify_files() {
-	let mut workspace = common::Workspace::new(EditMode::Patch);
+	let workspace = common::Workspace::new(EditMode::Patch);
 	workspace.write("dryrun.txt", "original\n");
 	let mut session = workspace.session();
 	session.set_args_json(

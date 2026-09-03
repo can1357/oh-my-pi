@@ -5,9 +5,14 @@
  * alternate screen and moves the same dotted outline the esc-esc rewind
  * selector uses over the rendered items; Enter copies the outlined turn's
  * text. Right descends into the turn's inner blocks — fenced code, `>`-quotes,
- * bash/eval commands, tool output — replacing the turn's rendered region with
- * a stacked, syntax-highlighted block view whose outline steps per block;
- * Left/Esc ascend back to the transcript.
+ * bash/eval commands, tool output, and links — replacing the turn's rendered
+ * region with a stacked, syntax-highlighted block view whose outline steps per
+ * block; Left/Esc ascend back to the transcript. Every block caption carries a
+ * clickable `⧉ copy` control and link blocks add `↗ open`; the overlay is
+ * fullscreen, so the terminal reports clicks here (SGR mouse) even though the
+ * main transcript never captures the mouse. Keyboard: Enter copies, `o` opens.
+ * A URL that wrapped across terminal rows therefore needs neither a careful
+ * mouse selection nor cmd-click.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -17,12 +22,13 @@ import {
 	ScrollView,
 	type TUI,
 	truncateToWidth,
+	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { replaceTabs } from "../../tools/render-utils";
 import { highlightCode, type ThemeColor, theme } from "../theme/theme";
-import { commandFromToolCall, extractBlocks } from "../utils/copy-targets";
+import { commandFromToolCall, extractBlocks, extractLinks } from "../utils/copy-targets";
 import {
 	matchesAppToolsExpand,
 	matchesSelectCancel,
@@ -53,6 +59,8 @@ export interface CopySelectorDeps {
 	requestRender: () => void;
 	/** The outlined content was chosen — copy it. `label` feeds the status line. */
 	onPick: (content: string, label: string) => void;
+	/** `o` on a link block — open `href` with the system opener. Absent: `o` is ignored. */
+	onOpen?: (href: string, label: string) => void;
 	onCancel: () => void;
 }
 
@@ -64,6 +72,8 @@ interface CopyBlock {
 	content: string;
 	/** Highlight language for the block preview. */
 	language?: string;
+	/** Set for link blocks: the URL `o` opens. `content` is the same URL. */
+	href?: string;
 }
 
 /** Rows the frame chrome occupies: top rule, header, rule, footer hint, bottom rule. */
@@ -72,6 +82,16 @@ const CHROME_ROWS = 5;
 const BLOCK_PREVIEW_LINES = 12;
 /** The copy picker's outline stroke — green, distinct from the rewind selector's accent. */
 const OUTLINE_COLOR: ThemeColor = "success";
+/** Rows above the scroll view: top rule, header, rule. Mouse rows map through this offset. */
+const CONTENT_TOP = 3;
+
+/** A clickable control on a block caption, in composed-column columns. */
+interface ControlRegion {
+	action: "copy" | "open";
+	blockIndex: number;
+	start: number;
+	end: number;
+}
 
 export class CopySelectorComponent implements Component {
 	#builder: ChatTranscriptBuilder;
@@ -86,6 +106,8 @@ export class CopySelectorComponent implements Component {
 	#blocks: CopyBlock[] | undefined;
 	#blockSelected = 0;
 	#blockCache = new Map<string, CopyBlock[]>();
+	/** Click targets of the last render, keyed by composed-column line index. */
+	#controls = new Map<number, ControlRegion[]>();
 
 	constructor(
 		entries: SessionMessageEntry[],
@@ -141,7 +163,9 @@ export class CopySelectorComponent implements Component {
 				if (event.wheel !== null) {
 					this.#scrollView.scroll(event.wheel * 3);
 					this.deps.requestRender();
+					return true;
 				}
+				if (event.leftClick) this.#click(event.row, event.col);
 				return true;
 			});
 			return;
@@ -181,6 +205,11 @@ export class CopySelectorComponent implements Component {
 			if (this.#blocks) this.#ascend();
 			return;
 		}
+		if (data === "o" || data === "O") {
+			const block = this.#blocks?.[this.#blockSelected];
+			if (block?.href && this.deps.onOpen) this.deps.onOpen(block.href, block.label);
+			return;
+		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			if (this.#blocks) {
 				const block = this.#blocks[this.#blockSelected];
@@ -204,6 +233,24 @@ export class CopySelectorComponent implements Component {
 		this.#blockSelected = 0;
 		this.#scrollToSelection = true;
 		this.deps.requestRender();
+	}
+
+	/** A left click at terminal (row, col): act if it lands on a caption control. */
+	#click(row: number, col: number): void {
+		if (!this.#blocks) return;
+		const line = row - CONTENT_TOP + this.#scrollView.getScrollOffset();
+		const regions = this.#controls.get(line);
+		if (!regions) return;
+		const hit = regions.find(region => col >= region.start && col < region.end);
+		if (!hit) return;
+		const block = this.#blocks[hit.blockIndex];
+		if (!block) return;
+		this.#blockSelected = hit.blockIndex;
+		if (hit.action === "open") {
+			if (block.href && this.deps.onOpen) this.deps.onOpen(block.href, block.label);
+			return;
+		}
+		this.deps.onPick(block.content, block.label);
 	}
 
 	#moveVertical(delta: -1 | 1): void {
@@ -253,10 +300,11 @@ export class CopySelectorComponent implements Component {
 		const target = this.#targets[this.#selected];
 		const blocks = target ? this.#blocksFor(target) : [];
 		let composed: ComposedColumn;
+		this.#controls = new Map();
 		if (this.#blocks && target) {
 			// Descended: the turn's rendered region is replaced by its block stack.
 			const before = composeOutlineColumn(childRows, 0, target.start, [], -1, contentWidth, undefined);
-			const stack = this.#composeBlocks(this.#blocks, contentWidth);
+			const stack = this.#composeBlocks(this.#blocks, contentWidth, before.lines.length);
 			const after = composeOutlineColumn(childRows, target.end, children.length, [], -1, contentWidth, undefined);
 			composed = {
 				lines: [...before.lines, ...stack.lines, ...after.lines],
@@ -299,16 +347,23 @@ export class CopySelectorComponent implements Component {
 		);
 		output.push(...this.#border.render(width));
 		output.push(...this.#scrollView.render(width));
+		const selectedBlock = this.#blocks?.[this.#blockSelected];
+		const openHint = selectedBlock?.href && this.deps.onOpen ? "  o open" : "";
 		const hint = this.#blocks
-			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter copy`
+			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter copy${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
 			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter copy  ctrl+o expand  esc close`;
 		output.push(` ${theme.fg("dim", hint)}`);
 		output.push(...this.#border.render(width));
 		return output;
 	}
 
-	/** The selected turn exploded into captioned block previews, selected one outlined. */
-	#composeBlocks(blocks: CopyBlock[], columnWidth: number): ComposedColumn {
+	/**
+	 * The selected turn exploded into captioned block previews, selected one
+	 * outlined. Each caption ends with clickable controls; their column spans
+	 * are recorded in `#controls` under the composed line index
+	 * (`lineOffset` + local index) so {@link #click} can resolve a mouse hit.
+	 */
+	#composeBlocks(blocks: CopyBlock[], columnWidth: number, lineOffset: number): ComposedColumn {
 		const inner = Math.max(10, columnWidth - 4);
 		const lines: string[] = [];
 		let selStart = -1;
@@ -322,18 +377,41 @@ export class CopySelectorComponent implements Component {
 			if (raw.length > shown.length) {
 				rows.push(theme.fg("dim", `… +${raw.length - shown.length} more lines`));
 			}
-			const caption = truncateToWidth(
+			const selected = index === this.#blockSelected;
+			const captionColor: ThemeColor = selected ? OUTLINE_COLOR : "dim";
+			const controls: Array<{ action: ControlRegion["action"]; text: string }> = [
+				{ action: "copy", text: `${theme.cmd.copy} copy` },
+			];
+			if (block.href && this.deps.onOpen) controls.push({ action: "open", text: `${theme.cmd.share} open` });
+			const controlsWidth = controls.reduce((sum, control) => sum + visibleWidth(control.text) + 2, 0);
+			const summary = truncateToWidth(
 				`${index + 1}/${blocks.length}${theme.sep.dot}${block.label}${theme.sep.dot}${raw.length} line${raw.length === 1 ? "" : "s"}`,
-				inner,
+				Math.max(4, inner - controlsWidth),
 			);
+			// Caption: two-space gutter, summary, then the controls, each preceded by two spaces.
+			let caption = theme.fg(captionColor, summary);
+			let cursor = 2 + visibleWidth(summary);
+			const regions: ControlRegion[] = [];
+			for (const control of controls) {
+				cursor += 2;
+				regions.push({
+					action: control.action,
+					blockIndex: index,
+					start: cursor,
+					end: cursor + visibleWidth(control.text),
+				});
+				caption += `  ${theme.fg("accent", control.text)}`;
+				cursor += visibleWidth(control.text);
+			}
 			lines.push("");
-			if (index === this.#blockSelected) {
+			this.#controls.set(lineOffset + lines.length, regions);
+			if (selected) {
 				selStart = lines.length;
-				lines.push(`  ${theme.fg(OUTLINE_COLOR, caption)}`);
+				lines.push(`  ${caption}`);
 				lines.push(...outlineRows(rows, inner, { color: OUTLINE_COLOR }));
 				selEnd = lines.length;
 			} else {
-				lines.push(`  ${theme.fg("dim", caption)}`);
+				lines.push(`  ${caption}`);
 				for (const row of rows) lines.push(row ? `  ${row}` : row);
 			}
 		}
@@ -380,6 +458,15 @@ function pushMarkdownBlocks(blocks: CopyBlock[], text: string): void {
 		} else {
 			blocks.push({ label: "quote", content: block.text });
 		}
+	}
+	// Links follow the message's blocks. The preview shows the whole URL on one
+	// row, so a link the transcript wrapped is copied or opened intact.
+	for (const link of extractLinks(text)) {
+		blocks.push({
+			label: link.text !== link.href ? `link${theme.sep.dot}${link.text}` : "link",
+			content: link.href,
+			href: link.href,
+		});
 	}
 }
 

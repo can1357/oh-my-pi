@@ -1705,7 +1705,7 @@ mod tests {
 			is_end_of_file:    false,
 		};
 		assert_eq!(
-			apply_hunks("one\n", "a.txt", &[hunk.clone()], 0.95, true)
+			apply_hunks("one\n", "a.txt", std::slice::from_ref(&hunk), 0.95, true)
 				.unwrap()
 				.0,
 			"two\n"
