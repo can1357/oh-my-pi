@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ## [18.1.8] - 2026-09-03
+### Added
+
+- Added a read-only `omp session-stats <session-id | previous | path>` CLI that prints the cumulative token and cost totals of a persisted session from its JSONL transcript (active branch only, matching the live `session_stats` accounting).
 
 ### Fixed
 
