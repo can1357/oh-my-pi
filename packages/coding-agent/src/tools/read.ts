@@ -86,6 +86,7 @@ import { readArchive, resolveArchiveReadPath } from "./read-archive";
 import {
 	BRACKET_CONTEXT_ELLIPSIS,
 	buildInMemoryMultiRangeResult,
+	buildInMemorySelectorResult,
 	buildInMemoryTextResult,
 	contiguousLineNumbers,
 	countTextLines,
@@ -112,7 +113,15 @@ import {
 	type SuffixMatchCache,
 } from "./read-path-resolution";
 import { type PdfImageReadTarget, renderPdfPageScreenshot, splitPdfImageReadPath } from "./read-pdf";
-import { isMultiRange, isRawSelector, type ParsedSelector, parseSel, selToOffsetLimit } from "./read-selector";
+import {
+	isMultiRange,
+	isRawSelector,
+	type ParsedSelector,
+	parseSel,
+	type ResolvedSelector,
+	resolveTailSelector,
+	selToOffsetLimit,
+} from "./read-selector";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
 import { isProseSummaryPath, renderSummary, routeReadThroughBridge, trySummarize } from "./read-summary";
 import { formatBytes, shortenPath } from "./render-utils";
@@ -520,6 +529,25 @@ async function streamLinesFromFile(
 		reachedEof,
 		hasTrailingNewline: reachedEof && endedWithNewline,
 	};
+}
+
+/**
+ * Pin a `:-N` tail selector against a file's line count. Buffered files count
+ * their already-split lines; larger files take one newline-counting pass with
+ * zero line/byte budget so {@link streamLinesFromFile} retains nothing.
+ */
+async function resolveFileTailSelector(
+	parsed: ParsedSelector,
+	filePath: string,
+	buffered: BufferedFileText | undefined,
+	signal?: AbortSignal,
+): Promise<ResolvedSelector> {
+	if (parsed.kind !== "tail") return parsed;
+	const includeTerminalNewline = parsed.raw === true;
+	const totalLines = buffered
+		? collectLineWindowFromBuffer(buffered, 0, 0, 0, 0, includeTerminalNewline).totalFileLines
+		: (await streamLinesFromFile(filePath, 0, 0, 0, 0, signal, { includeTerminalNewline })).totalFileLines;
+	return resolveTailSelector(parsed, totalLines);
 }
 
 const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
@@ -1117,31 +1145,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (!this.session.settings.get("fetch.enabled")) {
 				throw new ToolError("URL reads are disabled by settings.");
 			}
-			const urlRaw = parsedUrlTarget.raw;
-			const urlRanges = parsedUrlTarget.ranges;
-			if (urlRanges !== undefined && urlRanges.length > 1) {
+			const urlSel = parsedUrlTarget.sel;
+			const urlRaw = isRawSelector(urlSel);
+			if (urlSel.kind === "lines" || urlSel.kind === "tail") {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return buildInMemoryMultiRangeResult(this.session, entry.output, urlRanges, {
+				return buildInMemorySelectorResult(this.session, entry.output, urlSel, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
-					raw: urlRaw,
-					immutable: true,
-				});
-			}
-			const urlOffset = parsedUrlTarget.offset;
-			const urlLimit = parsedUrlTarget.limit;
-			if (urlOffset !== undefined || urlLimit !== undefined) {
-				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
-					ensureArtifact: true,
-				});
-				return buildInMemoryTextResult(this.session, entry.output, urlOffset, urlLimit, {
-					details: { ...entry.details },
-					sourceUrl: entry.details.finalUrl,
-					entityLabel: "URL output",
-					raw: urlRaw,
 					immutable: true,
 				});
 			}
@@ -1162,7 +1175,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
-					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
+					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
 				);
 			}
 			const urlMeta = parseInternalUrl(internalTarget.path);
@@ -1313,10 +1326,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (isMultiRange(parsed)) {
 				throw new ToolError("Multi-range line selectors are not supported for directory listings.");
 			}
-			const { offset, limit } = selToOffsetLimit(parsed);
 			// Directory listings are deterministic and fast; never abort them mid-scan
 			// (an interrupt would otherwise surface a misleading "Operation aborted").
-			const dirResult = await this.#readDirectory(absolutePath, offset, limit, undefined);
+			const dirResult = await this.#readDirectory(absolutePath, parsed, undefined);
 			if (suffixResolution) {
 				dirResult.details ??= {};
 				dirResult.details.suffixResolution = suffixResolution;
@@ -1354,15 +1366,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (isSampleProfilePath(absolutePath)) rendered = renderSampleProfile(await Bun.file(absolutePath).text());
 			else if (isCpuProfilePath(absolutePath)) rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
-				if (isMultiRange(parsed) && parsed.kind === "lines") {
-					return buildInMemoryMultiRangeResult(this.session, rendered, parsed.ranges, {
-						details: { resolvedPath: absolutePath },
-						sourcePath: absolutePath,
-						entityLabel: "profile summary",
-					});
-				}
-				const { offset, limit } = selToOffsetLimit(parsed);
-				return buildInMemoryTextResult(this.session, rendered, offset, limit, {
+				return buildInMemorySelectorResult(this.session, rendered, parsed, {
 					details: { resolvedPath: absolutePath },
 					sourcePath: absolutePath,
 					entityLabel: "profile summary",
@@ -1398,15 +1402,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}));
 		} else if (isNotebookPath(absolutePath) && !isRawSelector(parsed)) {
 			const notebookText = await readEditableNotebookText(absolutePath, resolvedDisplayPath);
-			if (isMultiRange(parsed) && parsed.kind === "lines") {
-				return buildInMemoryMultiRangeResult(this.session, notebookText, parsed.ranges, {
-					details: { resolvedPath: absolutePath },
-					sourcePath: absolutePath,
-					entityLabel: "notebook",
-				});
-			}
-			const { offset, limit } = selToOffsetLimit(parsed);
-			return buildInMemoryTextResult(this.session, notebookText, offset, limit, {
+			return buildInMemorySelectorResult(this.session, notebookText, parsed, {
 				details: { resolvedPath: absolutePath },
 				sourcePath: absolutePath,
 				entityLabel: "notebook",
@@ -1421,25 +1417,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// raw mode apply against the converted output. Without this,
 				// `file.pdf:50-100` silently returned the head of the document
 				// because only `truncateHead` was being applied.
-				if (isMultiRange(parsed) && parsed.kind === "lines") {
-					return buildInMemoryMultiRangeResult(this.session, renderedContent, parsed.ranges, {
-						details: {
-							resolvedPath: absolutePath,
-							contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
-						},
-						sourcePath: absolutePath,
-						entityLabel: "document",
-					});
-				}
-				const { offset, limit } = selToOffsetLimit(parsed);
-				return buildInMemoryTextResult(this.session, renderedContent, offset, limit, {
+				return buildInMemorySelectorResult(this.session, renderedContent, parsed, {
 					details: {
 						resolvedPath: absolutePath,
 						contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
 					},
 					sourcePath: absolutePath,
 					entityLabel: "document",
-					raw: isRawSelector(parsed),
 				});
 			} else if (result.error) {
 				content = [{ type: "text", text: `[Cannot read ${ext} file: ${result.error || "conversion failed"}]` }];
@@ -1522,13 +1506,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			if (!content) {
-				if (isMultiRange(parsed) && parsed.kind === "lines") {
+				const sel = await resolveFileTailSelector(parsed, absolutePath, buffered);
+				if (sel.kind === "lines" && sel.ranges.length > 1) {
 					const multiResult = await this.#readLocalFileMultiRange(
 						absolutePath,
-						parsed.ranges,
+						sel.ranges,
 						fileSize,
 						buffered,
-						parsed,
+						sel,
 						displayMode,
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
@@ -1542,7 +1527,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					}
 				} else {
 					// Raw text or line-range mode
-					const { offset, limit } = selToOffsetLimit(parsed);
+					const { offset, limit } = selToOffsetLimit(sel);
 					// Try ACP bridge first — editor's in-memory buffer is source of truth.
 					// Request full text so local range rendering keeps normal context and line numbers.
 					const bridgePromise = routeReadThroughBridge(this.session, absolutePath);
@@ -1557,7 +1542,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								),
 								sourcePath: absolutePath,
 								entityLabel: "file",
-								raw: isRawSelector(parsed),
+								raw: isRawSelector(sel),
 							});
 							if (suffixResolution) {
 								const notice = `[Path '${suffixResolution.from}' not found; resolved to '${suffixResolution.to}' via suffix match]`;
@@ -1575,7 +1560,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// never adds context: without line numbers the padding is
 					// indistinguishable from requested content, so `raw:31-31` must
 					// return line 31 and nothing else.
-					const rawSelector = isRawSelector(parsed);
+					const rawSelector = isRawSelector(sel);
 					const requestedStart = offset ? Math.max(0, offset - 1) : 0;
 					const expandStart = !rawSelector && offset !== undefined && offset > 1;
 					const expandEnd = !rawSelector && limit !== undefined;
@@ -1984,7 +1969,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 	async #readArtifactFile(
 		url: InternalUrl,
-		parsedSel: ParsedSelector,
+		parsed: ParsedSelector,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const artifact = await resolveArtifactFile(url, {
@@ -2000,7 +1985,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			contentType: "text/plain",
 		};
 
-		if (parsedSel.kind === "raw" && artifact.size > MAX_ARTIFACT_RAW_INLINE_BYTES) {
+		if (parsed.kind === "raw" && artifact.size > MAX_ARTIFACT_RAW_INLINE_BYTES) {
 			return toolResult<ReadToolDetails>(details)
 				.text(this.#formatRawArtifactBlockedNotice(artifact, artifactUrl))
 				.sourcePath(artifact.path)
@@ -2008,9 +1993,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				.done();
 		}
 
-		const rawSelector = isRawSelector(parsedSel);
+		const rawSelector = isRawSelector(parsed);
 		const displayMode = resolveFileDisplayMode(this.session, { raw: rawSelector, immutable: true });
-		if (isMultiRange(parsedSel) && parsedSel.kind === "lines") {
+		const parsedSel = await resolveFileTailSelector(parsed, artifact.path, undefined, signal);
+		if (parsedSel.kind === "lines" && parsedSel.ranges.length > 1) {
 			// Bracket context and per-range slicing both want the whole artifact, so
 			// materialize it once exactly as the plain-file path does.
 			const artifactBytes = artifact.size <= SNAPSHOT_MAX_BYTES ? await readWholeFile(artifact.path) : undefined;
@@ -2240,27 +2226,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return toolResult(details).text(resource.content).sourceInternal(url).done();
 		}
 
-		const raw = isRawSelector(parsedSel);
-		if (isMultiRange(parsedSel) && parsedSel.kind === "lines") {
-			return buildInMemoryMultiRangeResult(this.session, resource.content, parsedSel.ranges, {
-				details,
-				sourcePath: resource.sourcePath,
-				sourceInternal: url,
-				entityLabel: "resource",
-				immutable: resource.immutable,
-				raw,
-			});
-		}
-
-		const { offset, limit } = selToOffsetLimit(parsedSel);
-		return buildInMemoryTextResult(this.session, resource.content, offset, limit, {
+		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
 			details,
 			sourcePath: resource.sourcePath,
 			sourceInternal: url,
 			entityLabel: "resource",
 			ignoreResultLimits: scheme === "skill",
 			immutable: resource.immutable,
-			raw,
 		});
 	}
 
@@ -2307,11 +2279,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return resultBuilder.done();
 	}
 
-	/** Read directory contents as a formatted listing */
+	/** Read directory contents as a formatted listing, sliced by a single-range or tail selector. */
 	async #readDirectory(
 		absolutePath: string,
-		offset: number | undefined,
-		limit: number | undefined,
+		parsed: ParsedSelector,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const READ_DIRECTORY_MAX_DEPTH = 2;
@@ -2324,9 +2295,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				maxDepth: READ_DIRECTORY_MAX_DEPTH,
 				perDirLimit: READ_DIRECTORY_CHILD_LIMIT,
 				rootLimit: null,
-				// `lineCap` truncates the rendered tree itself, so apply it only when the caller
-				// did not request an offset — otherwise we'd cap the first N lines before slicing.
-				lineCap: offset === undefined && limit !== undefined ? limit : null,
+				// `lineCap` truncates the rendered tree itself; selectors slice the full
+				// rendering below instead so `:N-M` and `:-N` see the same listing.
+				lineCap: null,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -2345,9 +2316,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// builder lays out entries hierarchically (per-dir caps, recent-then-elided
 		// summaries); line-based slicing operates on the formatted text and matches what
 		// users expect from `:N-M` on long listings.
-		const wantsSlice = offset !== undefined || limit !== undefined;
-		if (wantsSlice) {
+		if (parsed.kind === "lines" || parsed.kind === "tail") {
 			const allLines = output.split("\n");
+			const { offset, limit } = selToOffsetLimit(resolveTailSelector(parsed, allLines.length));
 			const start = offset ? Math.max(0, offset - 1) : 0;
 			if (start >= allLines.length) {
 				const suggestion =
