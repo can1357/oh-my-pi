@@ -2,10 +2,12 @@ import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
+	apiKeys?: readonly string[];
 	baseUrl?: string;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	meta: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -22,6 +24,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "meta":
+			return "https://api.meta.ai/v1";
 		case "opencode-go":
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
@@ -47,12 +51,24 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 	}
 	return `${providerId}:ollama-models-v1:${Bun.hash(endpoint).toString(36)}`;
 }
+function resolveMetaModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions): string {
+	const apiKeys = [...new Set([...(options.apiKeys ?? []), ...(options.apiKey ? [options.apiKey] : [])])]
+		.filter(Boolean)
+		.sort();
+	if (apiKeys.length === 0) return providerId;
+	const configuredBaseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId) ?? "";
+	const normalizedBaseUrl = configuredBaseUrl.replace(/\/+$/, "");
+	const scope = `${apiKeys.join("\u0000")}\u0000${normalizedBaseUrl}`;
+	return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
+}
 
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
+		case "meta":
+			return resolveMetaModelCacheProviderId(providerId, options);
 		case "cursor":
 			// v4: Grok 4.5/4.6 rows cached before the effort-less default-tier fix
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch

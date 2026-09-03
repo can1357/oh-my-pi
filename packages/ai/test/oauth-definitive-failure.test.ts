@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { isDefinitiveOAuthFailure } from "@oh-my-pi/pi-ai/auth-storage";
+import { OAuthError } from "@oh-my-pi/pi-ai/error";
 
 describe("isDefinitiveOAuthFailure", () => {
 	it("treats explicit dead-grant errors as definitive", () => {
@@ -32,6 +33,28 @@ describe("isDefinitiveOAuthFailure", () => {
 		expect(isDefinitiveOAuthFailure("HTTP 403 Forbidden")).toBe(false);
 		expect(isDefinitiveOAuthFailure("403 PERMISSION_DENIED: account verification required")).toBe(false);
 		expect(isDefinitiveOAuthFailure("blocked by cloudflare (403)")).toBe(false);
+	});
+	it("uses typed token-endpoint status when the response body has no OAuth error code", () => {
+		for (const status of [401, 403]) {
+			expect(
+				isDefinitiveOAuthFailure(
+					new OAuthError("Meta token request returned invalid JSON", {
+						kind: "validation",
+						provider: "meta",
+						status,
+					}),
+				),
+			).toBe(true);
+		}
+		expect(
+			isDefinitiveOAuthFailure(
+				new OAuthError("Meta token request returned invalid JSON", {
+					kind: "validation",
+					provider: "meta",
+					status: 503,
+				}),
+			),
+		).toBe(false);
 	});
 
 	it("treats rate-limit and server/gateway errors as transient", () => {

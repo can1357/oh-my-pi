@@ -5,12 +5,13 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
 /**
  * Whether an OAuth refresh failure is definitive (the credential must be
- * disabled) versus transient. Thin alias over the {@link Flag.OAuthExpiry}
- * text classifier {@link isOAuthExpiry}; retained as the public
- * `@oh-my-pi/pi-ai` entrypoint name used by the coding agent and auth-broker.
+ * disabled) versus transient. Typed token-endpoint 401/403 responses are
+ * definitive even when their non-JSON bodies carry no classifiable text.
  */
-export function isDefinitiveOAuthFailure(errorMsg: string): boolean {
-	return isOAuthExpiry(errorMsg);
+export function isDefinitiveOAuthFailure(error: unknown): boolean {
+	if (error instanceof OAuthError && (error.status === 401 || error.status === 403)) return true;
+	const message = error instanceof Error ? error.message : String(error);
+	return isOAuthExpiry(message);
 }
 
 const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;

@@ -212,7 +212,7 @@ export async function refreshStoredManagedMcpOAuthCredential(
 				authorizationUrl: material && "authorizationUrl" in material ? material.authorizationUrl : undefined,
 			};
 		},
-		isDefinitiveFailure: error => isDefinitiveOAuthFailure(error instanceof Error ? error.message : String(error)),
+		isDefinitiveFailure: error => isDefinitiveOAuthFailure(error),
 		disabledCause: error => `oauth refresh failed: ${error instanceof Error ? error.message : String(error)}`,
 		keepCredentialOnRefreshFailure: opts.keepCredentialOnRefreshFailure ?? true,
 		onRefreshFailure: opts.onRefreshFailure,

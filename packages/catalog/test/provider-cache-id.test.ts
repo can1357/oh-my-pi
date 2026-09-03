@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { PROVIDER_DESCRIPTORS, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import {
+	isCredentialScopedModelCacheProvider,
+	PROVIDER_DESCRIPTORS,
+	resolveModelCacheProviderId,
+} from "@oh-my-pi/pi-catalog/provider-models";
 
 test("lightweight cache resolver matches every descriptor default", () => {
 	for (const descriptor of PROVIDER_DESCRIPTORS) {
@@ -30,4 +34,30 @@ test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a" }));
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/" }));
 	expect(teamA).not.toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-b/v1" }));
+});
+
+test("meta cache scope follows the complete credential set", () => {
+	const first = resolveModelCacheProviderId("meta", {
+		apiKeys: ["subscription-key", "payg-key"],
+		baseUrl: "https://api.meta.ai/v1/",
+	});
+	expect(isCredentialScopedModelCacheProvider("meta")).toBe(true);
+	expect(first).toBe(
+		resolveModelCacheProviderId("meta", {
+			apiKeys: ["payg-key", "subscription-key", "payg-key"],
+			baseUrl: "https://api.meta.ai/v1",
+		}),
+	);
+	expect(first).not.toBe(
+		resolveModelCacheProviderId("meta", {
+			apiKeys: ["subscription-key", "different-payg-key"],
+			baseUrl: "https://api.meta.ai/v1",
+		}),
+	);
+	expect(first).not.toBe(
+		resolveModelCacheProviderId("meta", {
+			apiKeys: ["subscription-key", "payg-key"],
+			baseUrl: "https://proxy.example/meta/v1",
+		}),
+	);
 });

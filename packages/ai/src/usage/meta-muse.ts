@@ -43,6 +43,14 @@ function buildLimit(
 		status: usageStatus(amount.usedFraction),
 	};
 }
+function formatRollingWindowLabel(minutes: number | undefined): string {
+	if (minutes === undefined) return "Rolling Window";
+	if (minutes % 60 === 0) {
+		const hours = minutes / 60;
+		return `${hours} ${hours === 1 ? "Hour" : "Hours"}`;
+	}
+	return `${minutes} ${minutes === 1 ? "Minute" : "Minutes"}`;
+}
 
 function buildLimits(payload: MuseCodeKeyResponse, accountId: string | undefined): UsageLimit[] {
 	const usage = payload.subs_usage;
@@ -53,7 +61,9 @@ function buildLimits(payload: MuseCodeKeyResponse, accountId: string | undefined
 		const minutes = usage.window.window_duration_mins;
 		const durationMs =
 			typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined;
-		const label = durationMs === undefined ? "Rolling window" : `${Math.round(durationMs / 3_600_000)} Hour`;
+		const label = formatRollingWindowLabel(
+			typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : undefined,
+		);
 		const limit = buildLimit(
 			durationMs === undefined ? "rolling" : `${Math.round(durationMs / 60_000)}m`,
 			label,

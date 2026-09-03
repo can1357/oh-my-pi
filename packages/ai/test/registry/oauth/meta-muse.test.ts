@@ -190,4 +190,25 @@ describe("Muse Code OAuth", () => {
 			),
 		).rejects.toThrow("invalid_grant: The refresh token was revoked");
 	});
+
+	test("preserves an unauthorized status when the token endpoint returns non-JSON", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				new Response("<html>Unauthorized</html>", {
+					status: 401,
+					headers: { "content-type": "text/html" },
+				}),
+			);
+
+		await expect(
+			refreshMetaMuseToken(
+				{ access: "expired-access", refresh: "revoked-refresh", expires: 0, apiKey: "LLM|old-key" },
+				fetchImpl,
+			),
+		).rejects.toMatchObject({
+			kind: "validation",
+			provider: "meta",
+			status: 401,
+		});
+	});
 });

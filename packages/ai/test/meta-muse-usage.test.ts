@@ -39,7 +39,7 @@ describe("Muse Code subscription usage", () => {
 		expect(report?.limits).toHaveLength(2);
 		expect(report?.limits[0]).toMatchObject({
 			id: "300m",
-			label: "5 Hour",
+			label: "5 Hours",
 			amount: { used: 42, usedFraction: 0.42, unit: "percent" },
 			window: { durationMs: 18_000_000, resetsAt: 1_800_000_000_000 },
 			status: "ok",
@@ -49,6 +49,27 @@ describe("Muse Code subscription usage", () => {
 			label: "Weekly",
 			amount: { used: 75, usedFraction: 0.75, unit: "percent" },
 			window: { durationMs: 604_800_000, resetsAt: Date.parse("2030-01-08T00:00:00.000Z") },
+		});
+	});
+
+	test("labels non-hour rolling windows in minutes", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				Response.json({
+					api_key: "LLM|subscription-key",
+					is_subs_active: true,
+					subs_usage: {
+						window: { used_percent: 20, window_duration_mins: 30 },
+					},
+				}),
+			);
+
+		const report = await metaMuseUsageProvider.fetchUsage({ provider: "meta", credential }, { fetch: fetchImpl });
+
+		expect(report?.limits[0]).toMatchObject({
+			id: "30m",
+			label: "30 Minutes",
+			window: { durationMs: 1_800_000 },
 		});
 	});
 

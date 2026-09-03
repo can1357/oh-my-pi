@@ -4579,6 +4579,7 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 	if (!primary) throw new Error("Meta model manager options require a primary configuration");
 	return {
 		...primary,
+		cacheProviderId: resolveModelCacheProviderId("meta", { apiKeys, baseUrl: config?.baseUrl }),
 		...(optionsByKey.length > 1 && {
 			fetchDynamicModels: async () => {
 				const rosters = await Promise.all(optionsByKey.map(options => options.fetchDynamicModels?.()));

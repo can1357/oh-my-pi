@@ -3467,7 +3467,7 @@ export class AuthStorage {
 					};
 				} catch (error) {
 					const errorMsg = String(error);
-					if (request.credential.expiresAt <= Date.now() && AIError.isDefinitiveOAuthFailure(errorMsg)) {
+					if (request.credential.expiresAt <= Date.now() && AIError.isDefinitiveOAuthFailure(error)) {
 						// The current access token is unusable, so don't replay an
 						// old usage report after its rotating refresh token is revoked.
 						// This changes cache state only; usage polling remains
@@ -5212,7 +5212,7 @@ export class AuthStorage {
 					// A failed preflight already exercised the provider refresh path.
 					// Do not replay the same refresh token in the final candidate pass.
 					const errorMsg = String(error);
-					const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
+					const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(error);
 					logger.debug("OAuth preflight refresh failed", {
 						provider,
 						index: candidate.selection.index,
@@ -5450,7 +5450,7 @@ export class AuthStorage {
 						credentialId,
 						signal && refreshSignal ? AbortSignal.any([signal, refreshSignal]) : (signal ?? refreshSignal),
 					),
-				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
+				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(error),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {
@@ -5754,7 +5754,7 @@ export class AuthStorage {
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
-			const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
+			const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(error);
 
 			logger.warn("OAuth token refresh failed", {
 				provider,
@@ -7140,7 +7140,7 @@ export class AuthStorage {
 				// A definitively-dead grant tears the row down here, where the
 				// attempted credential is known. CAS on the persisted credential so a
 				// peer/login rotation in flight leaves the freshly-rotated row intact.
-				if (AIError.isDefinitiveOAuthFailure(String(error))) {
+				if (AIError.isDefinitiveOAuthFailure(error)) {
 					// CAS-loss (false) means a peer/login rotated the row mid-refresh, so
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.

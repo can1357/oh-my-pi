@@ -92,6 +92,7 @@ async function readJson(response: Response, label: string): Promise<unknown> {
 		throw new AIError.OAuthError(`${label} returned invalid JSON`, {
 			kind: "validation",
 			provider: PROVIDER,
+			status: response.status,
 			cause: error,
 		});
 	}
