@@ -162,7 +162,7 @@ export interface RpcReadyFrame {
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
-	features: RpcServerFeatures;
+	features?: RpcServerFeatures;
 }
 
 export interface RpcChunkFrame {

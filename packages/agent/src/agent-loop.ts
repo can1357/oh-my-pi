@@ -987,7 +987,9 @@ function endAgentStream(
 	newMessages: AgentMessage[],
 	telemetry: AgentTelemetry | undefined,
 	stepCount: number,
+	setSteeringAdmission?: (accepting: boolean) => void,
 ): void {
+	setSteeringAdmission?.(false);
 	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCount));
 	stream.end(newMessages);
 }
@@ -1061,7 +1063,7 @@ async function runLoopBody(
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
 			emitInputMessages(stream, messagesToEmit);
-			endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+			endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 			return;
 		}
 		// Check for steering messages at start (user may have typed while waiting).
@@ -1121,7 +1123,7 @@ async function runLoopBody(
 			// A tool hook may mark its completed result as terminal (e.g. subagent
 			// yield) — same stop-before-next-model-call rule as the main loop.
 			if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
-				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 				return;
 			}
 		}
@@ -1134,7 +1136,7 @@ async function runLoopBody(
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
 				if (isDeadlineExceeded(config.deadline)) {
 					emitInputMessages(stream, messagesToEmit);
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 					return;
 				}
 				// Yield at the top of each iteration to prevent busy-wait when
@@ -1240,7 +1242,7 @@ async function runLoopBody(
 						turnOpen = false;
 					}
 					preserveSoftRequirementState = !signal?.aborted;
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 					return;
 				}
 
@@ -1501,7 +1503,7 @@ async function runLoopBody(
 				turnOpen = false;
 
 				if (isDeadlineExceeded(config.deadline)) {
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 					return;
 				}
 				// On external abort (user interrupt), leave the steering queue intact: the
@@ -1524,15 +1526,18 @@ async function runLoopBody(
 			}
 
 			if (isDeadlineExceeded(config.deadline)) {
-				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 				return;
 			}
 
+			// Close admission before the final async queue polls. Messages already queued
+			// are still consumed below; later active-only submissions must be rejected.
+			config.setSteeringAdmission?.(false);
 			// Agent would stop here. Drain non-interrupting asides + follow-up messages.
 			await config.onBeforeYield?.();
 
 			if (isDeadlineExceeded(config.deadline)) {
-				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 				return;
 			}
 			// Skip queue drains when externally aborted (same stranding hazard as above).
@@ -1543,6 +1548,7 @@ async function runLoopBody(
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
+				config.setSteeringAdmission?.(true);
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
 				continue;
@@ -1552,7 +1558,7 @@ async function runLoopBody(
 			break;
 		}
 
-		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+		endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 	} finally {
 		discardAsides(pendingMessages, new Error("Aside message was not committed before the agent loop ended"));
 		if (!preserveSoftRequirementState) {

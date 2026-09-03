@@ -103,6 +103,7 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		waitForAdvisorCatchup: async () => true,
 		sendUserMessage: async (content, options) => {
 			steerCalls.push({ content: String(content), options });
+			return true;
 		},
 		getLastAssistantMessage: () => (config.lastAssistantMessage ?? undefined) as never,
 		abort: async () => {

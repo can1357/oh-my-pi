@@ -6,8 +6,8 @@
  *  - `steer` with `activeTurnOnly: true` answers `data.accepted`, rejecting when
  *    no turn is live at the server's enqueue boundary instead of seeding the idle
  *    queue (which auto-drains into an unrequested turn).
- *  - `abort` with `clearQueue: true` synchronously replaces the queues and starts
- *    abort in one serialized command, leaving no inter-command enqueue gap.
+ *  - `abort` with `clearQueue: true` transfers queue ownership into abort, which
+ *    clears at startup and again before its final stranded-message drain.
  *
  * Both are gated by `ready.features.activeTurnSteering === 1`, which the server
  * advertises in the v1 ready frame — before and independently of any v2
@@ -22,7 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { handleRpcAbort, type RpcAbortSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import type { RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import type { RpcReadyFrame, RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const CLI_DIR = path.join(import.meta.dir, "..");
@@ -89,6 +89,15 @@ function fail(command: Record<string, unknown>, error: string): object {
 	return { id: command.id, type: "response", command: command.type, success: false, error };
 }
 
+/** A pre-capability server frame remains representable by the exported wire type. */
+const LEGACY_READY_FRAME = {
+	type: "ready",
+	protocolVersion: 1,
+	supportedProtocolVersions: [1, 2],
+	maxFrameBytes: 1048576,
+	maxReassembledFrameBytes: 33554432,
+} satisfies RpcReadyFrame;
+
 /** Legacy success shape stays assignable to the exported wire union. */
 const LEGACY_STEER_SUCCESS = {
 	type: "response",
@@ -141,16 +150,12 @@ describe("RPC active-turn steering (real server)", () => {
 });
 
 describe("RPC atomic abort handler", () => {
-	test("starts clear and abort synchronously before control can enqueue between them", async () => {
+	test("passes queue ownership into abort before control can enqueue", async () => {
 		const releaseAbort = Promise.withResolvers<void>();
 		const operations: string[] = [];
 		const session = {
-			clearQueue: options => {
-				operations.push(`clear:${options?.forInterrupt === true}`);
-				return { steering: [], followUp: [] };
-			},
-			abort: async () => {
-				operations.push("abort:start");
+			abort: async options => {
+				operations.push(`abort:start:${options?.clearQueue === true}`);
 				await releaseAbort.promise;
 				operations.push("abort:end");
 			},
@@ -159,37 +164,31 @@ describe("RPC atomic abort handler", () => {
 		const aborting = handleRpcAbort(session, true);
 		operations.push("caller:enqueue-opportunity");
 
-		// Both server operations start in the same synchronous command turn. A
-		// separate clear_queue request would return control before abort:start.
-		expect(operations).toEqual(["clear:true", "abort:start", "caller:enqueue-opportunity"]);
+		expect(operations).toEqual(["abort:start:true", "caller:enqueue-opportunity"]);
 
 		releaseAbort.resolve();
 		await aborting;
-		expect(operations).toEqual(["clear:true", "abort:start", "caller:enqueue-opportunity", "abort:end"]);
+		expect(operations).toEqual(["abort:start:true", "caller:enqueue-opportunity", "abort:end"]);
 	});
 
-	test("preserves plain abort without clearing queues", async () => {
-		let cleared = false;
+	test("preserves plain abort without requesting queue clearing", async () => {
+		let clearQueue: boolean | undefined;
 		const session = {
-			clearQueue: () => {
-				cleared = true;
-				return { steering: [], followUp: [] };
+			abort: async options => {
+				clearQueue = options?.clearQueue;
 			},
-			abort: async () => {},
 		} satisfies RpcAbortSession;
 
 		await handleRpcAbort(session, false);
-		expect(cleared).toBe(false);
+		expect(clearQueue).toBeUndefined();
 	});
 });
 
 describe("RPC active-turn steering (client mirror)", () => {
 	const READY_V1 = {
-		type: "ready",
-		protocolVersion: 1,
+		...LEGACY_READY_FRAME,
+		// Keep fake servers on protocol v1 so tests inspect only feature behavior.
 		supportedProtocolVersions: [1],
-		maxFrameBytes: 1048576,
-		maxReassembledFrameBytes: 33554432,
 	};
 
 	test("reads capabilities from a v1 ready frame with no protocol negotiation", async () => {
@@ -290,6 +289,15 @@ describe("RPC active-turn steering (client mirror)", () => {
 		expect(await client.clearQueue({ forInterrupt: true })).toEqual({ steering: 2, followUp: 1 });
 
 		expect(server.received.map(command => command.forInterrupt)).toEqual([undefined, true]);
+	});
+
+	test("rejects queue-clearing abort when the server lacks the capability", async () => {
+		const server = createFakeRpcServer(READY_V1, command => ok(command));
+		using client = new RpcClient({ spawn: () => server.process });
+		await client.start();
+
+		await expect(client.abort({ clearQueue: true })).rejects.toThrow("requires activeTurnSteering");
+		expect(server.received).toEqual([]);
 	});
 
 	test("sends queue clearing in the abort command only when requested", async () => {

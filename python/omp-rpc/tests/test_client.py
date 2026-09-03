@@ -934,6 +934,85 @@ ACTIVE_TURN_SERVER = textwrap.dedent(
 )
 
 
+REJECTED_PROMPT_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+    import time
+
+    print(json.dumps({"type": "ready", "protocolVersion": 1}), flush=True)
+    prompt_count = 0
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": command["type"],
+                    "success": True,
+                }
+            ),
+            flush=True,
+        )
+        if command["type"] == "prompt":
+            prompt_count += 1
+            if prompt_count > 1:
+                time.sleep(0.1)
+            print(
+                json.dumps(
+                    {
+                        "id": command.get("id"),
+                        "type": "prompt_result",
+                        "agentInvoked": False,
+                    }
+                ),
+                flush=True,
+            )
+    """
+)
+
+
+LIFECYCLE_ACCOUNTING_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(json.dumps({"type": "ready", "protocolVersion": 1}), flush=True)
+    prompt_count = 0
+    pending_steer = False
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        command_type = command["type"]
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": command_type,
+                    "success": True,
+                }
+            ),
+            flush=True,
+        )
+        if command_type == "prompt":
+            prompt_count += 1
+            if prompt_count == 1:
+                print(json.dumps({"type": "agent_start"}), flush=True)
+            else:
+                print(
+                    json.dumps({"type": "agent_end", "messages": []}),
+                    flush=True,
+                )
+        elif command_type == "steer":
+            pending_steer = True
+        elif command_type == "set_interrupt_mode" and pending_steer:
+            pending_steer = False
+            print(json.dumps({"type": "agent_start"}), flush=True)
+            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+    """
+)
+
 # Predates the capability: no `features`, and `steer` answers with no `data`.
 LEGACY_STEER_SERVER = textwrap.dedent(
     """
@@ -1605,6 +1684,24 @@ class RpcClientTests(unittest.TestCase):
         self.assertEqual(len(protocol_errors), 1)
         self.assertIn("late failure", protocol_errors[0])
         self.assertEqual(len(client.protocol_errors), 1)
+        self.assertEqual(client._awaited_prompt_result_ids, set())
+        self.assertEqual(client._completed_prompt_result_ids, set())
+
+    def test_wait_for_idle_reports_an_already_buffered_prompt_failure(self) -> None:
+        failure_seen = threading.Event()
+        client = self.make_client(server=LATE_PROMPT_FAILURE_SERVER)
+        client.on_protocol_error(lambda _error: failure_seen.set())
+
+        try:
+            client.start()
+            client.prompt("say hello")
+            self.assertTrue(failure_seen.wait(timeout=1.0))
+            with self.assertRaises(RpcCommandError) as ctx:
+                client.wait_for_idle(timeout=0.5)
+        finally:
+            client.stop()
+
+        self.assertEqual(ctx.exception.error, "late failure")
 
     def test_listener_exceptions_are_reported_without_stopping_client(self) -> None:
         listener_errors: list[tuple[str, str | None, str]] = []
@@ -1651,6 +1748,52 @@ class RpcClientTests(unittest.TestCase):
 
         self.assertIn("Frame: 'not-json'", str(ctx.exception))
 
+    def test_idle_legacy_active_only_steer_reserves_its_auto_started_run(self) -> None:
+        with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
+            self.assertTrue(client.steer("wake", active_turn_only=True))
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 0)
+            client.set_interrupt_mode("wait")
+            client.wait_for_idle(timeout=0.5)
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_prompt_result_without_agent_settles_scheduled_run(self) -> None:
+        with self.make_client(server=REJECTED_PROMPT_SERVER) as client:
+            turn = client.prompt_and_wait("rejected during preprocessing", timeout=0.5)
+            self.assertEqual(turn.events, ())
+            client.wait_for_idle(timeout=0.5)
+
+    def test_pre_capability_server_rejects_atomic_abort(self) -> None:
+        with (
+            self.make_client(server=LEGACY_STEER_SERVER) as client,
+            self.assertRaisesRegex(RpcError, "requires activeTurnSteering"),
+        ):
+            client.abort(clear_queue=True)
+
+    def test_prompt_result_only_completes_its_own_lifecycle(self) -> None:
+        with self.make_client(server=REJECTED_PROMPT_SERVER) as client:
+            client.prompt("first rejected prompt")
+            turn = client.prompt_and_wait("second rejected prompt", timeout=0.5)
+            self.assertEqual(turn.events, ())
+            self.assertEqual(client._scheduled_agent_runs, client._completed_agent_runs)
+
+    def test_streaming_prompt_shares_the_active_run_reservation(self) -> None:
+        with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
+            client.prompt("first")
+            client.prompt("second", streaming_behavior="followUp")
+            client.wait_for_idle(timeout=0.5)
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_idle_steer_reserves_its_auto_started_run(self) -> None:
+        with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
+            self.assertTrue(client.steer("wake"))
+            client.set_interrupt_mode("wait")
+            client.wait_for_idle(timeout=0.5)
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+
     def test_event_history_limit_reports_overflow(self) -> None:
         with self.make_client(max_event_history=2) as client:
             with self.assertRaises(RpcError) as ctx:
@@ -1671,10 +1814,14 @@ class RpcClientTests(unittest.TestCase):
                 client.clear_queue(),
                 ClearQueueResult(steering=0, follow_up=0),
             )
+            self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(
                 client.clear_queue(for_interrupt=True),
                 ClearQueueResult(steering=1, follow_up=0),
             )
+            client.wait_for_idle(timeout=0.5)
+            self.assertEqual(client._scheduled_agent_runs, 0)
+            self.assertEqual(client._completed_agent_runs, 0)
 
             # Plain abort remains fieldless; the atomic form sends literal true.
             client.abort()

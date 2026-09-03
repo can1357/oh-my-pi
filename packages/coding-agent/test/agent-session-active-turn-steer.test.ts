@@ -1,6 +1,7 @@
 /**
  * Contract: `steer(..., { activeTurnOnly: true })` enqueues only when a turn is
- * live, and `clearQueue({ forInterrupt: true })` makes a following abort final.
+ * live, and `abort({ clearQueue: true })` owns queue clearing through its final
+ * stranded-message drain.
  *
  * Both exist for hosts that drive the session over a wire (RPC) and cannot undo
  * a mistake:
@@ -10,11 +11,11 @@
  *     steering rejects at the final enqueue boundary — after image
  *     normalization, which suspends and lets the turn end underneath the call —
  *     and leaves both queues untouched.
- *  2. `abort()` drains stranded queued messages, so a queued user steer
- *     restarts the very run the host is interrupting (see
- *     "drains steering left after aborting an auto-continued queued turn" in
- *     agent-session-queued-steer-delivery.test.ts, which pins that behavior).
- *     Clearing for interrupt first is what makes the abort stick.
+ *  2. `abort()` drains stranded queued messages, so a queued user steer restarts
+ *     the very run the host is interrupting. Queue-clearing abort removes work at
+ *     startup and again after awaited cleanup so neither preexisting nor
+ *     mid-abort enqueues can start a continuation turn. Plain abort retains the
+ *     stranded-queue behavior.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -22,10 +23,13 @@ import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionProviderBoundary } from "../src/session/session-provider-boundary";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as imageLoading from "../src/utils/image-loading";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession active-turn steering", () => {
@@ -136,6 +140,49 @@ describe("AgentSession active-turn steering", () => {
 		await session.waitForIdle();
 		await running.catch(() => {});
 	});
+	it("rejects an active-only steer after the final queue poll closes", async () => {
+		const atFinalPoll = Promise.withResolvers<void>();
+		const releaseFinalPoll = Promise.withResolvers<void>();
+		const mock = createSession([{ content: ["done"] }]);
+		session.agent.setOnBeforeYield(async () => {
+			atFinalPoll.resolve();
+			await releaseFinalPoll.promise;
+		});
+
+		const running = session.prompt("do the thing");
+		await atFinalPoll.promise;
+		expect(session.agent.state.isStreaming).toBe(true);
+		expect(session.agent.acceptsSteering).toBe(false);
+		expect(await session.steer("too late", undefined, { activeTurnOnly: true })).toBe(false);
+
+		releaseFinalPoll.resolve();
+		await running;
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("rejects an active-only steer as soon as plain abort starts", async () => {
+		const started = Promise.withResolvers<void>();
+		const mock = createSession([
+			() => {
+				started.resolve();
+				return { content: ["working"], delayMs: 60_000 };
+			},
+			{ content: ["must not run"] },
+		]);
+
+		const running = session.prompt("do the thing");
+		await started.promise;
+		const aborting = session.abort();
+		expect(await session.steer("too late", undefined, { activeTurnOnly: true })).toBe(false);
+
+		await aborting;
+		await running.catch(() => {});
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
 
 	it("rejects an active-only steer when the turn ends while the call is suspended", async () => {
 		const started = Promise.withResolvers<void>();
@@ -210,7 +257,7 @@ describe("AgentSession active-turn steering", () => {
 		});
 	}
 
-	it("clearing for interrupt stops abort from restarting the interrupted run", async () => {
+	it("abort with clearQueue drops work queued before abort starts", async () => {
 		const mock = createSession([
 			{ content: ["initial response"] },
 			{ content: ["queued response"], delayMs: 1_000 },
@@ -225,24 +272,307 @@ describe("AgentSession active-turn steering", () => {
 		await delivered;
 		expect(mock.calls.length).toBe(2);
 
-		// Both queued behind the turn the host is about to interrupt.
+		// Both are queued behind the turn the host is about to interrupt.
 		expect(await session.steer("second queued", undefined, { activeTurnOnly: true })).toBe(true);
 		queueHiddenAsideSteer(session);
 		expect(session.getQueuedMessages().steering).toContain("second queued");
+		expect(session.agent.hasQueuedMessages()).toBe(true);
 
-		// Only the user message is restorable; the hidden aside is dropped, not returned.
-		expect(session.clearQueue({ forInterrupt: true })).toEqual({
-			steering: [{ text: "second queued", images: undefined }],
-			followUp: [],
-		});
-		expect(session.agent.hasQueuedMessages()).toBe(false);
-
-		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
 		await session.waitForIdle();
 
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 		expect(session.getQueuedMessages().steering).toEqual([]);
+	});
+
+	it("preserves advisor cards for queue-clearing aborts without a user reason", async () => {
+		const started = Promise.withResolvers<void>();
+		const mock = createSession([
+			() => {
+				started.resolve();
+				return { content: ["working"], delayMs: 60_000 };
+			},
+			{ content: ["must not run"] },
+		]);
+
+		const running = session.prompt("hello");
+		await started.promise;
+		session.agent.steer({
+			role: "custom",
+			customType: "advisor",
+			content: "keep this advice",
+			display: true,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+
+		await session.abort({ clearQueue: true });
+		await running.catch(() => {});
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(session.agent.state.messages).toContainEqual(
+			expect.objectContaining({ role: "custom", customType: "advisor", content: "keep this advice" }),
+		);
+	});
+
+	it("drops every enqueue source while queue-clearing abort is suspended", async () => {
+		const started = Promise.withResolvers<void>();
+		const abortSuspended = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		const mock = createSession([
+			() => {
+				started.resolve();
+				return { content: ["working"], delayMs: 60_000 };
+			},
+			{ content: ["must not run"] },
+		]);
+		const continueSpy = vi.spyOn(session.agent, "continue");
+		const waitForIdle = session.agent.waitForIdle.bind(session.agent);
+		vi.spyOn(session.agent, "waitForIdle").mockImplementation(async () => {
+			await waitForIdle();
+			abortSuspended.resolve();
+			await releaseAbort.promise;
+		});
+
+		const running = session.prompt("hello");
+		await started.promise;
+		const aborting = session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		await abortSuspended.promise;
+
+		// The first clear already ran. These simulate user, hidden extension,
+		// non-parent IRC, and triggerable next-turn work arriving while abort is
+		expect(await session.steer("late user steer")).toBe(false);
+		queueHiddenAsideSteer(session);
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+		await expect(
+			session.deliverIrcMessage({ id: "late-irc", from: "peer", to: "me", body: "ping", ts: Date.now() }),
+		).rejects.toThrow("queue-clearing abort");
+		await session.sendCustomMessage(
+			{ customType: "late-extension", content: "late extension work", display: false, attribution: "agent" },
+			{ deliverAs: "nextTurn", triggerTurn: true },
+		);
+
+		// Another delivery starts during abort but finishes normalization after the
+		// final clear. Its captured generation must make it a no-op.
+		const normalizationStarted = Promise.withResolvers<void>();
+		const releaseNormalization = Promise.withResolvers<void>();
+		vi.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages").mockImplementation(async message => {
+			normalizationStarted.resolve();
+			await releaseNormalization.promise;
+			return message;
+		});
+		const crossingAbort = session.sendCustomMessage(
+			{ customType: "late-extension", content: "crossing abort", display: false, attribution: "agent" },
+			{ deliverAs: "nextTurn", triggerTurn: true },
+		);
+		await normalizationStarted.promise;
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		await expect(
+			session.deliverIrcMessage({
+				id: "late-idle-irc",
+				from: "peer",
+				to: "me",
+				body: "ping after unwind",
+				ts: Date.now(),
+			}),
+		).rejects.toThrow("queue-clearing abort");
+		Reflect.deleteProperty(session, "isStreaming");
+		const completion = {
+			event: "daemon-completed",
+			completionId: "late-completion",
+			owner: "test-owner",
+			daemon: {
+				name: "late-worker",
+				id: "daemon-id",
+				state: "exited",
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				exitCode: 0,
+				restartCount: 0,
+				outputBytes: 0,
+				owner: "test-owner",
+				persist: false,
+				detached: false,
+			},
+		} satisfies DaemonCompletionNotification;
+		const completionResult = session.queueLaunchCompletion(completion).then(
+			() => undefined,
+			error => error,
+		);
+		expect(session.queuedMessageCount).toBeGreaterThan(0);
+
+		releaseAbort.resolve();
+		await aborting;
+		releaseNormalization.resolve();
+		expect(await crossingAbort).toBe(false);
+		expect(await completionResult).toBeInstanceOf(Error);
+		await running.catch(() => {});
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(session.queuedMessageCount).toBe(0);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(session.getQueuedMessages().steering).toEqual([]);
+	});
+
+	it("stops a streaming prompt when its keyword notice crosses queue-clearing abort", async () => {
+		const started = Promise.withResolvers<void>();
+		const mock = createSession([
+			() => {
+				started.resolve();
+				return { content: ["working"], delayMs: 60_000 };
+			},
+			{ content: ["must not run"] },
+		]);
+		const running = session.prompt("hello");
+		await started.promise;
+
+		const normalizationStarted = Promise.withResolvers<void>();
+		const releaseNormalization = Promise.withResolvers<void>();
+		vi.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages").mockImplementation(async message => {
+			normalizationStarted.resolve();
+			await releaseNormalization.promise;
+			return message;
+		});
+		const queuedPrompt = session.prompt("ultrathink change course", { streamingBehavior: "steer" });
+		await normalizationStarted.promise;
+
+		await session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		releaseNormalization.resolve();
+		expect(await queuedPrompt).toBe(false);
+		await running.catch(() => {});
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(session.queuedMessageCount).toBe(0);
+	});
+
+	it("rejects a prompt started during a queue-clearing abort", async () => {
+		const mock = createSession([{ content: ["must not run"] }]);
+		const abortSuspended = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		const waitForIdle = session.agent.waitForIdle.bind(session.agent);
+		vi.spyOn(session.agent, "waitForIdle").mockImplementation(async () => {
+			await waitForIdle();
+			abortSuspended.resolve();
+			await releaseAbort.promise;
+		});
+
+		const aborting = session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		await abortSuspended.promise;
+		expect(session.isStreaming).toBe(false);
+		const accepted = await session.prompt("too late");
+
+		releaseAbort.resolve();
+		await aborting;
+		await session.waitForIdle();
+
+		expect(accepted).toBe(false);
+		expect(mock.calls).toHaveLength(0);
+	});
+
+	it("retains queue-clear ownership while an overlapping plain abort settles", async () => {
+		const mock = createSession([{ content: ["must not run"] }]);
+		const firstAbortSuspended = Promise.withResolvers<void>();
+		const releaseFirstAbort = Promise.withResolvers<void>();
+		const waitForIdle = session.agent.waitForIdle.bind(session.agent);
+		let waitCalls = 0;
+		vi.spyOn(session.agent, "waitForIdle").mockImplementation(async () => {
+			await waitForIdle();
+			waitCalls++;
+			if (waitCalls !== 1) return;
+			firstAbortSuspended.resolve();
+			await releaseFirstAbort.promise;
+		});
+
+		const clearingAbort = session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		await firstAbortSuspended.promise;
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		const accepted = await session.prompt("must stay stopped");
+
+		releaseFirstAbort.resolve();
+		await clearingAbort;
+		await session.waitForIdle();
+
+		expect(accepted).toBe(false);
+		expect(mock.calls).toHaveLength(0);
+	});
+
+	it("rejects an idle prompt whose normalization crosses a queue-clearing abort", async () => {
+		const mock = createSession([{ content: ["must not run"] }]);
+		const normalizationStarted = Promise.withResolvers<void>();
+		const releaseNormalization = Promise.withResolvers<void>();
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			normalizationStarted.resolve();
+			await releaseNormalization.promise;
+			return images;
+		});
+
+		// RPC acknowledges prompt before this preprocessing finishes. Abort completes
+		// while no agent run exists, then the stale prompt resumes normalization.
+		const crossingPrompt = session.prompt("crossing prompt", {
+			images: [{ type: "image", data: "abc", mimeType: "image/png" }],
+		});
+		await normalizationStarted.promise;
+		expect(session.isStreaming).toBe(false);
+
+		await session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		releaseNormalization.resolve();
+		expect(await crossingPrompt).toBe(false);
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(0);
+		expect(session.queuedMessageCount).toBe(0);
+	});
+
+	it("preserves advisor suppression when a stale prompt resumes after abort", async () => {
+		const mock = createSession([{ content: ["must not run"] }]);
+
+		// prompt() yields on manual-compaction cleanup before user-initiated side
+		// effects. The abort advances queue-clear generation during that suspension.
+		const stalePrompt = session.prompt("stale prompt");
+		await session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		expect(await stalePrompt).toBe(false);
+
+		session.agent.steer({
+			role: "custom",
+			customType: "advisor",
+			content: "late blocker",
+			display: true,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		await session.abort();
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(0);
+	});
+	it("rejects a triggered custom turn whose usage preflight crosses abort", async () => {
+		const mock = createSession([{ content: ["must not run"] }]);
+		session.settings.set("retry.usageAwareFallback", true);
+		const preflightStarted = Promise.withResolvers<void>();
+		const releasePreflight = Promise.withResolvers<void>();
+		vi.spyOn(authStorage, "getModelUsageHealth").mockImplementation(async () => {
+			preflightStarted.resolve();
+			await releasePreflight.promise;
+			return { state: "healthy", accounts: [] };
+		});
+
+		const triggered = session.sendCustomMessage(
+			{ customType: "extension", content: "start work", display: false, attribution: "agent" },
+			{ triggerTurn: true },
+		);
+		await preflightStarted.promise;
+		await session.abort({ reason: USER_INTERRUPT_LABEL, clearQueue: true });
+		releasePreflight.resolve();
+
+		expect(await triggered).toBe(false);
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(0);
 	});
 
 	it("clearing without forInterrupt leaves hidden steers that abort would resume", async () => {

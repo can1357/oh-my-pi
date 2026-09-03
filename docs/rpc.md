@@ -46,12 +46,12 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 }
 ```
 
-`features` values are exact integers, not booleans: gate on `features.activeTurnSteering === 1`, because a server that bumps a capability has changed its semantics. Because the ready frame is always v1, capabilities are readable without negotiating v2.
+`features` is absent on servers that predate capability advertisement. When present, its values are exact integers, not booleans: gate on `features.activeTurnSteering === 1`, because a server that bumps a capability has changed its semantics. Because the ready frame is always v1, capabilities are readable without negotiating v2.
 
 Parse `features` leniently. Unknown keys, a bumped version, a non-integer value, and a `features` field that is not an object all mean "capability absent" — never a connection failure. A client that rejects the ready frame over an unrecognized capability cannot start against a server it would otherwise interoperate with. Currently advertised:
 
-| Capability              | Meaning                                                                                                                                                 |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Capability              | Meaning                                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `activeTurnSteering: 1` | `steer` honors `activeTurnOnly` and answers `data.accepted`; `abort` accepts `clearQueue: true`; `clear_queue` accepts `forInterrupt`. |
 
 Clients that support protocol v2 SHOULD immediately send:
@@ -628,12 +628,14 @@ another turn right after the interrupt. Clear and abort in one command:
 { "id": "a1", "type": "abort", "clearQueue": true }
 ```
 
-The serialized `abort` handler synchronously replaces both queues immediately
-before starting the abort. No client round trip exists where IRC or an extension
-can enqueue work between those operations. The clear uses interrupt semantics:
-hidden non-user steers are dropped, except advisor cards that abort preserves as
-visible advice. Plain `{ "type": "abort" }` keeps the legacy stranded-queue
-behavior.
+The serialized `abort` handler passes queue ownership into the session abort.
+With `clearQueue: true`, the session clears at abort startup and again after all
+awaited cleanup, immediately before it releases abort suppression and runs the
+stranded-queue drain. User steers, hidden extension work, and deferred next-turn
+messages submitted while abort is suspended are rejected or dropped. IRC
+delivery is rejected during that window, and already-pending IRC records are
+dropped. Advisor cards remain preserved as visible advice.
+Plain `{ "type": "abort" }` keeps the legacy stranded-queue behavior.
 
 `clear_queue` remains available for queue inspection and editor restore. Its
 response reports how many user-authored messages were dropped:

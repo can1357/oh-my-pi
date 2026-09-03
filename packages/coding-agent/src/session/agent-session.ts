@@ -746,7 +746,9 @@ export class AgentSession {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
-	#abortInProgress = false;
+	#abortInProgress = 0;
+	#clearQueueOnAbort = 0;
+	#queueClearGeneration = 0;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -1193,6 +1195,7 @@ export class AgentSession {
 			settings: this.settings,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
+			isQueueClearAbortActive: () => this.#clearQueueOnAbort > 0,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
@@ -1290,7 +1293,7 @@ export class AgentSession {
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
-			abortInProgress: () => this.#abortInProgress,
+			abortInProgress: () => this.#abortInProgress > 0,
 			streamingEditAbortTriggered: () => this.#streamingEditGuard.abortTriggered,
 			promptGeneration: () => this.#promptGeneration,
 			sessionId: () => this.sessionId,
@@ -1420,6 +1423,9 @@ export class AgentSession {
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
 			injectIdle: async messages => {
+				if (this.#clearQueueOnAbort > 0) {
+					throw new Error("Yield injection rejected during queue-clearing abort");
+				}
 				const first = messages[0];
 				if (!first) return;
 				this.#beginInFlight();
@@ -1674,7 +1680,7 @@ export class AgentSession {
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
-			abortInProgress: () => this.#abortInProgress,
+			abortInProgress: () => this.#abortInProgress > 0,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
@@ -5938,6 +5944,12 @@ export class AgentSession {
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
 		const submittedAt = Date.now();
+		const typedText = text;
+		if (this.#clearQueueOnAbort) {
+			this.#promptDropped?.({ text: typedText, images: options?.images });
+			return false;
+		}
+		const queueClearGeneration = this.#queueClearGeneration;
 		// A manual `/compact` runs with the agent subscription disconnected until its
 		// cleanup finally re-drains the preserved queues. Starting a turn before then
 		// would neither persist nor forward its events and could race the in-flight
@@ -5945,9 +5957,7 @@ export class AgentSession {
 		// here. No-op when no manual compaction is active.
 		await this.#maintenance.manualCompactionCleanup;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
-		// Slash/custom-command handling below rewrites `text`; keep the original
-		// so a dropped prompt is handed back exactly as the user typed it.
-		const typedText = text;
+		// Slash/custom-command handling below rewrites `text`; `typedText` preserves the original.
 
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
@@ -5980,6 +5990,10 @@ export class AgentSession {
 		// agent-initiated turns never trigger them.
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
+		if (queueClearGeneration !== this.#queueClearGeneration) {
+			this.#promptDropped?.({ text: typedText, images: options?.images });
+			return false;
+		}
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
@@ -6000,10 +6014,10 @@ export class AgentSession {
 			// Steer/follow-up/aside the keyword notices BEFORE the queued user message so the
 			// model reads the steering notice ahead of the prompt it modifies.
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
+				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
-			return true;
+			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
 		}
 
 		// Skip eager preludes when the user has already queued a directive
@@ -6034,6 +6048,10 @@ export class AgentSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 
+		if (queueClearGeneration !== this.#queueClearGeneration) {
+			this.#promptDropped?.({ text: typedText, images: options?.images });
+			return false;
+		}
 		// A concurrent prompt() can start a turn during the awaits above: image
 		// normalization and the vision-description call suspend after the
 		// isStreaming check at the top, so two callers — the CLI initial message
@@ -6046,13 +6064,13 @@ export class AgentSession {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
+				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
+			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
 				images: normalizedImages,
 				descriptionNotice: imageDescriptionNotice,
 			});
-			return true;
 		}
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
@@ -6117,15 +6135,14 @@ export class AgentSession {
 			// a message that was never persisted).
 			this.#promptDropped?.({ text: typedText, images: options?.images });
 		}
-		return true;
+		return dispatched;
 	}
 
 	/**
 	 * @returns true when the message is (or will be) picked up by an agent turn
 	 * — queued into a running turn, or a new turn started synchronously. false
-	 * when dispatch bailed before invoking the agent (e.g. a concurrent abort
-	 * won the generation race), so hosts waiting on a terminal `agent_end` can
-	 * stop instead of hanging.
+	 * when dispatch or queue admission loses a concurrent abort race, so hosts
+	 * waiting on a terminal `agent_end` can stop instead of hanging.
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
@@ -6134,6 +6151,8 @@ export class AgentSession {
 			queueOnly?: boolean;
 		},
 	): Promise<boolean> {
+		const queueClearGeneration = this.#queueClearGeneration;
+		if (this.#clearQueueOnAbort) return false;
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -6166,20 +6185,20 @@ export class AgentSession {
 			if (!streamingBehavior) throw new AgentBusyError();
 
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
+				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
-			return true;
+			return await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
 		}
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 
 			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
+				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
+				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
-			return true;
+			return await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -6652,6 +6671,7 @@ export class AgentSession {
 		// #queueUserMessage (which clears advisor auto-resume suppression and
 		// enqueues as a user-attributed message) and place the developer message
 		// directly on the follow-up queue.
+		const queueClearGeneration = this.#queueClearGeneration;
 		const normalizedImages = await this.#normalizeImagesForModel(images);
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
@@ -6660,6 +6680,7 @@ export class AgentSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		if (queueClearGeneration !== this.#queueClearGeneration) return;
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		this.agent.followUp({
@@ -6711,24 +6732,19 @@ export class AgentSession {
 		options?: { requireActiveTurn?: boolean },
 	): Promise<boolean> {
 		const requireActiveTurn = options?.requireActiveTurn === true;
-		// `agent.state.isStreaming`, NOT `this.isStreaming`: the session getter also
-		// reports true while a prompt unwinds (`#promptInFlightCount > 0`) after the
-		// agent run already ended. Admitting there would queue behind nothing and
-		// auto-drain into a fresh turn — exactly what activeTurnOnly must refuse.
-		// Cheap pre-check so an obviously idle session skips image normalization
-		// entirely; the decisive check is the one below, after every suspension point.
-		if (requireActiveTurn && !this.agent.state.isStreaming) return false;
+		const queueClearGeneration = this.#queueClearGeneration;
+		// `agent.acceptsSteering`, NOT `this.isStreaming`: the session getter remains
+		// true while a prompt unwinds, and core streaming remains true after the loop
+		// closes admission for its final queue poll. Admitting at either boundary would
+		// queue behind nothing and auto-drain into a fresh turn. The cheap pre-check
+		// skips image normalization when admission is already closed; the decisive
+		// check below runs after every suspension point.
+		if (requireActiveTurn && !this.agent.acceptsSteering) return false;
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
-		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
-		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
-		// a user interrupt suppressed. An aside is non-interrupting by design, and an
-		// active-turn-only caller defers this until the enqueue commits, so a rejected
-		// message leaves no advisor state behind.
-		if (mode !== "aside" && !requireActiveTurn) this.#advisors.autoResumeSuppressed = false;
 		// The pre-dispatch re-check in prompt() arrives with normalization and the
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
@@ -6745,8 +6761,9 @@ export class AgentSession {
 			: normalizedImages?.length
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
+		if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+		if (queueClearGeneration !== this.#queueClearGeneration || this.#clearQueueOnAbort > 0) return false;
 		if (mode === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
@@ -6759,12 +6776,12 @@ export class AgentSession {
 			return true;
 		}
 		// Final enqueue boundary. Image normalization and the vision-description call
-		// above suspend, so the turn can end while this call is in flight; re-check
-		// here and bail before touching either queue.
-		if (requireActiveTurn) {
-			if (!this.agent.state.isStreaming) return false;
-			this.#advisors.autoResumeSuppressed = false;
-		}
+		// above suspend, so the turn can finish or enter its final queue poll while
+		// this call is in flight. Bail before touching either queue when it can no
+		// longer consume new steering.
+		if (requireActiveTurn && !this.agent.acceptsSteering) return false;
+		// An accepted user message is a deliberate resume.
+		this.#advisors.autoResumeSuppressed = false;
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
 			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
@@ -6868,7 +6885,7 @@ export class AgentSession {
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
-		if (!triggerTurn) return;
+		if (!triggerTurn || this.#clearQueueOnAbort > 0) return;
 		const generation = this.#promptGeneration;
 		if (this.#scheduledHiddenNextTurnGeneration === generation) {
 			return;
@@ -6957,11 +6974,17 @@ export class AgentSession {
 	 *  are expected) must not assume dispatch happened just because this was awaited. */
 	async #promptAgentInitiatedMessage(
 		message: CustomMessage,
-		options?: { acceptTerminalEmptyStop?: boolean },
+		options?: { acceptTerminalEmptyStop?: boolean; queueClearGeneration?: number },
 	): Promise<boolean> {
 		this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			if (
+				options?.queueClearGeneration !== undefined &&
+				(options.queueClearGeneration !== this.#queueClearGeneration || this.#clearQueueOnAbort > 0)
+			) {
+				return false;
+			}
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
@@ -6982,9 +7005,10 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
-	): Promise<void> {
-		// Captured before the normalization await below — see #sessionGeneration's doc comment.
+	): Promise<boolean> {
+		// Captured before the normalization await below.
 		const sessionGeneration = this.#sessionGeneration;
+		const queueClearGeneration = this.#queueClearGeneration;
 		const details =
 			queueChipText !== undefined
 				? ({
@@ -7005,8 +7029,9 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+		if (queueClearGeneration !== this.#queueClearGeneration || this.#clearQueueOnAbort > 0) return false;
 		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -7016,7 +7041,7 @@ export class AgentSession {
 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
 			// correctly once idle, matching #queueUserMessage's aside branch.
 			this.#resumeStrandedIrcAsides();
-			return;
+			return true;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (deliverAs === "followUp") {
@@ -7025,6 +7050,7 @@ export class AgentSession {
 			this.agent.steer(normalizedAppMessage);
 		}
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**
@@ -7035,11 +7061,10 @@ export class AgentSession {
 	 * - Not streaming + triggerTurn: appends to state/session, starts new turn unless the client cannot own it
 	 * - Not streaming + no trigger: appends to state/session, no turn
 	 *
-	 * @returns true iff this call synchronously started a new turn (awaited
-	 * `agent.prompt`); false when the message was queued/appended without a turn
-	 * — including when `triggerTurn` is downgraded because the client defers
-	 * agent-initiated turns. Callers that must mirror the resulting `agent_end`
-	 * use this to avoid acting on a turn that never ran.
+	 * @returns true when the message was accepted into an active turn or started a
+	 * new turn. Returns false when it was only appended/deferred, or when a
+	 * queue-clearing abort rejected it. Callers that mirror `agent_end` use this
+	 * to distinguish agent work from local-only handling.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
@@ -7050,8 +7075,9 @@ export class AgentSession {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<boolean> {
-		// Captured before the normalization await below — see #sessionGeneration's doc comment.
+		// Captured before the normalization await below.
 		const sessionGeneration = this.#sessionGeneration;
+		const queueClearGeneration = this.#queueClearGeneration;
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
 		const suppressQueueChip = options?.deliverAs === "nextTurn" || options?.deliverAs === "aside";
 		const details =
@@ -7073,10 +7099,15 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (queueClearGeneration !== this.#queueClearGeneration) return false;
+		if (this.#clearQueueOnAbort > 0) {
+			this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+			return false;
+		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
-				return false;
+				return options?.triggerTurn === true;
 			}
 			if (options?.deliverAs === "aside") {
 				if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
@@ -7095,7 +7126,7 @@ export class AgentSession {
 				this.agent.steer(normalizedAppMessage);
 			}
 			this.#scheduleIdleQueueDrain();
-			return false;
+			return true;
 		}
 
 		if (options?.deliverAs === "nextTurn") {
@@ -7106,6 +7137,7 @@ export class AgentSession {
 				}
 				return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
+					queueClearGeneration,
 				});
 			}
 			this.agent.appendMessage(normalizedAppMessage);
@@ -7145,6 +7177,7 @@ export class AgentSession {
 			}
 			return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 				acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
+				queueClearGeneration,
 			});
 		}
 
@@ -7153,7 +7186,7 @@ export class AgentSession {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
-			return await this.#promptAgentInitiatedMessage(normalizedAppMessage);
+			return await this.#promptAgentInitiatedMessage(normalizedAppMessage, { queueClearGeneration });
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
@@ -7173,11 +7206,12 @@ export class AgentSession {
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
 	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
 	 * an idle session instead starts a turn, since there is no live run to inject into.
+	 * Returns whether the message was admitted to a current or new agent turn.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" | "aside" },
-	): Promise<void> {
+	): Promise<boolean> {
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
@@ -7201,18 +7235,15 @@ export class AgentSession {
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside");
-				return;
+				return await this.#queueUserMessage(text, images, "aside");
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp");
-			return;
+			return await this.#queueUserMessage(text, images, "followUp");
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer");
-			return;
+			return await this.#queueUserMessage(text, images, "steer");
 		}
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
@@ -7222,7 +7253,7 @@ export class AgentSession {
 		// `streamingBehavior` when it does. Passing "aside" through (instead of hard-coding
 		// "steer") keeps that race from degrading a non-interrupting aside into a
 		// tool-batch-aborting steer.
-		await this.prompt(text, {
+		return await this.prompt(text, {
 			expandPromptTemplates: false,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
@@ -7230,13 +7261,11 @@ export class AgentSession {
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).
-	 *  Only user-authored messages (plain user turns, `attribution:"user"` custom like `/skill`) are
-	 *  returned for editor restore. Other queued messages stay in the agent-core queues so a continuing
-	 *  stream still delivers them — EXCEPT on `forInterrupt` (Esc+abort), where only advisor cards are
-	 *  kept (abort()'s #extractQueuedAdvisorCards preserves them as visible advice) and every other
-	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
-	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
-	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
+	 *  Only user-authored agent-queue messages (plain user turns, `attribution:"user"` custom like
+	 *  `/skill`) are returned for editor restore. Other agent-queue messages stay available to a
+	 *  continuing stream unless `forInterrupt` is set. Interrupt clearing drops every non-advisor
+	 *  source: agent queues, pending IRC records, deferred next-turn messages, and yield-queue work.
+	 *  Advisor cards stay available for abort() to preserve as visible advice. */
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];
@@ -7249,6 +7278,12 @@ export class AgentSession {
 			? isAdvisorCard
 			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
+		if (options?.forInterrupt) this.#irc.drainPending();
+		if (options?.forInterrupt) {
+			this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(isAdvisorCard);
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			this.yieldQueue.clear();
+		}
 		this.#reconcileQueuedMessageDrain();
 		return { steering, followUp };
 	}
@@ -7511,6 +7546,10 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 *
+	 * `clearQueue` clears interrupt queues before abort starts and again after all
+	 * awaited cleanup, immediately before the stranded-message drain is enabled.
+	 * This prevents work enqueued while abort is suspended from restarting the run.
+	 *
 	 * `reason` (e.g. `USER_INTERRUPT_LABEL`) rides the agent's `AbortController`
 	 * and surfaces verbatim on the aborted assistant message's `errorMessage`, so
 	 * the transcript can distinguish a deliberate user interrupt from an opaque
@@ -7519,20 +7558,26 @@ export class AgentSession {
 	async abort(options?: {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
+		/** Drop queued work at both non-suspending boundaries of the abort lifecycle. */
+		clearQueue?: boolean;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
 		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
-		// Pull advisor concerns out of the steer/follow-up queues before any await so
-		// the post-abort stranded-message drain can't auto-resume the run on them.
-		// They are re-recorded as visible advice once the agent settles (below).
-		const strandedAdvisorCards = userInterrupt ? this.#extractQueuedAdvisorCards() : [];
-		// Session switch/compact paths disconnect first; explicit aborts should
-		// leave any queued steer/follow-up visible for the user rather than
-		// auto-starting a fresh turn during cleanup.
-		this.#abortInProgress = true;
+		// Suppress all settle drains before touching queues. No await may occur between
+		// either clear and the corresponding abort boundary.
+		this.#abortInProgress++;
+		if (options?.clearQueue) {
+			this.#clearQueueOnAbort++;
+			this.#queueClearGeneration++;
+		}
+		// Pull advisor concerns out of the steer/follow-up queues before clearing so
+		// they can be re-recorded as visible advice once the agent settles. Every other
+		// queued message is dropped when this abort owns queue clearing.
+		const strandedAdvisorCards = userInterrupt || options?.clearQueue ? this.#extractQueuedAdvisorCards() : [];
+		if (options?.clearQueue) this.clearQueue({ forInterrupt: true });
 		try {
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
@@ -7583,8 +7628,8 @@ export class AgentSession {
 			// visible/persisted advice without triggering a turn (the agent is idle
 			// now): cards steered into the queue before the user stopped, plus any
 			// that arrived via enqueueAdvice mid-abort and were parked hidden in
-			// #pendingNextTurnMessages while the turn was still tearing down. Other
-			// deferred next-turn context (non-advisor) stays queued, in order.
+			// #pendingNextTurnMessages while the turn was still tearing down. A
+			// queue-clearing abort drops other deferred next-turn context in finally.
 			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
 			if (parkedAdvisorCards.length > 0) {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
@@ -7593,7 +7638,16 @@ export class AgentSession {
 				this.#preserveAdvisorCard(card);
 			}
 		} finally {
-			this.#abortInProgress = false;
+			// Enqueues can arrive while any cleanup above is suspended. Cancel the
+			// replacement post-prompt queue and clear every interrupt source again at
+			// the final await-free boundary before enabling stranded-message drains.
+			if (options?.clearQueue) {
+				this.#queueClearGeneration++;
+				void this.#cancelPostPromptTasks();
+				this.clearQueue({ forInterrupt: true });
+			}
+			if (options?.clearQueue) this.#clearQueueOnAbort--;
+			this.#abortInProgress--;
 			this.#drainStrandedQueuedMessages();
 		}
 	}

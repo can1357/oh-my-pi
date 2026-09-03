@@ -374,6 +374,7 @@ export class Agent {
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#steeringWaiters = new Set<() => void>();
+	#steeringAdmissionOpen = false;
 
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
@@ -1052,6 +1053,11 @@ export class Agent {
 		return this.#abortController?.signal.aborted === true && this.#state.isStreaming;
 	}
 
+	/** Whether the active loop can still consume newly submitted steering. */
+	get acceptsSteering(): boolean {
+		return this.#state.isStreaming && this.#steeringAdmissionOpen;
+	}
+
 	#dequeueSteeringMessages(): AgentMessage[] {
 		if (this.#steeringMode === "one-at-a-time") {
 			if (this.#steeringQueue.length > 0) {
@@ -1101,6 +1107,7 @@ export class Agent {
 	}
 
 	abort(reason?: unknown) {
+		this.#steeringAdmissionOpen = false;
 		this.#abortController?.abort(reason);
 	}
 
@@ -1224,6 +1231,7 @@ export class Agent {
 		const continuationAbortController = new AbortController();
 		this.#abortController = continuationAbortController;
 		this.#state.isStreaming = true;
+		this.#steeringAdmissionOpen = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
 
@@ -1319,6 +1327,7 @@ export class Agent {
 			? AbortSignal.any([loopAbortController.signal, continuationSignal])
 			: loopAbortController.signal;
 		this.#state.isStreaming = true;
+		this.#steeringAdmissionOpen = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
 
@@ -1517,6 +1526,9 @@ export class Agent {
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
+			setSteeringAdmission: accepting => {
+				this.#steeringAdmissionOpen = accepting;
+			},
 			telemetry: this.#telemetry,
 		};
 
@@ -1600,6 +1612,7 @@ export class Agent {
 				}
 			}
 		} catch (err) {
+			this.#steeringAdmissionOpen = false;
 			const stoppedForAbort = loopSignal.aborted;
 			const errorMessage = stoppedForAbort
 				? abortReasonText(loopSignal)
@@ -1704,6 +1717,7 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			this.#steeringAdmissionOpen = false;
 			resolveRun?.();
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;

@@ -119,12 +119,14 @@ export type RpcSessionChangeResult =
 
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
-export type RpcAbortSession = Pick<AgentSession, "abort" | "clearQueue">;
+export type RpcAbortSession = Pick<AgentSession, "abort">;
 
-/** Clear interrupt queues and start abort before yielding back to the input loop. */
+/** Delegate queue ownership to abort so late enqueues are cleared before its final drain. */
 export async function handleRpcAbort(session: RpcAbortSession, clearQueue: boolean): Promise<void> {
-	if (clearQueue) session.clearQueue({ forInterrupt: true });
-	await session.abort({ reason: USER_INTERRUPT_LABEL });
+	await session.abort({
+		reason: USER_INTERRUPT_LABEL,
+		...(clearQueue ? { clearQueue: true } : {}),
+	});
 }
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
@@ -270,8 +272,8 @@ export class RpcExtensionUserMessageTracker {
 
 	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
 		const scopedTask = task.then(
-			() => {
-				scope.hasAgentMessageTask = true;
+			agentInvoked => {
+				if (agentInvoked !== false) scope.hasAgentMessageTask = true;
 			},
 			() => {},
 		);
