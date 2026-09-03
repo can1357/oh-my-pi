@@ -7,9 +7,8 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
-import { resolveSymlinkWriteTarget } from "../utils/atomic-file";
+import { resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
 
 import { validateServerConfig } from "./config";
 import { MCP_CONFIG_SCHEMA_URL, type MCPConfigFile, type MCPServerConfig } from "./types";
@@ -19,23 +18,6 @@ function withSchema(config: MCPConfigFile): MCPConfigFile {
 		$schema: config.$schema ?? MCP_CONFIG_SCHEMA_URL,
 		...config,
 	};
-}
-
-/**
- * Serialize a read-modify-write against one config file.
- *
- * Wraps {@link withFileLock} on the symlink-RESOLVED target: two configured
- * paths that alias the same physical mcp.json must contend on one lock, or
- * both read-modify-writes could publish against the resolved target and the
- * last rename would drop the other's mutation. The lock directory
- * (`${resolved}.lock`) is created with a non-recursive `mkdir`, so the
- * referent's parent directory is materialized first — also covering a link
- * dangling into a directory that does not exist yet.
- */
-async function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-	const writePath = await resolveSymlinkWriteTarget(filePath);
-	await fs.promises.mkdir(path.dirname(writePath), { recursive: true, mode: 0o700 });
-	return withFileLock(writePath, fn);
 }
 
 /**
@@ -147,7 +129,7 @@ export async function addMCPServer(filePath: string, name: string, config: MCPSe
 	// Serialize the read-modify-write under a per-file lock so a concurrent
 	// mutation cannot overwrite this one (lost update). The lock also guards
 	// against cross-process writers sharing the same config file.
-	await withConfigLock(filePath, async () => {
+	await withConfigFileLock(filePath, async () => {
 		const existing = await readMCPConfigFile(filePath);
 
 		// Check for duplicate name
@@ -186,7 +168,7 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
 	}
 
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
+	await withConfigFileLock(filePath, async () => {
 		const existing = await readMCPConfigFile(filePath);
 
 		const updated: MCPConfigFile = {
@@ -207,7 +189,7 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
  */
 export async function removeMCPServer(filePath: string, name: string): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
+	await withConfigFileLock(filePath, async () => {
 		const existing = await readMCPConfigFile(filePath);
 
 		if (!existing.mcpServers?.[name]) {
@@ -253,7 +235,7 @@ export async function readDisabledServers(filePath: string): Promise<string[]> {
  */
 export async function setServerDisabled(filePath: string, name: string, disabled: boolean): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
+	await withConfigFileLock(filePath, async () => {
 		const config = await readMCPConfigFile(filePath);
 		const current = new Set(config.disabledServers ?? []);
 
@@ -292,7 +274,7 @@ export async function readEnabledServers(filePath: string): Promise<string[]> {
  */
 export async function setServerForceEnabled(filePath: string, name: string, force: boolean): Promise<void> {
 	// Serialize the read-modify-write (see addMCPServer).
-	await withConfigLock(filePath, async () => {
+	await withConfigFileLock(filePath, async () => {
 		const config = await readMCPConfigFile(filePath);
 		const current = new Set(config.enabledServers ?? []);
 

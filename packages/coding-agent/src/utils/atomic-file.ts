@@ -1,8 +1,8 @@
-import type { Stats } from "node:fs";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 
 /**
  * Upper bound on symlink hops while resolving a dangling config chain by hand.
@@ -236,7 +236,7 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
  * which would swallow it and return the chain head — clobbering the
  * user-managed link itself.
  */
-async function statTraversingDirectory(acc: string, filePath: string, requirement: string): Promise<Stats> {
+async function statTraversingDirectory(acc: string, filePath: string, requirement: string): Promise<fs.Stats> {
 	try {
 		return await fs.promises.stat(acc);
 	} catch (error) {
@@ -249,6 +249,21 @@ function enotDir(message: string): Error & { code?: string } {
 	const notDir = new Error(`ENOTDIR: ${message}`) as Error & { code?: string };
 	notDir.code = "ENOTDIR";
 	return notDir;
+}
+
+/**
+ * Serialize a read-modify-write against one config file on its symlink-RESOLVED
+ * target: two configured paths that alias the same physical file must contend
+ * on one lock, or both read-modify-writes can publish against the resolved
+ * target and the last rename drops the other's mutation. The lock directory
+ * (`${resolved}.lock`) is created with a non-recursive `mkdir`, so the
+ * referent's parent directory is materialized first — also covering a link
+ * dangling into a directory that does not exist yet.
+ */
+export async function withConfigFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+	const writePath = await resolveSymlinkWriteTarget(filePath);
+	await fs.promises.mkdir(path.dirname(writePath), { recursive: true, mode: 0o700 });
+	return withFileLock(writePath, fn);
 }
 
 /**

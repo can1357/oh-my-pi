@@ -35,4 +35,25 @@ describe.skipIf(process.platform === "win32")("ssh config-writer symlinked confi
 		// are preserved.
 		expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
 	});
+
+	it("serializes read-modify-writes that alias one target through two symlinks", async () => {
+		// Two configured paths, one physical ssh.json. The read-modify-write
+		// must lock on the resolved target (and stage a per-writer temp) so
+		// both mutations land; without the lock both read the same old JSON
+		// and the last rename drops the other's host.
+		const target = path.join(dir, "real-ssh.json");
+		await fs.writeFile(target, JSON.stringify({ hosts: {} }));
+		const linkA = path.join(dir, "ssh-a.json");
+		const linkB = path.join(dir, "ssh-b.json");
+		await fs.symlink(target, linkA);
+		await fs.symlink(target, linkB);
+
+		await Promise.all([
+			addSSHHost(linkA, "alpha", { host: "alpha.example.com" }),
+			addSSHHost(linkB, "bravo", { host: "bravo.example.com" }),
+		]);
+
+		const config = await readSSHConfigFile(linkA);
+		expect(Object.keys(config.hosts ?? {}).sort()).toEqual(["alpha", "bravo"]);
+	});
 });
