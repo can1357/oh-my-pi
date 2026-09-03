@@ -159,8 +159,6 @@ describe("extension-registered status line segments", () => {
 		);
 		component.updateSettings({
 			preset: "custom",
-			// "toString"/"constructor" resolve inherited members on a plain object;
-			// they must be treated as unregistered, not dispatched as fake segments.
 			leftSegments: ["toString", "constructor", "my_widget"],
 			rightSegments: [],
 			separator: "powerline-thin",
@@ -173,8 +171,6 @@ describe("extension-registered status line segments", () => {
 	});
 
 	it("renders an extension segment registered under a prototype-named id", () => {
-		// An own-key built-in check must still let an extension claim an id that
-		// collides with an Object.prototype member name.
 		const component = new StatusLineComponent(
 			makeSession({
 				getStatusLineSegment: id =>
@@ -214,7 +210,6 @@ describe("extension-registered status line segments", () => {
 
 describe("extension status line segment context", () => {
 	it("maps the internal render context onto the public StatusLineSegmentContext shape", () => {
-		// No repository → deterministic null branch regardless of the host checkout.
 		vi.spyOn(vcs, "repo").mockReturnValue(null);
 		let captured: StatusLineSegmentContext | undefined;
 		const component = new StatusLineComponent(
@@ -238,7 +233,6 @@ describe("extension status line segment context", () => {
 		component.getTopBorder(80);
 		expect(captured).toBeDefined();
 		expect(captured?.width).toBe(80);
-		// Mirrors the zeroed usage stats the mock session reports.
 		expect(captured?.usage).toEqual({
 			inputTokens: 0,
 			outputTokens: 0,
@@ -345,8 +339,6 @@ describe("git branch resolution for extension segments", () => {
 		component.watchBranch(() => {
 			repaints += 1;
 		});
-		// A custom-only registered extension layout must still install the watcher
-		// so a later HEAD change invalidates the cached branch and repaints.
 		expect(watchSpy).toHaveBeenCalled();
 		expect(watchCallback).toBeDefined();
 		watchCallback?.();

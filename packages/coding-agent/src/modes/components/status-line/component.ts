@@ -514,12 +514,6 @@ export class StatusLineComponent implements Component {
 	#gitEnabled(): boolean {
 		return settings.get("git.enabled");
 	}
-	/**
-	 * True when the status line needs live git branch data: a built-in git/pr
-	 * segment, or a registered extension segment whose render context exposes
-	 * `ctx.git.branch`. Gates the cache-invalidating HEAD watcher so an
-	 * extension branch segment stays fresh across HEAD changes.
-	 */
 	#watchesGitBranch(): boolean {
 		const effectiveSettings = this.#resolveSettings();
 		return (
@@ -530,11 +524,6 @@ export class StatusLineComponent implements Component {
 		);
 	}
 
-	/**
-	 * True when a configured id is backed by an actually-registered extension
-	 * segment (not built-in, and a renderer is registered for it). Unknown or
-	 * mistyped ids are excluded so they don't trigger git branch resolution.
-	 */
 	#hasRegisteredExtensionSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 		const runner = this.session.extensionRunner;
 		if (!runner) return false;
@@ -1954,8 +1943,6 @@ export class StatusLineComponent implements Component {
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
-		// An extension segment may render the branch via its context, so resolve
-		// the branch label for custom-only layouts too — not just built-in git/pr.
 		const includeBranch =
 			gitEnabled &&
 			(this.#hasRegisteredExtensionSegment(effectiveSettings.leftSegments) ||

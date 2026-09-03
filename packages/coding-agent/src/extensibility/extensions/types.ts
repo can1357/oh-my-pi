@@ -1178,10 +1178,6 @@ export type AssistantThinkingRenderer = (
 	theme: Theme,
 ) => Component | undefined;
 
-// ============================================================================
-// Status Line Segments
-// ============================================================================
-
 export interface StatusLineSegmentUsage {
 	inputTokens: number;
 	outputTokens: number;
@@ -1192,17 +1188,13 @@ export interface StatusLineSegmentUsage {
 	tokensPerSecond: number | null;
 }
 
-/** Data made available to an extension-registered status-line segment renderer. */
 export interface StatusLineSegmentContext {
-	/** Terminal columns budgeted for the whole status line; segments do not need to truncate to this themselves. */
 	width: number;
 	usage: StatusLineSegmentUsage;
-	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;
 	contextTokens: number;
 	contextWindow: number;
 	git: { branch: string | null } | null;
-	/** Active (non-idle) processing time accumulated this session, in ms. */
 	activeMs: number;
 }
 
@@ -1447,16 +1439,6 @@ export interface ExtensionAPI {
 	 */
 	registerComposerShape(definition: ComposerShapeDefinition): void;
 
-	/**
-	 * Register a named status-line segment usable from `statusLine.leftSegments` /
-	 * `statusLine.rightSegments` config, alongside the built-in segment ids.
-	 *
-	 * A built-in segment id always renders as the built-in segment — a plugin
-	 * registering e.g. `"model"` is shadowed rather than replacing it, so
-	 * built-in behavior can't be silently hijacked by a plugin id collision.
-	 * When two extensions register the same non-built-in id, the most
-	 * recently loaded extension wins, matching command lookup (`getCommand`).
-	 */
 	registerStatusLineSegment(id: string, renderer: StatusLineSegmentRenderer): void;
 
 	// =========================================================================

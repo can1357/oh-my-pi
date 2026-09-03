@@ -908,7 +908,6 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	collab: collabSegment,
 };
 
-/** Maps the internal render context down to the smaller, stable shape exposed to extensions. */
 function toExtensionSegmentContext(ctx: SegmentContext): ExtensionStatusLineSegmentContext {
 	return {
 		width: ctx.width,
@@ -929,16 +928,11 @@ function toExtensionSegmentContext(ctx: SegmentContext): ExtensionStatusLineSegm
 	};
 }
 
-/** True when `id` names a built-in segment (an own key of {@link SEGMENTS}), not an extension-registered id. */
 export function isBuiltInSegmentId(id: StatusLineSegmentRef): id is StatusLineSegmentId {
 	return Object.hasOwn(SEGMENTS, id);
 }
 
 export function renderSegment(id: StatusLineSegmentRef, ctx: SegmentContext): RenderedSegment {
-	// Built-in ids always win, even if a plugin registered the same id — see
-	// `ExtensionRunner.getStatusLineSegment`. The own-key check keeps an
-	// arbitrary extension id from resolving an inherited `Object.prototype`
-	// member (e.g. "toString") as a bogus segment and crashing the render.
 	if (isBuiltInSegmentId(id)) {
 		return SEGMENTS[id].render(ctx);
 	}
@@ -949,8 +943,6 @@ export function renderSegment(id: StatusLineSegmentRef, ctx: SegmentContext): Re
 	}
 	try {
 		const rendered = extensionRenderer(toExtensionSegmentContext(ctx), theme);
-		// Extension content shares the built-in single-row surface: strip
-		// row-breaking control characters while preserving intentional styling.
 		return { content: sanitizeStyledStatusText(rendered.content), visible: rendered.visible };
 	} catch (error) {
 		logger.warn(`status-line segment "${id}" threw during render: ${error instanceof Error ? error.message : error}`);

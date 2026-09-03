@@ -493,8 +493,6 @@ describe("ExtensionRunner", () => {
 				modelRegistry,
 			);
 
-			// getStatusLineSegment searches extensions in reverse load order, so the
-			// explicit (later-loaded) extension wins — matching getCommand precedence.
 			const renderer = runner.getStatusLineSegment("dup_seg");
 			expect(renderer).toBeDefined();
 			const rendered = (renderer as unknown as () => { content: string })();

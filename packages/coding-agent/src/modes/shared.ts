@@ -15,18 +15,7 @@ export function sanitizeStatusText(text: string): string {
 		.trim();
 }
 
-/**
- * Sanitize extension-provided status content for a single-line status while
- * preserving a segment's themed color. Only complete SGR sequences (`\x1b[…m`)
- * survive; every other escape sequence (cursor moves, OSC hyperlinks, screen
- * clears) is stripped, and all C0/C1 controls — including tabs, newlines, and
- * carriage returns that would break the one-row status bar — are mapped to a
- * space. Runs are then collapsed and the ends trimmed.
- */
 export function sanitizeStyledStatusText(text: string): string {
-	// A capturing split isolates SGR sequences at odd indices (kept verbatim);
-	// the surrounding text has tabs expanded via the central helper, then any
-	// remaining ANSI and C0/C1 control bytes scrubbed to spaces.
 	return text
 		.split(/(\x1b\[[0-9;:]*m)/g)
 		.map((part, index) =>

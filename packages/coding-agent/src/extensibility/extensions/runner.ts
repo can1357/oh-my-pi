@@ -1146,13 +1146,6 @@ export class ExtensionRunner {
 		return withActiveSettings(this.settings, fn);
 	}
 
-	/**
-	 * Look up an extension-registered status-line segment by id. Callers are
-	 * expected to check built-in segment ids first — a built-in id always
-	 * wins, so this is only consulted for unrecognized ids. When multiple
-	 * extensions register the same id, the most recently loaded one wins,
-	 * matching `getCommand`.
-	 */
 	getStatusLineSegment(id: string): StatusLineSegmentRenderer | undefined {
 		for (let index = this.extensions.length - 1; index >= 0; index -= 1) {
 			const renderer = this.extensions[index]?.statusLineSegments.get(id);
