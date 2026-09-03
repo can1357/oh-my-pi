@@ -31,7 +31,14 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function makeSession(extensionRunner?: { getStatusLineSegment: (id: string) => unknown }) {
+function makeSession(extensionRunner?: {
+	getStatusLineSegment: (id: string) => unknown;
+	runScoped?: <T>(fn: () => T) => T;
+}) {
+	const runner =
+		extensionRunner && typeof extensionRunner.runScoped !== "function"
+			? { ...extensionRunner, runScoped: <T>(fn: () => T): T => fn() }
+			: extensionRunner;
 	return {
 		state: { messages: [], model: undefined },
 		messages: [],
@@ -47,7 +54,7 @@ function makeSession(extensionRunner?: { getStatusLineSegment: (id: string) => u
 		getGoalModeState: () => null,
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		modelRegistry: { isUsingOAuth: () => false },
-		extensionRunner,
+		extensionRunner: runner,
 		sessionManager: {
 			getSessionName: () => "extension segments test",
 			getUsageStatistics: () => ({
@@ -205,6 +212,36 @@ describe("extension-registered status line segments", () => {
 		expect(content).toContain("LINE1 LINE2 TAB");
 		expect(content).not.toContain("\n");
 		expect(content).not.toContain("\t");
+	});
+
+	it("runs an extension segment renderer inside the runner's settings scope", () => {
+		const order: string[] = [];
+		const component = new StatusLineComponent(
+			makeSession({
+				getStatusLineSegment: id =>
+					id === "scoped_widget"
+						? () => {
+								order.push("render");
+								return { content: "SCOPED", visible: true };
+							}
+						: undefined,
+				runScoped: <T>(fn: () => T): T => {
+					order.push("enter");
+					const result = fn();
+					order.push("exit");
+					return result;
+				},
+			}),
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["scoped_widget"],
+			rightSegments: [],
+			separator: "powerline-thin",
+		});
+
+		expect(component.getTopBorder(80).content).toContain("SCOPED");
+		expect(order).toEqual(["enter", "render", "exit"]);
 	});
 });
 

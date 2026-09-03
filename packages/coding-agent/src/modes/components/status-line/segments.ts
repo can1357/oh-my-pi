@@ -937,12 +937,13 @@ export function renderSegment(id: StatusLineSegmentRef, ctx: SegmentContext): Re
 		return SEGMENTS[id].render(ctx);
 	}
 
-	const extensionRenderer = ctx.session.extensionRunner?.getStatusLineSegment(id);
-	if (!extensionRenderer) {
+	const runner = ctx.session.extensionRunner;
+	const extensionRenderer = runner?.getStatusLineSegment(id);
+	if (!runner || !extensionRenderer) {
 		return { content: "", visible: false };
 	}
 	try {
-		const rendered = extensionRenderer(toExtensionSegmentContext(ctx), theme);
+		const rendered = runner.runScoped(() => extensionRenderer(toExtensionSegmentContext(ctx), theme));
 		return { content: sanitizeStyledStatusText(rendered.content), visible: rendered.visible };
 	} catch (error) {
 		logger.warn(`status-line segment "${id}" threw during render: ${error instanceof Error ? error.message : error}`);

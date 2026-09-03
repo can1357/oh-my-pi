@@ -1178,6 +1178,7 @@ export type AssistantThinkingRenderer = (
 	theme: Theme,
 ) => Component | undefined;
 
+/** Token, cache, cost, and throughput totals for the current session. */
 export interface StatusLineSegmentUsage {
 	inputTokens: number;
 	outputTokens: number;
@@ -1188,21 +1189,28 @@ export interface StatusLineSegmentUsage {
 	tokensPerSecond: number | null;
 }
 
+/** Read-only session snapshot passed to an extension-registered status-line segment renderer. */
 export interface StatusLineSegmentContext {
+	/** Terminal columns budgeted for the whole status line; renderers need not truncate to this. */
 	width: number;
 	usage: StatusLineSegmentUsage;
+	/** Context-window usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;
 	contextTokens: number;
 	contextWindow: number;
+	/** Current git branch (as { branch }), or null outside a repo or when git is disabled. */
 	git: { branch: string | null } | null;
+	/** Active (non-idle) processing time accumulated this session, in ms. */
 	activeMs: number;
 }
 
+/** A segment renderer's output: the rendered string and whether to show it. */
 export interface StatusLineSegmentResult {
 	content: string;
 	visible: boolean;
 }
 
+/** Renders one extension status-line segment from the session snapshot and active theme. */
 export type StatusLineSegmentRenderer = (ctx: StatusLineSegmentContext, theme: Theme) => StatusLineSegmentResult;
 
 // ============================================================================
@@ -1439,6 +1447,15 @@ export interface ExtensionAPI {
 	 */
 	registerComposerShape(definition: ComposerShapeDefinition): void;
 
+	/**
+	 * Register a named status-line segment usable from `statusLine.leftSegments` /
+	 * `statusLine.rightSegments`, alongside the built-in segment ids.
+	 *
+	 * A built-in segment id always renders the built-in segment; registering that
+	 * id is shadowed rather than replacing it. When two extensions register the
+	 * same non-built-in id, the most recently loaded extension wins (matching
+	 * `getCommand`). A renderer that throws degrades to an invisible segment.
+	 */
 	registerStatusLineSegment(id: string, renderer: StatusLineSegmentRenderer): void;
 
 	// =========================================================================

@@ -116,6 +116,7 @@ Core methods:
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`
 - `registerComposerShape`
+- `registerStatusLineSegment`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
 - `getActiveTools`, `getAllTools`, `setActiveTools`
@@ -698,6 +699,31 @@ All render methods receive `width`, `paddingX`, the theme's `box` glyphs, and th
 - `scrollbarThumb`: this row intersects the editor scrollbar thumb.
 
 The built-in implementations in `packages/tui/src/components/composer/` are the reference for framed, rule, filled-surface, and IME-safe layouts.
+
+## Status line segment renderer
+
+`registerStatusLineSegment(id, renderer)` contributes a named segment that a user can place in `statusLine.leftSegments` / `statusLine.rightSegments` (with `statusLine.preset: custom`), alongside the built-in ids.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.registerStatusLineSegment("acme-branch", (ctx, theme) => ({
+    content: theme.fg("accent", ctx.git?.branch ?? "detached"),
+    visible: ctx.git?.branch != null,
+  }));
+}
+```
+
+The renderer receives a read-only `StatusLineSegmentContext` (`width`, `usage`, `contextPercent`, `contextTokens`, `contextWindow`, `git.branch`, `activeMs`) and the active `theme`, and returns `{ content, visible }`.
+
+Semantics:
+
+- Built-in ids always win: registering an id that names a built-in segment (e.g. `model`) is shadowed, not overridden.
+- When two extensions register the same non-built-in id, the most recently loaded extension wins (matching command lookup).
+- The renderer runs inside the owning session's settings scope, so a synchronous settings read resolves that session's values.
+- Returned `content` is sanitized for the single-row status bar: complete SGR color sequences survive; other escape sequences and C0/C1 control characters are stripped or collapsed to spaces.
+- A renderer that throws is logged and degrades to an invisible segment rather than crashing the bar.
 
 ## Custom message renderer
 

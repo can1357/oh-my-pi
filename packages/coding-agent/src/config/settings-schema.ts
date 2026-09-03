@@ -263,6 +263,12 @@ export type StatusLineSegmentId =
 	| "usage"
 	| "collab";
 
+/**
+ * A status-line segment reference: a built-in {@link StatusLineSegmentId}, or an
+ * arbitrary id an extension registered via `registerStatusLineSegment`. Kept
+ * distinct from `StatusLineSegmentId` so built-in ids keep literal-type
+ * autocomplete in config and preset definitions.
+ */
 export type StatusLineSegmentRef = StatusLineSegmentId | (string & {});
 
 /** Submenu choice metadata. */
