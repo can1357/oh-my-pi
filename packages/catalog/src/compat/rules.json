@@ -12848,6 +12848,27 @@
 				}
 			},
 			{
+				"source": "providers/vercel-ai-gateway.kdl:79",
+				"providers": [
+					"vercel-ai-gateway"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.2-contributor"
+					},
+					{
+						"kind": "exact",
+						"value": "meta/muse-spark-1.3-contributor"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 131072
+					}
+				}
+			},
+			{
 				"source": "providers/vllm.kdl:4",
 				"class": "qwen",
 				"providers": [

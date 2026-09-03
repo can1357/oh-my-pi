@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Capped the Vercel AI Gateway `meta/muse-spark-1.3-contributor` output budget to 131072 tokens so requests no longer fail with HTTP 400 ([#10705](https://github.com/can1357/oh-my-pi/issues/10705)).
+
 ## [18.1.6] - 2026-09-03
 
 ### Added
