@@ -89,7 +89,7 @@ import {
 	type TaskToolDetails,
 	type YieldItem,
 } from "./types";
-import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
+import { arrayValuedLabels, assembleYieldResult, yieldUsesLastTurn } from "./yield-assembly";
 
 export type { YieldItem } from "./types";
 
@@ -1559,11 +1559,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						});
 						if (data !== undefined) {
-							// Bind the contemporaneous assistant turn to each yield: a
-							// data-less/`useLastTurn` section resolves from the text current
-							// when it executed, so multiple incremental sections keep their
-							// own reports instead of collapsing onto the run's final message.
-							if (event.toolName === "yield" && isRecord(data) && lastAssistantText !== undefined) {
+							// Bind the contemporaneous assistant turn only to yields that
+							// resolve from it (data-less / `useLastTurn`); stamping every
+							// yield would duplicate unselected assistant prose into the
+							// public result payload of ordinary structured yields.
+							if (
+								event.toolName === "yield" &&
+								isRecord(data) &&
+								lastAssistantText !== undefined &&
+								yieldUsesLastTurn(data)
+							) {
 								data.lastTurnText = lastAssistantText;
 							}
 							recordExtractedToolData(event.toolName, data);

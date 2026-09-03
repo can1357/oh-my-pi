@@ -352,6 +352,23 @@ describe("runSubprocess request guards", () => {
 		expect(JSON.parse(result.output)).toEqual({ findings: ["first finding report", "second finding report"] });
 	});
 
+	it("does not stamp last-turn text onto structured yields that carry data", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [assistantMessageEnd("long analysis prose the caller never selected"), yieldToolEnd()],
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-structured-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ ok: true });
+		// A yield with explicit data must not carry the preceding prose into the
+		// public result payload.
+		const items = result.extractedToolData?.yield as Array<Record<string, unknown>> | undefined;
+		expect(items?.[0]?.lastTurnText).toBeUndefined();
+	});
+
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 50 });
 		const handle = createFakeSession({

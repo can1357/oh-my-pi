@@ -25,7 +25,7 @@ function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
 	return Array.isArray(type) && type.length > 0;
 }
 
-function getYieldLabels(type: YieldItem["type"]): string[] {
+function getYieldLabels(type: unknown): string[] {
 	if (typeof type === "string") {
 		const label = type.trim();
 		return label ? [label] : [];
@@ -40,17 +40,26 @@ function getYieldLabels(type: YieldItem["type"]): string[] {
 	return labels;
 }
 
+/**
+ * True when a yield resolves its payload from the last assistant turn rather
+ * than its own `data` — an explicit `useLastTurn`, or a data-less typed section.
+ * Gates both payload resolution and the executor's per-yield text stamp so
+ * ordinary structured yields never carry unselected assistant prose.
+ */
+export function yieldUsesLastTurn(item: { data?: unknown; type?: unknown; useLastTurn?: unknown }): boolean {
+	if (item.useLastTurn === true) return true;
+	if (item.data !== undefined) return false;
+	return getYieldLabels(item.type).length > 0;
+}
+
 function resolveYieldPayload(
 	item: YieldItem,
 	lastAssistantText: string | undefined,
-	labels: string[],
 ): { value: unknown; fromLastAssistantText: boolean; missingData: boolean } {
-	const hasData = item.data !== undefined;
-	const shouldUseLastTurn = item.useLastTurn === true || (labels.length > 0 && !hasData);
 	// Prefer the text bound to this specific yield; fall back to the run-level
 	// value only for items the executor never stamped (e.g. render rebuilds).
 	const resolvedText = item.lastTurnText ?? lastAssistantText;
-	if (shouldUseLastTurn && resolvedText !== undefined) {
+	if (yieldUsesLastTurn(item) && resolvedText !== undefined) {
 		return {
 			value: resolvedText,
 			fromLastAssistantText: true,
@@ -163,7 +172,7 @@ export function assembleYieldResult(
 		if (!isIncrementalYieldType(item.type)) continue;
 		schemaOverridden ||= item.schemaOverridden === true;
 		const labels = getYieldLabels(item.type);
-		const resolved = resolveYieldPayload(item, lastAssistantText, labels);
+		const resolved = resolveYieldPayload(item, lastAssistantText);
 		missingData ||= resolved.missingData;
 		for (const label of labels) {
 			appendYieldSection(sections, sectionCounts, label, resolved.value, arrayLabels?.has(label) ?? false);
@@ -175,7 +184,7 @@ export function assembleYieldResult(
 	// `type: "result"` finalize that carries `data` is the complete result, used
 	// verbatim — never wrapped in a section.
 	if (terminalItem && terminalItem.data !== undefined) {
-		const resolved = resolveYieldPayload(terminalItem, lastAssistantText, []);
+		const resolved = resolveYieldPayload(terminalItem, lastAssistantText);
 		return {
 			data: resolved.value,
 			schemaOverridden: terminalItem.schemaOverridden === true,
@@ -191,7 +200,7 @@ export function assembleYieldResult(
 	}
 
 	if (!terminalItem) return undefined;
-	const resolved = resolveYieldPayload(terminalItem, lastAssistantText, getYieldLabels(terminalItem.type));
+	const resolved = resolveYieldPayload(terminalItem, lastAssistantText);
 	return {
 		data: resolved.value,
 		schemaOverridden: terminalItem.schemaOverridden === true,

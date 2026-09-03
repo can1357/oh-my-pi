@@ -6,6 +6,7 @@
 
 - MCP HTTP reconnects now release obsolete tool generations instead of growing session memory on every reconnect ([#11784](https://github.com/can1357/oh-my-pi/issues/11784)).
 - `/debug` memory reports now keep large heap snapshots out of JavaScript strings and reject empty snapshots instead of saving zero-byte files ([#11785](https://github.com/can1357/oh-my-pi/issues/11785)).
+- Fixed data-less subagent yields discarding a report when the report and yield tool call arrive in separate assistant messages ([#10635](https://github.com/can1357/oh-my-pi/issues/10635)).
 
 ## [18.1.18] - 2026-09-11
 
@@ -332,7 +333,6 @@
 - Fixed messages typed while an edit or write tool was streaming from discarding the completed tool call and triggering unnecessary regeneration.
 - Fixed self-hosted Firecrawl URLs with origin-only base URLs from gaining an extra slash.
 - Fixed omp commit auto-staging from including macOS Unicode-normalization duplicates or files ignored by nested .gitignore rules.
-- Fixed data-less subagent yields discarding a report when the report and yield tool call arrive in separate assistant messages ([#10635](https://github.com/can1357/oh-my-pi/issues/10635)).
 
 ## [18.1.5] - 2026-09-03
 
