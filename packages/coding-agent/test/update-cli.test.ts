@@ -534,7 +534,8 @@ describe("update-cli mise verification", () => {
 			verifyViaPath: async () => ({ ok: false, path: "~/.local/share/mise/shims/omp" }),
 		});
 
-		expect(logLines.some(line => line.includes("You may need to reinstall:"))).toBe(true);
+		expect(logLines.some(line => line.includes("omp.sh/install"))).toBe(true);
+		expect(logLines.some(line => line.includes("mise install --force"))).toBe(false);
 	});
 });
 
