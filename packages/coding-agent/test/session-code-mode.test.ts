@@ -12,7 +12,7 @@ import { Settings } from "../src/config/settings";
 import { EVAL_AGENT_BRIDGE_NAME } from "../src/eval/agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME } from "../src/eval/budget-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME } from "../src/eval/completion-bridge";
-import { EVAL_CONCURRENCY_BRIDGE_NAME } from "../src/eval/concurrency-bridge";
+import { EVAL_CANCEL_BRIDGE_NAME, EVAL_STATUS_BRIDGE_NAME, EVAL_WAIT_BRIDGE_NAME } from "../src/eval/handle-bridge";
 import { createAgentSession } from "../src/sdk";
 import { AgentSession } from "../src/session/agent-session";
 import type { ToolNamespacesInfo } from "../src/session/code-mode";
@@ -148,7 +148,9 @@ describe("resolveCodeMode", () => {
 			EVAL_AGENT_BRIDGE_NAME,
 			EVAL_BUDGET_BRIDGE_NAME,
 			EVAL_COMPLETION_BRIDGE_NAME,
-			EVAL_CONCURRENCY_BRIDGE_NAME,
+			EVAL_WAIT_BRIDGE_NAME,
+			EVAL_STATUS_BRIDGE_NAME,
+			EVAL_CANCEL_BRIDGE_NAME,
 		];
 		const r = resolveCodeMode({
 			provider: "openai-codex",

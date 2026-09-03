@@ -11,8 +11,14 @@ describe("tinyWorkerEnvOverlay", () => {
 	});
 
 	it("lets a present env var win over the persisted setting", () => {
-		expect(tinyWorkerEnvOverlay({ PI_TINY_DEVICE: "cpu" }, "cuda", "fp16")).toEqual({ PI_TINY_DTYPE: "fp16" });
-		expect(tinyWorkerEnvOverlay({ PI_TINY_DTYPE: "q8" }, "cuda", "fp16")).toEqual({ PI_TINY_DEVICE: "cuda" });
+		expect(tinyWorkerEnvOverlay({ PI_TINY_DEVICE: "cpu" }, "cuda", "fp16")).toEqual({
+			PI_TINY_DEVICE: "cpu",
+			PI_TINY_DTYPE: "fp16",
+		});
+		expect(tinyWorkerEnvOverlay({ PI_TINY_DTYPE: "q8" }, "cuda", "fp16")).toEqual({
+			PI_TINY_DEVICE: "cuda",
+			PI_TINY_DTYPE: "q8",
+		});
 	});
 
 	it("omits a var when its setting is the default sentinel or unset", () => {

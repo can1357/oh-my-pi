@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
@@ -166,6 +167,19 @@ describe("structured subagent primitive", () => {
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+
+		const planSession = session({ planMode: true });
+		const customTools = createEvalCustomTools(planSession, [
+			{
+				name: "word_count",
+				description: "Count words",
+				parameters: { type: "object", properties: {} },
+				language: "python",
+			},
+		]);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: planSession, customTools }))).rejects.toThrow(
+			"Eval-defined tools are unavailable in plan mode.",
+		);
 		expect(discover).not.toHaveBeenCalled();
 	});
 	it("reloads model roles before resolving an agent added during the session", async () => {

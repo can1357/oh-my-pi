@@ -200,6 +200,7 @@ export interface TurnRecoveryHost {
 		source: string;
 		delayMs?: number;
 		generation?: number;
+		shouldContinue?: () => boolean;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -2472,6 +2473,7 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
+			shouldContinue: () => this.#retryAttempt > 0,
 			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
 		});
 

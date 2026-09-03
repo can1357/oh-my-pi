@@ -546,7 +546,8 @@ export class ChatTranscriptBuilder {
 		if (
 			message.customType === "irc:incoming" ||
 			message.customType === "irc:autoreply" ||
-			message.customType === "irc:relay"
+			message.customType === "irc:relay" ||
+			message.customType === "irc:workpool"
 		) {
 			this.container.addChild(buildIrcMessageCard(message, () => this.#expanded));
 			return;

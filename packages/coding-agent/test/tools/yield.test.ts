@@ -8,8 +8,10 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
-import { arrayValuedLabels } from "../../src/task/yield-assembly";
+import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
+import { arrayValuedLabels, assembleYieldResult } from "../../src/task/yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -55,6 +57,61 @@ function makeCodexModel(): Model<"openai-codex-responses"> {
 }
 
 describe("YieldTool", () => {
+	it("accepts one workpool item per yield and completes on the final item", async () => {
+		let items: Array<{ id: string; index: number }> = [];
+		const tool = new YieldTool(createSession({ getWorkPoolYieldItems: () => items }));
+		expect(toRecord(tool.parameters).required).toEqual(["result"]);
+
+		items = [
+			{ id: "review#1", index: 1 },
+			{ id: "review#2", index: 2 },
+		];
+		expect(toRecord(tool.parameters).required).toEqual(["key"]);
+		expect(tool.description).toContain("ONE workpool item at a time");
+		const first = await tool.execute("pool-1", { key: 1, data: "one" });
+		expect(first.content).toEqual([{ type: "text", text: "Item 1 submitted. Remaining item(s): 2." }]);
+		expect(first.details).toMatchObject({
+			status: "success",
+			type: ["review#1"],
+			complete: undefined,
+		});
+		await expect(tool.execute("pool-duplicate", { key: 1, data: { outcome: "again" } })).rejects.toThrow(
+			"already submitted",
+		);
+
+		const second = await tool.execute("pool-2", { key: 2, data: { outcome: "two" } });
+		expect(second.content).toEqual([
+			{ type: "text", text: "Item 2 submitted. All workpool items are complete; ending this turn." },
+		]);
+		expect(second.details).toMatchObject({ status: "success", type: ["review#2"], complete: true });
+
+		items = [{ id: "next#1", index: 1 }];
+		const next = await tool.execute("pool-next", { key: 1, data: { outcome: "new batch" } });
+		expect(next.details).toMatchObject({ type: ["next#1"], complete: true });
+	});
+
+	it("assembles per-key workpool yields into the batch output schema", () => {
+		const items = [
+			{ id: "review#1", index: 1 },
+			{ id: "review#2", index: 2 },
+		];
+		const schema = buildWorkPoolOutputSchema(items);
+		const assembled = assembleYieldResult(
+			[
+				{ status: "success", type: ["review#1"], data: { outcome: "one" } },
+				{ status: "success", type: ["review#2"], data: { outcome: "two" }, complete: true },
+			],
+			undefined,
+			arrayValuedLabels(schema),
+		);
+		expect(assembled?.data).toEqual({
+			"review#1": { outcome: "one" },
+			"review#2": { outcome: "two" },
+		});
+		const validator = buildOutputValidator(schema).validator;
+		expect(validator?.validate(assembled?.data).success).toBe(true);
+	});
+
 	it("accepts success payload with data", async () => {
 		const tool = new YieldTool(createSession());
 		const result = await tool.execute("call-1", { result: { data: { ok: true } } } as never);

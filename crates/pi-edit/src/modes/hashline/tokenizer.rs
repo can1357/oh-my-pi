@@ -536,6 +536,26 @@ fn unquote_path(raw: &str) -> Option<String> {
 	}
 }
 
+/// Whether a header path closes a bracket it never opened (`Foo] [bar.ts`).
+///
+/// The path runs from the row's opening `[` to its final `]`, so a path may
+/// legitimately contain brackets (`app/[slug]/page.tsx`). An unmatched `]`
+/// cannot come from one authored header — it means the row holds two bracket
+/// groups, as in `[*** Begin Patch] [migrations.ts#5275]`, and reading it as a
+/// path would aim the edit at a file named after the surrounding noise.
+pub fn header_path_has_orphan_bracket(path: &str) -> bool {
+	let mut depth = 0u32;
+	for byte in path.bytes() {
+		match byte {
+			b'[' => depth += 1,
+			b']' if depth == 0 => return true,
+			b']' => depth -= 1,
+			_ => {},
+		}
+	}
+	false
+}
+
 fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	let line = line.trim_end();
 	let body = line
@@ -547,6 +567,7 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	if let Some((path, hash)) = body.rsplit_once(HL_FILE_HASH_SEP) {
 		if path.is_empty()
 			|| path.contains('#')
+			|| header_path_has_orphan_bracket(path)
 			|| hash.len() != HL_FILE_HASH_LENGTH
 			|| !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 		{
@@ -554,7 +575,7 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 		}
 		return Some((path.to_string(), Some(hash.to_ascii_uppercase())));
 	}
-	if body.contains('#') {
+	if body.contains('#') || header_path_has_orphan_bracket(body) {
 		None
 	} else {
 		Some((body.to_string(), None))
