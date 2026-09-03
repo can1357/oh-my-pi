@@ -105,6 +105,25 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[2]?.options?.textVerbosity).toBe("medium");
 	});
 
+	it("caps stream watchdogs to remaining --max-time so fallbackChains can hop", () => {
+		const settings = Settings.isolated({
+			"providers.streamFirstEventTimeoutSeconds": 600,
+			"providers.streamIdleTimeoutSeconds": 300,
+			"retry.modelFallback": true,
+		});
+		const { fn: base, calls } = captureBase();
+		const deadline = Date.now() + 90_000;
+		const wrapped = createSettingsAwareStreamFn(settings, base, { getDeadline: () => deadline });
+
+		wrapped(stubModel, stubContext, undefined);
+
+		const first = calls[0]?.options?.streamFirstEventTimeoutMs;
+		const idle = calls[0]?.options?.streamIdleTimeoutMs;
+		expect(first).toBeGreaterThanOrEqual(44_000);
+		expect(first).toBeLessThanOrEqual(45_000);
+		expect(idle).toBe(first);
+	});
+
 	it("forwards configured stream watchdog budgets while preserving caller overrides", () => {
 		const settings = Settings.isolated({
 			"providers.streamFirstEventTimeoutSeconds": 600,
