@@ -94,6 +94,8 @@ const SKILL_FIELDS: Record<string, true> = {
 	"allowed-tools": true,
 	metadata: true,
 	compatibility: true,
+	mode: true,
+	reminder: true,
 };
 /** Skill `name` characters: Unicode letters/digits (Python `str.isalnum`) and hyphens. */
 const SKILL_NAME_CHARS_RE = /^[\p{L}\p{N}-]+$/u;
@@ -117,9 +119,8 @@ function validateSkillName(raw: unknown, dirName: string): string | null {
  * Validate `SKILL.md` frontmatter against the Agent Skills specification
  * (https://agentskills.io/specification), the source of truth for skill
  * validity under Agent Plugins §7.1, mirroring the official skills-ref
- * reference validator: the frontmatter schema is CLOSED to its six fields and
- * any unexpected key rejects the skill. Returns the first violation, or `null`
- * when the skill conforms. Frontmatter keys must be raw (unnormalized).
+ * reference validator: the frontmatter schema is CLOSED to its eight fields
+ * and any unexpected key rejects the skill. Returns the first violation, or `null`
  */
 export function validateAgentSkillFrontmatter(frontmatter: Record<string, unknown>, dirName: string): string | null {
 	for (const key in frontmatter) {
@@ -142,6 +143,15 @@ export function validateAgentSkillFrontmatter(frontmatter: Record<string, unknow
 	if (compatibility !== undefined) {
 		if (typeof compatibility !== "string") return `"compatibility" must be a string`;
 		if (compatibility.length > 500) return `"compatibility" exceeds 500 characters`;
+	}
+
+	const mode = frontmatter.mode;
+	if (mode !== undefined && typeof mode !== "boolean") return `"mode" must be a boolean`;
+
+	const reminder = frontmatter.reminder;
+	if (reminder !== undefined) {
+		if (typeof reminder !== "string") return `"reminder" must be a string`;
+		if (reminder.length > 1024) return `"reminder" exceeds 1024 characters`;
 	}
 
 	const metadata = frontmatter.metadata;

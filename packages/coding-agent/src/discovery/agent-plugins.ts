@@ -185,6 +185,10 @@ async function scanStandardSkills(realRoot: string, level: "user" | "project"): 
 				path: skillPath,
 				content: body,
 				frontmatter,
+				// mode/reminder are client extensions accepted by the closed skill
+				// schema; kebab-case aliases are already canonicalized above.
+				...(frontmatter.mode !== undefined && { mode: frontmatter.mode }),
+				...(frontmatter.reminder !== undefined && { reminder: frontmatter.reminder }),
 				level,
 				_source: createSourceMeta(PROVIDER_ID, skillPath, level),
 			});

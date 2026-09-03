@@ -477,6 +477,8 @@ export async function scanSkillsFromDir(
 				path: skillPath,
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
+				mode: parseBoolean(frontmatter.mode),
+				reminder: typeof frontmatter.reminder === "string" ? frontmatter.reminder : undefined,
 				level,
 				_source: createSourceMeta(providerId, skillPath, level, options.origin),
 			});

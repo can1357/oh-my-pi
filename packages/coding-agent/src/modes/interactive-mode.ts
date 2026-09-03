@@ -3296,6 +3296,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.subagentContainer.addChild(new SubagentHudComponent(lines, order, layout.toggleRow));
 	}
 
+	#updateSkillModeStatus(): void {
+		const pinned = this.session.getPinnedModeSkillNames();
+		this.statusLine.setSkillModeStatus(pinned.length > 0 ? [...pinned] : undefined);
+		this.ui.requestRender();
+	}
+
 	#vibeParentSession(): VibeParentSession {
 		return {
 			getAgentId: () => this.session.getAgentId() ?? null,
@@ -3583,6 +3589,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		this.#updateSkillModeStatus();
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
@@ -6257,6 +6264,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.prepareSessionSwitch();
 		await this.#commandController.handleClearCommand();
+		this.#updateSkillModeStatus();
 	}
 
 	handleFreshCommand(): Promise<void> {
