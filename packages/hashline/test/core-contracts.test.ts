@@ -180,6 +180,11 @@ describe("hashline input splitter", () => {
 	it("rejects unified-diff hunk headers on the first line", () => {
 		const input = ["@@ -1,3 +1,3 @@", "PUT <1:", repl("x")].join("\n");
 		expect(() => splitHashlineInputs(input)).toThrow(/unified-diff hunk header/);
+		// The remediation has to name keywords the grammar accepts. A model that
+		// follows `replace`/`delete`/`insert` guidance just fails a second time.
+		expect(() => splitHashlineInputs(input)).toThrow(/`PUT 1\.=1:`/);
+		expect(() => splitHashlineInputs(input)).toThrow(/`CUT 1\.=1`/);
+		expect(() => splitHashlineInputs(input)).toThrow(/`PUT <1:`/);
 	});
 });
 

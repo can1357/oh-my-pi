@@ -11,7 +11,14 @@ import * as path from "node:path";
 import { applyEdits } from "./apply";
 import { resolveBlockEdits } from "./block";
 import { hasClipboardEdit } from "./clipboard";
-import { HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX } from "./format";
+import {
+	HL_FILE_HASH_EXAMPLES,
+	HL_FILE_HASH_LENGTH,
+	HL_FILE_HASH_SEP,
+	HL_FILE_PREFIX,
+	HL_FILE_SUFFIX,
+	HL_RANGE_SEP,
+} from "./format";
 import { CLIPBOARD_INTERLEAVED_SECTIONS } from "./messages";
 import { parsePatch, parsePatchStreaming } from "./parser";
 import { Tokenizer } from "./tokenizer";
@@ -191,7 +198,7 @@ function splitRawSections(input: string, options: SplitOptions = {}): RawSection
 		if (/^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@/.test(firstTrimmed)) {
 			throw new Error(
 				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. " +
-					`File sections start with \`${HL_FILE_PREFIX}path${HL_FILE_HASH_SEP}HASH${HL_FILE_SUFFIX}\`; use \`replace\`, \`delete\`, or \`insert\` ops.`,
+					`File sections start with \`${HL_FILE_PREFIX}path${HL_FILE_HASH_SEP}HASH${HL_FILE_SUFFIX}\`; use \`PUT 1${HL_RANGE_SEP}1:\` with \`+final-content\` rows to replace, \`CUT 1${HL_RANGE_SEP}1\` to delete, or \`PUT <1:\` / \`PUT >1:\` to insert.`,
 			);
 		}
 		const preview = JSON.stringify(firstLine.slice(0, 120));

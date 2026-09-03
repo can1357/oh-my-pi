@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the unified-diff contamination error naming `replace`, `delete`, and `insert` ops that the grammar does not accept; it now points at `PUT`, `CUT`, and the gap forms.
+
 ## [18.0.4] - 2026-08-24
 
 ### Changed
