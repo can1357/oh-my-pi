@@ -12,11 +12,16 @@
  * `home` instead of `os.homedir()`. Module-level CLI injection state is
  * reset between cases so they cannot poison each other.
  */
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getCapability, loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
+import {
+	getCapability,
+	getEnabledProviders,
+	loadCapability,
+	setEnabledProviders,
+} from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { hookCapability } from "@oh-my-pi/pi-coding-agent/capability/hook";
 import { mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
@@ -28,6 +33,7 @@ import { toolCapability } from "@oh-my-pi/pi-coding-agent/capability/tool";
 import type { LoadContext, Provider } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
+import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
@@ -36,6 +42,7 @@ import {
 	withOmpExtensionRootScope,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const PROVIDER_ID = "omp-plugins";
@@ -44,6 +51,7 @@ let tempDir: string;
 let home: string;
 let project: string;
 let ext: string;
+let originalEnabledProviders: string[];
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -92,9 +100,13 @@ function buildExtensionPackage(packageDir: string, skillName = "my-skill"): void
 
 beforeEach(() => {
 	clearCache();
+	clearClaudePluginRootsCache();
 	clearOmpExtensionCliRoots();
+	originalEnabledProviders = getEnabledProviders();
+	setEnabledProviders(originalEnabledProviders.filter(id => id !== "claude" && id !== "claude-plugins"));
 	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-plugins-"));
 	home = path.join(tempDir, "home");
+	vi.spyOn(os, "homedir").mockReturnValue(home);
 	project = path.join(tempDir, "project");
 	ext = path.join(tempDir, "my-extension");
 	fs.mkdirSync(home, { recursive: true });
@@ -106,13 +118,16 @@ beforeEach(() => {
 
 afterEach(() => {
 	clearCache();
+	clearClaudePluginRootsCache();
 	clearOmpExtensionCliRoots();
+	setEnabledProviders(originalEnabledProviders);
 	if (originalAgentDirEnv) {
 		setAgentDir(originalAgentDirEnv);
 	} else {
 		setAgentDir(fallbackAgentDir);
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
+	vi.restoreAllMocks();
 	removeSyncWithRetries(tempDir);
 });
 
@@ -151,6 +166,33 @@ test("user settings.json#extensions also feeds sub-discovery", async () => {
 
 	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
 	expect(skills.map(s => s.name)).toContain("my-skill");
+});
+
+test("OMP marketplace registry surfaces user plugin skills without Claude opt-in", async () => {
+	const marketplacePlugin = path.join(tempDir, "marketplace-plugin");
+	buildExtensionPackage(marketplacePlugin, "marketplace-skill");
+	writeFile(
+		path.join(home, ".omp", "plugins", "installed_plugins.json"),
+		JSON.stringify({
+			version: 2,
+			plugins: {
+				"marketplace-plugin@test-market": [
+					{
+						scope: "user",
+						installPath: marketplacePlugin,
+						version: "1.0.0",
+						enabled: true,
+					},
+				],
+			},
+		}),
+	);
+	clearClaudePluginRootsCache();
+
+	const result = await loadSkills({ cwd: project });
+
+	expect(result.skills.map(skill => skill.name)).toContain("marketplace-skill");
+	expect(result.skills.find(skill => skill.name === "marketplace-skill")?._source?.provider).toBe("omp-plugins");
 });
 
 test("project config.yml#extensions surfaces every sub-directory (#9768)", async () => {

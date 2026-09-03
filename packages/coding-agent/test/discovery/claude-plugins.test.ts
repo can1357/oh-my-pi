@@ -138,6 +138,7 @@ describe("listClaudePluginRoots", () => {
 		expect(result.roots[0]).toEqual({
 			id: "test-plugin@test-market",
 			marketplace: "test-market",
+			registry: "claude",
 			plugin: "test-plugin",
 			version: "1.0.0",
 			path: "/path/to/test-plugin",
@@ -172,6 +173,7 @@ describe("listClaudePluginRoots", () => {
 			{
 				id: "relocated@market",
 				marketplace: "market",
+				registry: "claude",
 				plugin: "relocated",
 				version: "1.0.0",
 				path: "/path/to/relocated",
