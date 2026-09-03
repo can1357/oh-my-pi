@@ -48,7 +48,13 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../types";
-import { isRecord, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
+import {
+	getHeaderCaseInsensitive,
+	isRecord,
+	normalizeSystemPrompts,
+	normalizeToolCallId,
+	resolveCacheRetention,
+} from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
@@ -233,15 +239,6 @@ function buildClaudeCodeBetas({
 	if (thinkingRequest) betas.push(effortBeta);
 	betas.push(fallbackCreditBeta);
 	return betas;
-}
-
-function getHeaderCaseInsensitive(headers: Record<string, string> | undefined, headerName: string): string | undefined {
-	if (!headers) return undefined;
-	const normalizedName = headerName.toLowerCase();
-	for (const [key, value] of Object.entries(headers)) {
-		if (key.toLowerCase() === normalizedName) return value;
-	}
-	return undefined;
 }
 
 function isClaudeCodeClientUserAgent(userAgent: string | undefined): userAgent is string {
@@ -3506,6 +3503,64 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	}
 }
 
+/**
+ * Anchor cache_control on the stable request head — the last (non-deferred)
+ * tool definition and the last system block. The canonical cache order is
+ * tools → system → messages, so a breakpoint on the final system block caches
+ * the entire tools+system prefix, and the extra tool breakpoint keeps the tool
+ * definitions cached even when the system text changes. This guarantees the
+ * large, unchanging head is a cache hit on every turn regardless of how the
+ * message tail churns — the breakpoint placement first-party Anthropic clients
+ * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
+ * moving message tail, so tail churn re-writes the whole head uncached.
+ *
+ * Anthropic allows at most 4 cache breakpoints per request. At most one is
+ * spent on tools and one on system here, leaving two for the message tail in
+ * `applyPromptCaching`. Head caching is skipped entirely when the head is
+ * already anchored — the OAuth Claude Code path caches its own instruction
+ * block at buildAnthropicSystemBlocks, and via the canonical tools → system
+ * order that single system breakpoint already caches every preceding tool. Re-
+ * anchoring there would be redundant, would change the OAuth wire, and could
+ * push a tool-heavy request over the 4-breakpoint budget, so the general
+ * API-key path (nothing cached upstream) is the only one decorated here.
+ *
+ * Runs after the byte-stability plane (planStableAnthropicSystem /
+ * planStableAnthropicTools), which hands back fresh block/tool copies each turn
+ * and keys tool identity off a fingerprint that excludes cache_control — so
+ * decorating here is byte-stable across turns and never forces a re-baseline.
+ */
+function applyHeadCaching(
+	systemBlocks: AnthropicSystemBlock[] | undefined,
+	tools: AnthropicWireTool[] | undefined,
+	cacheControl?: AnthropicCacheControl,
+): void {
+	if (!cacheControl) return;
+
+	// If anything in the head already carries a breakpoint, the head is already
+	// cached (OAuth anchors its identity system block, which — canonical order
+	// tools → system — caches all tools too). Leave it untouched.
+	const headAlreadyCached =
+		(systemBlocks?.some(block => block.cache_control != null) ?? false) ||
+		(tools?.some(tool => tool.cache_control != null) ?? false);
+	if (headAlreadyCached) return;
+
+	if (tools && tools.length > 0) {
+		// Deferred tools are not part of the checked prefix until referenced, so
+		// anchor the last tool that actually sits in the stable prefix.
+		for (let index = tools.length - 1; index >= 0; index--) {
+			const tool = tools[index];
+			if (!tool || tool.defer_loading) continue;
+			tool.cache_control = cloneAnthropicCacheControl(cacheControl);
+			break;
+		}
+	}
+
+	if (systemBlocks && systemBlocks.length > 0) {
+		const lastBlock = systemBlocks[systemBlocks.length - 1];
+		if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+	}
+}
+
 function usesAdaptiveThinkingTagOnly(model: Model<"anthropic-messages">): boolean {
 	const thinking = model.thinking;
 	if (thinking?.mode !== "anthropic-adaptive") return false;
@@ -3981,6 +4036,9 @@ function buildParams(
 	if (controlState) syncAnthropicControlState(controlState, wireMessages);
 	systemBlocks = planStableAnthropicSystem(systemBlocks, controlState, model.compat.supportsMidConversationSystem);
 	tools = planStableAnthropicTools(tools, wireMessages, controlState, model.compat.supportsMidConversationToolChanges);
+	// Anchor the stable tools+system head so it stays cached across turns; the
+	// moving message tail is anchored separately in applyPromptCaching below.
+	applyHeadCaching(systemBlocks, tools, cacheControl);
 	const topLevelEffort = planStableAnthropicEffort(
 		outputConfigEffort,
 		wireMessages,

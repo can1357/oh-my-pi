@@ -405,6 +405,7 @@ export class StatusLineComponent implements Component {
 	/** Frame timer driving repaints while the brand fade is unsettled. */
 	#brandFadeTimer: NodeJS.Timeout | undefined;
 	#hookStatuses: Map<string, string> = new Map();
+	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	/**
@@ -724,10 +725,14 @@ export class StatusLineComponent implements Component {
 
 	setHookStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
-			this.#hookStatuses.delete(key);
+			if (!this.#hookStatuses.delete(key)) return;
 		} else {
+			if (this.#hookStatuses.get(key) === text) return;
 			this.#hookStatuses.set(key, text);
 		}
+		this.#sortedHookStatuses = Array.from(this.#hookStatuses.entries())
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([, status]) => status);
 	}
 
 	watchBranch(onBranchChange: () => void): void {
@@ -1814,6 +1819,7 @@ export class StatusLineComponent implements Component {
 			width,
 			options: segmentOptions ?? {},
 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
+			hookStatuses: this.#sortedHookStatuses,
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
 			prewalk:
@@ -2444,11 +2450,8 @@ export class StatusLineComponent implements Component {
 			}
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;
-		if (showHooks && this.#hookStatuses.size > 0) {
-			const hookLines = Array.from(this.#hookStatuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
-			lines.push(...hookLines);
+		if (showHooks && this.#sortedHookStatuses.length > 0) {
+			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeStatusText(text), width)));
 		}
 		return lines;
 	}

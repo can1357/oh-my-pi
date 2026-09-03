@@ -435,9 +435,11 @@ mod tests {
 	#[test]
 	fn clipboard_batch_fork_and_commit_preserve_named_only() {
 		let store = EditStore::new();
-		let mut initial = Clipboard::default();
-		initial.named = Some(HashMap::from([("a".into(), vec!["one".into()])]));
-		initial.lines = Some(vec!["anonymous".into()]);
+		let initial = Clipboard {
+			named: Some(HashMap::from([("a".into(), vec!["one".into()])])),
+			lines: Some(vec!["anonymous".into()]),
+			..Default::default()
+		};
 		store.commit_clipboard(&initial);
 		let mut batch = store.start_clipboard_batch();
 		assert!(batch.lines.is_none());

@@ -32,7 +32,7 @@ fn insert_before(line: u32, text: &str, op_line: u32) -> Edit {
 		block_start: None,
 	}
 }
-fn delete(line: u32, op_line: u32) -> Edit {
+const fn delete(line: u32, op_line: u32) -> Edit {
 	Edit::Delete {
 		anchor:        Anchor { line },
 		line_num:      op_line,

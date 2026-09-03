@@ -5,9 +5,11 @@
 ### Added
 
 - Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
+## [18.1.6] - 2026-09-03
+
 ### Fixed
 
-- Fixed the band composer dropping its status row while the top border has no content, so the status line no longer pushes the prompt down when it attaches.
+- Fixed the band composer layout so the status line remains visible and no longer causes the prompt to shift unexpectedly when the top border is empty.
 
 ## [18.1.5] - 2026-09-03
 

@@ -2,19 +2,28 @@
 
 ## [Unreleased]
 
+## [18.1.6] - 2026-09-03
+
 ### Breaking Changes
 
-- Renamed `claudeCodeSessionId` to `sessionId` in `AnthropicClientOptionsArgs`
-- Renamed `openAISessionId` to `sessionId` in `OpenAIRequestSetupOptions`
+- Renamed `claudeCodeSessionId` to `sessionId` in `AnthropicClientOptionsArgs`.
+- Renamed `openAISessionId` to `sessionId` in `OpenAIRequestSetupOptions`.
+
+### Added
+
+- Added Amazon Bedrock `requestMetadata` support for cost and usage attribution in AWS invocation logs.
 
 ### Changed
 
-- Inference requests now identify as omp by default while preserving explicit provider and OAuth User-Agent fingerprints.
+- Codex GPT-5.6 requests now use full Responses by default, enabling independent tool calls to run in parallel; provider-native compaction continues to use catalog-selected Responses Lite.
+- Inference requests now identify as omp by default while preserving explicit provider and OAuth User-Agent fingerprints. Amazon Bedrock requests use an `omp/<version>` User-Agent by default and honor configured `User-Agent` overrides.
 
 ### Fixed
 
-- Anthropic and OpenRouter 402 credit-exhaustion errors ("would exceed your available credits", "Insufficient credits") now switch to a sibling account instead of stopping the turn with a retry hint.
-- OpenCode Go (and Zen) requests now carry the required `x-opencode-session` header with a stable per-conversation id, so they keep working once the gateway starts rejecting headerless requests.
+- Fixed Antigravity usage reporting to match the official client's five-hour and weekly quota buckets.
+- Anthropic and OpenRouter credit-exhaustion errors now automatically switch to a sibling account instead of stopping the turn with a retry hint.
+- Fixed OpenCode Go and Zen requests by including the required stable per-conversation session identification.
+- Improved Anthropic prompt caching so explicit cache breakpoints preserve reusable tools and system prompts when the message tail changes.
 
 ## [18.1.5] - 2026-09-03
 

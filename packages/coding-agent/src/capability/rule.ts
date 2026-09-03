@@ -30,6 +30,8 @@ export interface RuleFrontmatter {
 	astCondition?: string | string[];
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
+	/** Agent-name globs this rule applies to; absent = every agent. `main` targets the top-level session. */
+	agents?: string[] | string;
 	/** Per-rule TTSR interrupt mode override. */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	[key: string]: unknown;
@@ -57,6 +59,8 @@ export interface Rule {
 	astCondition?: string[];
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
+	/** Lowercased agent-name globs this rule applies to (absent = every agent). */
+	agents?: string[];
 	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	/** Source metadata */
@@ -174,6 +178,43 @@ function normalizeScopeField(value: unknown): string[] | undefined {
 		return undefined;
 	}
 	return Array.from(new Set(tokens));
+}
+
+/**
+ * Parse the `agents` frontmatter field into lowercased agent-name glob patterns.
+ * Reuses the scope tokenizer for comma-separated spellings; `{a,b}` groups survive.
+ */
+export function parseRuleAgents(value: unknown): string[] | undefined {
+	const tokens = normalizeScopeField(value);
+	if (!tokens) {
+		return undefined;
+	}
+	return Array.from(new Set(tokens.map(token => token.replace(/\s*,\s*/g, ",").toLowerCase())));
+}
+
+/** Agent name used for the top-level (non-sub) session when evaluating `agents`. */
+export const MAIN_AGENT_RULE_NAME = "main";
+
+/** Fallback agent name used for a subagent session with no explicit `agentName` (see sdk.ts). */
+export const SUB_AGENT_RULE_NAME = "sub";
+
+/**
+ * Whether a rule's `agents` scope admits `agentName`. A rule without `agents`
+ * applies everywhere; `agentName === undefined` disables scoping entirely
+ * (used by CLI inventory listings that must show every rule).
+ */
+export function ruleAppliesToAgent(rule: Pick<Rule, "agents">, agentName: string | undefined): boolean {
+	const patterns = rule.agents;
+	if (!patterns || patterns.length === 0 || agentName === undefined) {
+		return true;
+	}
+	const name = agentName.trim().toLowerCase();
+	return patterns.some(pattern => {
+		if (pattern === name) {
+			return true;
+		}
+		return new Bun.Glob(pattern).match(name);
+	});
 }
 /**
  * Heuristic for condition shorthand that looks like a file glob (for example `*.rs`).

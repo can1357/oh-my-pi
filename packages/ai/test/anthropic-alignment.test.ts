@@ -475,7 +475,9 @@ describe("Anthropic request fingerprint alignment", () => {
 			messages?: Array<{ role: string; content: string | Array<{ cache_control?: unknown }> }>;
 		};
 
-		expect(payload.system?.some(block => block.cache_control != null)).toBe(false);
+		// Only the last system block is anchored (stable head); earlier blocks stay uncached.
+		expect(payload.system?.slice(0, -1).some(block => block.cache_control != null)).toBe(false);
+		expect(payload.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
 		const userContent = payload.messages?.[0]?.content;
 		expect(Array.isArray(userContent) ? userContent[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
@@ -784,7 +786,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(extractSuffix(billingWithDev)).toBe(extractSuffix(billingUserOnly));
 	});
 
-	it("leaves system blocks uncached on API-key requests", async () => {
+	it("anchors the last system block on API-key requests", async () => {
 		const payload = (await captureAnthropicPayload(
 			ANTHROPIC_MODEL,
 			{
@@ -794,10 +796,14 @@ describe("Anthropic request fingerprint alignment", () => {
 			{ isOAuth: false },
 		)) as { system?: Array<{ type: string; text?: string; cache_control?: unknown }> };
 
-		expect(payload.system).toEqual([
-			{ type: "text", text: "stable system" },
-			{ type: "text", text: "stable durable context" },
-		]);
+		// The general API-key path now anchors the stable head: the last system
+		// block carries the breakpoint, earlier blocks stay uncached.
+		expect(payload.system?.[0]).toEqual({ type: "text", text: "stable system" });
+		expect(payload.system?.[1]).toEqual({
+			type: "text",
+			text: "stable durable context",
+			cache_control: { type: "ephemeral" },
+		});
 	});
 
 	it("uses Bearer auth for non-Anthropic API bases with api-key credentials", () => {
