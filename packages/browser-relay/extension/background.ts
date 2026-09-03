@@ -39,6 +39,7 @@ import {
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
 import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
+import { PendingAttaches, type PendingAttachToken } from "./pending-attaches";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -67,8 +68,7 @@ let pingTimer: NodeJS.Timeout | null = null;
 const pendingAttaches = new Set<Promise<void>>();
 const pendingDetaches = new Set<Promise<void>>();
 let pendingOperationGeneration = 0;
-const pendingAttachTabs = new Set<number>();
-const canceledPendingAttachTabs = new Set<number>();
+const pendingAttachOperations = new PendingAttaches();
 const guardDetachments = new Set<number>();
 const attachmentStateEpochs = new Map<number, number>();
 // Tabs the relay explicitly asked us to detach. onDetach reports these as
@@ -793,8 +793,8 @@ async function buildHello(): Promise<
 }
 
 async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
-	pendingAttachTabs.add(tabId);
-	const pending = attachTabOperation(tabId, socket);
+	const operation = pendingAttachOperations.begin(tabId);
+	const pending = attachTabOperation(tabId, socket, operation);
 	pendingOperationGeneration++;
 	invalidateHelloRefresh();
 	pendingAttaches.add(pending);
@@ -802,14 +802,14 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 		await pending;
 	} finally {
 		pendingAttaches.delete(pending);
-		pendingAttachTabs.delete(tabId);
-		canceledPendingAttachTabs.delete(tabId);
+		pendingAttachOperations.finish(tabId, operation);
 	}
 }
 
 async function attachTabOperation(
 	tabId: number,
 	socket: WebSocket,
+	operation: PendingAttachToken,
 ): Promise<void> {
 	await chrome.debugger.attach({ tabId }, "1.3");
 	noteAttachmentStateChange(attachmentStateEpochs, tabId);
@@ -879,7 +879,7 @@ async function attachTabOperation(
 		);
 		throw error;
 	}
-	if (canceledPendingAttachTabs.delete(tabId)) {
+	if (operation.canceled) {
 		// onDetach ran while the recovery marker was being persisted. Undo the
 		// delayed track and fail the RPC: returning success would make the bridge
 		// mint a session for a Chrome root the user already canceled.
@@ -1175,8 +1175,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 		source.tabId,
 		reason,
 	);
-	if (!relayInitiated && pendingAttachTabs.has(source.tabId))
-		canceledPendingAttachTabs.add(source.tabId);
+	if (!relayInitiated && pendingAttachOperations.has(source.tabId))
+		pendingAttachOperations.cancel(source.tabId);
 	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 	// A detach can land after buildHello() snapshots getTargets() while that

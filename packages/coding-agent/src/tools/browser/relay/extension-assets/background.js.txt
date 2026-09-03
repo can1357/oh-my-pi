@@ -194,6 +194,33 @@ async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOpe
   }
 }
 
+// extension/pending-attaches.ts
+class PendingAttaches {
+  #byTab = new Map;
+  begin(tabId) {
+    const token = { canceled: false };
+    const pending = this.#byTab.get(tabId) ?? new Set;
+    pending.add(token);
+    this.#byTab.set(tabId, pending);
+    return token;
+  }
+  finish(tabId, token) {
+    const pending = this.#byTab.get(tabId);
+    if (!pending)
+      return;
+    pending.delete(token);
+    if (pending.size === 0)
+      this.#byTab.delete(tabId);
+  }
+  cancel(tabId) {
+    for (const token of this.#byTab.get(tabId) ?? [])
+      token.canceled = true;
+  }
+  has(tabId) {
+    return (this.#byTab.get(tabId)?.size ?? 0) > 0;
+  }
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
@@ -210,8 +237,7 @@ var pingTimer = null;
 var pendingAttaches = new Set;
 var pendingDetaches = new Set;
 var pendingOperationGeneration = 0;
-var pendingAttachTabs = new Set;
-var canceledPendingAttachTabs = new Set;
+var pendingAttachOperations = new PendingAttaches;
 var guardDetachments = new Set;
 var attachmentStateEpochs = new Map;
 var relayInitiatedDetachTabs = new Set;
@@ -635,8 +661,8 @@ async function buildHello() {
   };
 }
 async function attachTab(tabId, socket) {
-  pendingAttachTabs.add(tabId);
-  const pending = attachTabOperation(tabId, socket);
+  const operation = pendingAttachOperations.begin(tabId);
+  const pending = attachTabOperation(tabId, socket, operation);
   pendingOperationGeneration++;
   invalidateHelloRefresh();
   pendingAttaches.add(pending);
@@ -644,11 +670,10 @@ async function attachTab(tabId, socket) {
     await pending;
   } finally {
     pendingAttaches.delete(pending);
-    pendingAttachTabs.delete(tabId);
-    canceledPendingAttachTabs.delete(tabId);
+    pendingAttachOperations.finish(tabId, operation);
   }
 }
-async function attachTabOperation(tabId, socket) {
+async function attachTabOperation(tabId, socket, operation) {
   await chrome.debugger.attach({ tabId }, "1.3");
   noteAttachmentStateChange(attachmentStateEpochs, tabId);
   if (ws !== socket) {
@@ -683,7 +708,7 @@ async function attachTabOperation(tabId, socket) {
     });
     throw error;
   }
-  if (canceledPendingAttachTabs.delete(tabId)) {
+  if (operation.canceled) {
     attachmentGuard.untrack(tabId);
     await forgetRecoverable(tabId);
     throw new Error("debugger attachment detached before attach completed");
@@ -874,8 +899,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return;
   }
   const relayInitiated = consumeRelayInitiatedDetach(relayInitiatedDetachTabs, source.tabId, reason);
-  if (!relayInitiated && pendingAttachTabs.has(source.tabId))
-    canceledPendingAttachTabs.add(source.tabId);
+  if (!relayInitiated && pendingAttachOperations.has(source.tabId))
+    pendingAttachOperations.cancel(source.tabId);
   forgetRecoverable(source.tabId);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
   refreshHello();
