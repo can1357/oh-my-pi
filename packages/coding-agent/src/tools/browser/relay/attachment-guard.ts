@@ -41,18 +41,23 @@ export class AttachmentGuard<H> {
 	/** Record a tab the extension just attached. */
 	track(tabId: number): void {
 		this.#attached.add(tabId);
+		this.#cancelRetry(tabId);
 		this.#scheduleSweep();
 	}
 
 	/** Forget a tab that has been detached (explicit RPC, user cancel, or navigation). */
 	untrack(tabId: number): void {
 		this.#attached.delete(tabId);
+		this.#cancelRetry(tabId);
+		if (this.#attached.size === 0) this.#cancel();
+	}
+
+	#cancelRetry(tabId: number): void {
 		const retry = this.#targetedRetries.get(tabId);
 		if (retry !== undefined) {
 			this.options.clearTimer(retry);
 			this.#targetedRetries.delete(tabId);
 		}
-		if (this.#attached.size === 0) this.#cancel();
 	}
 
 	/** Retry cleanup for one failed attachment without sweeping healthy tabs. */

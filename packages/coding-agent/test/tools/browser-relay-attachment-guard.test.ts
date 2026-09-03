@@ -112,6 +112,19 @@ describe("AttachmentGuard", () => {
 		expect(detached).toEqual([]);
 	});
 
+	it("cancels a targeted retry when attachment ownership is restored", () => {
+		const { guard, timers, detached } = makeGuard();
+		guard.retry(1);
+		expect(timers.pendingCount).toBe(1);
+
+		guard.track(1);
+		expect(timers.pendingCount).toBe(0);
+
+		timers.flush();
+		expect(detached).toEqual([]);
+		expect(guard.attachedTabIds()).toEqual([1]);
+	});
+
 	it("arms a sweep when a new attachment appears after the relay already disconnected", () => {
 		const { guard, timers, detached } = makeGuard();
 		guard.onDisconnected();
