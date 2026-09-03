@@ -30,6 +30,7 @@ beforeAll(async () => {
 	skillDir = path.join(pluginRoot, "skills", "docs");
 	await fs.mkdir(path.join(skillDir, "references"), { recursive: true });
 	await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: docs\ndescription: d\n---\nBody\n");
+	await fs.writeFile(path.join(skillDir, "synthesized.md"), "Synthesized body\n");
 	// A legitimate shared file elsewhere INSIDE the plugin root.
 	await fs.mkdir(path.join(pluginRoot, "shared"), { recursive: true });
 	await fs.writeFile(path.join(pluginRoot, "shared", "inside.md"), "inside contents\n");
@@ -49,6 +50,12 @@ afterAll(async () => {
 });
 
 describe("bash skill:// expansion containment", () => {
+	it("resolves a bare URI to the configured instruction file", () => {
+		const skill: Skill = { ...pluginSkill(), filePath: path.join(skillDir, "synthesized.md") };
+
+		expect(resolveSkillUrlToPath("skill://docs", [skill])).toBe(skill.filePath);
+	});
+
 	it("resolves in-root symlinks to their canonical target", () => {
 		const resolved = resolveSkillUrlToPath("skill://docs/references/ok.md", [pluginSkill()]);
 		// The canonical realpath is returned, never the symlink path.

@@ -7,7 +7,7 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 - Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
 - `pty: true` only for terminal interaction (`sudo`, `ssh`).
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
-{{#if hasSkills}}- Skill instructions resolve as `skill://<name>/SKILL.md`; other internal URIs auto-resolve to paths.
+{{#if hasSkills}}- Skill instructions resolve as `skill://<name>`; other internal URIs auto-resolve to paths.
 {{else}}- Internal URIs auto-resolve to paths.
 {{/if}}
 {{#if hasShellBuiltins}}- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine{{#unless isWindows}}, errno{{/unless}}{{/if}}

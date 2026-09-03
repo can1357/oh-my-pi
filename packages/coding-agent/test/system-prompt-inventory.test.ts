@@ -28,6 +28,7 @@ const TOOLS = new Map<string, SystemPromptToolMetadata>([
 		{
 			label: "Read",
 			description: "Reads files from disk.",
+			readsSkillUris: true,
 			parameters: { type: "object", properties: { path: { type: "string" } } },
 		},
 	],
@@ -598,6 +599,29 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("`skill://<name>`");
 	});
 
+	it("does not treat a custom tool named read as a skill URI reader", async () => {
+		const { systemPrompt } = await buildSdkSystemPrompt({
+			cwd: tempDir,
+			customPrompt: "Custom instructions.",
+			contextFiles: [],
+			skills: [
+				{
+					name: "hidden-sdk-skill",
+					description: "Unavailable through the custom read tool",
+					filePath: path.join(tempDir, "synthesized.md"),
+					baseDir: tempDir,
+					source: "test",
+					hide: true,
+				},
+			],
+			tools: [{ ...SDK_TOOL, name: "read" }],
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Custom instructions.");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
 	it("omits skill URL guidance when no skills are loaded", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
@@ -640,9 +664,16 @@ describe("system prompt tool inventory", () => {
 		const tools = await createTools(session, ["read", "bash"]);
 		const read = tools.find(tool => tool.name === "read")!;
 		const bash = tools.find(tool => tool.name === "bash")!;
+		const { systemPrompt } = await buildSdkSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: session.skills,
+			tools,
+		});
 
 		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
-		expect(bash.description).toContain("`skill://<name>/SKILL.md`");
+		expect(bash.description).toContain("`skill://<name>`");
+		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
 	});
 
 	it("keeps visible skills when no tools map is provided", async () => {
