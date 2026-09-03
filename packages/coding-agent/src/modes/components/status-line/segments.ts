@@ -373,6 +373,16 @@ const modeSegment: StatusLineSegment = {
 			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
+		const skill = ctx.skillMode;
+		if (skill && skill.length > 0) {
+			const names = skill.map(sanitizeStatusText).filter(Boolean);
+			if (names.length > 0) {
+				const label = names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+				const content = withIcon(theme.icon.pin, statusValue(ctx, label));
+				return { content: accentFg(ctx, "accent", content), visible: true };
+			}
+		}
+
 		const loop = ctx.loopMode;
 		if (loop) {
 			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;

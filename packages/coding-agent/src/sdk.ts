@@ -170,6 +170,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
+import { renderSkillModeReminder, replaySkillModePins, resolvePinnedModeSkills } from "./session/mode-skills";
 import { clampProviderContextImages, dropUnreadableContextImages } from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
@@ -3127,6 +3128,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			// Pinned skill modes (frontmatter `mode: true`): their standing reminder
+			// rides the base prompt for the session. Pin state replays from session
+			// entries, so a resume re-injects it with no in-memory handoff.
+			for (const skill of resolvePinnedModeSkills(
+				replaySkillModePins(sessionManager.getEntries()),
+				hasSession ? session.skills : skills,
+			)) {
+				if (skill.reminder?.trim()) appendParts.push(renderSkillModeReminder(skill));
+			}
 			const projection = projectMountedMCPXdevGuidance(
 				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			);
