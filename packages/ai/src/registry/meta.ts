@@ -27,18 +27,22 @@ const loginMetaApiKey = createApiKeyLogin(
 );
 
 export async function loginMeta(callbacks: OAuthController): Promise<OAuthCredentials | string> {
-	if (!callbacks.onPrompt) throw new AIError.OnPromptRequiredError("Meta");
-	const method =
-		callbacks.authMethod ??
-		(
+	let method = callbacks.authMethod;
+	if (method === undefined) {
+		if (!callbacks.onPrompt) throw new AIError.OnPromptRequiredError("Meta");
+		method = (
 			await callbacks.onPrompt({
 				message: metaLoginPrompt,
 				placeholder: metaLoginPlaceholder,
 			})
 		).trim();
+	}
 	if (callbacks.signal?.aborted || method.length === 0) throw new AIError.LoginCancelledError();
 	if (method === "muse" || method === "1") return loginMetaMuse(callbacks);
-	if (method === "api-key" || method === "2") return loginMetaApiKey(callbacks);
+	if (method === "api-key" || method === "2") {
+		if (!callbacks.onPrompt) throw new AIError.OnPromptRequiredError("Meta");
+		return loginMetaApiKey(callbacks);
+	}
 	throw new AIError.ConfigurationError("Choose 1 for Muse Code or 2 for a Model API key");
 }
 

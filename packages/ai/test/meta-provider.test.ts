@@ -80,6 +80,49 @@ describe("Meta login", () => {
 		expect(apiKey).toBe("meta-rpc-key");
 	});
 
+	test("starts an explicit Muse login without a prompt callback", async () => {
+		const credentials = await loginMeta({
+			authMethod: "muse",
+			onAuth: () => {},
+			fetch: input => {
+				const url = String(input);
+				if (url.endsWith("/oidc/device/authorization/")) {
+					return Promise.resolve(
+						Response.json({
+							device_code: "device-token",
+							user_code: "ABCD-EFGH",
+							verification_uri: "https://auth.meta.com/oauth/device/",
+							expires_in: 600,
+						}),
+					);
+				}
+				if (url.endsWith("/oidc/device/token/")) {
+					return Promise.resolve(
+						Response.json({
+							access_token: "oauth-access",
+							refresh_token: "oauth-refresh",
+							expires_in: 3600,
+						}),
+					);
+				}
+				return Promise.resolve(
+					Response.json({
+						api_key: "LLM|subscription-key",
+						user_id: "meta-account",
+						is_subs_active: true,
+					}),
+				);
+			},
+		});
+
+		expect(credentials).toMatchObject({
+			access: "oauth-access",
+			refresh: "oauth-refresh",
+			apiKey: "LLM|subscription-key",
+			accountId: "meta-account",
+		});
+	});
+
 	test("rejects keyless Muse OAuth credentials before replacing stored login keys", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });

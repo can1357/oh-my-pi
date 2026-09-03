@@ -229,7 +229,7 @@ describe("auth-broker wire surface", () => {
 		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 	});
 
-	test("stamps Meta login recency and projects it for legacy clients", async () => {
+	test("stamps Meta login recency and projects PAYG and Muse keys for legacy clients", async () => {
 		let uploadedCredential: Record<string, unknown> | undefined;
 		const fetchImpl: typeof fetch = Object.assign(
 			async (input: string | URL | Request, init?: RequestInit) => {
@@ -287,17 +287,19 @@ describe("auth-broker wire surface", () => {
 		});
 		const legacyResult = await legacyClient.fetchSnapshot();
 		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
+		const legacyCredentials = legacyResult.snapshot.credentials
+			.filter(entry => entry.provider === "meta")
+			.map(entry => entry.credential);
+		expect(legacyCredentials.map(credential => credential.type)).toEqual(["api_key", "api_key"]);
 		expect(
-			legacyResult.snapshot.credentials
-				.filter(entry => entry.provider === "meta")
-				.map(entry => entry.credential.type),
-		).toEqual(["api_key"]);
-		const legacyCredential = legacyResult.snapshot.credentials.find(
-			entry => entry.provider === "meta" && entry.credential.type === "api_key",
-		)?.credential;
-		expect(legacyCredential?.type).toBe("api_key");
-		if (legacyCredential?.type !== "api_key") throw new Error("expected legacy Meta API-key credential");
-		expect(legacyCredential.authorizedAt).toBeUndefined();
+			legacyCredentials.map(credential => {
+				if (credential.type !== "api_key") throw new Error("expected legacy Meta API-key credential");
+				return { key: credential.key, authorizedAt: credential.authorizedAt };
+			}),
+		).toEqual([
+			{ key: "meta-payg-key", authorizedAt: undefined },
+			{ key: "LLM|subscription-key", authorizedAt: undefined },
+		]);
 	});
 
 	test("fails closed when a legacy broker cannot store Meta PAYG recency", async () => {

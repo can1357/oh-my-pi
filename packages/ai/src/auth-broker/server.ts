@@ -413,7 +413,13 @@ function projectCredentialForClient(
 	if (clientSupportsMetaApiKeyAuthorizedAt || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) {
 		return credential;
 	}
-	if (credential.type === "oauth") return undefined;
+	if (credential.type === "oauth") {
+		if (!credential.apiKey) return undefined;
+		return {
+			type: "api_key",
+			key: credential.apiKey,
+		};
+	}
 	if (credential.authorizedAt === undefined) return credential;
 	return {
 		type: "api_key",
