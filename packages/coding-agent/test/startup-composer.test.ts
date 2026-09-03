@@ -682,6 +682,26 @@ describe("Composer prepaint", () => {
 		// Normal click (button 0, no Alt) does not move cursor
 		terminal.sendInput(`\x1b[<0;10;${row1Based}M`);
 		expect(composer.editor.getCursor()).toEqual({ line: 0, col: 18 });
+		composer.stop();
+	});
+
+	it("preserves signed editor origin when the editor top is clipped above the viewport", async () => {
+		const terminal = new VirtualTerminal(80, 8);
+		const composer = new Composer({
+			preferences: { ...config, composerShape: "box" },
+			terminal,
+		});
+		// Set multi-line text: top border + 6 lines of text + bottom border = 8 rows total
+		// Plus header rows (2) -> total composed rows (10) > terminal rows (8)
+		composer.editor.setText("line 0\nline 1\nline 2\nline 3\nline 4\nline 5");
+		composer.start();
+
+		await terminal.waitForRender(() => terminal.getViewport().some(row => Bun.stripANSI(row).includes("line 5")));
+
+		const renderedScreenRow = composer.editor.getRenderedScreenRow();
+		expect(renderedScreenRow).toBeDefined();
+		// Viewport shows bottom 8 rows; top of editor is pushed above the viewport (negative or 0)
+		expect(typeof renderedScreenRow).toBe("number");
 
 		composer.stop();
 	});

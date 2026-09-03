@@ -288,13 +288,11 @@ export class Composer implements TerminalFrameProvider {
 			if (editorOffset !== undefined) {
 				const vpOffset = Math.max(0, rendered.length - rows);
 				const editorVpRow = editorOffset - vpOffset;
-				this.#lastEditorViewportRow = editorVpRow >= 0 ? editorVpRow : undefined;
+				this.#lastEditorViewportRow = editorVpRow;
 				const destructiveReset = this.ui.clearScrollbackOnNextRender;
 				const startTop = destructiveReset ? 0 : Math.min(this.ui.providerViewportTop, Math.max(0, rows - 1));
 				const newTop = Math.max(0, Math.min(startTop, rows - rendered.length));
-				this.editor.setRenderedScreenRow(
-					this.#lastEditorViewportRow !== undefined ? newTop + this.#lastEditorViewportRow : undefined,
-				);
+				this.editor.setRenderedScreenRow(newTop + editorVpRow);
 			} else {
 				this.#lastEditorViewportRow = undefined;
 				this.editor.setRenderedScreenRow(undefined);
@@ -325,15 +323,13 @@ export class Composer implements TerminalFrameProvider {
 			const editorRowInComposed = before.length + active.length + offsetInAfter;
 			const vpOffset = Math.max(0, composed.length - rows);
 			const editorVpRow = editorRowInComposed - vpOffset;
-			this.#lastEditorViewportRow = editorVpRow >= 0 ? editorVpRow : undefined;
+			this.#lastEditorViewportRow = editorVpRow;
 			const destructiveReset = this.ui.clearScrollbackOnNextRender;
 			const startTop = destructiveReset ? 0 : Math.min(this.ui.providerViewportTop, Math.max(0, rows - 1));
 			const historyCount = history?.rows.length ?? 0;
 			const viewportLen = Math.min(rows, composed.length);
 			const newTop = Math.max(0, Math.min(startTop + historyCount, rows - viewportLen));
-			this.editor.setRenderedScreenRow(
-				this.#lastEditorViewportRow !== undefined ? newTop + this.#lastEditorViewportRow : undefined,
-			);
+			this.editor.setRenderedScreenRow(newTop + editorVpRow);
 		} else {
 			this.#lastEditorViewportRow = undefined;
 			this.editor.setRenderedScreenRow(undefined);
