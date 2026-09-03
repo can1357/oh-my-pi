@@ -4,6 +4,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
+import { fitTrackedPullRequests } from "../../../session/pr-tracker";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -388,6 +389,25 @@ const prSegment: StatusLineSegment = {
 	},
 };
 
+const trackedPullRequestsSegment: StatusLineSegment = {
+	id: "tracked_prs",
+	render(ctx) {
+		const tracked = ctx.trackedPullRequests ?? [];
+		if (tracked.length === 0) return { content: "", visible: false };
+
+		const { visibleCount, omittedCount } = fitTrackedPullRequests(tracked, ctx.width);
+		const parts: string[] = [];
+		for (let index = 0; index < visibleCount; index += 1) {
+			const pr = tracked[index];
+			if (!pr) continue;
+			const label = `#${pr.number} ${pr.status}`;
+			parts.push(TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label);
+		}
+		if (omittedCount > 0) parts.push(`+${omittedCount}`);
+		return { content: theme.fg("accent", withIcon(theme.icon.pr, parts.join(theme.sep.dot))), visible: true };
+	},
+};
+
 const subagentsSegment: StatusLineSegment = {
 	id: "subagents",
 	render(ctx) {
@@ -735,6 +755,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,
+	tracked_prs: trackedPullRequestsSegment,
 	subagents: subagentsSegment,
 	token_in: tokenInSegment,
 	token_out: tokenOutSegment,

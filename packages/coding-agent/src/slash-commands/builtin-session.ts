@@ -1,12 +1,16 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
+import { getTrackedPullRequestStatus, registerTrackedPullRequest } from "../session/pr-tracker";
+import { parsePullRequestUrl } from "../tools/gh-common";
+import { getOrFetchPr } from "../tools/gh-view";
 import {
 	getChangelogPath,
 	parseChangelog,
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	renderChangelogEntries,
 } from "../utils/changelog";
+import * as git from "../utils/git";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
@@ -136,6 +140,42 @@ async function handleSessionPinCommand(
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
 }
 
+async function handlePrAdoptCommand(
+	arg: string,
+	runtime: Pick<SlashCommandRuntime, "cwd" | "output" | "sessionManager" | "settings">,
+): Promise<void> {
+	const { repo, prNumber } = parsePullRequestUrl(arg);
+	if (!repo || prNumber === undefined) {
+		await runtime.output("Usage: /pr adopt <GitHub pull request URL>");
+		return;
+	}
+	try {
+		const result = await getOrFetchPr({
+			cwd: runtime.cwd,
+			repo,
+			number: prNumber,
+			includeComments: false,
+			settings: runtime.settings,
+			signal: AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
+		});
+		const status = getTrackedPullRequestStatus(result.payload);
+		if (status.terminal) {
+			await runtime.output(`Cannot track PR #${prNumber}: it is already ${status.label}.`);
+			return;
+		}
+		const registered = await registerTrackedPullRequest(runtime.sessionManager, {
+			repo,
+			number: prNumber,
+			url: result.payload.url ?? arg,
+			title: result.payload.title,
+			source: "adopt",
+		});
+		await runtime.output(registered ? `Tracking PR #${prNumber}.` : `PR #${prNumber} is already tracked.`);
+	} catch (error) {
+		await runtime.output(`Could not adopt PR #${prNumber}: ${errorMessage(error)}`);
+	}
+}
+
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "todo",
@@ -251,6 +291,23 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
 			}
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "pr",
+		icon: "branch",
+		description: "Track a pull request in this session",
+		acpDescription: "Adopt a pull request for session status tracking",
+		acpInputHint: "adopt <GitHub pull request URL>",
+		subcommands: [{ name: "adopt", description: "Track an existing open pull request", usage: "<url>" }],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (verb === "adopt") {
+				await handlePrAdoptCommand(rest, runtime);
+				return commandConsumed();
+			}
+			return usage("Usage: /pr adopt <GitHub pull request URL>", runtime);
 		},
 	},
 	{

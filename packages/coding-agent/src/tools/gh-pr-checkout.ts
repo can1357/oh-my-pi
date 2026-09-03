@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { registerTrackedPullRequest } from "../session/pr-tracker";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import type { GhPrCheckoutSummary, GhToolDetails } from "./gh";
@@ -18,6 +19,7 @@ import {
 	parsePullRequestUrl,
 	parseRepoRef,
 	pushLine,
+	repoFromUrl,
 	requireCurrentGitBranch,
 	requireNonEmpty,
 } from "./gh-common";
@@ -605,7 +607,7 @@ export async function executePrCreate(
 				.map(line => line.trim())
 				.find(line => line.startsWith("https://")) ?? output.trim();
 		const parsed = parsePullRequestUrl(url);
-		const resolvedRepo = repo ?? parsed.repo;
+		const resolvedRepo = repo ?? repoFromUrl(url) ?? parsed.repo;
 
 		let prView: GhPrViewData | undefined;
 		if (resolvedRepo && parsed.prNumber !== undefined) {
@@ -629,6 +631,15 @@ export async function executePrCreate(
 			}
 		}
 
+		if (session.sessionManager && resolvedRepo && parsed.prNumber !== undefined) {
+			await registerTrackedPullRequest(session.sessionManager, {
+				repo: resolvedRepo,
+				number: parsed.prNumber,
+				url: prView?.url ?? url,
+				title: prView?.title ?? title,
+				source: "github",
+			});
+		}
 		const text = formatPrCreateResult({
 			url,
 			prNumber: parsed.prNumber,

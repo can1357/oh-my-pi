@@ -238,6 +238,7 @@ export type StatusLineSegmentId =
 	| "path"
 	| "git"
 	| "pr"
+	| "tracked_prs"
 	| "subagents"
 	| "token_in"
 	| "token_out"

@@ -28,6 +28,7 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
+import { registerTrackedPullRequest } from "../session/pr-tracker";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
@@ -39,7 +40,7 @@ import { checkBashInterception } from "./bash-interceptor";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
-import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
+import { detectSuccessfulBashCreatedPullRequest, invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -509,6 +510,24 @@ function formatWallTimeNotice(wallTimeMs: number): string {
 function formatExitCodeNotice(exitCode: number): string {
 	return `Command exited with code ${exitCode}`;
 }
+/**
+ * Persist only a successful, unchained `gh pr create` result. The detector
+ * requires both an executable-shaped command and a URL line emitted by gh,
+ * never natural-language assistant output or arbitrary shell output.
+ */
+async function registerBashCreatedPullRequest(
+	session: ToolSession,
+	command: string,
+	result: { output: string; exitCode?: number },
+): Promise<void> {
+	if (!session.sessionManager) return;
+	const pullRequest = detectSuccessfulBashCreatedPullRequest(command, result.output, result.exitCode);
+	if (!pullRequest) return;
+	await registerTrackedPullRequest(session.sessionManager, {
+		...pullRequest,
+		source: "github",
+	});
+}
 
 /**
  * Strip the trailing occurrence of `notice` (plus a single surrounding newline
@@ -844,6 +863,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						},
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					});
+					await registerBashCreatedPullRequest(this.session, options.command, result);
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
@@ -1354,6 +1374,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
+				await registerBashCreatedPullRequest(this.session, command, bridgeResult);
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
@@ -1439,6 +1460,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw new ToolError(message);
 			}
 		}
+		await registerBashCreatedPullRequest(this.session, command, result);
 		return this.#buildCompletedResult(result, timeoutSec, {
 			requestedTimeoutSec,
 			notices: pendingNotices,

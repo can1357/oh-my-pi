@@ -4,7 +4,11 @@
  * leaving unrelated commands and read-only `gh` calls alone.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { invalidateGithubCacheForBashCommand } from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
+import {
+	detectBashCreatedPullRequest,
+	detectSuccessfulBashCreatedPullRequest,
+	invalidateGithubCacheForBashCommand,
+} from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
 import {
 	clearAll,
 	getCached,
@@ -200,5 +204,36 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		invalidateGithubCacheForBashCommand("gh pr close --repo a/one");
 		expect(getCached("a/one", "pr", 7, true)).toBeNull();
 		expect(getCached("b/two", "pr", 8, true)?.rendered).toBe("pr-b/two-8");
+	});
+});
+
+describe("detectBashCreatedPullRequest", () => {
+	it("accepts only successful gh pr create-shaped command output", () => {
+		expect(
+			detectBashCreatedPullRequest(
+				"GH_HOST=github.com gh pr create --title 'Tracker'",
+				"https://github.com/owner/repo/pull/42\n",
+			),
+		).toEqual({
+			repo: "owner/repo",
+			number: 42,
+			url: "https://github.com/owner/repo/pull/42",
+		});
+	});
+
+	it("rejects prose URLs and chained commands", () => {
+		const output = "https://github.com/owner/repo/pull/42";
+		expect(detectBashCreatedPullRequest("echo 'created gh pr create'", output)).toBeUndefined();
+		expect(detectBashCreatedPullRequest("gh pr create && echo 'done'", output)).toBeUndefined();
+	});
+
+	it("rejects non-zero gh pr create results", () => {
+		expect(
+			detectSuccessfulBashCreatedPullRequest(
+				"gh pr create --title Tracker",
+				"https://github.com/owner/repo/pull/42",
+				1,
+			),
+		).toBeUndefined();
 	});
 });

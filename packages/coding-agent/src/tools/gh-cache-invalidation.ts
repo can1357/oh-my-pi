@@ -17,12 +17,59 @@
  * number, all auth_keys) because the upside of staleness elimination
  * dwarfs the cost of one cache miss.
  */
-import { formatRepoRef } from "./gh-common";
+import { formatRepoRef, repoFromUrl } from "./gh-common";
 import { invalidateAllForNumber, invalidateAllForRepo } from "./github-cache";
 import { tokenizeShellSegments } from "./shell-tokenize";
 
 const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
 const ISSUE_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)(?:[/?#].*)?$/i;
+
+export interface BashCreatedPullRequest {
+	repo: string;
+	number: number;
+	url: string;
+}
+
+const SHELL_ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Extract a PR only from an unchained `gh pr create` invocation and its
+ * machine-shaped success output. A command can print arbitrary URLs, so any
+ * shell pipeline or command chain deliberately fails closed.
+ */
+export function detectBashCreatedPullRequest(command: string, output: string): BashCreatedPullRequest | undefined {
+	const segments = tokenizeShellSegments(command);
+	if (segments.length !== 1) return undefined;
+	const [tokens] = segments;
+	if (!tokens) return undefined;
+	let executableIndex = 0;
+	while (SHELL_ENV_ASSIGNMENT.test(tokens[executableIndex] ?? "")) executableIndex += 1;
+	if (
+		tokens[executableIndex] !== "gh" ||
+		tokens[executableIndex + 1] !== "pr" ||
+		tokens[executableIndex + 2] !== "create"
+	) {
+		return undefined;
+	}
+	for (const line of output.split(/\r?\n/u)) {
+		const url = line.trim();
+		const match = PR_URL_PATTERN.exec(url);
+		if (!match) continue;
+		const number = Number(match[3]);
+		if (!Number.isSafeInteger(number) || number <= 0) continue;
+		return { repo: repoFromUrl(url) ?? formatRepoRef(match[1], match[2]), number, url };
+	}
+	return undefined;
+}
+
+/** Require a completed zero-exit Bash invocation before accepting a create result. */
+export function detectSuccessfulBashCreatedPullRequest(
+	command: string,
+	output: string,
+	exitCode: number | undefined,
+): BashCreatedPullRequest | undefined {
+	return exitCode === 0 ? detectBashCreatedPullRequest(command, output) : undefined;
+}
 
 /** Subcommands that mutate the rendered issue/PR view in any meaningful way. */
 const MUTATING_ISSUE_SUBCMDS: Record<string, true> = {

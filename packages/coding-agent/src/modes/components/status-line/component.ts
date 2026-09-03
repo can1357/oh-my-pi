@@ -13,7 +13,13 @@ import { adjustHsv, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
+import {
+	getTrackedPullRequestStatus,
+	getTrackedPullRequests,
+	recordTrackedPullRequestTerminal,
+} from "../../../session/pr-tracker";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
+import { getOrFetchPr } from "../../../tools/gh-view";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import * as git from "../../../utils/git";
 import * as jj from "../../../utils/jj";
@@ -38,6 +44,9 @@ import type {
 	StatusLineSegmentOptions,
 	StatusLineSettings,
 } from "./types";
+
+const TRACKED_PR_REFRESH_TTL_MS = 60_000;
+const MAX_TRACKED_PR_REFRESHES_PER_RENDER = 4;
 
 const JJ_REFRESH_TTL_MS = 5000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
@@ -329,6 +338,9 @@ function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 function hasPrSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("pr");
 }
+function hasTrackedPullRequestsSegment(segments: readonly StatusLineSegmentId[]): boolean {
+	return segments.includes("tracked_prs");
+}
 function hasPathSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("path");
 }
@@ -444,6 +456,8 @@ export class StatusLineComponent implements Component {
 	#cachedPrContext: PrCacheContext | undefined = undefined;
 	#prLookupInFlight = false;
 	#defaultBranch?: string;
+	#trackedPullRequestStatuses = new Map<string, { status: string; refreshedAt: number }>();
+	#trackedPullRequestRefreshes = new Set<string>();
 	#defaultBranchCwd: string | undefined = undefined;
 	#lastTokensPerSecond: number | null = null;
 	#lastTokensPerSecondTimestamp: number | null = null;
@@ -1652,9 +1666,72 @@ export class StatusLineComponent implements Component {
 			contextWindow,
 			systemPromptRef: systemPrompt,
 			toolsRef: tools,
+
 			skillsRef: skills,
 		};
 		return { usedTokens, contextWindow };
+	}
+	#trackedPullRequests(): Array<{ number: number; url: string; status: string }> {
+		const sessionManager = this.session.sessionManager;
+		if (typeof sessionManager.getBranch !== "function") return [];
+
+		const tracked = getTrackedPullRequests(sessionManager.getBranch());
+		const now = Date.now();
+		let launches = 0;
+		for (const pullRequest of tracked) {
+			const key = `${pullRequest.repo.toLowerCase()}#${pullRequest.number}`;
+			const cached = this.#trackedPullRequestStatuses.get(key);
+			if (
+				launches >= MAX_TRACKED_PR_REFRESHES_PER_RENDER ||
+				this.#trackedPullRequestRefreshes.has(key) ||
+				(cached && now - cached.refreshedAt < TRACKED_PR_REFRESH_TTL_MS)
+			) {
+				continue;
+			}
+			launches += 1;
+			this.#trackedPullRequestRefreshes.add(key);
+			void (async () => {
+				try {
+					const result = await getOrFetchPr({
+						cwd: sessionManager.getCwd(),
+						repo: pullRequest.repo,
+						number: pullRequest.number,
+						includeComments: false,
+						settings: this.session.settings,
+						signal: AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
+					});
+					if (this.#disposed) return;
+					const status = getTrackedPullRequestStatus(result.payload);
+					if (status.terminal && status.terminalState) {
+						this.session.emitNotice(
+							"info",
+							`Tracked PR #${pullRequest.number} is ${status.label}; removing it from session status.`,
+							"pr-tracker",
+						);
+						recordTrackedPullRequestTerminal(sessionManager, pullRequest, status.terminalState);
+						return;
+					}
+					this.#trackedPullRequestStatuses.set(key, { status: status.label, refreshedAt: Date.now() });
+				} catch {
+					// Avoid retrying a missing/unavailable gh binary on every redraw; the
+					// next bounded refresh still retries after the status TTL.
+					this.#trackedPullRequestStatuses.set(key, {
+						status: this.#trackedPullRequestStatuses.get(key)?.status ?? "open",
+						refreshedAt: Date.now(),
+					});
+				} finally {
+					this.#trackedPullRequestRefreshes.delete(key);
+					if (!this.#disposed) this.#onBranchChange?.();
+				}
+			})();
+		}
+		return tracked.map(pullRequest => ({
+			number: pullRequest.number,
+			url: pullRequest.url,
+			status:
+				this.#trackedPullRequestStatuses.get(`${pullRequest.repo.toLowerCase()}#${pullRequest.number}`)?.status ??
+				"open",
+		}));
 	}
 
 	#buildSegmentContext(
@@ -1663,6 +1740,7 @@ export class StatusLineComponent implements Component {
 		includePath: boolean,
 		includeGit: boolean,
 		includePr: boolean,
+		includeTrackedPullRequests: boolean,
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
@@ -1725,6 +1803,7 @@ export class StatusLineComponent implements Component {
 				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
 			: null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
+		const trackedPullRequests = includeTrackedPullRequests ? this.#trackedPullRequests() : [];
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
 		return {
@@ -1759,6 +1838,7 @@ export class StatusLineComponent implements Component {
 				status: gitStatus,
 				pr: gitPr,
 			},
+			trackedPullRequests,
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
 		};
@@ -1839,12 +1919,16 @@ export class StatusLineComponent implements Component {
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
+		const includeTrackedPullRequests =
+			hasTrackedPullRequestsSegment(effectiveSettings.leftSegments) ||
+			hasTrackedPullRequestsSegment(effectiveSettings.rightSegments);
 		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
 			includeGit,
 			includePr,
+			includeTrackedPullRequests,
 			previewTitle,
 		);
 		const separatorDef = plain
