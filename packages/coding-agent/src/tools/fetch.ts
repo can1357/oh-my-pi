@@ -6,7 +6,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
+import { $which, logger, ptree, truncate } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
 import type { Settings } from "../config/settings";
 import { readEditableNotebookText } from "../edit/notebook";
@@ -14,6 +14,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
+import { writeArtifact } from "../session/artifacts";
 import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine, urlHyperlink } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
@@ -1597,7 +1598,22 @@ async function persistReadUrlArtifact(
 ): Promise<{ id?: string; path?: string } | undefined> {
 	const artifact = await session.allocateOutputArtifact?.("read");
 	if (!artifact?.path) return undefined;
-	await Bun.write(artifact.path, output);
+	// The id ships to the model as `artifact://<id>`, so publish one only for an
+	// artifact the filesystem confirmed, and never let a failed side-channel
+	// write discard a completed fetch. Same shape as the bash, browser, and
+	// computer artifact writers.
+	try {
+		await writeArtifact(artifact.path, output);
+	} catch (error) {
+		// `writeArtifact` distinguishes a short write from a failed one, so keep
+		// the reason: silently dropping the id hides a filesystem problem that
+		// only shows up as a missing `artifact://` link.
+		logger.warn("Failed to persist read artifact", {
+			path: artifact.path,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 	return artifact;
 }
 

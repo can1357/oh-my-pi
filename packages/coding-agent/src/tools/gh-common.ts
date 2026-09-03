@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { writeArtifact } from "../session/artifacts";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
@@ -327,7 +328,23 @@ export async function saveArtifactText(
 		return undefined;
 	}
 
-	await Bun.write(artifactPath, text);
+	// Callers embed this id as `artifact://<id>`, so publish one only for an
+	// artifact the filesystem confirmed, and never let a failed side-channel
+	// write discard a completed tool result. Same shape as the bash, browser,
+	// and computer artifact writers.
+	try {
+		await writeArtifact(artifactPath, text);
+	} catch (error) {
+		// `writeArtifact` distinguishes a short write from a failed one, so keep
+		// the reason: silently dropping the id hides a filesystem problem that
+		// only shows up as a missing `artifact://` link.
+		logger.warn("Failed to persist tool output artifact", {
+			toolType,
+			path: artifactPath,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 	return artifactId;
 }
 
