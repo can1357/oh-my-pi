@@ -236,17 +236,46 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	return result;
 }
 
-// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
+const IGNORE_PROJECT_ENV_VAR = "PI_IGNORE_PROJECT_ENV";
+
+function shouldIgnoreProjectEnv(
+	agentEnv: Record<string, string>,
+	configEnv: Record<string, string>,
+	homeEnv: Record<string, string>,
+): boolean {
+	// Bun.env is required for launcher-provided flags where no authoritative
+	// pre-dotenv snapshot is available. In source/npm launches it may already
+	// include project dotenv values, but a project-provided "1" can only exclude
+	// that same source; no project value can negate an OMP-owned opt-out.
+	return [Bun.env, agentEnv, configEnv, homeEnv].some(source => source[IGNORE_PROJECT_ENV_VAR] === "1");
+}
+
+// Parse OMP-owned dotenv sources first: the project source is conditional on
+// an early-boot flag that cannot wait for Settings initialization.
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
+const projectDir = getProjectDir();
+const ignoreProjectEnv = shouldIgnoreProjectEnv(agentEnv, piEnv, homeEnv);
+const projectEnv = ignoreProjectEnv ? {} : parseEnvFile(path.join(projectDir, ".env"));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
 	if (!isSafeEnvName(key) || isMacosMallocStackLoggingEnvName(key) || value === undefined || !isSafeEnvValue(value)) {
 		delete Bun.env[key];
 	}
+}
+
+// With the opt-out active, shipped compiled binaries and explicit
+// --no-env-file launches have no pre-JS Bun dotenv values to clean. Source/npm
+// launches need one provenance-aware cleanup pass for values Bun already added.
+const projectEnvMayBePreloaded = !isCompiledBinary() && !process.execArgv.includes("--no-env-file");
+if (ignoreProjectEnv && projectEnvMayBePreloaded) {
+	const filtered = filterChildShellEnv(Bun.env, projectDir);
+	for (const key of Object.keys(Bun.env)) {
+		if (!(key in filtered)) delete Bun.env[key];
+	}
+	for (const [key, value] of Object.entries(filtered)) Bun.env[key] = value;
 }
 
 for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {

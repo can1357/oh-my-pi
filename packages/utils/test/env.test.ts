@@ -241,6 +241,160 @@ describe("filterChildShellEnv", () => {
 	});
 });
 
+interface ProjectEnvProbe {
+	project: string | null;
+	local: string | null;
+	shared: string | null;
+	inherited: string | null;
+}
+
+async function runProjectEnvProbe(options: {
+	launchFlag?: string;
+	configFlag?: string;
+	bunArgs?: string[];
+}): Promise<ProjectEnvProbe> {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-project-env-"));
+	tempDirs.push(root);
+	const projectDir = path.join(root, "project");
+	const agentDir = path.join(root, "agent");
+	const homeDir = path.join(root, "home");
+	const configDir = path.join(homeDir, ".omp");
+	fs.mkdirSync(projectDir);
+	fs.mkdirSync(agentDir);
+	fs.mkdirSync(configDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(projectDir, ".env"),
+		"PROJECT_ONLY=project\nSHARED_VALUE=project\nINHERITED_VALUE=project\n",
+	);
+	fs.writeFileSync(path.join(projectDir, ".env.local"), "LOCAL_ONLY=local\n");
+	fs.writeFileSync(path.join(agentDir, ".env"), "SHARED_VALUE=agent\n");
+	if (options.configFlag) {
+		fs.writeFileSync(path.join(configDir, ".env"), `PI_IGNORE_PROJECT_ENV=${options.configFlag}\n`);
+	}
+
+	const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+	const script = [
+		`import { $env } from ${JSON.stringify(envModulePath)};`,
+		"process.stdout.write(JSON.stringify({",
+		"  project: $env.PROJECT_ONLY ?? null,",
+		"  local: $env.LOCAL_ONLY ?? null,",
+		"  shared: $env.SHARED_VALUE ?? null,",
+		"  inherited: $env.INHERITED_VALUE ?? null,",
+		"}));",
+	].join("\n");
+	const proc = Bun.spawn([process.execPath, ...(options.bunArgs ?? []), "--no-install", "--eval", script], {
+		cwd: projectDir,
+		env: {
+			...process.env,
+			OMP_PROFILE: undefined,
+			BUN_ENV: undefined,
+			HOME: homeDir,
+			INHERITED_VALUE: "launcher",
+			LOCAL_ONLY: undefined,
+			NODE_ENV: undefined,
+			PI_CODING_AGENT_DIR: agentDir,
+			PI_COMPILED: undefined,
+			PI_PROFILE: undefined,
+			XDG_CACHE_HOME: undefined,
+			XDG_CONFIG_HOME: undefined,
+			XDG_DATA_HOME: undefined,
+			XDG_STATE_HOME: undefined,
+			PI_IGNORE_PROJECT_ENV: options.launchFlag,
+			PROJECT_ONLY: undefined,
+			SHARED_VALUE: undefined,
+		},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	expect(exitCode, stderr).toBe(0);
+	return JSON.parse(stdout) as ProjectEnvProbe;
+}
+
+describe("PI_IGNORE_PROJECT_ENV", () => {
+	const withoutProject = {
+		project: null,
+		local: null,
+		shared: "agent",
+		inherited: "launcher",
+	};
+
+	it("excludes Bun-preloaded project dotenv values when inherited from the launcher", async () => {
+		expect(await runProjectEnvProbe({ launchFlag: "1" })).toEqual(withoutProject);
+	});
+
+	it("can be enabled from the OMP config-root dotenv file", async () => {
+		expect(await runProjectEnvProbe({ configFlag: "1" })).toEqual(withoutProject);
+	});
+
+	it("skips the manual project merge when Bun autoloading is disabled", async () => {
+		expect(await runProjectEnvProbe({ launchFlag: "1", bunArgs: ["--no-env-file"] })).toEqual(withoutProject);
+	});
+
+	it.skipIf(process.platform === "win32" || !Bun.which("mkfifo"))(
+		"does not open the project dotenv when Bun autoloading is disabled",
+		async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-project-env-fifo-"));
+			tempDirs.push(root);
+			const projectDir = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			const homeDir = path.join(root, "home");
+			fs.mkdirSync(projectDir);
+			fs.mkdirSync(agentDir);
+			fs.mkdirSync(homeDir);
+			const envPath = path.join(projectDir, ".env");
+			const mkfifo = Bun.spawnSync([Bun.which("mkfifo")!, envPath], { stdout: "pipe", stderr: "pipe" });
+			expect(mkfifo.exitCode, Buffer.from(mkfifo.stderr).toString()).toBe(0);
+
+			const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+			const proc = Bun.spawn(
+				[process.execPath, "--no-env-file", "--no-install", "--eval", `import ${JSON.stringify(envModulePath)};`],
+				{
+					cwd: projectDir,
+					env: {
+						...process.env,
+						HOME: homeDir,
+						PI_CODING_AGENT_DIR: agentDir,
+						PI_IGNORE_PROJECT_ENV: "1",
+					},
+					signal: AbortSignal.timeout(2000),
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+			expect({ exitCode, stderr, stdout }).toEqual({ exitCode: 0, stderr: "", stdout: "" });
+		},
+		5000,
+	);
+
+	it("keeps OMP project loading enabled when only Bun autoloading is disabled", async () => {
+		expect(await runProjectEnvProbe({ bunArgs: ["--no-env-file"] })).toEqual({
+			project: "project",
+			local: null,
+			shared: "project",
+			inherited: "launcher",
+		});
+	});
+
+	it("keeps project dotenv loading enabled by default", async () => {
+		expect(await runProjectEnvProbe({})).toEqual({
+			project: "project",
+			local: "local",
+			shared: "project",
+			inherited: "launcher",
+		});
+	});
+});
+
 describe("isBunTestRuntime", () => {
 	it("does not treat shared application env names as a test runner signal", async () => {
 		expect(await runRuntimeProbe({ NODE_ENV: "test", BUN_ENV: undefined, PI_TEST_RUNTIME: undefined })).toBe(false);
