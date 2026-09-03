@@ -21,6 +21,7 @@ import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainTex
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatPathRelativeToCwd, type LineRange } from "./path-utils";
 import type { ReadToolDetails } from "./read";
+import { isRawSelector, type ParsedSelector, resolveTailSelector, selToOffsetLimit } from "./read-selector";
 import { formatBytes, shortenPath } from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -291,21 +292,47 @@ function expandRangeWithContext(
 	};
 }
 
+/** Options shared by the in-memory text builders; `raw` flips the line split to verbatim `\n` segments. */
+export interface InMemoryTextOptions {
+	details?: ReadToolDetails;
+	sourcePath?: string;
+	sourceUrl?: string;
+	sourceInternal?: string;
+	entityLabel: string;
+	ignoreResultLimits?: boolean;
+	raw?: boolean;
+	immutable?: boolean;
+}
+
+/**
+ * Render any read selector against in-memory text. Pins `:-N` tails to the
+ * text's own line count (raw mode addresses `\n` segments verbatim; otherwise
+ * the hashline-addressable split), then dispatches multi-range selectors to
+ * {@link buildInMemoryMultiRangeResult} and everything else to
+ * {@link buildInMemoryTextResult}. Raw mode is derived from the selector.
+ */
+export function buildInMemorySelectorResult(
+	session: ToolSession,
+	text: string,
+	parsed: ParsedSelector,
+	options: Omit<InMemoryTextOptions, "raw">,
+): AgentToolResult<ReadToolDetails> {
+	const raw = isRawSelector(parsed);
+	const totalLines = raw ? text.split("\n").length : splitAddressableFileLines(text).length;
+	const sel = resolveTailSelector(parsed, totalLines);
+	if (sel.kind === "lines" && sel.ranges.length > 1) {
+		return buildInMemoryMultiRangeResult(session, text, sel.ranges, { ...options, raw });
+	}
+	const { offset, limit } = selToOffsetLimit(sel);
+	return buildInMemoryTextResult(session, text, offset, limit, { ...options, raw });
+}
+
 export function buildInMemoryTextResult(
 	session: ToolSession,
 	text: string,
 	offset: number | undefined,
 	limit: number | undefined,
-	options: {
-		details?: ReadToolDetails;
-		sourcePath?: string;
-		sourceUrl?: string;
-		sourceInternal?: string;
-		entityLabel: string;
-		ignoreResultLimits?: boolean;
-		raw?: boolean;
-		immutable?: boolean;
-	},
+	options: InMemoryTextOptions,
 ): AgentToolResult<ReadToolDetails> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
@@ -495,15 +522,7 @@ export function buildInMemoryMultiRangeResult(
 	session: ToolSession,
 	text: string,
 	ranges: readonly LineRange[],
-	options: {
-		details?: ReadToolDetails;
-		sourcePath?: string;
-		sourceUrl?: string;
-		sourceInternal?: string;
-		entityLabel: string;
-		raw?: boolean;
-		immutable?: boolean;
-	},
+	options: Omit<InMemoryTextOptions, "ignoreResultLimits">,
 ): AgentToolResult<ReadToolDetails> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};

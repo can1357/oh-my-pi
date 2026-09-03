@@ -1,7 +1,5 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
 import { PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
@@ -66,6 +64,7 @@ import {
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { loadDailyActivity } from "../../stats/activity-client";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -303,13 +302,7 @@ export class SelectorController {
 					provider => (provider === currentProvider ? activeAccount : undefined),
 					usageModelSelectors,
 				),
-			loadActivity: async push => {
-				// Show whatever the stats DB already has, then re-query after an
-				// incremental session sync so the heatmap converges on fresh data.
-				push(await getDailyActivity());
-				await syncAllSessions();
-				push(await getDailyActivity());
-			},
+			loadActivity: loadDailyActivity,
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});

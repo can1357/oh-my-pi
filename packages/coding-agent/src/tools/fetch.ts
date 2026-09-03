@@ -28,7 +28,8 @@ import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
-import { isReadableUrlPath, type LineRange, parseLineRanges } from "./path-utils";
+import { isReadableUrlPath, type LineRange, parseLineRanges, parseTailCount } from "./path-utils";
+import type { ParsedSelector } from "./read-selector";
 import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -142,25 +143,22 @@ function normalizeUrl(url: string): string {
 	return url;
 }
 
-// URL line selectors mirror the file form: `:50`, `:50-100`, `:50+150`, `:5-10,20-30`, `:raw`,
-// or `:raw:N-M` / `:N-M:raw` to combine raw mode with a range. If a URL would otherwise look
-// like `host:port`, add a trailing slash before the selector (e.g. `https://example.com/:80`
+// URL line selectors mirror the file form: `:50`, `:50-100`, `:50+150`, `:5-10,20-30`, `:-60`,
+// `:raw`, or `:raw:N-M` / `:N-M:raw` to combine raw mode with a range. If a URL would otherwise
+// look like `host:port`, add a trailing slash before the selector (e.g. `https://example.com/:80`
 // to read line 80 of the document at `https://example.com/`).
 
+/** A readable external URL split from its trailing read selector. */
 export interface ParsedReadUrlTarget {
 	path: string;
-	raw: boolean;
-	offset?: number;
-	limit?: number;
-	/** Populated only when the selector carries 2+ ranges. Single-range stays on offset/limit. */
-	ranges?: readonly LineRange[];
+	sel: ParsedSelector;
 }
 
-/** Recognize a single selector token (`raw` or one/many line ranges). */
+/** Recognize a single selector token (`raw`, a tail, or one/many line ranges). */
 function isUrlSelectorToken(token: string): boolean {
 	if (token.toLowerCase() === "raw") return true;
 	try {
-		return parseLineRanges(token) !== null;
+		return parseLineRanges(token) !== null || parseTailCount(token) !== null;
 	} catch {
 		// `parseLineRanges` throws `ToolError` for malformed ranges (e.g. `5+0`). Only treat the
 		// token as a selector when it parses cleanly so URL ports like `:80` keep flowing
@@ -178,37 +176,37 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 	}
 
 	let raw = false;
-	let ranges: readonly LineRange[] | undefined;
-	for (const sel of embedded?.sels ?? []) {
-		if (sel.toLowerCase() === "raw") {
+	let ranges: [LineRange, ...LineRange[]] | undefined;
+	let tail: number | undefined;
+	for (const token of embedded?.sels ?? []) {
+		if (token.toLowerCase() === "raw") {
 			raw = true;
 			continue;
 		}
-		if (ranges !== undefined) {
+		if (ranges !== undefined || tail !== undefined) {
 			// Two range groups on the same URL (`…:5-10:20-30`) — combine with commas instead.
 			throw new ToolError(
 				`URL selector has multiple range groups; combine them with commas (e.g. \`:5-10,20-30\`).`,
 			);
 		}
-		const parsed = parseLineRanges(sel);
-		if (parsed === null) {
+		ranges = parseLineRanges(token) ?? undefined;
+		if (ranges !== undefined) continue;
+		const count = parseTailCount(token);
+		if (count === null) {
 			// Shouldn't happen — isUrlSelectorToken vetted it. Belt-and-suspenders.
-			throw new ToolError(`Invalid URL line selector: ${sel}`);
+			throw new ToolError(`Invalid URL line selector: ${token}`);
 		}
-		ranges = parsed;
+		tail = count;
 	}
 
-	if (!ranges || ranges.length === 0) return { path: urlPath, raw };
-	if (ranges.length === 1) {
-		const r = ranges[0];
-		return {
-			path: urlPath,
-			raw,
-			offset: r.startLine,
-			limit: r.endLine !== undefined ? r.endLine - r.startLine + 1 : undefined,
-		};
-	}
-	return { path: urlPath, raw, ranges };
+	const sel: ParsedSelector = ranges
+		? { kind: "lines", ranges, raw }
+		: tail !== undefined
+			? { kind: "tail", count: tail, raw }
+			: raw
+				? { kind: "raw" }
+				: { kind: "none" };
+	return { path: urlPath, sel };
 }
 
 /**
