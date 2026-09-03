@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added the public `getTinyWorkerRuntimeDir()` utility, which returns the standard `~/.omp/run/tiny` directory for tiny-worker runtime data.
+
 ## [18.1.6] - 2026-09-03
 
 ### Added
