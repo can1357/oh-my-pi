@@ -19,7 +19,6 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
 
-import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
@@ -81,7 +80,7 @@ import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/provider
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
+import { type EditStore, MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	$env,
 	escapeXmlText,
@@ -114,7 +113,7 @@ import {
 	onModelRolesChanged,
 } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
-import { getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { getEditStore } from "../edit/store";
 import type { PythonResult } from "../eval/py/executor";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
@@ -177,6 +176,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -218,6 +218,7 @@ import type { EditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { videoPreviewSource } from "../utils/video";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
@@ -503,9 +504,7 @@ export class AgentSession {
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
-	fileSnapshotStore?: InMemorySnapshotStore;
-	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
-	editClipboard?: Clipboard;
+	editStore?: EditStore;
 
 	/** Materializes this session's live extension-root policy per discovery call. */
 	readonly #extensionRoots: () => EffectiveExtensionRoots;
@@ -2594,7 +2593,12 @@ export class AgentSession {
 		};
 	}
 
-	#persistMessageEnd(message: AgentMessage): void {
+	#persistMessageEnd(message: AgentMessage, promptGeneration: number): void {
+		// Session transitions bump the prompt generation before replacing the
+		// transcript. A message_end handler may still be awaiting an extension at
+		// that boundary; never let its delayed persistence append the previous
+		// conversation to the replacement session.
+		if (this.#promptGeneration !== promptGeneration) return;
 		if (message.role === "hookMessage" || message.role === "custom") {
 			// One-run instructions must not return from persisted history: prewalk
 			// nudges are consumed once, and Vibe context is rebuilt only while active.
@@ -2699,6 +2703,7 @@ export class AgentSession {
 	}
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
+		const eventPromptGeneration = this.#promptGeneration;
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
@@ -2852,10 +2857,14 @@ export class AgentSession {
 				await this.#emitSessionEvent(displayEvent);
 			} catch (error) {
 				if (event.type === "message_end") {
-					const persistMessageEnd = () => this.#persistMessageEnd(event.message);
 					try {
-						if (messageEndPersistence) await messageEndPersistence.persist(persistMessageEnd);
-						else persistMessageEnd();
+						if (messageEndPersistence) {
+							await messageEndPersistence.persist(() =>
+								this.#persistMessageEnd(event.message, eventPromptGeneration),
+							);
+						} else {
+							this.#persistMessageEnd(event.message, eventPromptGeneration);
+						}
 					} catch (persistenceError) {
 						logger.warn("Failed to persist message after session event emission failed", {
 							error: String(persistenceError),
@@ -2896,6 +2905,8 @@ export class AgentSession {
 			}
 		}
 
+		if (event.type === "tool_stream_update") this.#streamingEditGuard.maybeAbort(event);
+
 		if (await this.#ttsr.checkMessageUpdate(event)) return;
 
 		if (
@@ -2916,12 +2927,12 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			const persistMessageEnd = () => this.#persistMessageEnd(event.message);
 			if (messageEndPersistence) {
-				await messageEndPersistence.persist(persistMessageEnd);
+				await messageEndPersistence.persist(() => this.#persistMessageEnd(event.message, eventPromptGeneration));
 			} else {
-				persistMessageEnd();
+				this.#persistMessageEnd(event.message, eventPromptGeneration);
 			}
+			if (this.#promptGeneration !== eventPromptGeneration) return;
 			if (interruptedThinkingMessage) {
 				this.sessionManager.appendCustomMessageEntry(
 					interruptedThinkingMessage.customType,
@@ -2991,11 +3002,6 @@ export class AgentSession {
 				const details = isRecord(event.message.details) ? event.message.details : undefined;
 				const semanticResult = semanticToolResult(toolName, event.message);
 				const semanticDetails = isRecord(semanticResult?.details) ? semanticResult.details : undefined;
-				// Invalidate streaming edit cache when edit tool completes to prevent stale data
-				const editedPath = details ? stringProperty(details, "path") : undefined;
-				if (toolName === "edit" && editedPath) {
-					this.#streamingEditGuard.invalidate(editedPath);
-				}
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
 					this.#scheduleReplanTitleRefresh();
 				}
@@ -5721,6 +5727,30 @@ export class AgentSession {
 		return normalizeModelContextImages(images, { model: this.model });
 	}
 
+	/**
+	 * Emit source paths for video contact-sheet images as hidden user context.
+	 * The visible message deliberately contains only its `[Video #N]` marker and
+	 * preview image, while the agent gets the path required for `read` frame
+	 * subselectors without exposing the user's filesystem layout in the TUI.
+	 */
+	#createVideoAttachmentNotices(images: readonly ImageContent[] | undefined, timestamp: number): CustomMessage[] {
+		if (!images?.length) return [];
+		const notices: CustomMessage[] = [];
+		for (let index = 0; index < images.length; index++) {
+			const sourcePath = videoPreviewSource(images[index]!);
+			if (!sourcePath) continue;
+			notices.push({
+				role: "custom",
+				customType: "video-attachment",
+				content: prompt.render(videoAttachmentPrompt, { index: String(index + 1), path: sourcePath }),
+				display: false,
+				attribution: "user",
+				timestamp,
+			});
+		}
+		return notices;
+	}
+
 	#buildImageDescriptionNotice(
 		normalizedImages: ImageContent[],
 		signal?: AbortSignal,
@@ -5893,6 +5923,7 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
+		const videoAttachmentNotices = this.#createVideoAttachmentNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -5963,8 +5994,16 @@ export class AgentSession {
 				...options,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
-						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
+					preludeMessages.length > 0 ||
+					keywordNotices.length > 0 ||
+					videoAttachmentNotices.length > 0 ||
+					imageDescriptionNotice
+						? [
+								...preludeMessages,
+								...keywordNotices,
+								...videoAttachmentNotices,
+								...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
+							]
 						: undefined,
 			});
 		} finally {
@@ -6168,7 +6207,7 @@ export class AgentSession {
 				const fileMentionMessages = await generateFileMentionMessages(fileMentions, this.sessionManager.getCwd(), {
 					autoResizeImages: this.settings.get("images.autoResize"),
 					useHashLines: resolveFileDisplayMode(this).hashLines,
-					snapshotStore: getFileSnapshotStore(this),
+					snapshotStore: getEditStore(this),
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
@@ -6569,6 +6608,7 @@ export class AgentSession {
 		// The pre-dispatch re-check in prompt() arrives with normalization and the
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
+		const videoAttachmentNotices = this.#createVideoAttachmentNotices(images, timestamp ?? Date.now());
 		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
@@ -6583,6 +6623,7 @@ export class AgentSession {
 				: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
+			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
 				role: "user",
@@ -6591,6 +6632,7 @@ export class AgentSession {
 				timestamp: timestamp ?? Date.now(),
 			});
 		} else {
+			for (const notice of videoAttachmentNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer({
 				role: "user",
@@ -7394,6 +7436,11 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// Drop the frozen system-prompt/tool snapshot and synced message bytes
+			// (mirrors freshSession()/resetSessionContext()): without this the first
+			// post-/new turns keep sending the previous session's StablePrefix, and
+			// #syncAppendOnlyContext only re-runs on model or setting changes.
+			this.agent.appendOnlyContext?.invalidateForModelChange();
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 			this.#pendingNextTurnMessages = [];

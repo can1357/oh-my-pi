@@ -454,8 +454,6 @@ export class ChatTranscriptBuilder {
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: settings.get("terminal.showImages"),
-					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 				},
 				this.deps.getTool?.(content.name),
 				this.deps.ui,

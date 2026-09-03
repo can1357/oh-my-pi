@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { splitAddressableFileLines } from "@oh-my-pi/hashline";
+import { notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -15,19 +15,13 @@ import {
 	type ImageMetadata,
 	isProbablyBinary,
 	isProbablyBinaryHeader,
+	isEnoent,
 	logger,
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
-import {
-	canonicalSnapshotKey,
-	getFileSnapshotStore,
-	recordFileSnapshot,
-	recordSeenLinesFromBody,
-	SNAPSHOT_MAX_BYTES,
-} from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
-import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
+import { getEditStore } from "../edit/store";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -113,6 +107,20 @@ import {
 	type SuffixMatchCache,
 } from "./read-path-resolution";
 import { type PdfImageReadTarget, renderPdfPageScreenshot, splitPdfImageReadPath } from "./read-pdf";
+import { formatDimensionNote, resizeImage } from "../utils/image-resize";
+import {
+	VideoError,
+	buildVideoContactSheetPng,
+	extractVideoFramePng,
+	formatVideoDetails,
+	isVideoPath,
+	parseVideoSelector,
+	probeVideo,
+	splitVideoReadTarget,
+	videoMimeForPath,
+	type VideoMetadata,
+	type VideoPng,
+} from "../utils/video";
 import {
 	isMultiRange,
 	isRawSelector,
@@ -122,6 +130,7 @@ import {
 	resolveTailSelector,
 	selToOffsetLimit,
 } from "./read-selector";
+import { splitAddressableFileLines } from "./hashline-format";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
 import { isProseSummaryPath, renderSummary, routeReadThroughBridge, trySummarize } from "./read-summary";
 import { formatBytes, shortenPath } from "./render-utils";
@@ -136,6 +145,7 @@ export { readToolRenderer } from "./read-renderer";
 /** Largest profile (`*.sample.txt`, `*.cpuprofile`) converted to a bottleneck summary; bigger files read as plain text. */
 const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 const MAX_ARTIFACT_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
+const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
 const LF_BYTE = 0x0a;
@@ -798,6 +808,121 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return toolResult<ReadToolDetails>({ notes, displayReadTargets }).content(content).done();
 	}
 
+	/**
+	 * Reinterpret a read target pointing at a video file. Timestamp selectors
+	 * (`clip.mp4:1h5m42s`, `clip.mp4:0:05`) never survive line-selector parsing,
+	 * so peel one off the raw path whenever the base names an existing video
+	 * file; a literal file named by the full path (colon included) still wins.
+	 */
+	async #applyVideoSelectorFallback(
+		literalSplit: { path: string; sel?: string },
+		readPath: string,
+	): Promise<{ path: string; sel?: string }> {
+		const videoSplit = splitVideoReadTarget(readPath);
+		if (!videoSplit) return literalSplit;
+		if ((await probeLiteralPathExists(videoSplit.path, this.session.cwd)) === "missing") return literalSplit;
+		if ((await probeLiteralPathExists(readPath, this.session.cwd)) === "exists") return literalSplit;
+		return videoSplit;
+	}
+
+	/**
+	 * Read a video file as a contact-sheet preview grid (bare read) or a single
+	 * frame (`:412` frame index, `:1h5m42s`/`:90s` timestamp). Both ride the
+	 * image pipeline so model context sees real pixels plus a metadata block.
+	 */
+	async #readVideoFile(
+		absolutePath: string,
+		sel: string | undefined,
+		fileSize: number,
+		suffixResolution: { from: string; to: string } | undefined,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		const mimeType = videoMimeForPath(absolutePath);
+		const selector = parseVideoSelector(sel);
+		if (selector === null && sel !== undefined) {
+			throw new ToolError(
+				`Invalid selector ':${sel}' on '${resolvedDisplayPath}'. Use :<frame> (e.g. :412) or :<timestamp> (e.g. :1h5m42s, :90s) to extract a frame, or read without a selector for a preview grid.`,
+			);
+		}
+		const applySuffix = (text: string): string =>
+			suffixResolution ? prependSuffixResolutionNotice(text, suffixResolution) : text;
+		let meta: VideoMetadata;
+		try {
+			meta = await probeVideo(absolutePath, signal);
+		} catch (error) {
+			if (error instanceof VideoError) throw new ToolError(error.message);
+			throw error;
+		}
+		if (this.syncInspectImageState()) {
+			const hint =
+				"\n\nIf you want to see the video, read a frame with " +
+				`${resolvedDisplayPath}:<timestamp> (e.g. :0:05) or ${resolvedDisplayPath}:<frame> (e.g. :412).`;
+			return toolResult<ReadToolDetails>({
+				resolvedPath: absolutePath,
+				contentType: mimeType,
+				fileSize,
+				suffixResolution,
+			})
+				.text(
+					applySuffix(
+						`${formatVideoDetails(resolvedDisplayPath, meta, fileSize, mimeType)}${selector ? "" : hint}`,
+					),
+				)
+				.sourcePath(absolutePath)
+				.done();
+		}
+		let png: VideoPng;
+		let label: string;
+		try {
+			if (selector) {
+				png = await extractVideoFramePng(absolutePath, selector, signal);
+				label =
+					selector.kind === "time"
+						? `Video frame: ${resolvedDisplayPath} @ ${selector.raw}`
+						: `Video frame: ${resolvedDisplayPath} (frame ${selector.frame})`;
+			} else {
+				const sheet = await buildVideoContactSheetPng(absolutePath, meta, signal);
+				png = sheet.png;
+				label = `Video preview grid: ${resolvedDisplayPath} (${sheet.thumbs} frames, ${sheet.cols}x${sheet.rows})`;
+			}
+		} catch (error) {
+			if (error instanceof VideoError) throw new ToolError(error.message);
+			throw error;
+		}
+		let image: ImageContent = { type: "image", data: png.data, mimeType: png.mimeType };
+		let dimensionNote: string | undefined;
+		if (this.#autoResizeImages) {
+			try {
+				const resized = await resizeImage(image, {
+					excludeWebP: webpExclusionForModel(this.session.getActiveModel?.()),
+				});
+				dimensionNote = formatDimensionNote(resized);
+				image = { type: "image", data: resized.data, mimeType: resized.mimeType };
+			} catch {
+				// Fall back to the extracted PNG when resize fails.
+			}
+		}
+		const previewBytes = Buffer.from(image.data, "base64").length;
+		if (previewBytes > MAX_IMAGE_SIZE) {
+			throw new ToolError(
+				`Video preview too large: ${formatBytes(previewBytes)} exceeds ${formatBytes(MAX_IMAGE_SIZE)} limit.`,
+			);
+		}
+		const text = applySuffix(
+			`${label}\n${formatVideoDetails(resolvedDisplayPath, meta, fileSize, mimeType)}${dimensionNote ? `\n${dimensionNote}` : ""}`,
+		);
+		return toolResult<ReadToolDetails>({
+			resolvedPath: absolutePath,
+			contentType: mimeType,
+			fileSize,
+			suffixResolution,
+		})
+			.content([{ type: "text", text }, image])
+			.sourcePath(absolutePath)
+			.done();
+	}
+
 	async #readPdfPageScreenshot(options: {
 		readPath: string;
 		absolutePdfPath: string;
@@ -1067,23 +1192,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		if (shouldAddHashLines && outputText) {
 			const tag = buffered
-				? getFileSnapshotStore(this.session).record(canonicalSnapshotKey(absolutePath), buffered.normalizedText)
-				: await recordFileSnapshot(this.session, absolutePath);
+				? getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText)
+				: getEditStore(this.session).recordSnapshotFile(absolutePath);
 			if (tag) {
-				recordSeenLinesFromBody(this.session, absolutePath, tag, outputText);
+				getEditStore(this.session).recordSeenLinesFromBody(absolutePath, tag, outputText);
 				outputText = `${formatReadHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag)}\n${outputText}`;
 			}
 		} else if (rawSelector && visibleSpans.length > 0) {
 			const rawSeenLines = lineNumbersFromSpans(visibleSpans);
 			if (rawSeenLines.length > 0) {
 				if (buffered) {
-					getFileSnapshotStore(this.session).record(
-						canonicalSnapshotKey(absolutePath),
-						buffered.normalizedText,
-						rawSeenLines,
-					);
+					getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText, rawSeenLines);
 				} else {
-					await recordFileSnapshot(this.session, absolutePath, rawSeenLines);
+					getEditStore(this.session).recordSnapshotFile(absolutePath, rawSeenLines);
 				}
 			}
 		}
@@ -1254,9 +1375,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					: null;
 		}
 
-		const localTarget = pdfImageRead ? { path: pdfImageRead.pdfPath, sel: undefined } : literalSplit;
+		const localTarget = pdfImageRead
+			? { path: pdfImageRead.pdfPath, sel: undefined }
+			: await this.#applyVideoSelectorFallback(literalSplit, readPath);
 		const localReadPath = localTarget.path;
-		const parsed = parseSel(localTarget.sel);
+		// Video frame selectors (`:412`, `:1h5m42s`, `:0:05`) are not line selectors;
+		// keep them out of the line parser so they reach the video reader intact.
+		const parsed =
+			isVideoPath(localTarget.path) &&
+			(localTarget.sel === undefined || parseVideoSelector(localTarget.sel) !== null)
+				? { kind: "none" as const }
+				: parseSel(localTarget.sel);
 
 		let absolutePath = resolveReadPath(localReadPath, this.session.cwd);
 		let suffixResolution: { from: string; to: string } | undefined;
@@ -1382,6 +1511,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
 			| undefined;
 
+		if (isVideoPath(absolutePath)) {
+			return this.#readVideoFile(absolutePath, localTarget.sel, fileSize, suffixResolution, signal);
+		}
 		if (parsed.kind === "image") {
 			({ content, details, sourcePath } = await this.#loadImageContent({
 				readPath: localReadPath,
@@ -1400,8 +1532,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				imageMetadata,
 				fileSize,
 			}));
-		} else if (isNotebookPath(absolutePath) && !isRawSelector(parsed)) {
-			const notebookText = await readEditableNotebookText(absolutePath, resolvedDisplayPath);
+		} else if (absolutePath.toLowerCase().endsWith(".ipynb") && !isRawSelector(parsed)) {
+			let notebookJson: string;
+			try {
+				notebookJson = await Bun.file(absolutePath).text();
+			} catch (error) {
+				if (isEnoent(error)) throw new Error(`File not found: ${resolvedDisplayPath}`);
+				throw error;
+			}
+			const notebookText = notebookToEditableText(notebookJson, resolvedDisplayPath);
 			return buildInMemorySelectorResult(this.session, notebookText, parsed, {
 				details: { resolvedPath: absolutePath },
 				sourcePath: absolutePath,
@@ -1489,7 +1628,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const bodyText = footer ? `${renderedSummary.text}\n\n${footer}` : renderedSummary.text;
 					const modelText = prependHashlineHeader(bodyText, summaryHashContext);
 					if (summaryHashContext?.tag) {
-						recordSeenLinesFromBody(this.session, absolutePath, summaryHashContext.tag, renderedSummary.text);
+						getEditStore(this.session).recordSeenLinesFromBody(
+							absolutePath,
+							summaryHashContext.tag,
+							renderedSummary.text,
+						);
 					}
 					details = {
 						displayContent: { text: renderedSummary.displayText, startLine: 1 },
@@ -1681,16 +1824,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// non-truncated whole-file window can supply it.
 						const isWholeFile = offset === undefined && limit === undefined && !wasTruncated;
 						const tag = buffered
-							? getFileSnapshotStore(this.session).record(
-									canonicalSnapshotKey(absolutePath),
-									buffered.normalizedText,
-								)
+							? getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText)
 							: isWholeFile
-								? getFileSnapshotStore(this.session).record(
-										canonicalSnapshotKey(absolutePath),
+								? getEditStore(this.session).recordSnapshot(
+										absolutePath,
 										normalizeToLF(`${collectedLines.join("\n")}${hasTrailingNewline ? "\n" : ""}`),
 									)
-								: await recordFileSnapshot(this.session, absolutePath);
+								: getEditStore(this.session).recordSnapshotFile(absolutePath);
 						if (tag) {
 							hashContext = hashlineHeaderContext(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag);
 						}
@@ -1801,20 +1941,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (reachedEof) details.totalLines = totalFileLines;
 
 					if (hashContext?.tag) {
-						recordSeenLinesFromBody(this.session, absolutePath, hashContext.tag, outputText);
+						getEditStore(this.session).recordSeenLinesFromBody(absolutePath, hashContext.tag, outputText);
 					}
 					if (rawSelector && !firstLineExceedsLimit && collectedLines.length > 0) {
 						// A raw read emits no header, but recording the range it displayed
 						// lets a same-content hashline tag inherit its provenance.
 						const seenLines = contiguousLineNumbers(startLineDisplay, collectedLines.length);
 						if (buffered) {
-							getFileSnapshotStore(this.session).record(
-								canonicalSnapshotKey(absolutePath),
-								buffered.normalizedText,
-								seenLines,
-							);
+							getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText, seenLines);
 						} else {
-							await recordFileSnapshot(this.session, absolutePath, seenLines);
+							getEditStore(this.session).recordSnapshotFile(absolutePath, seenLines);
 						}
 					}
 
@@ -1905,7 +2041,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
 
 		const rawText = region.lines.join("\n");
-		const tag = shouldAddHashLines ? await recordFileSnapshot(this.session, entry.absolutePath) : undefined;
+		const tag = shouldAddHashLines ? getEditStore(this.session).recordSnapshotFile(entry.absolutePath) : undefined;
 		const hashContext = tag
 			? hashlineHeaderContext(formatPathRelativeToCwd(entry.absolutePath, this.session.cwd), tag)
 			: undefined;

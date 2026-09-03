@@ -33,6 +33,7 @@ import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import { withInferenceUserAgent } from "./providers/inference-headers";
 import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -909,7 +910,7 @@ function streamDispatch<TApi extends Api>(
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
 	const requestOptions = {
 		...debugOptions,
-		fetch: wrapFetchForProxy(debugOptions.fetch, model.provider),
+		fetch: wrapFetchForProxy(withInferenceUserAgent(debugOptions.fetch), model.provider),
 	} as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1445,22 +1446,28 @@ function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
 	return outer;
 }
 
+function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOptions {
+	if (options?.sessionId) return options;
+	return { ...options, sessionId: crypto.randomUUID() };
+}
+
 export function streamSimple<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	const sessionOptions = withInferenceSessionId(options);
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, options);
+		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
-	const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
+	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
 	const wrappedExecHandlers = execHandlers === undefined ? undefined : codec.wrapCursorExecHandlers(execHandlers);
 	const wireOptions =
 		wrappedExecHandlers === undefined
-			? options
+			? sessionOptions
 			: {
-					...options,
+					...sessionOptions,
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
@@ -1477,7 +1484,7 @@ function streamSimpleRequest<TApi extends Api>(
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
 	const requestOptions = {
 		...debugOptions,
-		fetch: wrapFetchForProxy(debugOptions.fetch, model.provider),
+		fetch: wrapFetchForProxy(withInferenceUserAgent(debugOptions.fetch), model.provider),
 	} as SimpleStreamOptions;
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
@@ -1722,7 +1729,12 @@ export async function completeSimple<TApi extends Api>(
 	},
 ): Promise<AssistantMessage> {
 	const { onAttempt, ...streamOptions } = options ?? {};
-	return resolveWithThinkingLoopRetries(options?.signal, () => streamSimple(model, context, streamOptions), onAttempt);
+	const sessionOptions = withInferenceSessionId(streamOptions);
+	return resolveWithThinkingLoopRetries(
+		options?.signal,
+		() => streamSimple(model, context, sessionOptions),
+		onAttempt,
+	);
 }
 
 const MIN_OUTPUT_TOKENS = 1024;

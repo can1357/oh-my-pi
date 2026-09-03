@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added catalog-delivered model intelligence scores and estimated output throughput.
+
+### Changed
+
+- Improved model search ranking by prioritizing configured roles, provider preferences, and recent usage
+- Improved model selection stability when filtering the model browser list
+
 ## [18.1.5] - 2026-09-03
 
 ### Added

@@ -6,8 +6,6 @@ import { formatDuration, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
-import { getEditClipboard } from "../../edit/edit-clipboard";
-import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import {
@@ -108,6 +106,7 @@ export class EventController {
 	 *  at their tool_execution_end so the title returns to `working`. */
 	#approvalAttentionToolCallIds = new Set<string>();
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
+	#pendingStreamPreviews = new Map<string, unknown>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
@@ -257,6 +256,14 @@ export class EventController {
 			message_end: e => this.#handleMessageEnd(e),
 			tool_execution_start: e => this.#handleToolExecutionStart(e),
 			tool_execution_update: e => this.#handleToolExecutionUpdate(e),
+			tool_stream_update: async event => {
+				const component = this.ctx.pendingTools.get(event.toolCallId);
+				if (component?.updateStreamPreview) {
+					component.updateStreamPreview(event.update);
+				} else {
+					this.#pendingStreamPreviews.set(event.toolCallId, event.update);
+				}
+			},
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
@@ -551,7 +558,10 @@ export class EventController {
 		// Streamed JSON can deliver non-string `i` (object, number, boolean) before
 		// schema validation; `?.` only guards null/undefined, so guard the type too.
 		if (typeof intent !== "string") return;
-		const trimmed = intent.trim();
+		const trimmed = intent
+			.trim()
+			.replace(/\s*\.+$/, "")
+			.trim();
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(trimmed);
@@ -711,6 +721,7 @@ export class EventController {
 		this.#lastIntent = undefined;
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
+		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
 		this.#executionStartedCallIds.clear();
 		this.#syntheticFailureCards.clear();
@@ -826,6 +837,7 @@ export class EventController {
 		this.#sealAbandonedForegroundTools();
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
+		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
 		this.#executionStartedCallIds.clear();
 		this.#syntheticFailureCards.clear();
@@ -1273,17 +1285,18 @@ export class EventController {
 						renderArgs,
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							snapshots: getFileSnapshotStore(this.ctx.viewSession),
-							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 						},
 						tool,
 						this.ctx.ui,
 						this.ctx.sessionManager.getCwd(),
 						content.id,
 					);
+					const pendingPreview = this.#pendingStreamPreviews.get(content.id);
+					if (pendingPreview !== undefined) {
+						component.updateStreamPreview(pendingPreview);
+						this.#pendingStreamPreviews.delete(content.id);
+					}
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
 					this.ctx.pendingTools.set(content.id, component);
@@ -1535,8 +1548,6 @@ export class EventController {
 				event.args,
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-					snapshots: getFileSnapshotStore(this.ctx.viewSession),
-					clipboard: getEditClipboard(this.ctx.viewSession),
 					showImages: settings.get("terminal.showImages"),
 				},
 				tool,
@@ -1544,6 +1555,11 @@ export class EventController {
 				this.ctx.sessionManager.getCwd(),
 				event.toolCallId,
 			);
+			const pendingPreview = this.#pendingStreamPreviews.get(event.toolCallId);
+			if (pendingPreview !== undefined) {
+				component.updateStreamPreview(pendingPreview);
+				this.#pendingStreamPreviews.delete(event.toolCallId);
+			}
 			component.setArgsComplete(event.toolCallId);
 			component.setExecutionStarted(event.toolCallId);
 			this.#executionStartedCallIds.add(event.toolCallId);
@@ -1912,6 +1928,7 @@ export class EventController {
 		this.#priorTurnToolComponents = new Map(this.#toolTimelineComponents);
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
+		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
 		this.#executionStartedCallIds.clear();
 		this.#syntheticFailureCards.clear();

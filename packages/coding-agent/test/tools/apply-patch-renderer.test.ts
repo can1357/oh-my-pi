@@ -111,14 +111,16 @@ describe("apply_patch rendering", () => {
 	});
 
 	it("shows an apply_patch parse error preview for malformed input", async () => {
-		const uiTheme = await getUiTheme();
+		await getUiTheme();
+		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
 		const malformedInput = ["*** Begin Patch", "*** Update File: src/bad.ts", "*** End Patch"].join("\n");
 
-		const component = toolRenderers.apply_patch.renderCall(
-			{ input: malformedInput },
-			{ expanded: false, isPartial: true },
-			uiTheme,
-		);
+		const component = new ToolExecutionComponent("apply_patch", { input: malformedInput }, {}, undefined, uiStub);
+		component.updateStreamPreview({
+			generation: 1,
+			streaming: false,
+			files: [{ path: "", error: "Line 3: Update file hunk for path 'src/bad.ts' is empty" }],
+		});
 		const rendered = Bun.stripANSI(component.render(160).join("\n"));
 
 		expect(rendered).toContain("src/bad.ts");
@@ -144,8 +146,19 @@ describe("apply_patch rendering", () => {
 			const before = Bun.stripANSI(component.render(160).join("\n"));
 			expect(before).not.toContain("(preview)");
 
+			component.updateStreamPreview({
+				generation: 1,
+				streaming: false,
+				files: [
+					{
+						path: "preview.ts",
+						diff: " 1|const value = 1;\n-1|const value = 1;\n+1|const value = 2;",
+						firstChangedLine: 1,
+					},
+				],
+			});
 			component.setArgsComplete();
-			const after = await waitForRenderedText(component, 160, "(preview)");
+			const after = Bun.stripANSI(component.render(160).join("\n"));
 			expect(after).toContain("(preview)");
 			expect(after).toContain("const value = 2;");
 		} finally {
