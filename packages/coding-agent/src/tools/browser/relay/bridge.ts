@@ -558,6 +558,7 @@ export class RelayBridge {
 		if (this.#ext && this.#ext !== socket) {
 			this.#log("replacing extension socket");
 			for (const tab of this.#tabs.values()) {
+				tab.recoveryStartUrl = tab.url;
 				if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 				this.#resetRuntime(tab);
 			}

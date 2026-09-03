@@ -7208,6 +7208,58 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
 
+	it("reruns immediate preloads when a replacement socket bypasses the old close callback", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, url: "https://example.com/before" })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		const replacement = new FakeExtSocket();
+		bridge.extConnected(replacement);
+		bridge.extClosed(ext);
+		bridge.extMessage(
+			replacement,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1, url: "https://example.com/after" })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await waitFor(() => replacement.pending("attach").length === 1);
+		ack(bridge, replacement, "attach");
+		await waitFor(() => replacement.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, replacement, "send", {});
+		await waitFor(() =>
+			replacement.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		);
+
+		const replay = replacement.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toEqual({
+			source: "window.__relayInjected = true;",
+			runImmediately: true,
+		});
+	});
+
 	it("re-cycles Runtime for a preserved session that re-enables before the reconnect hello", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
