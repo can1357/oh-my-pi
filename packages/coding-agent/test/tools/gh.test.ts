@@ -17,6 +17,7 @@ import {
 import {
 	parseIssueUrl,
 	parsePullRequestUrl,
+	saveArtifactText,
 	tryResolveCurrentRepoFresh,
 } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
 import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
@@ -1900,5 +1901,39 @@ describe("current checkout repository with an upstream remote", () => {
 		const jsonSpy = mockOriginView(null);
 		expect(await tryResolveCurrentRepoFresh(repoDir, undefined)).toBe("vendor/engine");
 		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("saveArtifactText", () => {
+	let tmpDir: string;
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-gh-artifact-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	it("publishes an id for an artifact it wrote", async () => {
+		const artifactsDir = path.join(tmpDir, "artifacts");
+		await fs.mkdir(artifactsDir, { recursive: true });
+		const session = createSession(tmpDir, Settings.isolated({ "github.enabled": true }), artifactsDir);
+
+		const artifactId = await saveArtifactText(session, "gh", "full failed-job logs\n");
+
+		expect(artifactId).toBe("0");
+		expect(await fs.readFile(path.join(artifactsDir, "0-gh.md"), "utf8")).toBe("full failed-job logs\n");
+	});
+
+	it("drops the id instead of failing the tool when the artifact write fails", async () => {
+		// A completed `gh run watch` embeds this id as `artifact://<id>`. A
+		// failed side-channel write must not discard the result the tool already
+		// produced, and must not advertise an artifact that is not there.
+		const blocker = path.join(tmpDir, "not-a-dir");
+		await fs.writeFile(blocker, "");
+		const session = createSession(tmpDir, Settings.isolated({ "github.enabled": true }), blocker);
+
+		expect(await saveArtifactText(session, "gh", "full failed-job logs\n")).toBeUndefined();
 	});
 });

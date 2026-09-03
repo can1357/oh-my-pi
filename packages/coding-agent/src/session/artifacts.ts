@@ -67,6 +67,27 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 }
 
 /**
+ * Best-effort {@link writeArtifact} for side-channel output next to a finished
+ * tool result. A failed write is logged with its path and reason instead of
+ * thrown, so the caller keeps its result and only omits the `artifact://` link.
+ *
+ * Returns whether the artifact was confirmed on disk.
+ */
+export async function tryWriteArtifact(path: string, content: string, toolType: string): Promise<boolean> {
+	try {
+		await writeArtifact(path, content);
+		return true;
+	} catch (error) {
+		logger.warn("Failed to persist tool output artifact", {
+			toolType,
+			path,
+			error: toError(error).message,
+		});
+		return false;
+	}
+}
+
+/**
  * Artifact surface shared by a session and the subagents that adopt its
  * manager. {@link ArtifactManager} implements it on the owning thread; a
  * subagent worker holds a remote implementation whose ids come from the owner
