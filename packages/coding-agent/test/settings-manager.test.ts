@@ -7,8 +7,8 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
+import { physicalTargetSegments } from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import {
-	__physicalTargetSegmentsForTesting,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -823,20 +823,20 @@ describe("Settings", () => {
 			// `C:\C:\managed\final.yml`, so flushing through a dangling absolute link
 			// fails. Drive the splitter with the win32 engine so the bug reproduces
 			// on this POSIX host.
-			const segments = __physicalTargetSegmentsForTesting("C:\\managed\\final.yml", path.win32).filter(
+			const segments = physicalTargetSegments("C:\\managed\\final.yml", path.win32).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(segments).toEqual(["managed", "final.yml"]);
 			// A UNC target seeds at the `\\server\share\` root, which must likewise
 			// be stripped rather than re-walked as `server` / `share` segments.
-			const uncSegments = __physicalTargetSegmentsForTesting(
+			const uncSegments = physicalTargetSegments(
 				"\\\\server\\share\\managed\\final.yml",
 				path.win32,
 			).filter(segment => segment !== "" && segment !== ".");
 			expect(uncSegments).toEqual(["managed", "final.yml"]);
 			// A relative Windows target seeds at the link's real parent, so every
 			// segment is preserved unchanged.
-			expect(__physicalTargetSegmentsForTesting("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
+			expect(physicalTargetSegments("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
 		});
 
 		it("treats a backslash as a filename character on POSIX, not a separator", async () => {
@@ -845,10 +845,10 @@ describe("Settings", () => {
 			// `managed`/`config.yml` makes flush either fail on the missing dir or
 			// write an unrelated file while the real link stays dangling. Drive the
 			// splitter with the posix engine so the bug reproduces on any host.
-			expect(__physicalTargetSegmentsForTesting("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
+			expect(physicalTargetSegments("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
 			// Forward slashes still split, and the leading `/` of an absolute POSIX
 			// target strips to no extra segment (root seeded separately).
-			const absSegments = __physicalTargetSegmentsForTesting("/managed/final.yml", path.posix).filter(
+			const absSegments = physicalTargetSegments("/managed/final.yml", path.posix).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(absSegments).toEqual(["managed", "final.yml"]);

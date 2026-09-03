@@ -24,15 +24,18 @@ function withSchema(config: MCPConfigFile): MCPConfigFile {
 /**
  * Serialize a read-modify-write against one config file.
  *
- * Wraps {@link withFileLock} but first ensures the config's parent directory
- * exists, because the lock directory (`${filePath}.lock`) is created with a
- * non-recursive `mkdir` — without this the very first write (before the config
- * file or its parent exists) would fail to acquire the lock with ENOENT.
+ * Wraps {@link withFileLock} on the symlink-RESOLVED target: two configured
+ * paths that alias the same physical mcp.json must contend on one lock, or
+ * both read-modify-writes could publish against the resolved target and the
+ * last rename would drop the other's mutation. The lock directory
+ * (`${resolved}.lock`) is created with a non-recursive `mkdir`, so the
+ * referent's parent directory is materialized first — also covering a link
+ * dangling into a directory that does not exist yet.
  */
-function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-	return fs.promises
-		.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
-		.then(() => withFileLock(filePath, fn));
+async function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+	const writePath = await resolveSymlinkWriteTarget(filePath);
+	await fs.promises.mkdir(path.dirname(writePath), { recursive: true, mode: 0o700 });
+	return withFileLock(writePath, fn);
 }
 
 /**
@@ -66,12 +69,14 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 	const dir = path.dirname(writePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	// Writing through a user-managed link must not tighten the target's
-	// permissions (e.g. a shared 0644 config suddenly becoming 0600); keep the
-	// referent's current mode, falling back to the private default.
+	// mcp.json carries credentials (server `env`, auth `headers`), so the
+	// published mode keeps only the owner bits of the referent's current mode
+	// — stricter-than-600 owner modes (e.g. 0o400) survive, group/world bits
+	// are dropped like the unconditional 0o600 always did — and a new file
+	// falls back to the private default.
 	let mode = 0o600;
 	try {
-		mode = (await fs.promises.stat(writePath)).mode & 0o777;
+		mode = (await fs.promises.stat(writePath)).mode & 0o700;
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}

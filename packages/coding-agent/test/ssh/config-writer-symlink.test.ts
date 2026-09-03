@@ -19,9 +19,9 @@ describe.skipIf(process.platform === "win32")("ssh config-writer symlinked confi
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("writes to the referent, keeping the ssh.json symlink and its mode intact", async () => {
+	it("writes to the referent, keeping the ssh.json symlink and tightening its mode to owner-only", async () => {
 		const target = path.join(dir, "real-ssh.json");
-		await fs.writeFile(target, JSON.stringify({ hosts: {} }), { mode: 0o640 });
+		await fs.writeFile(target, JSON.stringify({ hosts: {} }));
 		await fs.chmod(target, 0o640);
 		const link = path.join(dir, "ssh.json");
 		await fs.symlink(target, link);
@@ -31,6 +31,8 @@ describe.skipIf(process.platform === "win32")("ssh config-writer symlinked confi
 		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
 		const config = await readSSHConfigFile(link);
 		expect(Object.keys(config.hosts ?? {})).toEqual(["alpha"]);
-		expect((await fs.stat(target)).mode & 0o777).toBe(0o640);
+		// Group/world bits are dropped (credential-adjacent file); owner bits
+		// are preserved.
+		expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
 	});
 });

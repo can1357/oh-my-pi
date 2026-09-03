@@ -54,11 +54,14 @@ export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile
 	const dir = path.dirname(writePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	// Keep the referent's current mode so writing through a link cannot
-	// tighten its permissions; fall back to the private default.
+	// ssh.json is credential-adjacent (hosts, usernames, key paths), so the
+	// published mode keeps only the owner bits of the referent's current mode —
+	// stricter-than-600 owner modes survive, group/world bits are dropped like
+	// the unconditional 0o600 always did — and a new file falls back to the
+	// private default.
 	let mode = 0o600;
 	try {
-		mode = (await fs.promises.stat(writePath)).mode & 0o777;
+		mode = (await fs.promises.stat(writePath)).mode & 0o700;
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
