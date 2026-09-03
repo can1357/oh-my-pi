@@ -38,6 +38,9 @@
 ### Fixed
 
 - Fixed `grep` and `sed` treating basic regular expressions as extended ones, which silently matched every line for patterns like `^+` or `s/^\+/` and swapped the meanings of `+` and `\+` ([#10298](https://github.com/can1357/oh-my-pi/pull/10298) by [@mruangutai](https://github.com/mruangutai)).
+### Added
+
+- Added `atomicLocalWrite`, a cross-platform handle-relative primitive for session-local staged writes with no-link containment, atomic replacement, and structured commit-state errors.
 
 ## [18.1.0] - 2026-09-01
 

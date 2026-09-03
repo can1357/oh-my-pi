@@ -42,6 +42,7 @@ export const __piNativesV18_1_8 = nativeBindings.__piNativesV18_1_8;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
+export const atomicLocalWrite = nativeBindings.atomicLocalWrite;
 export const blockRangeAt = nativeBindings.blockRangeAt;
 export const copyToClipboard = nativeBindings.copyToClipboard;
 export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs;
@@ -131,6 +132,19 @@ export const AstMatchStrictness = {
 	Relaxed: "relaxed",
 	Signature: "signature",
 	Template: "template",
+};
+export const AtomicWriteCommitState = {
+	Committed: "COMMITTED",
+	NotCommitted: "NOT_COMMITTED",
+	Indeterminate: "INDETERMINATE",
+};
+export const AtomicWriteErrorCode = {
+	InvalidInput: "INVALID_INPUT",
+	Aborted: "ABORTED",
+	Busy: "BUSY",
+	Unsupported: "UNSUPPORTED",
+	UnsafePath: "UNSAFE_PATH",
+	Io: "IO",
 };
 export const DiffSide = {
 	Old: "Old",

@@ -1229,6 +1229,9 @@ export interface ExtensionAPI {
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
 
+	/** Whether this OMP host owns the native handle-relative local writer. */
+	readonly hasAtomicLocalWrite: boolean;
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================

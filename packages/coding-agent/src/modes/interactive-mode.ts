@@ -3830,7 +3830,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
 				});
-				await fs.mkdir(path.dirname(newLocalPath), { recursive: true });
+				await fs.mkdir(path.dirname(newLocalPath), { recursive: true, mode: 0o700 });
 				await fs.writeFile(newLocalPath, planContent);
 			} else if (options.compactBeforeExecute) {
 				// Distill the plan-mode transcript before the execution turn is queued so

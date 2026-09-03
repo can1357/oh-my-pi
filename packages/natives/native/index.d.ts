@@ -872,6 +872,48 @@ export interface AstReplaceResult {
   parseErrors?: Array<string>
 }
 
+/**
+ * Write bytes through a native, handle-relative, same-parent atomic
+ * replacement. Invalid DTOs become typed rejections without calling a platform
+ * mutator.
+ */
+export declare function atomicLocalWrite(options: AtomicLocalWriteOptions, signal?: unknown | undefined): Promise<AtomicLocalWriteResult>
+
+/**
+ * JavaScript input for [`atomic_local_write`]. napi-rs derives camelCase field
+ * names (`absoluteRoot`, `targetComponents`, `contentUtf8`, `executable`).
+ */
+export interface AtomicLocalWriteOptions {
+  absoluteRoot: string
+  targetComponents: Array<string>
+  contentUtf8: Uint8Array
+  executable: boolean
+}
+
+/** JavaScript result for [`atomic_local_write`]. */
+export interface AtomicLocalWriteResult {
+  bytesWritten: number
+  madeExecutable: boolean
+  commitState: AtomicWriteCommitState
+}
+
+/** Truth about whether the target replacement happened. */
+export declare enum AtomicWriteCommitState {
+  Committed = 'COMMITTED',
+  NotCommitted = 'NOT_COMMITTED',
+  Indeterminate = 'INDETERMINATE'
+}
+
+/** Stable machine-readable failure categories for atomic local writes. */
+export declare enum AtomicWriteErrorCode {
+  InvalidInput = 'INVALID_INPUT',
+  Aborted = 'ABORTED',
+  Busy = 'BUSY',
+  Unsupported = 'UNSUPPORTED',
+  UnsafePath = 'UNSAFE_PATH',
+  Io = 'IO'
+}
+
 export interface AxNode {
   ref: string
   role: string
