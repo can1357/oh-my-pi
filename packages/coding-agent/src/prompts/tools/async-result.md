@@ -5,20 +5,20 @@
 {{/if}}{{#each jobs}}{{#if @root.multiple}}── Job {{escapeXml this.jobId}}{{#if this.label}} ({{escapeXml this.label}}){{/if}}: {{#if this.failed}}failed{{else}}completed{{/if}}{{#if this.bash}}{{#if this.hasExitCode}}, exit {{this.exitCode}}{{else}}{{#if this.failed}}, no exit code{{#if this.timedOut}} (timed out){{/if}}{{/if}}{{/if}}{{/if}} ──
 {{/if}}{{#if this.progressSummarized}}{{#if this.hasLeftover}}<output>
 {{#if this.leftoverHead}}<head>
-{{escapeXml this.leftoverHead}}
+{{this.leftoverHead}}
 </head>
 {{#if this.leftoverSuppressed}}<suppressed reason="rate-limit" events="{{this.leftoverSuppressed}}" full-output="artifact://{{this.artifactId}}" />
 {{else}}<suppressed reason="preview-limit" full-output="artifact://{{this.artifactId}}" />
 {{/if}}<tail>
-{{escapeXml this.leftoverTail}}
+{{this.leftoverTail}}
 </tail>
-{{else}}{{escapeXml this.leftoverText}}{{#if this.leftoverTruncated}}
+{{else}}{{this.leftoverText}}{{#if this.leftoverTruncated}}
 <suppressed reason="preview-limit" full-output="artifact://{{this.artifactId}}" />{{/if}}
 {{/if}}</output>
 Remaining output since the last progress update; earlier output was already delivered. Full output: artifact://{{this.artifactId}}{{else}}All output was already delivered as progress updates. Full output: artifact://{{this.artifactId}}{{/if}}{{#if this.terminalText}}
 <result>
-{{escapeXml this.terminalText}}
-</result>{{/if}}{{else}}{{escapeXml this.result}}{{/if}}{{#if this.schemaStatus}}
+{{this.terminalText}}
+</result>{{/if}}{{else}}{{this.result}}{{/if}}{{#if this.schemaStatus}}
 
 Structured output: schema {{this.schemaStatus}}{{#if this.schemaError}}: {{this.schemaError}}{{/if}}{{#if this.hasStructuredData}}; full payload at agent://{{this.agentUrlId}}, fields via agent://{{this.agentUrlId}}?q=.<field>{{/if}}{{#unless this.schemaValid}}{{#if this.structuredJson}}; preview:
 ```json
