@@ -2064,15 +2064,18 @@ async function streamAssistantResponse(
 									if (event.type.endsWith("_start")) openBlocks.add(contentIndex);
 									else if (event.type.endsWith("_end")) openBlocks.delete(contentIndex);
 								}
-								// `message` and `assistantMessageEvent.partial` intentionally share one
-								// immutable snapshot of the streaming partial: every message_update
-								// consumer treats both as read-only, so cloning the identical partial
-								// twice per delta was pure waste. The snapshot itself is rebuilt
-								// incrementally — only the delta's block, open blocks, and newly
-								// appended blocks are deep-cloned; finalized blocks are carried
-								// over from the previous snapshot by reference (see
-								// `snapshotAssistantMessageIncremental`), keeping per-delta work
-								// proportional to the live stream instead of the whole turn.
+								// READ-ONLY-CONSUMER INVARIANT: `message` and
+								// `assistantMessageEvent.partial` intentionally share one snapshot,
+								// and the snapshot is rebuilt incrementally — only the delta's
+								// block, open blocks, and newly appended blocks are deep-cloned;
+								// finalized blocks are carried over from the previous snapshot by
+								// reference (see `snapshotAssistantMessageIncremental`), so they are
+								// shared across ALL message_update snapshots of the turn.
+								// Consumers MUST treat both fields — and every content block inside
+								// them — as read-only: mutating a snapshot would corrupt every
+								// earlier and later snapshot of the turn, not just this one. In
+								// exchange, per-delta work is proportional to the live stream
+								// instead of the whole turn (issue #10605).
 								const messageSnapshot: AssistantMessage = turnSnapshot
 									? snapshotAssistantMessageIncremental(
 											partialMessage,
