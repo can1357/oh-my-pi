@@ -98,6 +98,20 @@ interface HeaderResolutionOptions {
 	apiKeyConfig?: string;
 }
 
+/**
+ * Hidden accessor a live-headers proxy exposes so a parent
+ * {@link createLiveConfigHeaders} can fold it in one resolve call. Enumerating a
+ * nested proxy key-by-key instead re-fires its traps (and its own nested
+ * sources' traps) per property, which is O(keys^depth) once these proxies are
+ * re-wrapped across turns/subagent batches — the multi-minute main-thread stall
+ * in #10605.
+ */
+const LIVE_HEADER_RESOLVER = Symbol("ompLiveConfigHeaderResolver");
+
+interface LiveHeaderCarrier {
+	[LIVE_HEADER_RESOLVER]?: () => Record<string, string> | undefined;
+}
+
 function materializeConfigHeaderSources(
 	sources: readonly HeaderSource[],
 	options?: HeaderResolutionOptions,
@@ -105,8 +119,17 @@ function materializeConfigHeaderSources(
 	const resolved: Record<string, string> = {};
 	for (const source of sources) {
 		if (!source) continue;
-		for (const [key, value] of Object.entries(source)) {
-			const next = resolveConfigValue(value);
+		const resolveLive = (source as LiveHeaderCarrier)[LIVE_HEADER_RESOLVER];
+		if (resolveLive) {
+			// A nested live-headers proxy already resolves its own chain; fold its
+			// snapshot once instead of enumerating it (its values are resolved, so
+			// they must not pass through resolveConfigValue again).
+			const snapshot = resolveLive();
+			if (snapshot) Object.assign(resolved, snapshot);
+			continue;
+		}
+		for (const key in source) {
+			const next = resolveConfigValue(source[key]);
 			if (next) resolved[key] = next;
 		}
 	}
@@ -129,6 +152,7 @@ export function createLiveConfigHeaders(
 	const current = () => materializeConfigHeaderSources(allSources, options) ?? {};
 	return new Proxy(localHeaders, {
 		get(target, property, receiver) {
+			if (property === LIVE_HEADER_RESOLVER) return () => materializeConfigHeaderSources(allSources, options);
 			if (typeof property !== "string") return Reflect.get(target, property, receiver);
 			return current()[property];
 		},

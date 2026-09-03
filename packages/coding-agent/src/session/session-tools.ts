@@ -250,6 +250,14 @@ export class SessionTools {
 	#toolRegistryMutationScope = new AsyncLocalStorage<boolean>();
 	#toolRegistryMutationTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
+	/**
+	 * Model identity (`formatModelString`) last named by an inspect_image
+	 * status notice. Consulted by {@link reconcileInspectImageAfterModelChange}
+	 * to refresh the hint when consecutive switches keep the tool hidden but
+	 * change the active model — otherwise the notice keeps naming the previous
+	 * model (issue #10729).
+	 */
+	#lastInspectImageNoticeModel: string | undefined;
 	#rebuildSystemPrompt: SessionToolsOptions["rebuildSystemPrompt"];
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
@@ -1602,23 +1610,32 @@ export class SessionTools {
 
 	/**
 	 * Reconciles inspect_image after a model change and surfaces a notice when
-	 * the visible tool set actually flipped. Called from every model-change
-	 * path — including retry-fallback switches that bypass
-	 * {@link syncAfterModelChange}.
+	 * the visible tool set flips, or when consecutive switches keep the tool
+	 * hidden for image capability but change the active model (the hint names
+	 * the model, so it would otherwise keep naming the previous one — issue
+	 * #10729). Called from every model-change path — including retry-fallback
+	 * switches that bypass {@link syncAfterModelChange}.
 	 */
 	reconcileInspectImageAfterModelChange(): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const before = this.getEnabledToolNames().includes("inspect_image");
 			const reconciled = await this.reconcileInspectImageTool();
+			if (!reconciled) return;
 			const after = this.getEnabledToolNames().includes("inspect_image");
-			if (!reconciled || before === after) return;
 			const model = this.#host.model();
 			const modelName = model ? formatModelString(model) : "the current model";
+			const flipped = before !== after;
+			// The hidden-state hint names the active model to explain why
+			// inspect_image vanished; refresh it when the model changed while the
+			// tool stays hidden, otherwise the prior hint keeps naming the old model.
+			const staleHiddenModel = !after && !flipped && modelName !== this.#lastInspectImageNoticeModel;
+			if (!flipped && !staleHiddenModel) return;
+			this.#lastInspectImageNoticeModel = modelName;
 			this.#host.emitNotice(
 				"info",
 				after
 					? `inspect_image is now available: ${modelName} has no native image input.`
-					: `inspect_image is now hidden: ${modelName} supports image input natively. Override with /vision on.`,
+					: `inspect_image ${flipped ? "is now hidden" : "stays hidden"}: ${modelName} supports image input natively. Override with /vision on.`,
 				"vision",
 			);
 		});
