@@ -589,6 +589,19 @@ describe("sloppy v8", () => {
 		expect(notes.join("\n")).toMatch(/omitted the <SM:PUT> separator/);
 	});
 
+	test("rejects a marker-less whole-block restatement whose prefix line alone matches", () => {
+		// Regression (review P1 on #10527): a desired-state restatement that
+		// begins with one unchanged file line scores high on shared frame
+		// similarity (e.g. an added import above a kept call), which would let
+		// the separator recovery split at that line and replace only it —
+		// duplicating the kept call. The split requires an equal non-blank line
+		// count, so this falls through to the fail-closed error.
+		const content = 'import { a } from "x";\nrun();\n';
+		const input = '<SM:EDIT>\nimport { a } from "x";\nimport { b } from "x";\nrun();';
+
+		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
+	});
+
 	test("keeps the fail-closed error when no block resembles the stated text", () => {
 		const content = "const a = 1;\nkeep();\n";
 

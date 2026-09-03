@@ -612,14 +612,16 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 /**
  * Minimum normalized similarity between a recovered MATCH prefix and its
  * recovered REWRITE remainder for the missing-separator split to be trusted.
- * A real "forgot the » separator" payload pairs old and new text of the same
- * construct (high similarity); a marker-less desired-state payload whose first
- * line happens to exist in the file pairs a stray prefix with unrelated target
- * text (low similarity). Below the bound the split is a misread and the payload
- * falls through to the closest-block path (or the fail-closed error) instead
- * of silently replacing the prefix line with the remainder.
+ * A real "forgot the » separator" payload replaces the matched text with a
+ * same-shape rewrite (same line count, high similarity). A marker-less
+ * desired-state block whose first line happens to exist in the file pairs a
+ * stray prefix with the block's remaining lines — usually a different line
+ * count, and often a tail that is really the file's own continuation. The
+ * split is only accepted when both agree with the same-construct reading;
+ * anything else falls through to the gated closest-block path (or the
+ * fail-closed error) instead of silently replacing a prefix line.
  */
-const RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY = 0.5;
+const RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY = 0.65;
 
 function recoverMissingSeparator(
 	lines: string[],
@@ -647,16 +649,22 @@ function recoverMissingSeparator(
 		if (matches.length !== 1) continue;
 		const throughFirstRewriteLine = normalizeBlock(lines.slice(0, remainderStart + 1), false);
 		if (content.startsWith(throughFirstRewriteLine, matches[0].start)) continue;
-		// Structural gate: a recovered split must look like a rewrite of the
-		// matched text (same construct, similar normalized shape), not a
-		// marker-less desired-state block whose first line merely exists in the
-		// file. Splitting the latter replaces only the prefix line and strands
-		// the rest — the silent corruption this gate exists to prevent.
+		// Structural gate: a recovered split must look like a same-shape rewrite
+		// of the matched text (equal non-blank line count, similar normalized
+		// shape), not a marker-less desired-state block whose first line merely
+		// exists in the file. Splitting the latter replaces only the prefix line
+		// and strands the rest — the silent corruption this gate exists to
+		// prevent. Line-count equality alone rejects whole-block restatements
+		// whose prefix is a single matching line (e.g. an added import above a
+		// kept call), even when the shared frame keeps similarity high.
+		const patternLines = patternText.split("\n").filter(line => line.trim() !== "");
+		const rewriteLines = rewrite.split("\n").filter(line => line.trim() !== "");
 		const patternNormalized = normalizeText(patternText).text;
 		const rewriteNormalized = normalizeText(rewrite).text;
 		if (
 			patternNormalized === "" ||
 			rewriteNormalized === "" ||
+			patternLines.length !== rewriteLines.length ||
 			similarity(patternNormalized, rewriteNormalized) < RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY
 		) {
 			continue;
