@@ -217,6 +217,7 @@ export class FooterComponent implements Component {
 		const normalizedPremiumRequests = Math.round((totalPremiumRequests + Number.EPSILON) * 100) / 100;
 		if (totalCost || usingSubscription || normalizedPremiumRequests) {
 			const billingParts: string[] = [];
+			const costPrefix = sanitizeStatusText(settings.get("statusLine.costPrefix") ?? "$");
 			if (totalCost) {
 				const formatted = totalCost.toFixed(3);
 				if (usingSubscription) {
@@ -226,7 +227,7 @@ export class FooterComponent implements Component {
 							: `S${formatted}`;
 					billingParts.push(spend);
 				} else {
-					billingParts.push(`$${formatted}`);
+					billingParts.push(`${costPrefix}${formatted}`);
 				}
 			} else if (usingSubscription) {
 				billingParts.push(theme.getSymbolPreset() === "nerd" && subscriptionIcon ? subscriptionIcon : "(sub)");

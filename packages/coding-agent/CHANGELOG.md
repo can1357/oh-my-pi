@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `statusLine.costPrefix` setting to customize the currency symbol displayed before cost amounts in the status line (default: `$`). Cosmetic only — does not convert values.
+
 ### Fixed
 
 - Fixed user-scope marketplace plugins installed through `omp` losing their skills unless the Claude plugin source was separately enabled ([#10662](https://github.com/can1357/oh-my-pi/issues/10662)).
