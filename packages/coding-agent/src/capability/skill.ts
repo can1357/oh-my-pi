@@ -70,6 +70,26 @@ export interface Skill {
 	_source: SourceMeta;
 }
 
+/**
+ * Maximum length (in characters) of a mode skill's `reminder`. Reminders are
+ * injected into the system prompt, so every skill-loading path enforces this
+ * cap through {@link validateSkillReminder}.
+ */
+export const SKILL_REMINDER_MAX_LENGTH = 1024;
+
+/**
+ * Validate a skill's `reminder` frontmatter value. Returns `null` when the
+ * value is acceptable (including absent), otherwise an error message.
+ */
+export function validateSkillReminder(reminder: unknown): string | null {
+	if (reminder === undefined) return null;
+	if (typeof reminder !== "string") return `"reminder" must be a string`;
+	if (reminder.length > SKILL_REMINDER_MAX_LENGTH) {
+		return `"reminder" exceeds ${SKILL_REMINDER_MAX_LENGTH} characters`;
+	}
+	return null;
+}
+
 export const skillCapability = defineCapability<Skill>({
 	id: "skills",
 	displayName: "Skills",

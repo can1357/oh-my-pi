@@ -98,8 +98,14 @@ describe("status line pinned skill mode segment", () => {
 		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.agents, "Vibe"));
 	});
 
-	it("takes the slot over loop mode when both are active", () => {
+	it("yields the slot to loop mode when both are active", () => {
 		const rendered = renderSegment("mode", createContext(["ponytail"], { loopMode: { state: "waiting" } }));
+		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop waiting"));
+	});
+
+	it("keeps the pin when no loop is active", () => {
+		const rendered = renderSegment("mode", createContext(["ponytail"], { loopMode: null }));
+		expect(rendered.visible).toBe(true);
 		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.pin, "ponytail"));
 	});
 

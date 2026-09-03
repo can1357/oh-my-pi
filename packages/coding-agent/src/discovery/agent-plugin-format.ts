@@ -14,6 +14,7 @@
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readFile } from "../capability/fs";
+import { validateSkillReminder } from "../capability/skill";
 import { isContainedResolved, realpathIfExists, resolveContainedPath } from "./contained-path";
 import { registerPluginCacheInvalidator } from "./helpers";
 
@@ -121,6 +122,7 @@ function validateSkillName(raw: unknown, dirName: string): string | null {
  * validity under Agent Plugins §7.1, mirroring the official skills-ref
  * reference validator: the frontmatter schema is CLOSED to its eight fields
  * and any unexpected key rejects the skill. Returns the first violation, or `null`
+ * when the skill conforms. Frontmatter keys must be raw (unnormalized).
  */
 export function validateAgentSkillFrontmatter(frontmatter: Record<string, unknown>, dirName: string): string | null {
 	for (const key in frontmatter) {
@@ -148,11 +150,8 @@ export function validateAgentSkillFrontmatter(frontmatter: Record<string, unknow
 	const mode = frontmatter.mode;
 	if (mode !== undefined && typeof mode !== "boolean") return `"mode" must be a boolean`;
 
-	const reminder = frontmatter.reminder;
-	if (reminder !== undefined) {
-		if (typeof reminder !== "string") return `"reminder" must be a string`;
-		if (reminder.length > 1024) return `"reminder" exceeds 1024 characters`;
-	}
+	const reminderViolation = validateSkillReminder(frontmatter.reminder);
+	if (reminderViolation !== null) return reminderViolation;
 
 	const metadata = frontmatter.metadata;
 	if (metadata !== undefined) {
