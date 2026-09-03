@@ -580,12 +580,12 @@ describe("sloppy v8", () => {
 	test("recovers a genuinely missing separator only when the split is structurally similar", () => {
 		// A real "forgot »" payload pairs current text with a near-identical
 		// rewrite; the split applies and the note names the omitted separator.
-		const content = "const timeout = 1000;\n";
+		const content = "const timeout = 1000;\nreport(timeout);\n";
 		const notes: string[] = [];
 
-		expect(applySloppy(content, "<SM:EDIT>\nconst timeout = 1000;\nconst timeout = 5000;", { path: "c.ts", notes })).toBe(
-			"const timeout = 5000;\n",
-		);
+		expect(
+			applySloppy(content, "<SM:EDIT>\nconst timeout = 1000;\nconst timeout = 5000;", { path: "c.ts", notes }),
+		).toBe("const timeout = 5000;\nreport(timeout);\n");
 		expect(notes.join("\n")).toMatch(/omitted the <SM:PUT> separator/);
 	});
 
@@ -626,16 +626,24 @@ describe("sloppy v8", () => {
 
 	test("rejects a missing-separator split when the matching prefix is at EOF", () => {
 		// Regression (review P1 round 3 on #10527): a two-line file with a
-		// marker-less desired block that appends similarly shaped declarations
-		// — the prefix matches uniquely and both halves score above the
-		// similarity threshold, but the file has no continuation lines after
-		// the match, so the continuation gate was skipped and the split
-		// replaced the matched prefix with the appended declarations. Now the
-		// insufficient continuation triggers a higher similarity bar (0.85)
-		// that the append does not meet, so the split is rejected and the
-		// payload fails closed instead of silently corrupting the file.
+		// marker-less desired block that appends only moderately similar
+		// declarations. With no continuation lines after the matching prefix,
+		// insufficient continuation itself rejects the split, so the payload
+		// fails closed instead of silently corrupting the file.
 		const content = "const item1 = oldA;\nconst item2 = oldB;\n";
 		const input = "<SM:EDIT>\nconst item1 = oldA;\nconst item2 = oldB;\nconst item3 = newC;\nconst item4 = newD;";
+		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
+	});
+
+	test("rejects a high-similarity missing-separator split with insufficient EOF continuation", () => {
+		// Regression (latest review on #10527): similarity alone cannot prove a
+		// forgotten separator when the uniquely matching prefix has fewer
+		// following nonblank lines than the candidate rewrite. Even this highly
+		// similar append must fail closed rather than replace item1/item2 with
+		// item3/item4.
+		const content = "const item1 = value;\nconst item2 = value;\n";
+		const input = "<SM:EDIT>\nconst item1 = value;\nconst item2 = value;\nconst item3 = value;\nconst item4 = value;";
+
 		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
