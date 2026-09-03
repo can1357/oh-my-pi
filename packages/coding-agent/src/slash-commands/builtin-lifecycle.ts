@@ -387,7 +387,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed({ agentInvoked: true });
 		},
 		handleTui: async (_command, runtime) => {
-			if (!runtime.ctx.session.continueTurn()) {
+			if (runtime.ctx.session.isStreaming) {
+				runtime.ctx.showStatus("Wait for the current response to finish or abort it before continuing");
+			} else if (!runtime.ctx.session.continueTurn()) {
 				runtime.ctx.showStatus("Nothing to continue");
 			}
 			runtime.ctx.editor.setText("");

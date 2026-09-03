@@ -131,7 +131,9 @@ describe("/continue slash command", () => {
 		const harness = createTuiRuntime(activeSession);
 
 		expect(await executeBuiltinSlashCommand("/continue", harness.runtime)).toBe(true);
-		expect(harness.showStatus).toHaveBeenCalledWith("Nothing to continue");
+		expect(harness.showStatus).toHaveBeenCalledWith(
+			"Wait for the current response to finish or abort it before continuing",
+		);
 		expect(providerCalls).toBe(1);
 
 		gate.resolve();

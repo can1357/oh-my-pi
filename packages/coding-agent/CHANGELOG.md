@@ -14,7 +14,7 @@
 - Added repeat read warning hints when identical file content is read multiple times.
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
-- Added `/continue` as a discoverable equivalent to the existing `.`/`c` shortcut, resuming the current intent without a user message after rewinds or interrupts.
+- Added `/continue` as a discoverable equivalent to the existing `.`/`c` shortcut (when the session is idle), resuming the current intent without a user message after rewinds or interrupts.
 
 ### Changed
 
