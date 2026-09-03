@@ -5,12 +5,14 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
 /**
  * Whether an OAuth refresh failure is definitive (the credential must be
- * disabled) versus transient. Typed token-endpoint 401/403 responses are
- * definitive even when their non-JSON bodies carry no classifiable text.
+ * disabled) versus transient. Typed token-endpoint 401/403 responses retain
+ * their status, but explicit transient markers still take precedence.
  */
 export function isDefinitiveOAuthFailure(error: unknown): boolean {
-	if (error instanceof OAuthError && (error.status === 401 || error.status === 403)) return true;
 	const message = error instanceof Error ? error.message : String(error);
+	if (error instanceof OAuthError && (error.status === 401 || error.status === 403)) {
+		return isOAuthExpiry(`HTTP 401 ${message}`);
+	}
 	return isOAuthExpiry(message);
 }
 

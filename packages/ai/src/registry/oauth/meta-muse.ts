@@ -148,12 +148,13 @@ function parseDeviceAuthorization(payload: unknown): DeviceAuthorization {
 	};
 }
 
-function parseTokenResponse(payload: unknown): TokenResponse {
+function parseTokenResponse(payload: unknown, status?: number): TokenResponse {
 	const parsed = tokenResponseSchema(payload);
 	if (parsed instanceof type.errors) {
 		throw new AIError.OAuthError(`Invalid Meta token response: ${parsed.summary}`, {
 			kind: "validation",
 			provider: PROVIDER,
+			status,
 		});
 	}
 	return parsed;
@@ -256,7 +257,7 @@ async function pollDeviceToken(
 		signal,
 	);
 	if (response.ok) return { status: "complete", value: parseTokenGrant(payload) };
-	const code = parseTokenResponse(payload).error?.trim() || "";
+	const code = parseTokenResponse(payload, response.status).error?.trim() || "";
 	if (code === "authorization_pending") return { status: "pending" };
 	if (code === "slow_down") return { status: "slow_down" };
 	return { status: "failed", message: `Meta token polling failed: ${code || response.status}` };
@@ -352,7 +353,7 @@ export async function refreshMetaMuseToken(
 		signal,
 	);
 	if (!response.ok) {
-		const errorResponse = parseTokenResponse(payload);
+		const errorResponse = parseTokenResponse(payload, response.status);
 		const code = errorResponse.error?.trim();
 		const description = errorResponse.error_description?.trim();
 		const detail = [code, description].filter(Boolean).join(": ");

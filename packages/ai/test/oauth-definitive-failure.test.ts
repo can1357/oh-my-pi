@@ -57,6 +57,24 @@ describe("isDefinitiveOAuthFailure", () => {
 		).toBe(false);
 	});
 
+	it("keeps typed 403 token-endpoint policy and edge failures transient", () => {
+		for (const message of [
+			"HTTP 403 Forbidden",
+			"403 PERMISSION_DENIED: account verification required",
+			"blocked by Cloudflare captcha",
+		]) {
+			expect(
+				isDefinitiveOAuthFailure(
+					new OAuthError(message, {
+						kind: "validation",
+						provider: "meta",
+						status: 403,
+					}),
+				),
+			).toBe(false);
+		}
+	});
+
 	it("treats rate-limit and server/gateway errors as transient", () => {
 		for (const msg of [
 			"429 too many requests",

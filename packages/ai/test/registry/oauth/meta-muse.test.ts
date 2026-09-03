@@ -211,4 +211,27 @@ describe("Muse Code OAuth", () => {
 			status: 401,
 		});
 	});
+
+	test("preserves a forbidden status when token JSON violates the OAuth schema", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				response(
+					{
+						error: { code: "invalid_token", message: "The refresh token was revoked" },
+					},
+					403,
+				),
+			);
+
+		await expect(
+			refreshMetaMuseToken(
+				{ access: "expired-access", refresh: "revoked-refresh", expires: 0, apiKey: "LLM|old-key" },
+				fetchImpl,
+			),
+		).rejects.toMatchObject({
+			kind: "validation",
+			provider: "meta",
+			status: 403,
+		});
+	});
 });
