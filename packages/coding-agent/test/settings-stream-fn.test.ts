@@ -119,8 +119,8 @@ describe("createSettingsAwareStreamFn", () => {
 
 		const first = calls[0]?.options?.streamFirstEventTimeoutMs;
 		const idle = calls[0]?.options?.streamIdleTimeoutMs;
-		expect(first).toBeGreaterThanOrEqual(44_000);
-		expect(first).toBeLessThanOrEqual(45_000);
+		expect(first).toBeGreaterThanOrEqual(74_000);
+		expect(first).toBeLessThanOrEqual(75_000);
 		expect(idle).toBe(first);
 	});
 
