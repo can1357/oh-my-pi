@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- File mentions now accept line selectors such as `@src/app.ts:40-80`, `@src/app.ts:1-5,20-30`, and tails like `@log.txt:-60`, injecting only the requested lines into the prompt ([#10623](https://github.com/can1357/oh-my-pi/pull/10623) by [@kml93](https://github.com/kml93)). Selectors survive quoted paths (`@"My Folder/a.ts":1-5`); invalid ranges are ignored silently.
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes
@@ -98,6 +102,9 @@
 - Added clone-first Git worktree support that carries over ignored build artifacts when creating worktrees, with a configurable `worktree.clone` setting and fallback to a standard checkout. This is supported by `github pr_checkout`, `omp worktree add`, and `git worktree add` commands entered through the Bash tool.
 - Added the `omp worktree add` command with Git-compatible branch, detach, path, and commit options.
 - Added `/wt` (alias `/worktree`) to create a linked worktree with uncommitted changes and move the current session into it while leaving the original checkout untouched.
+### Added
+
+- File mentions now accept line selectors such as `@src/app.ts:40-80` and `@src/app.ts:1-5,20-30`, injecting only the requested lines into the prompt.
 
 ### Changed
 

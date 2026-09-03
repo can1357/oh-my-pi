@@ -98,6 +98,21 @@ function extractQuotedPrefix(text: string): string | null {
 	return text.slice(quoteStart);
 }
 
+/**
+ * True when a typed remainder after a completion value is a file-mention
+ * selector (`:1-10`, `:1-5,20-30`, `:-60`) rather than filename characters.
+ * Mirrors the read-tool selector grammar loosely; false negatives only drop a
+ * preserved suffix (retyped by hand), never mis-accept a filename.
+ */
+function isFileSelectorSuffix(suffix: string): boolean {
+	if (!suffix.startsWith(":")) return false;
+	return suffix
+		.slice(1)
+		.toLowerCase()
+		.split(":")
+		.every(chunk => chunk === "raw" || chunk === "conflicts" || chunk === "img" || /^[\dl][\dl,.\-+]*$/.test(chunk));
+}
+
 function parsePathPrefix(prefix: string): { rawPrefix: string; isAtPrefix: boolean; isQuotedPrefix: boolean } {
 	if (prefix.startsWith('@"')) {
 		return { rawPrefix: prefix.slice(2), isAtPrefix: true, isQuotedPrefix: true };
@@ -734,18 +749,24 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		// Check if we're completing a file attachment (prefix starts with "@")
 		if (prefix.startsWith("@")) {
 			const liveAtPrefix = this.#extractAtPrefix(textBeforeCursor);
-			if (liveAtPrefix) {
-				beforePrefix = currentLine.slice(0, cursorCol - liveAtPrefix.length);
-			}
-			// This is a file attachment completion
-			const newLine = `${beforePrefix + item.value} ${afterCursor}`;
+			const completedPath = item.value;
+			const liveSuffix =
+				liveAtPrefix?.startsWith(completedPath) === true ? liveAtPrefix.slice(completedPath.length) : "";
+			// Preserve only selector-shaped remainders (`:1-10`): a stale
+			// suggestion whose value prefixes a longer live filename
+			// (`@foo.ts` vs `@foo.tsx`) must replace the token, not accept the
+			// unrelated longer path.
+			const preservedSuffix = isFileSelectorSuffix(liveSuffix) ? liveSuffix : "";
+			beforePrefix = liveAtPrefix ? currentLine.slice(0, cursorCol - liveAtPrefix.length) : beforePrefix;
+			const insert = `${completedPath}${preservedSuffix} `;
+			const newLine = `${beforePrefix}${insert}${afterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
 
 			return {
 				lines: newLines,
 				cursorLine,
-				cursorCol: beforePrefix.length + item.value.length + 1, // +1 for space
+				cursorCol: beforePrefix.length + insert.length,
 			};
 		}
 
