@@ -125,7 +125,7 @@ declare const chrome: {
 			alarmInfo: { periodInMinutes?: number; delayInMinutes?: number },
 		): void;
 		clear(name: string): Promise<boolean>;
-		onAlarm: ChromeEvent<(alarm: { name: string }) => void>;
+		onAlarm: ChromeEvent<(alarm: { name: string; scheduledTime: number }) => void>;
 	};
 	action: {
 		setBadgeText(details: { text: string }): Promise<void>;

@@ -6,6 +6,19 @@
 
 - Fixed browser-relay tabs becoming detached, duplicated, or undrivable after relay outages and extension restarts ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed recovered tabs losing their active sessions or remaining attached after the last client disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+### Added
+
+- Added `report` field to scout agent definitions for detailed, non-summarized findings
+- Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
+
+### Fixed
+
+- Fixed protocol handler incorrectly escaping raw text content from agent responses
+- Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
+- Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
+- Fixed the status line missing from the first frame at startup and appearing only after the session loaded; the last run's status row is cached per project and painted immediately, then replaced in place by the live one.
+- Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
+
 ## [18.1.5] - 2026-09-03
 
 ### Added
@@ -14,6 +27,7 @@
 - Added clone-first Git worktree support that carries over ignored build artifacts when creating worktrees, with a configurable `worktree.clone` setting and fallback to a standard checkout. This is supported by `github pr_checkout`, `omp worktree add`, and `git worktree add` commands entered through the Bash tool.
 - Added the `omp worktree add` command with Git-compatible branch, detach, path, and commit options.
 - Added `/wt` (alias `/worktree`) to create a linked worktree with uncommitted changes and move the current session into it while leaving the original checkout untouched.
+- Added the `:-N` read selector to tail the last N lines of files, directories, archives, artifacts, internal URLs (`history://`, `skill://`, …), and web URLs; combines with `:raw` (`:raw:-60`).
 
 ### Changed
 

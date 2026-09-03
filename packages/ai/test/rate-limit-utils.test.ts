@@ -396,12 +396,20 @@ describe("isUsageLimit", () => {
 	});
 
 	it("detects structured provider usage codes without quota wording", () => {
-		expect(isUsageLimit(new ProviderHttpError("Generic provider failure", 429, { code: "insufficient_quota" }))).toBe(
-			true,
-		);
-		expect(isUsageLimit(new ProviderHttpError("Generic provider failure", 429, { code: "rate_limit_error" }))).toBe(
-			false,
-		);
+		expect(
+			isUsageLimit(
+				new ProviderHttpError("Generic provider failure", 429, {
+					code: "insufficient_quota",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isUsageLimit(
+				new ProviderHttpError("Generic provider failure", 429, {
+					code: "rate_limit_error",
+				}),
+			),
+		).toBe(false);
 		expect(isUsageLimit(new ProviderHttpError("Payment Required", 402))).toBe(true);
 		expect(isUsageLimit(new ProviderHttpError("A subscription is required for this endpoint", 402))).toBe(false);
 	});
@@ -536,6 +544,19 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(403, message)).toBe(true);
 		expect(isUsageLimitOutcome(undefined, message)).toBe(true);
 		expect(isUsageLimitOutcome(429, message)).toBe(true);
+	});
+
+	it("rotates on Anthropic 402 in-flight credit exhaustion instead of surfacing the retry hint", () => {
+		const message =
+			"402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits. retry-after-ms=120000";
+		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
+		expect(is402BillingCapBody(message)).toBe(true);
+		expect(isUsageLimitOutcome(402, message)).toBe(true);
+		expect(isUsageLimit(message)).toBe(true);
+		// OpenRouter's prepaid wording is the same account-local cap.
+		expect(
+			isUsageLimitOutcome(402, "Insufficient credits. Add more using https://openrouter.ai/settings/credits"),
+		).toBe(true);
 	});
 
 	it("rotates only account-scoped cap 403s and statusless trailers", () => {

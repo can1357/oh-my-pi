@@ -116,7 +116,7 @@ function mergeSubscriptionParams(
 	next: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
 	if (key !== "Emulation.setEmulatedMedia") return next;
-	return { ...(previous ?? {}), ...(next ?? {}) };
+	return { ...previous, ...next };
 }
 
 function mergeSubscriptionFieldSequences(
@@ -126,7 +126,7 @@ function mergeSubscriptionFieldSequences(
 	sequence: number,
 ): Record<string, number> | undefined {
 	if (key !== "Emulation.setEmulatedMedia" || !nextParams) return previous;
-	const merged = { ...(previous ?? {}) };
+	const merged = { ...previous };
 	for (const field of Object.keys(nextParams)) merged[field] = sequence;
 	return merged;
 }
@@ -178,7 +178,7 @@ function applySubscriptionUpdate(
 	update: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
 	if (key !== "Emulation.setEmulatedMedia") return update ?? base;
-	const merged = { ...(base ?? {}) };
+	const merged = { ...base };
 	for (const [field, value] of Object.entries(update ?? {})) {
 		if (field === "media" && value === "") {
 			delete merged.media;
@@ -199,7 +199,7 @@ function reconcileSubscriptionParams(
 	next: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
 	if (key !== "Emulation.setEmulatedMedia") return next;
-	const params = { ...(next ?? {}) };
+	const params = { ...next };
 	if (previous && "media" in previous && (!next || !("media" in next))) params.media = "";
 	if (previous && "features" in previous && (!next || !("features" in next))) params.features = [];
 	return Object.keys(params).length > 0 ? params : undefined;
@@ -999,7 +999,7 @@ export class RelayBridge {
 		}
 		const clientIdentifier = `preload:${ref.tabId}:${++this.#sessionSeq}`;
 		this.#rememberPreloadScript(tab, sessionId, clientIdentifier, rootIdentifier, msg.params, loaderId);
-		this.#reply(conn, msg, { ...(result ?? {}), identifier: clientIdentifier });
+		this.#reply(conn, msg, { ...result, identifier: clientIdentifier });
 	}
 
 	async #handlePreloadScriptRemove(
@@ -1020,8 +1020,7 @@ export class RelayBridge {
 		}
 		const clientIdentifier = typeof msg.params?.identifier === "string" ? msg.params.identifier : undefined;
 		const script = clientIdentifier ? this.#preloadScript(tab, sessionId, clientIdentifier) : undefined;
-		const params =
-			script && clientIdentifier ? { ...(msg.params ?? {}), identifier: script.rootIdentifier } : msg.params;
+		const params = script && clientIdentifier ? { ...msg.params, identifier: script.rootIdentifier } : msg.params;
 		try {
 			await this.#rpc({
 				op: "send",
@@ -1630,7 +1629,7 @@ export class RelayBridge {
 	}
 
 	#rememberTabSubscriptionClear(tab: TabState, key: string, clears: Record<string, number>, sequence: number): void {
-		const merged = { ...(tab.subscriptionClears.get(key) ?? {}) };
+		const merged = { ...tab.subscriptionClears.get(key) };
 		for (const field of Object.keys(clears)) merged[field] = sequence;
 		tab.subscriptionClears.set(key, merged);
 	}
@@ -1973,7 +1972,7 @@ export class RelayBridge {
 		while (true) {
 			const pending = tab.pendingSubscriptions.get(key);
 			if (!pending || pending.size === 0) return;
-			await Promise.allSettled([...pending]);
+			await Promise.allSettled(pending);
 		}
 	}
 
