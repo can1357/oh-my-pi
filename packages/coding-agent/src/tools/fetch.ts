@@ -6,7 +6,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
+import { $which, logger, ptree, truncate } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
 import type { Settings } from "../config/settings";
 import { readEditableNotebookText } from "../edit/notebook";
@@ -14,6 +14,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
+import { writeArtifact } from "../session/artifacts";
 import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine, urlHyperlink } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
@@ -1591,13 +1592,29 @@ async function findArtifactPath(session: ToolSession, artifactId: string): Promi
 	}
 }
 
+/**
+ * Persist the read output as an artifact, or report that none exists.
+ *
+ * `writeArtifact()` stages a sibling temp file and verifies the bytes before
+ * publishing, so a short or failed write never leaves a truncated file where
+ * `artifact://<id>` can resolve it. Returning `undefined` keeps the caller from
+ * advertising an id for content that is not on disk (issue #9646).
+ */
 async function persistReadUrlArtifact(
 	session: ToolSession,
 	output: string,
 ): Promise<{ id?: string; path?: string } | undefined> {
 	const artifact = await session.allocateOutputArtifact?.("read");
 	if (!artifact?.path) return undefined;
-	await Bun.write(artifact.path, output);
+	try {
+		await writeArtifact(artifact.path, output);
+	} catch (error) {
+		logger.warn("read: failed to persist url output artifact", {
+			path: artifact.path,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 	return artifact;
 }
 

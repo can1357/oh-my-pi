@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { writeArtifact } from "../session/artifacts";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
@@ -317,6 +318,16 @@ export async function tryResolveCurrentRepoFresh(
 	}
 }
 
+/**
+ * Save the full result as an artifact and return its id, or `undefined` when no
+ * artifact exists.
+ *
+ * `writeArtifact()` stages a sibling temp file and verifies the bytes before
+ * publishing, so a short or failed write never leaves a truncated file where
+ * `artifact://<id>` can resolve it. Callers pass the returned id to
+ * `appendArtifactReference()`, which advertises it to the model, so a failed
+ * write must yield no id (issue #9646).
+ */
 export async function saveArtifactText(
 	session: ToolSession,
 	toolType: string,
@@ -327,7 +338,15 @@ export async function saveArtifactText(
 		return undefined;
 	}
 
-	await Bun.write(artifactPath, text);
+	try {
+		await writeArtifact(artifactPath, text);
+	} catch (error) {
+		logger.warn("gh: failed to persist result artifact", {
+			path: artifactPath,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 	return artifactId;
 }
 
