@@ -3350,9 +3350,7 @@ export class AgentSession {
 			if (this.#recovery.isRetryableReasonlessAbort(msg) || resolvedInterruptedToolTurn === "reasonless-abort") {
 				const didRetry = await this.#recovery.handleRetryableError(
 					msg,
-					resolvedInterruptedToolTurn === "reasonless-abort"
-						? { allowModelFallback: false, preserveFailedTurn: true }
-						: { allowModelFallback: false },
+					resolvedInterruptedToolTurn === "reasonless-abort" ? { preserveFailedTurn: true } : undefined,
 				);
 				if (didRetry) {
 					await emitAgentEndNotification({ willContinue: true });

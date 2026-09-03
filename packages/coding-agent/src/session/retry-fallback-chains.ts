@@ -75,6 +75,8 @@ export function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: numbe
 	return cappedDelayMs * jitter;
 }
 
+export { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "./session-deadline";
+
 /** Parses a configured retry fallback selector. */
 export function parseRetryFallbackSelector(
 	selector: string,

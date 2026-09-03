@@ -46,6 +46,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
+import { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "./session-deadline";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -2169,9 +2170,13 @@ export class TurnRecovery {
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		const remainingMs = remainingSessionDeadlineMs(this.#host.agent.deadline);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		if (!staleOpenAIResponsesReplayError) {
+			delayMs = capDurationToSessionDeadline(delayMs, remainingMs, retrySettings.modelFallback) ?? delayMs;
+		}
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
