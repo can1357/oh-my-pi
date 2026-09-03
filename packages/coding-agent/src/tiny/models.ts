@@ -1,7 +1,7 @@
 /** Default session-title model: the online @smol path (no local download / on-device inference). */
 export const ONLINE_TINY_TITLE_MODEL_KEY = "online";
 /** Local model the `tiny-models` CLI downloads when none is named. Not the session-title default — that is {@link ONLINE_TINY_TITLE_MODEL_KEY}. */
-export const DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY = "lfm2-700m";
+export const DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY = "lfm2.5-230m";
 
 export interface TinyTitleLocalModelSpec {
 	key: string;
@@ -18,55 +18,36 @@ export interface TinyTitleLocalModelSpec {
 
 export const TINY_TITLE_LOCAL_MODELS = [
 	{
-		key: "lfm2-350m",
-		repo: "onnx-community/LFM2-350M-ONNX",
+		key: "lfm2.5-230m",
+		repo: "LiquidAI/LFM2.5-230M-ONNX",
 		dtype: "q4",
-		label: "LFM2 350M",
-		description: "Recommended local model; best speed/quality balance, about 212 MB cached.",
-		contextNote: "Best local default from the title-generation spike.",
+		label: "LFM2.5 230M",
+		description: "Recommended local model; fastest LFM2.5 option, about 214 MB cached.",
+		contextNote: "Best balance among the current compact title models.",
 	},
 	{
-		key: "qwen3-0.6b",
-		repo: "onnx-community/Qwen3-0.6B-ONNX",
+		key: "lfm2.5-350m",
+		repo: "onnx-community/LFM2.5-350M-ONNX",
 		dtype: "q4",
-		label: "Qwen3 0.6B",
-		description: "Most robust local option; slower first load, about 500 MB cached.",
-		contextNote: "Use when title quality matters more than local startup cost.",
-		reasoning: true,
+		label: "LFM2.5 350M",
+		description: "Larger LFM2.5 option, about 292 MB cached; tends toward terse titles.",
+		contextNote: "Use when compact labels are preferred over descriptive titles.",
 	},
 	{
-		key: "gemma-270m",
-		repo: "onnx-community/gemma-3-270m-it-ONNX",
+		key: "falcon-h1-90m",
+		repo: "onnx-community/Falcon-H1-Tiny-90M-Instruct-ONNX",
 		dtype: "q4",
-		label: "Gemma 270M",
-		description: "Smallest viable local option; lower quality, lowest cache footprint.",
-		contextNote: "Use on constrained machines that still need local titles.",
-	},
-	{
-		key: "qwen2.5-0.5b",
-		repo: "onnx-community/Qwen2.5-0.5B-Instruct",
-		dtype: "q4",
-		label: "Qwen2.5 0.5B",
-		description: "Balanced local fallback; moderate quality and cache footprint.",
-		contextNote: "Useful when Qwen3 is too heavy but Gemma quality is insufficient.",
-	},
-	{
-		key: "lfm2-700m",
-		repo: "onnx-community/LFM2-700M-ONNX",
-		dtype: "q4",
-		label: "LFM2 700M",
-		description: "Highest-quality local option; larger and slower than LFM2 350M.",
-		contextNote: "Use when local title quality is preferred over startup cost.",
+		label: "Falcon H1 Tiny 90M",
+		description: "Smallest option, about 147 MB cached; lower fidelity on complex prompts.",
+		contextNote: "Use on constrained machines where download size matters most.",
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 export const TINY_TITLE_MODEL_VALUES = [
 	ONLINE_TINY_TITLE_MODEL_KEY,
-	"lfm2-350m",
-	"qwen3-0.6b",
-	"gemma-270m",
-	"qwen2.5-0.5b",
-	"lfm2-700m",
+	"lfm2.5-230m",
+	"lfm2.5-350m",
+	"falcon-h1-90m",
 ] as const;
 
 export type TinyTitleModelKey = (typeof TINY_TITLE_MODEL_VALUES)[number];

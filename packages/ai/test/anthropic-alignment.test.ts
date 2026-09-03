@@ -173,18 +173,20 @@ describe("Anthropic request fingerprint alignment", () => {
 
 	it("matches Claude Code OAuth header defaults", () => {
 		const sessionId = "167ec5b4-e711-4169-879f-84fa52679d9c";
-		const headers = buildAnthropicHeaders({
+		const { defaultHeaders: headers } = buildAnthropicClientOptions({
+			model: ANTHROPIC_MODEL,
 			apiKey: "sk-ant-oat-test",
 			isOAuth: true,
 			stream: true,
-			claudeCodeSessionId: sessionId,
+			hasTools: true,
+			thinkingEnabled: true,
+			sessionId,
 		});
 
 		expect(headers.Accept).toBe("application/json");
 		// Pinned literally (not via the imported constant) so a wrong version bump is caught
 		// on an observable wire header: this is the exact User-Agent the upstream expects.
 		expect(headers["User-Agent"]).toBe("claude-cli/2.1.257 (external, cli)");
-		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
 		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
@@ -213,6 +215,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			"Connection",
 			"Accept-Encoding",
 		]);
+		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["anthropic-beta"]).toBe(
 			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
 		);

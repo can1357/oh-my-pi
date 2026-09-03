@@ -1,3 +1,4 @@
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
@@ -49,6 +50,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			},
 			plugins: [await createLegacyPiVirtualModulePlugin()],
 			compile: {
+				// Bun's process-wide fetch User-Agent default. Any explicit
+				// provider fingerprint (Anthropic/Codex OAuth) still wins.
+				execArgv: [`--user-agent=${USER_AGENT}`],
 				...(options.executablePath
 					? { executablePath: options.executablePath }
 					: options.target

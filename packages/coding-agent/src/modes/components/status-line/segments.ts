@@ -17,8 +17,14 @@ export type { SegmentContext } from "./types";
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+const STARTUP_PLACEHOLDER = "…";
+
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+
+function statusValue(ctx: SegmentContext, value: string): string {
+	return ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : value;
 }
 /**
  * Hash-derived accent ANSI for the session title (or preview stand-in title).
@@ -88,6 +94,21 @@ function formatAdvisorSpend(amount: number, usingSubscription: boolean, uiTheme:
 	return `${spend} (adv)`;
 }
 
+function formatSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
+	if (!usingSubscription) return "$…";
+	if (uiTheme.getSymbolPreset() === "nerd" && uiTheme.icon.subscription) {
+		return `${uiTheme.icon.subscription} …`;
+	}
+	return "S…";
+}
+
+function formatAdvisorSpendPlaceholder(usingSubscription: boolean, uiTheme: Theme): string {
+	const spend = formatSpendPlaceholder(usingSubscription, uiTheme);
+	const icon = uiTheme.icon.advisor;
+	if (icon && icon !== "(adv)") return `${icon} ${spend}`;
+	return `${spend} (adv)`;
+}
+
 const SCRATCH_ROOTS: readonly string[] = (() => {
 	const roots = new Set<string>([os.tmpdir(), path.join(os.homedir(), "tmp")]);
 	if (process.platform === "win32") {
@@ -124,7 +145,10 @@ const piSegment: StatusLineSegment = {
 	render(ctx) {
 		if (ctx.focusedAgentId) {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
-			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
+			return {
+				content: theme.fg("warning", `${icon}${statusValue(ctx, ctx.focusedAgentId)} `),
+				visible: true,
+			};
 		}
 		// Brand fg fades between dim gray (idle) and the accent (working) across
 		// turn edges; the component samples the tween into `brandFgAnsi`.
@@ -133,7 +157,7 @@ const piSegment: StatusLineSegment = {
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandSpinnerFrame(ctx.now?.getTime())} ${brandTimer(ctx.turnElapsedMs)} `
+				? `${brandSpinnerFrame(ctx.now?.getTime())} ${statusValue(ctx, brandTimer(ctx.turnElapsedMs))} `
 				: theme.icon.omp
 					? `${theme.icon.omp} `
 					: "";
@@ -164,6 +188,7 @@ const modelSegment: StatusLineSegment = {
 		if (modelName.startsWith("Claude ")) {
 			modelName = modelName.slice(7);
 		}
+		modelName = statusValue(ctx, modelName);
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
@@ -183,6 +208,10 @@ const modelSegment: StatusLineSegment = {
 						? `${theme.status.disabled} off`
 						: (theme.thinking[level as keyof typeof theme.thinking] ?? level);
 			}
+		}
+
+		if (ctx.startupPlaceholder && thinkingDisplay) {
+			thinkingDisplay = withIcon(thinkingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
 		}
 
 		// Compact mode swaps the model icon for the thinking-level glyph and drops
@@ -272,7 +301,7 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	const parts: string[] = [withIcon(icon, "Goal")];
 	const showBudget = ctx.session.settings.get("goal.statusInFooter") === true;
 	if (showBudget && goal) {
-		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));
+		parts.push(statusValue(ctx, formatGoalBudget(goal.tokensUsed, goal.tokenBudget)));
 	}
 	return {
 		content: color === "accent" ? accentFg(ctx, color, parts.join(" ")) : theme.fg(color, parts.join(" ")),
@@ -332,9 +361,9 @@ const modeSegment: StatusLineSegment = {
 		if (loop) {
 			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
 			const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
-			const parts = [withIcon(icon, `Loop ${loop.state}`)];
+			const parts = [withIcon(icon, `Loop ${statusValue(ctx, loop.state)}`)];
 			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
-			if (limit) parts.push(limit);
+			if (limit) parts.push(statusValue(ctx, limit));
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
 		}
 
@@ -355,7 +384,9 @@ const pathSegment: StatusLineSegment = {
 		if (stripPrefix && ctx.worktree) {
 			const { projectName, worktreeName } = ctx.worktree;
 			const label = ctx.git.branch === worktreeName ? projectName : `${projectName}/${worktreeName}`;
-			const text = fileHyperlink(getProjectDir(), clampPathLength(label, opts.maxLength ?? 40));
+			const text = ctx.startupPlaceholder
+				? STARTUP_PLACEHOLDER
+				: fileHyperlink(getProjectDir(), clampPathLength(label, opts.maxLength ?? 40));
 			const content = withIcon(theme.icon.worktree, text);
 			return { content: theme.fg("statusLinePath", content), visible: true };
 		}
@@ -380,7 +411,8 @@ const pathSegment: StatusLineSegment = {
 
 		const showScratchIcon = scratch && stripPrefix;
 		const icon = showScratchIcon ? theme.icon.scratchFolder : theme.icon.folder;
-		const content = withIcon(icon, `${fileHyperlink(projectDir, pwd)}${repoSuffix}`);
+		const text = ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : `${fileHyperlink(projectDir, pwd)}${repoSuffix}`;
+		const content = withIcon(icon, text);
 		return { content: theme.fg("statusLinePath", content), visible: true };
 	},
 };
@@ -398,20 +430,20 @@ const gitSegment: StatusLineSegment = {
 		const showBranch = opts.showBranch !== false;
 		let content = "";
 		if (showBranch && branch) {
-			content = withIcon(theme.icon.branch, branch);
+			content = withIcon(theme.icon.branch, statusValue(ctx, branch));
 		}
 
 		// Add status indicators
 		if (gitStatus) {
 			const indicators: string[] = [];
 			if (opts.showUnstaged !== false && gitStatus.unstaged > 0) {
-				indicators.push(theme.fg("statusLineDirty", `*${gitStatus.unstaged}`));
+				indicators.push(theme.fg("statusLineDirty", `*${statusValue(ctx, `${gitStatus.unstaged}`)}`));
 			}
 			if (opts.showStaged !== false && gitStatus.staged > 0) {
-				indicators.push(theme.fg("statusLineStaged", `+${gitStatus.staged}`));
+				indicators.push(theme.fg("statusLineStaged", `+${statusValue(ctx, `${gitStatus.staged}`)}`));
 			}
 			if (opts.showUntracked !== false && gitStatus.untracked > 0) {
-				indicators.push(theme.fg("statusLineUntracked", `?${gitStatus.untracked}`));
+				indicators.push(theme.fg("statusLineUntracked", `?${statusValue(ctx, `${gitStatus.untracked}`)}`));
 			}
 			if (indicators.length > 0) {
 				const indicatorText = indicators.join(" ");
@@ -436,8 +468,9 @@ const prSegment: StatusLineSegment = {
 		const { pr } = ctx.git;
 		if (!pr) return { content: "", visible: false };
 
-		const label = withIcon(theme.icon.pr, `#${pr.number}`);
-		const content = TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
+		const label = withIcon(theme.icon.pr, `#${statusValue(ctx, `${pr.number}`)}`);
+		const content =
+			!ctx.startupPlaceholder && TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
 		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 };
@@ -448,7 +481,7 @@ const subagentsSegment: StatusLineSegment = {
 		if (ctx.subagentCount === 0) {
 			return { content: "", visible: false };
 		}
-		const content = withIcon(theme.icon.agents, `${ctx.subagentCount}`);
+		const content = withIcon(theme.icon.agents, statusValue(ctx, `${ctx.subagentCount}`));
 		return { content: theme.fg("statusLineSubagents", content), visible: true };
 	},
 };
@@ -459,7 +492,7 @@ const tokenInSegment: StatusLineSegment = {
 		const { input } = ctx.usageStats;
 		if (!input) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.input, formatNumber(input));
+		const content = withIcon(theme.icon.input, statusValue(ctx, formatNumber(input)));
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
 };
@@ -470,7 +503,7 @@ const tokenOutSegment: StatusLineSegment = {
 		const { output } = ctx.usageStats;
 		if (!output) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.output, formatNumber(output));
+		const content = withIcon(theme.icon.output, statusValue(ctx, formatNumber(output)));
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
 };
@@ -486,7 +519,7 @@ const tokenTotalSegment: StatusLineSegment = {
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.tokens, formatNumber(total));
+		const content = withIcon(theme.icon.tokens, statusValue(ctx, formatNumber(total)));
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
 };
@@ -497,7 +530,7 @@ const tokenRateSegment: StatusLineSegment = {
 		const { tokensPerSecond } = ctx.usageStats;
 		if (!tokensPerSecond) return { content: "", visible: false };
 
-		const content = withIcon(theme.icon.throughput, `${tokensPerSecond.toFixed(1)} tok/s`);
+		const content = withIcon(theme.icon.throughput, `${statusValue(ctx, tokensPerSecond.toFixed(1))} tok/s`);
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
 };
@@ -517,13 +550,19 @@ const costSegment: StatusLineSegment = {
 
 		const billingParts: string[] = [];
 		if (cost) {
-			billingParts.push(formatSpend(cost, usingSubscription, theme));
+			billingParts.push(
+				ctx.startupPlaceholder
+					? formatSpendPlaceholder(usingSubscription, theme)
+					: formatSpend(cost, usingSubscription, theme),
+			);
 		} else if (usingSubscription) {
 			billingParts.push(
 				theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? theme.icon.subscription : "(sub)",
 			);
 		}
-		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
+		if (normalizedPremiumRequests) {
+			billingParts.push(`★ ${statusValue(ctx, formatNumber(normalizedPremiumRequests))}`);
+		}
 		if (advisorCost) {
 			const prefix = billingParts.length ? "+ " : "";
 			// Resolve the advisor subscription flag lazily: with no active advisor
@@ -531,7 +570,10 @@ const costSegment: StatusLineSegment = {
 			// → credential-file reads), and the status line re-renders at the
 			// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
 			const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
-			billingParts.push(`${prefix}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
+			const spend = ctx.startupPlaceholder
+				? formatAdvisorSpendPlaceholder(advisorUsingSubscription, theme)
+				: formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme);
+			billingParts.push(`${prefix}${spend}`);
 		}
 		if (billingParts.length === 0) return { content: "", visible: false };
 
@@ -562,7 +604,10 @@ const contextPctSegment: StatusLineSegment = {
 						: theme.fg(color, theme.icon.auto)
 			}`;
 		}
-		const text = theme.fg(color, formatContextUsage(pct, window, ctx.contextTokens));
+		const text = theme.fg(
+			color,
+			ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : formatContextUsage(pct, window, ctx.contextTokens),
+		);
 		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };
@@ -575,7 +620,7 @@ const contextTotalSegment: StatusLineSegment = {
 		const window = ctx.contextWindow;
 		if (!window) return { content: "", visible: false };
 		return {
-			content: theme.fg("statusLineContext", withIcon(theme.icon.context, formatNumber(window))),
+			content: theme.fg("statusLineContext", withIcon(theme.icon.context, statusValue(ctx, formatNumber(window)))),
 			visible: true,
 		};
 	},
@@ -593,7 +638,7 @@ const timeSpentSegment: StatusLineSegment = {
 	id: "time_spent",
 	render(ctx) {
 		if (ctx.activeMs < 1000) return { content: "", visible: false };
-		return { content: withIcon(theme.icon.time, formatDuration(ctx.activeMs)), visible: true };
+		return { content: withIcon(theme.icon.time, statusValue(ctx, formatDuration(ctx.activeMs))), visible: true };
 	},
 };
 
@@ -617,7 +662,7 @@ const timeSegment: StatusLineSegment = {
 		}
 		timeStr += suffix;
 
-		return { content: withIcon(theme.icon.time, timeStr), visible: true };
+		return { content: withIcon(theme.icon.time, statusValue(ctx, timeStr)), visible: true };
 	},
 };
 
@@ -626,7 +671,7 @@ const sessionSegment: StatusLineSegment = {
 	render(ctx) {
 		const sessionManager = ctx.session.sessionManager;
 		const sessionId = sessionManager?.getSessionId?.();
-		const display = sessionId?.slice(0, 8) || "new";
+		const display = statusValue(ctx, sessionId?.slice(0, 8) || "new");
 
 		return { content: withIcon(theme.icon.session, display), visible: true };
 	},
@@ -635,7 +680,7 @@ const sessionSegment: StatusLineSegment = {
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
 	render(ctx) {
-		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		const name = statusValue(ctx, ctx.hostname ?? os.hostname().split(".")[0]);
 		const content = withIcon(theme.icon.host, name);
 		const ansi = sessionAccentAnsi(ctx);
 		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
@@ -648,7 +693,7 @@ const cacheReadSegment: StatusLineSegment = {
 		const { cacheRead } = ctx.usageStats;
 		if (!cacheRead) return { content: "", visible: false };
 
-		const parts = [theme.icon.cache, formatNumber(cacheRead)].filter(Boolean);
+		const parts = [theme.icon.cache, statusValue(ctx, formatNumber(cacheRead))].filter(Boolean);
 		const content = parts.join(" ");
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
@@ -660,7 +705,7 @@ const cacheWriteSegment: StatusLineSegment = {
 		const { cacheWrite } = ctx.usageStats;
 		if (!cacheWrite) return { content: "", visible: false };
 
-		const parts = [theme.icon.cache, formatNumber(cacheWrite)].filter(Boolean);
+		const parts = [theme.icon.cache, statusValue(ctx, formatNumber(cacheWrite))].filter(Boolean);
 		const content = parts.join(" ");
 		return { content: theme.fg("statusLineOutput", content), visible: true };
 	},
@@ -680,7 +725,7 @@ const cacheHitSegment: StatusLineSegment = {
 		const total = cacheRead + cacheWrite + input;
 
 		const rate = (cacheRead / total) * 100;
-		const rateStr = rate.toFixed(2);
+		const rateStr = statusValue(ctx, rate.toFixed(2));
 
 		const parts: string[] = [theme.icon.cache];
 		parts.push(theme.fg("statusLineSpend", `${rateStr}%`));
@@ -695,7 +740,8 @@ const sessionNameSegment: StatusLineSegment = {
 		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		return { content: accentFg(ctx, "accent", sanitizeStatusText(name)), visible: true };
+		const content = ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : sanitizeStatusText(name);
+		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 };
 
@@ -703,10 +749,8 @@ const collabSegment: StatusLineSegment = {
 	id: "collab",
 	render(ctx) {
 		if (!ctx.collab) return { content: "", visible: false };
-		const label =
-			ctx.collab.role === "host"
-				? `⇄ collab:${ctx.collab.participantCount}`
-				: `⇄ collab guest:${ctx.collab.participantCount}`;
+		const participants = statusValue(ctx, `${ctx.collab.participantCount}`);
+		const label = ctx.collab.role === "host" ? `⇄ collab:${participants}` : `⇄ collab guest:${participants}`;
 		return { content: accentFg(ctx, "accent", label), visible: true };
 	},
 };
@@ -741,33 +785,44 @@ const usageSegment: StatusLineSegment = {
 		}
 		const parts: string[] = [];
 		if (u.tier) {
-			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
+			const tier = ctx.startupPlaceholder
+				? STARTUP_PLACEHOLDER
+				: truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
 			const reset =
 				u.fiveHour.resetMinutes !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`,
+						)
 					: "";
 			parts.push(`5h ${pctText}${reset}`);
 		}
 		if (u.daily) {
 			const pct = u.daily.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
 			const reset =
 				u.daily.resetMinutes !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.daily.resetMinutes, "m")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.daily.resetMinutes, "m")})`,
+						)
 					: "";
 			parts.push(`1d ${pctText}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.round(pct)}`)}%`);
 			const reset =
 				u.sevenDay.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`,
+						)
 					: "";
 			parts.push(`7d ${pctText}${reset}`);
 		}
@@ -776,10 +831,13 @@ const usageSegment: StatusLineSegment = {
 			// Cursor and OpenCode Go (normalize gates monthly to those providers).
 			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
 			// "1% used"; OpenCode's endpoint already emits floored integers).
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.floor(pct)}%`);
+			const pctText = theme.fg(pickUsageColor(pct), `${statusValue(ctx, `${Math.floor(pct)}`)}%`);
 			const reset =
 				u.monthly.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.monthly.resetHours, "h")})`)
+					? theme.fg(
+							"muted",
+							ctx.startupPlaceholder ? " (…)" : ` (${formatUsageReset(u.monthly.resetHours, "h")})`,
+						)
 					: "";
 			parts.push(`mo ${pctText}${reset}`);
 		}

@@ -48,7 +48,6 @@
   },
   "dependencies": {
     "@babel/parser": "catalog:",
-    "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
@@ -246,10 +245,6 @@
     "./edit/*": {
       "types": "./src/edit/*.ts",
       "import": "./src/edit/*.ts"
-    },
-    "./edit/modes/*": {
-      "types": "./src/edit/modes/*.ts",
-      "import": "./src/edit/modes/*.ts"
     },
     "./exa": {
       "types": "./src/exa/index.ts",

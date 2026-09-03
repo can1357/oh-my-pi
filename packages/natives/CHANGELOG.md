@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added EditSession and EditStore types for managing edit states and snapshots
+- Added utility functions for handling hashline operations and formatting
+- Added utility functions for managing edit mode and generating edit descriptions
+- Added notebookToEditableText and extractInlineSloppyRegions utilities
+
 ## [18.1.5] - 2026-09-03
 
 ### Changed

@@ -1,7 +1,6 @@
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -20,8 +19,9 @@ import {
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
-import { recordFileSnapshot, recordSeenLinesFromBody } from "../edit/file-snapshot-store";
+import { getEditStore } from "../edit/store";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { formatHashlineHeader } from "./hashline-format";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
@@ -1477,7 +1477,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						// Mint a whole-file content tag so any anchor validates while the
 						// file is unchanged; over-cap / unreadable files get no tag (and
 						// therefore plain, non-editable line output).
-						const tag = await recordFileSnapshot(this.session, absoluteFilePath);
+						const tag = getEditStore(this.session).recordSnapshotFile(absoluteFilePath);
 						if (tag) hashContexts.set(relativePath, { tag });
 					}
 				}
@@ -1525,7 +1525,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}
 					if (hashContext?.tag) {
 						const absoluteFilePath = path.resolve(this.session.cwd, relativePath);
-						recordSeenLinesFromBody(this.session, absoluteFilePath, hashContext.tag, modelOut.join("\n"));
+						getEditStore(this.session).recordSeenLinesFromBody(
+							absoluteFilePath,
+							hashContext.tag,
+							modelOut.join("\n"),
+						);
 					}
 					return { model: modelOut, display: displayOut };
 				};

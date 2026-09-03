@@ -65,7 +65,9 @@ export class UserMessageComponent extends Container {
 						form === "chip"
 							? `${attachmentSgr(kind, index)}\x1b[1m${label}\x1b[22m${keywordReset}`
 							: theme.fg("accent", `\x1b[1m${label}\x1b[22m`);
-					return kind === "image" ? imageReferenceHyperlink(label, index, imageLinks, () => styled) : styled;
+					return kind === "image" || kind === "video"
+						? imageReferenceHyperlink(label, index, imageLinks, () => styled)
+						: styled;
 				},
 			});
 		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
