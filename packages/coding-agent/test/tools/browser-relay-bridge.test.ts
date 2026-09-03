@@ -5224,6 +5224,53 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
 	});
 
+	it("drops spent fresh-root recovery after the last holder disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const owner = new FakeCdpSocket();
+		const ownerId = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerId, 1);
+
+		bridge.cdpMessage(
+			ownerId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(() =>
+			ext.pending("send").some(
+				(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+			),
+		);
+		bridge.extClosed(ext);
+		await flush();
+		bridge.cdpClosed(ownerId);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.rpcs("forgetRecovery").length === 1);
+		ack(bridge, ext2, "forgetRecovery");
+
+		const replacement = new FakeCdpSocket();
+		const replacementId = bridge.cdpConnected(replacement);
+		await attachPage(bridge, ext2, replacement, replacementId, 1);
+		const detachesBeforeHello = ext2.rpcs("detach").length;
+		connect(bridge, ext2, [tab({ tabId: 1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await flush();
+
+		expect(ext2.rpcs("detach")).toHaveLength(detachesBeforeHello);
+	});
+
 	it("retracts preserved sessions when a forced-root detach fails", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

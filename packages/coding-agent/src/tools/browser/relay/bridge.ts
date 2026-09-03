@@ -767,6 +767,15 @@ export class RelayBridge {
 				continue;
 			}
 			if (holders.length === 0) {
+				// No downstream session can need recovery anymore. If the orphan
+				// guard already detached this root, consume any stale fresh-root
+				// authorization now so a future holder is not detached on a later
+				// hello for work that belonged to the departed owner.
+				tab.forceFreshRootBeforeReplay = false;
+				tab.refreshDetachInFlight = false;
+				tab.restorePending = false;
+				tab.recoveryStartUrl = null;
+				tab.recoveryStartLoaderId = undefined;
 				if (hasRecoveryMetadata && recoverableNow.has(tab.tabId)) {
 					void this.#rpc({ op: "forgetRecovery", tabId: tab.tabId }).catch(
 						(err) => {
