@@ -82837,7 +82837,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 65536,
+			"maxTokens": 65535,
 			"thinking": {
 				"mode": "budget",
 				"efforts": [

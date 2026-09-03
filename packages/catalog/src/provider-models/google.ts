@@ -35,6 +35,9 @@ export interface GoogleGeminiCliModelManagerConfig {
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash"] as const;
+// Vertex rejects maxOutputTokens=65536 for the 2.5 Lite line; rows cached
+// before the limits-patch clamp must not resurrect the rejected value.
+const GEMINI_25_FLASH_LITE_VERTEX_CACHE_MIGRATION_MODEL_IDS = ["gemini-2.5-flash-lite"] as const;
 
 function toDiscoveryFetch(fetchImpl: FetchImpl | undefined): typeof fetch | undefined {
 	if (!fetchImpl) {
@@ -62,7 +65,10 @@ export function googleModelManagerOptions(
 export function googleVertexModelManagerOptions(_config?: GoogleVertexModelManagerConfig): ModelManagerOptions {
 	return {
 		providerId: "google-vertex",
-		dropCachedModelIdsOnStaticMismatch: GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS,
+		dropCachedModelIdsOnStaticMismatch: [
+			...GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS,
+			...GEMINI_25_FLASH_LITE_VERTEX_CACHE_MIGRATION_MODEL_IDS,
+		],
 	};
 }
 

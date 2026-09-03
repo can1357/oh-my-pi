@@ -4804,7 +4804,30 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:85",
+				"source": "classes/gemini.kdl:92",
+				"class": "gemini",
+				"providers": [
+					"google-vertex"
+				],
+				"family": "lite",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "2.5.0"
+					},
+					{
+						"op": "<",
+						"revision": "2.6.0"
+					}
+				],
+				"catalog": {
+					"limitsPatch": {
+						"maxTokens": 65535
+					}
+				}
+			},
+			{
+				"source": "classes/gemini.kdl:100",
 				"class": "gemini",
 				"revision": [
 					{
@@ -4820,7 +4843,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:94",
+				"source": "classes/gemini.kdl:109",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4838,7 +4861,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:100",
+				"source": "classes/gemini.kdl:115",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",

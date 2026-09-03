@@ -34,6 +34,9 @@
 - Fixed startup failures when discovering Bedrock-style Mistral Mixtral models.
 - Fixed Muse Spark 1.3 contributor models on OpenCode gateways so they use the correct Responses API route.
 - Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
+### Fixed
+
+- Gemini 2.5 Flash Lite on Vertex AI no longer requests `maxOutputTokens=65536`, which the endpoint rejects with a 400; the output cap is clamped to 65535 ([#10595](https://github.com/can1357/oh-my-pi/pull/10595) by [@WeMingT](https://github.com/WeMingT)).
 
 ## [18.1.4] - 2026-09-02
 
