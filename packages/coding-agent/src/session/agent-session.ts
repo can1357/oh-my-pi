@@ -838,6 +838,7 @@ export class AgentSession {
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
+		this.#advisors.preserveQueuedAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -1072,6 +1073,7 @@ export class AgentSession {
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
+		this.#advisors.preserveQueuedAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -1675,6 +1677,7 @@ export class AgentSession {
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
+			isAgentConnected: () => this.#unsubscribeAgent !== undefined,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
@@ -4223,6 +4226,9 @@ export class AgentSession {
 	#reconnectToAgent(): void {
 		if (this.#unsubscribeAgent) return; // Already connected
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		// An aside queued before the disconnect (e.g. a `/compact` boundary) has no
+		// subscriber until this line runs; re-record it now that events flow again.
+		this.#advisors.preserveQueuedAdvice();
 	}
 
 	#activeProviderSessionId(sessionId?: string): string {
@@ -7503,7 +7509,9 @@ export class AgentSession {
 		// Pull advisor concerns out of the steer/follow-up queues before any await so
 		// the post-abort stranded-message drain can't auto-resume the run on them.
 		// They are re-recorded as visible advice once the agent settles (below).
-		const strandedAdvisorCards = userInterrupt ? this.#extractQueuedAdvisorCards() : [];
+		const strandedAdvisorCards = userInterrupt
+			? [...this.#extractQueuedAdvisorCards(), ...this.#advisors.drainQueuedAdvice()]
+			: [];
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
 		// auto-starting a fresh turn during cleanup.
