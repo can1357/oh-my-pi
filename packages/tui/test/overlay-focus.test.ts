@@ -248,4 +248,24 @@ describe("TUI overlay focus", () => {
 			tui.stop();
 		}
 	});
+	it("reports whether the overlay currently has focus", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const editor = new FocusRecorder("editor");
+		const questionnaire = new FocusRecorder("questionnaire");
+		const dialog = new FocusRecorder("dialog");
+
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		const questionnaireHandle = tui.showOverlay(questionnaire);
+		expect(questionnaireHandle.isFocused()).toBe(true);
+
+		const dialogHandle = tui.showOverlay(dialog);
+		expect(questionnaireHandle.isFocused()).toBe(false);
+		expect(dialogHandle.isFocused()).toBe(true);
+
+		dialogHandle.hide();
+		expect(questionnaireHandle.isFocused()).toBe(true);
+	});
 });

@@ -36,6 +36,7 @@ function makeHost(rows = 24): FakeHost {
 					},
 					setHidden() {},
 					isHidden: () => false,
+					isFocused: () => true,
 				} satisfies OverlayHandle;
 			},
 			setFocus(component) {

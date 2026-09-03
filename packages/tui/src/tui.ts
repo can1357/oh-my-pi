@@ -394,6 +394,8 @@ export interface OverlayHandle {
 	setHidden(hidden: boolean): void;
 	/** Check if overlay is temporarily hidden */
 	isHidden(): boolean;
+	/** Check if this overlay currently has focus */
+	isFocused(): boolean;
 }
 
 /**
@@ -1042,6 +1044,7 @@ export class TUI extends Container {
 				this.requestRender();
 			},
 			isHidden: () => entry.hidden,
+			isFocused: () => this.#focusedComponent === component,
 		};
 	}
 

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the band composer dropping its status row while the top border has no content, so the status line no longer pushes the prompt down when it attaches.
+- Fixed plugins crashing when checking whether their overlay is focused via `OverlayHandle.isFocused()` ([#10664](https://github.com/can1357/oh-my-pi/issues/10664)).
 
 ## [18.1.5] - 2026-09-03
 

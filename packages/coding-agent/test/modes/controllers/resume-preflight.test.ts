@@ -59,7 +59,7 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 			terminal: { rows: 24 },
 			showOverlay: vi.fn((component: unknown) => {
 				selector = component as SessionSelector.SessionSelectorComponent;
-				return { hide, setHidden: vi.fn(), isHidden: () => false };
+				return { hide, setHidden: vi.fn(), isHidden: () => false, isFocused: () => true };
 			}),
 		},
 		editor,

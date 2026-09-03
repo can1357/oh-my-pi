@@ -29,6 +29,7 @@ function makeHarness() {
 		hide: vi.fn(),
 		setHidden: vi.fn(),
 		isHidden: vi.fn(() => false),
+		isFocused: vi.fn(() => true),
 	};
 	const showOverlay = vi.fn(() => fakeHandle);
 	let uiContext: ExtensionUIContext | undefined;

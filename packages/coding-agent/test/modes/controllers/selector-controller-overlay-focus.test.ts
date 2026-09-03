@@ -122,7 +122,7 @@ describe("SelectorController session replacement overlay", () => {
 			ui: {
 				showOverlay: vi.fn(component => {
 					selector = component as SessionSelectorComponent;
-					return { hide, setHidden: vi.fn(), isHidden: () => false };
+					return { hide, setHidden: vi.fn(), isHidden: () => false, isFocused: () => true };
 				}),
 				setFocus: vi.fn(),
 				requestRender: vi.fn(),

@@ -479,6 +479,7 @@ describe("InteractiveMode plan review rendering", () => {
 			hide: vi.fn(),
 			setHidden: vi.fn(),
 			isHidden: vi.fn(() => false),
+			isFocused: vi.fn(() => true),
 		};
 		vi.spyOn(mode.ui, "showOverlay").mockImplementation((component, options) => {
 			if (!(component instanceof PlanReviewOverlay)) throw new Error("Expected Plan Review overlay");
