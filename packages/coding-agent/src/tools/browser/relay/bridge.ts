@@ -3545,11 +3545,27 @@ export class RelayBridge {
 				),
 			)
 			.sort((left, right) => left.sequence - right.sequence);
-		const currentLoaderId = preloadScripts.some(
+		const hasImmediatePreload = preloadScripts.some(
 			(script) => script.params?.runImmediately === true,
-		)
-			? await this.#mainFrameLoaderId(tab.tabId).catch(() => undefined)
-			: undefined;
+		);
+		// Loader snapshots alone cannot tell whether a navigation happened before
+		// or after Chrome acknowledged a non-immediate preload registration. Keep
+		// Page events observable across that window even when no preserved client
+		// enabled the domain; otherwise a post-ack navigation can be mistaken for a
+		// missed invocation and the retry executes non-idempotent setup twice.
+		const temporarilyObserveNavigations =
+			hasImmediatePreload &&
+			this.#latestSubscriptionForKey(tab, "Page.enable") === undefined;
+		const enablePageEvents = temporarilyObserveNavigations
+			? this.#rpc({ op: "send", tabId: tab.tabId, method: "Page.enable" })
+			: Promise.resolve();
+		const currentLoaderPromise = hasImmediatePreload
+			? this.#mainFrameLoaderId(tab.tabId).catch(() => undefined)
+			: Promise.resolve(undefined);
+		const [, currentLoaderId] = await Promise.all([
+			enablePageEvents,
+			currentLoaderPromise,
+		]);
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
 			const runImmediately =
@@ -3650,6 +3666,23 @@ export class RelayBridge {
 			}
 			current.rootIdentifier = rootIdentifier;
 			if (currentLoaderId !== undefined) current.loaderId = currentLoaderId;
+		}
+		if (temporarilyObserveNavigations) {
+			try {
+				this.#assertExtensionCurrent(expectedExt);
+				await this.#rpc({
+					op: "send",
+					tabId: tab.tabId,
+					method: "Page.disable",
+				});
+			} catch (err) {
+				// The preload replay already mutated this root. If the cleanup result
+				// is lost, retry only after replacing the root so the additive
+				// registration cannot be duplicated.
+				if (isExtensionTransportInterrupted(err))
+					tab.forceFreshRootBeforeReplay = true;
+				throw err;
+			}
 		}
 		this.#scheduleLivePreloadScriptCleanup(tab);
 	}

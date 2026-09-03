@@ -4097,7 +4097,7 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
-	it("does not rerun an acknowledged preload without Runtime events", async () => {
+	it("observes preload navigation without client Page or Runtime domains", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -4141,6 +4141,9 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() =>
 			ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
 		);
+		expect(
+			ext2.pending("send").some((rpc) => rpc.method === "Page.enable"),
+		).toBe(true);
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
@@ -4168,6 +4171,10 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-after-navigation" } },
 		});
+		await waitFor(() =>
+			ext2.pending("send").some((rpc) => rpc.method === "Page.disable"),
+		);
+		ack(bridge, ext2, "send");
 		await flush();
 
 		expect(
@@ -4182,6 +4189,9 @@ describe("RelayBridge tab grouping", () => {
 				.rpcs("send")
 				.filter((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 		).toHaveLength(1);
+		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toContain(
+			"Page.disable",
+		);
 	});
 
 	it("reruns immediate preload scripts on a forced fresh root", async () => {
