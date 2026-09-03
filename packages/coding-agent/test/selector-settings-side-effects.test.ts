@@ -371,7 +371,7 @@ describe("selector setting side effects", () => {
 		try {
 			hub.handleInput("\x1b[A"); // All models → Roles.
 			hub.handleInput("\n"); // Enter the role rows.
-			for (let i = 0; i < 8; i++) hub.handleInput("\x1b[B"); // Default → task.
+			for (let i = 0; i < 7; i++) hub.handleInput("\x1b[B"); // Default → task (designer removed).
 			hub.handleInput("t");
 
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(taskModel)];
