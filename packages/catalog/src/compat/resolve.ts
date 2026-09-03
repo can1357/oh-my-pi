@@ -903,6 +903,7 @@ function resolveGooglePolicy(
 	const compat: ResolvedGoogleCompat = {
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
+		requiresSkipThoughtSignatureOnFirstFunctionCall: false,
 		dropUnsignedThinking: false,
 		ccaLegacyParametersSchema: false,
 		multimodalFunctionResponse: false,

@@ -1298,7 +1298,7 @@ describe("ACP agent", () => {
 
 	it("surfaces a provider error that reaches the client only via agent_end", async () => {
 		// A request that fails before streaming any assistant events (e.g.
-		// GitHub Copilot's HTTP 400 model_not_supported after retries) emits no
+		// GitHub Copilot's HTTP 400 model_not_supported) emits no
 		// message_update/message_end — only agent_end carrying an empty
 		// assistant message with errorMessage. The client must still see why
 		// the turn ended instead of a silent stop.
@@ -1307,8 +1307,7 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId);
 		if (!session) throw new Error("session not registered");
 
-		const errorText =
-			"GitHub Copilot rejected this model (HTTP 400 model_not_supported) after retries. Try again in a few seconds.";
+		const errorText = "400 The requested model is not supported.";
 		const failedMessage = {
 			...makeAssistantMessage(""),
 			stopReason: "error" as const,

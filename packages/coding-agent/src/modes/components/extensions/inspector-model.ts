@@ -464,9 +464,11 @@ export function enablementLabel(state: ExtensionState, reason?: string, shadowed
 			const reasonText =
 				reason === "provider-disabled"
 					? "provider disabled"
-					: reason === "item-disabled"
-						? "manually disabled"
-						: "unknown";
+					: reason === "user-opt-in"
+						? "~/ config not enabled"
+						: reason === "item-disabled"
+							? "manually disabled"
+							: "unknown";
 			return `Disabled (${reasonText})`;
 		}
 		case "shadowed":

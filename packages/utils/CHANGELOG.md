@@ -5,6 +5,18 @@
 ### Added
 
 - Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+- Added `IncomingDoc` (`@oh-my-pi/pi-utils/incoming-json`): typed, path-addressed cursors over a JSON document while its text is still arriving — string chunks and lines, array elements, and keyed object values become available incrementally, with structured `IncomingJsonError` issues (`missing`, `incomplete`, `aborted`, `malformed`, `mismatch`) for failed pulls.
+- Added `Serial` to run async operations one at a time in call order.
+
+### Fixed
+
+- Relaxed JSON quote recovery now looks past `//` and `/* */` comments when deciding whether a quote closes a string, so `{a:'x'/*c*/, b:2}` parses instead of swallowing the comment into the string.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added `TerminalQueryResponder` to `@oh-my-pi/pi-utils/vterm`, enabling headless PTY consumers to answer common terminal queries for cursor position, device status and attributes, and foreground/background colors without maintaining a screen buffer.
 
 ## [18.1.3] - 2026-09-02
 

@@ -5,6 +5,51 @@
 ### Added
 
 - Speech-to-text can now use a configured OpenAI Codex account by selecting OpenAI Codex as the speech transcriber ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+- Added `report` field to scout agent definitions for detailed, non-summarized findings
+- Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
+
+### Changed
+
+- Inlined approved plan content directly into agent history to reduce redundant read operations
+
+### Fixed
+
+- Fixed protocol handler incorrectly escaping raw text content from agent responses
+- Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
+- Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
+- Fixed the status line missing from the first frame at startup and appearing only after the session loaded; the last run's status row is cached per project and painted immediately, then replaced in place by the live one.
+- Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added Abliteration provider support to `/login`, including `ABLITERATION_API_KEY` configuration and help text.
+- Added clone-first Git worktree support that carries over ignored build artifacts when creating worktrees, with a configurable `worktree.clone` setting and fallback to a standard checkout. This is supported by `github pr_checkout`, `omp worktree add`, and `git worktree add` commands entered through the Bash tool.
+- Added the `omp worktree add` command with Git-compatible branch, detach, path, and commit options.
+- Added `/wt` (alias `/worktree`) to create a linked worktree with uncommitted changes and move the current session into it while leaving the original checkout untouched.
+- Added the `:-N` read selector to tail the last N lines of files, directories, archives, artifacts, internal URLs (`history://`, `skill://`, …), and web URLs; combines with `:raw` (`:raw:-60`).
+
+### Changed
+
+- Foreign user-level configuration sources (`~/.cursor`, `~/.codex`, `~/.claude`, `~/.gemini`, `~/.config/opencode`, `~/.codeium/windsurf`) are now opt-in via `enabledProviders`, while project-level configurations in CWD and `.agents` continue to load by default.
+- Split subagent isolation configuration into `task.isolation.enabled` and `isolation.backend`; existing `task.isolation.mode` settings are migrated automatically.
+- Updated the built-in `smol` and `slow` model priority chains to favor newer recommended models and remove older model generations.
+- Improved unsupported-model error messages by removing retry guidance that does not apply.
+
+### Fixed
+
+- Fixed automatic title generation so `--no-title` also prevents todo-initialization title refreshes, while automatic titles retain the selected OAuth account without sharing foreground request identity.
+- Fixed provider errors so they wrap to the terminal width and remain readable in the transcript and pinned error banner, with long messages available through the expansion hint.
+- Fixed Gemini malformed function-call turns so textual tool-call output is rejected conversationally and the session can continue instead of stopping with a pinned error.
+- Fixed auto-compaction recovery getting stuck in repeated retries when models return empty length-limited responses; it now stops with an actionable error.
+- Fixed MCP servers failing to reconnect after transient startup handshake timeouts.
+- Fixed programs supervised by `hub start` hanging when querying terminal capabilities.
+- Fixed large pastes followed immediately by Enter so the input is submitted with the pasted content instead of being left in the large-paste menu.
+
+### Removed
+
+- Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
 
 ## [18.1.3] - 2026-09-02
 

@@ -1,6 +1,87 @@
 {
 	"version": 1,
 	"files": [
+		"auth/_order.kdl",
+		"auth/abliteration.kdl",
+		"auth/aiand.kdl",
+		"auth/aimlapi.kdl",
+		"auth/alibaba-coding-plan.kdl",
+		"auth/alibaba-token-plan.kdl",
+		"auth/amazon-bedrock.kdl",
+		"auth/anthropic.kdl",
+		"auth/azure.kdl",
+		"auth/baseten.kdl",
+		"auth/bedrock-mantle.kdl",
+		"auth/cerebras.kdl",
+		"auth/cline-pass.kdl",
+		"auth/cloudflare-ai-gateway.kdl",
+		"auth/coreweave.kdl",
+		"auth/cursor.kdl",
+		"auth/deepinfra.kdl",
+		"auth/deepseek.kdl",
+		"auth/devin.kdl",
+		"auth/exa.kdl",
+		"auth/firepass.kdl",
+		"auth/fireworks.kdl",
+		"auth/github-copilot.kdl",
+		"auth/gitlab-duo-agent.kdl",
+		"auth/gitlab-duo.kdl",
+		"auth/gmi-cloud.kdl",
+		"auth/google-antigravity.kdl",
+		"auth/google-gemini-cli.kdl",
+		"auth/google-vertex.kdl",
+		"auth/google.kdl",
+		"auth/groq.kdl",
+		"auth/huggingface.kdl",
+		"auth/kagi.kdl",
+		"auth/kilo.kdl",
+		"auth/kimi-code.kdl",
+		"auth/litellm.kdl",
+		"auth/llama.cpp.kdl",
+		"auth/lm-studio.kdl",
+		"auth/meta.kdl",
+		"auth/minimax-code-cn.kdl",
+		"auth/minimax-code.kdl",
+		"auth/minimax.kdl",
+		"auth/mistral.kdl",
+		"auth/moonshot.kdl",
+		"auth/nanogpt.kdl",
+		"auth/novita.kdl",
+		"auth/nvidia.kdl",
+		"auth/ollama-cloud.kdl",
+		"auth/ollama.kdl",
+		"auth/openai-codex-device.kdl",
+		"auth/openai-codex.kdl",
+		"auth/openai.kdl",
+		"auth/opencode-go.kdl",
+		"auth/opencode-zen.kdl",
+		"auth/openrouter.kdl",
+		"auth/parallel.kdl",
+		"auth/perplexity.kdl",
+		"auth/qianfan.kdl",
+		"auth/qwen-portal.kdl",
+		"auth/sakana.kdl",
+		"auth/siliconflow-cn.kdl",
+		"auth/siliconflow.kdl",
+		"auth/synthetic.kdl",
+		"auth/tavily.kdl",
+		"auth/together.kdl",
+		"auth/umans.kdl",
+		"auth/venice.kdl",
+		"auth/vercel-ai-gateway.kdl",
+		"auth/vllm.kdl",
+		"auth/wafer-serverless.kdl",
+		"auth/xai-oauth.kdl",
+		"auth/xai.kdl",
+		"auth/xiaomi-token-plan-ams.kdl",
+		"auth/xiaomi-token-plan-cn.kdl",
+		"auth/xiaomi-token-plan-sgp.kdl",
+		"auth/xiaomi.kdl",
+		"auth/yolo-auto.kdl",
+		"auth/zai-coding-plan.kdl",
+		"auth/zai.kdl",
+		"auth/zenmux.kdl",
+		"auth/zhipu-coding-plan.kdl",
 		"classes/amazon.kdl",
 		"classes/anthropic.kdl",
 		"classes/baidu.kdl",
@@ -20,6 +101,7 @@
 		"classes/qwen.kdl",
 		"classes/stepfun.kdl",
 		"classes/xai.kdl",
+		"providers/abliteration.kdl",
 		"providers/aiand.kdl",
 		"providers/aimlapi.kdl",
 		"providers/alibaba-coding-plan.kdl",
@@ -41,6 +123,7 @@
 		"providers/gitlab-duo.kdl",
 		"providers/gmi-cloud.kdl",
 		"providers/google-antigravity.kdl",
+		"providers/google-gemini-cli.kdl",
 		"providers/google-vertex.kdl",
 		"providers/google.kdl",
 		"providers/groq.kdl",
@@ -501,6 +584,32 @@
 						"provenance": "models.json census",
 						"provider": "umans",
 						"class": "glm"
+					},
+					{
+						"id": "abliteration-glm-5-3-family",
+						"model": "abliterated-model-large-v2",
+						"rationale": "Abliteration's Large V2 is an abliterated GLM 5.3 deployment",
+						"provenance": "docs.abliteration.ai/models (2026-09)",
+						"provider": "abliteration",
+						"class": "glm",
+						"revision": "5.3.0"
+					},
+					{
+						"id": "abliteration-glm-5-2-family",
+						"model": "abliterated-model-large",
+						"rationale": "Abliteration's Large is an abliterated GLM 5.2 deployment",
+						"provenance": "docs.abliteration.ai/models (2026-09)",
+						"provider": "abliteration",
+						"class": "glm",
+						"revision": "5.2.0"
+					},
+					{
+						"id": "abliteration-glm-base-family",
+						"model": "abliterated-model",
+						"rationale": "Abliteration's base deployment is GLM-derived; the docs do not pin the revision",
+						"provenance": "docs.abliteration.ai/models (2026-09)",
+						"provider": "abliteration",
+						"class": "glm"
 					}
 				]
 			},
@@ -673,9 +782,18 @@
 						"id": "llama",
 						"glob": "*llama*",
 						"priority": 0
+					},
+					{
+						"id": "muse-spark",
+						"glob": "*muse-spark*",
+						"priority": 0
 					}
 				],
-				"revisionPrefixes": [],
+				"revisionPrefixes": [
+					{
+						"prefix": "muse-spark-"
+					}
+				],
 				"skipBare": [],
 				"overrides": []
 			},
@@ -3082,7 +3200,8 @@
 			"responsesRouteModels": {
 				"opencode-go": [
 					"deepseek-v4-flash",
-					"muse-spark-1.2"
+					"muse-spark-1.2",
+					"muse-spark-1.3"
 				]
 			},
 			"billingVariantSuffixes": [
@@ -4701,7 +4820,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:93",
+				"source": "classes/gemini.kdl:94",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4719,7 +4838,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:99",
+				"source": "classes/gemini.kdl:100",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",
@@ -4911,7 +5030,83 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:39",
+				"source": "classes/glm.kdl:46",
+				"class": "glm",
+				"providers": [
+					"abliteration"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.2.0"
+					},
+					{
+						"op": "<",
+						"revision": "5.3.0"
+					}
+				],
+				"wire": {
+					"reasoningEffortMap": {
+						"xhigh": "max"
+					}
+				},
+				"thinking": {
+					"defaultLevel": "high",
+					"efforts": [
+						"high",
+						"xhigh",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "classes/glm.kdl:55",
+				"class": "glm",
+				"providers": [
+					"abliteration"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.3.0"
+					}
+				],
+				"wire": {
+					"reasoningEffortMap": {
+						"medium": "high",
+						"xhigh": "max"
+					}
+				},
+				"thinking": {
+					"defaultLevel": "max",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					],
+					"requiresEffort": true
+				}
+			},
+			{
+				"source": "classes/glm.kdl:42",
+				"class": "glm",
+				"providers": [
+					"abliteration"
+				],
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "classes/glm.kdl:68",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4939,7 +5134,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:49",
+				"source": "classes/glm.kdl:78",
 				"class": "glm",
 				"providers": [
 					"zai"
@@ -4960,7 +5155,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:61",
+				"source": "classes/glm.kdl:90",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4980,7 +5175,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:65",
+				"source": "classes/glm.kdl:94",
 				"class": "glm",
 				"providers": [
 					"alibaba-coding-plan",
@@ -4992,7 +5187,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:69",
+				"source": "classes/glm.kdl:98",
 				"class": "glm",
 				"providers": [
 					"openrouter",
@@ -5009,7 +5204,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:80",
+				"source": "classes/glm.kdl:109",
 				"class": "glm",
 				"models": [
 					{
@@ -5488,7 +5683,7 @@
 				}
 			},
 			{
-				"source": "classes/meta.kdl:4",
+				"source": "classes/meta.kdl:6",
 				"class": "meta",
 				"models": [
 					{
@@ -5498,6 +5693,14 @@
 					{
 						"kind": "exact",
 						"value": "muse-spark-1.2-contributor"
+					},
+					{
+						"kind": "exact",
+						"value": "muse-spark-1.3"
+					},
+					{
+						"kind": "exact",
+						"value": "muse-spark-1.3-contributor"
 					}
 				],
 				"thinking": {
@@ -5512,7 +5715,7 @@
 				}
 			},
 			{
-				"source": "classes/meta.kdl:9",
+				"source": "classes/meta.kdl:11",
 				"class": "meta",
 				"providers": [
 					"kilo",
@@ -6415,6 +6618,16 @@
 				"class": "xai",
 				"wire": {
 					"thinkingLoopGuard": "xai"
+				}
+			},
+			{
+				"source": "providers/abliteration.kdl:5",
+				"providers": [
+					"abliteration"
+				],
+				"wire": {
+					"includeEncryptedReasoning": false,
+					"streamIdleTimeoutMs": 0
 				}
 			},
 			{
@@ -8249,7 +8462,23 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:11",
+				"source": "providers/google-antigravity.kdl:13",
+				"class": "gemini",
+				"providers": [
+					"google-antigravity"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "3.0.0"
+					}
+				],
+				"wire": {
+					"requiresSkipThoughtSignatureOnFirstFunctionCall": true
+				}
+			},
+			{
+				"source": "providers/google-antigravity.kdl:17",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -8277,7 +8506,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:21",
+				"source": "providers/google-antigravity.kdl:27",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -8295,7 +8524,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:27",
+				"source": "providers/google-antigravity.kdl:33",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity"
@@ -8316,7 +8545,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:33",
+				"source": "providers/google-antigravity.kdl:39",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8336,7 +8565,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:37",
+				"source": "providers/google-antigravity.kdl:43",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8351,7 +8580,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:41",
+				"source": "providers/google-antigravity.kdl:47",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8367,7 +8596,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:46",
+				"source": "providers/google-antigravity.kdl:52",
 				"providers": [
 					"google-antigravity"
 				],
@@ -8383,6 +8612,22 @@
 						"low": 1001
 					},
 					"mode": "budget"
+				}
+			},
+			{
+				"source": "providers/google-gemini-cli.kdl:8",
+				"class": "gemini",
+				"providers": [
+					"google-gemini-cli"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "3.0.0"
+					}
+				],
+				"wire": {
+					"requiresSkipThoughtSignatureOnFirstFunctionCall": true
 				}
 			},
 			{
@@ -14142,6 +14387,17 @@
 				"provider": "opencode-zen",
 				"routes": [
 					{
+						"api": "openai-responses",
+						"match": {
+							"prefix": [
+								"muse-spark-"
+							],
+							"exact": [
+								"muse-spark-1.3-contributor-free"
+							]
+						}
+					},
+					{
 						"api": "openai-completions",
 						"match": {
 							"exact": [
@@ -14158,10 +14414,15 @@
 					{
 						"api": "openai-responses",
 						"match": {
+							"prefix": [
+								"muse-spark-"
+							],
 							"exact": [
 								"deepseek-v4-flash",
 								"muse-spark-1.2",
-								"muse-spark-1.2-contributor"
+								"muse-spark-1.2-contributor",
+								"muse-spark-1.3",
+								"muse-spark-1.3-contributor"
 							]
 						}
 					},
@@ -14406,6 +14667,15 @@
 				}
 			},
 			{
+				"provider": "meta",
+				"match": {
+					"prefix": [
+						"muse-image-",
+						"muse-voice-"
+					]
+				}
+			},
+			{
 				"provider": "nanogpt",
 				"match": {
 					"substring": [
@@ -14625,5 +14895,2039 @@
 				"max"
 			]
 		}
+	},
+	"auth": {
+		"providers": [
+			{
+				"id": "openai-codex",
+				"apiKeyFormat": "bearer",
+				"name": "ChatGPT Plus/Pro (Codex Subscription)",
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"api.connectors.read",
+						"api.connectors.invoke"
+					],
+					"scopeSeparator": " ",
+					"pkce": true,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {
+						"id_token_add_organizations": "true",
+						"codex_cli_simplified_flow": "true",
+						"originator": "pi"
+					},
+					"clientId": {
+						"value": "app_EMoamEEZ73f0CkXaXp7hrann"
+					},
+					"authorizeUrl": {
+						"value": "https://auth.openai.com/oauth/authorize"
+					},
+					"instructions": "A browser window should open. Complete login to finish.",
+					"callback": {
+						"port": 1455,
+						"path": "/auth/callback",
+						"hostname": "localhost",
+						"portFallback": false,
+						"manualOnly": false,
+						"redirectUri": {
+							"value": "http://localhost:1455/auth/callback"
+						}
+					},
+					"token": {
+						"url": {
+							"value": "https://auth.openai.com/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {},
+						"timeoutMs": 15000
+					},
+					"afterExchange": "openai-codex-profile",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 0
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"token": {
+						"url": {
+							"value": "https://auth.openai.com/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {},
+						"timeoutMs": 15000
+					},
+					"afterRefresh": "openai-codex-profile",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 0
+						}
+					}
+				},
+				"callbackPort": 1455,
+				"pasteCode": true
+			},
+			{
+				"id": "anthropic",
+				"apiKeyFormat": "bearer",
+				"name": "Anthropic (Claude Pro/Max)",
+				"env": {
+					"hook": "anthropic-foundry"
+				},
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [
+						"org:create_api_key",
+						"user:profile",
+						"user:inference",
+						"user:sessions:claude_code",
+						"user:mcp_servers",
+						"user:file_upload"
+					],
+					"scopeSeparator": " ",
+					"pkce": true,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {
+						"code": "true"
+					},
+					"clientId": {
+						"value": "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl",
+						"encoding": "base64"
+					},
+					"authorizeUrl": {
+						"value": "https://claude.ai/oauth/authorize"
+					},
+					"instructions": "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
+					"callback": {
+						"port": 54545,
+						"path": "/callback",
+						"hostname": "localhost",
+						"portFallback": true,
+						"manualOnly": false
+					},
+					"token": {
+						"url": {
+							"value": "https://api.anthropic.com/v1/oauth/token"
+						},
+						"body": "json",
+						"standard": true,
+						"params": {
+							"state": "{state}"
+						},
+						"headers": {}
+					},
+					"afterExchange": "anthropic-identity",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						},
+						"accountId": {
+							"path": "account.uuid"
+						},
+						"email": {
+							"path": "account.email_address"
+						},
+						"orgId": {
+							"path": "organization.uuid"
+						},
+						"orgName": {
+							"path": "organization.name"
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"token": {
+						"url": {
+							"value": "https://api.anthropic.com/v1/oauth/token"
+						},
+						"body": "json",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"anthropic-beta": "oauth-2025-04-20",
+							"User-Agent": "anthropic-sdk-typescript/{claude_code_sdk_version} userOAuthProvider"
+						}
+					},
+					"afterRefresh": "anthropic-identity",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						},
+						"accountId": {
+							"path": "account.uuid"
+						},
+						"email": {
+							"path": "account.email_address"
+						}
+					}
+				},
+				"callbackPort": 54545,
+				"pasteCode": true
+			},
+			{
+				"id": "zai",
+				"apiKeyFormat": "bearer",
+				"name": "Z.AI (GLM Coding Plan)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://z.ai/manage-apikey/apikey-list",
+					"instructions": "Copy your API key from the dashboard",
+					"prompt": "Paste your Z.AI API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "Z.AI",
+						"baseUrl": "https://api.z.ai/api/coding/paas/v4",
+						"model": "glm-5.2"
+					}
+				}
+			},
+			{
+				"id": "zai-coding-plan",
+				"apiKeyFormat": "bearer",
+				"name": "Z.AI (GLM Coding Plan · Sign in)",
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [],
+					"scopeSeparator": " ",
+					"pkce": false,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {},
+					"clientId": {
+						"value": "client_P8X5CMWmlaRO9gyO-KSqtg",
+						"env": [
+							"ZAI_OAUTH_CLIENT_ID"
+						]
+					},
+					"authorizeUrl": {
+						"value": "https://chat.z.ai/api/oauth/authorize",
+						"env": [
+							"ZAI_OAUTH_AUTHORIZE_URL"
+						]
+					},
+					"callback": {
+						"port": 9999,
+						"path": "/callback",
+						"hostname": "127.0.0.1",
+						"portFallback": false,
+						"manualOnly": false,
+						"redirectUri": {
+							"value": "http://127.0.0.1:9999/callback"
+						}
+					},
+					"instructions": "Complete Z.ai login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
+					"token": {
+						"url": {
+							"value": "https://zcode.z.ai/api/v1/oauth/token",
+							"env": [
+								"ZAI_OAUTH_TOKEN_URL"
+							]
+						},
+						"body": "json",
+						"standard": false,
+						"params": {
+							"provider": "zai",
+							"code": "{code}",
+							"redirect_uri": "{redirect_uri}",
+							"state": "{state}"
+						},
+						"headers": {}
+					},
+					"afterExchange": "zai-mint-key",
+					"credential": {
+						"access": {
+							"path": "data.zai.access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "never"
+						},
+						"email": {
+							"path": "data.user.email"
+						},
+						"accountId": {
+							"path": "data.user.id"
+						}
+					}
+				},
+				"storeAs": "zai",
+				"refresh": {
+					"kind": "none"
+				},
+				"callbackPort": 9999,
+				"pasteCode": true
+			},
+			{
+				"id": "kimi-code",
+				"apiKeyFormat": "bearer",
+				"name": "Kimi Code",
+				"login": {
+					"kind": "device-code",
+					"scopes": [],
+					"scopeSeparator": " ",
+					"clientId": {
+						"value": "17e5f671-d194-4dfb-9706-5516cb48c098"
+					},
+					"baseUrl": {
+						"value": "https://auth.kimi.com",
+						"env": [
+							"KIMI_CODE_OAUTH_HOST",
+							"KIMI_OAUTH_HOST"
+						]
+					},
+					"headersHook": "kimi-fingerprint",
+					"device": {
+						"url": {
+							"value": "{base}/api/oauth/device_authorization"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"token": {
+						"url": {
+							"value": "{base}/api/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"response": {
+						"userCode": "user_code",
+						"deviceCode": "device_code",
+						"verificationUri": "verification_uri",
+						"verificationUriComplete": "verification_uri_complete",
+						"interval": "interval",
+						"expiresIn": "expires_in"
+					},
+					"instructions": "Enter code: {user_code}",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						},
+						"accountId": {
+							"claim": [
+								"user_id",
+								"sub"
+							]
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"token": {
+						"url": {
+							"value": "{base}/api/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						},
+						"accountId": {
+							"claim": [
+								"user_id",
+								"sub"
+							]
+						}
+					},
+					"headersHook": "kimi-fingerprint"
+				}
+			},
+			{
+				"id": "openrouter",
+				"apiKeyFormat": "bearer",
+				"name": "OpenRouter",
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [],
+					"scopeSeparator": " ",
+					"pkce": true,
+					"state": "none",
+					"standardAuthorizeParams": false,
+					"authorizeParams": {
+						"callback_url": "{redirect_uri}",
+						"code_challenge": "{code_challenge}",
+						"code_challenge_method": "S256"
+					},
+					"authorizeUrl": {
+						"value": "https://openrouter.ai/auth"
+					},
+					"callback": {
+						"port": 54549,
+						"path": "/callback",
+						"hostname": "localhost",
+						"portFallback": true,
+						"manualOnly": false
+					},
+					"token": {
+						"url": {
+							"value": "https://openrouter.ai/api/v1/auth/keys"
+						},
+						"body": "json",
+						"standard": false,
+						"params": {
+							"code": "{code}",
+							"code_verifier": "{code_verifier}",
+							"code_challenge_method": "S256"
+						},
+						"headers": {}
+					},
+					"pasteKey": {
+						"prefix": "sk-or-",
+						"validateUrl": "https://openrouter.ai/api/v1/auth/key"
+					},
+					"credential": {
+						"access": {
+							"path": "key"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "never"
+						}
+					}
+				},
+				"result": "api-key",
+				"refresh": {
+					"kind": "none"
+				},
+				"callbackPort": 54549,
+				"pasteCode": true
+			},
+			{
+				"id": "github-copilot",
+				"apiKeyFormat": "structured",
+				"name": "GitHub Copilot",
+				"login": {
+					"kind": "custom",
+					"hook": "github-copilot"
+				},
+				"refresh": {
+					"kind": "hook",
+					"hook": "github-copilot"
+				}
+			},
+			{
+				"id": "cursor",
+				"apiKeyFormat": "bearer",
+				"name": "Cursor (Claude, GPT, etc.)",
+				"login": {
+					"kind": "custom",
+					"hook": "cursor"
+				},
+				"refresh": {
+					"kind": "hook",
+					"hook": "cursor"
+				}
+			},
+			{
+				"id": "devin",
+				"apiKeyFormat": "bearer",
+				"name": "Devin",
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [],
+					"scopeSeparator": " ",
+					"pkce": true,
+					"state": "uuid",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {
+						"prompt": "select_account"
+					},
+					"authorizeUrl": {
+						"value": "https://app.devin.ai/auth/cli/continue"
+					},
+					"instructions": "Sign in to Devin in your browser.",
+					"callback": {
+						"port": 59653,
+						"path": "/callback",
+						"hostname": "127.0.0.1",
+						"portFallback": true,
+						"manualOnly": false
+					},
+					"token": {
+						"url": {
+							"value": "https://api.devin.ai/auth/cli/token"
+						},
+						"body": "json",
+						"standard": false,
+						"params": {
+							"code": "{code}",
+							"code_verifier": "{code_verifier}"
+						},
+						"headers": {
+							"Accept": "application/json"
+						}
+					},
+					"credential": {
+						"access": {
+							"path": "token"
+						},
+						"refresh": {
+							"path": "token"
+						},
+						"expires": {
+							"mode": "jwt",
+							"skewMs": 300000,
+							"fallbackMs": 31536000000
+						},
+						"apiEndpoint": {
+							"literal": "https://api.devin.ai"
+						},
+						"enterpriseUrl": {
+							"literal": "https://app.devin.ai"
+						}
+					}
+				},
+				"refresh": {
+					"kind": "none"
+				},
+				"callbackPort": 59653,
+				"pasteCode": true
+			},
+			{
+				"id": "google-antigravity",
+				"apiKeyFormat": "structured",
+				"name": "Antigravity (Gemini 3, Claude, GPT-OSS)",
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [
+						"https://www.googleapis.com/auth/cloud-platform",
+						"https://www.googleapis.com/auth/userinfo.email",
+						"https://www.googleapis.com/auth/userinfo.profile",
+						"https://www.googleapis.com/auth/cclog",
+						"https://www.googleapis.com/auth/experimentsandconfigs"
+					],
+					"scopeSeparator": " ",
+					"pkce": false,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {
+						"access_type": "offline",
+						"prompt": "consent"
+					},
+					"clientId": {
+						"value": "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
+						"encoding": "base64"
+					},
+					"clientSecret": {
+						"value": "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=",
+						"encoding": "base64"
+					},
+					"authorizeUrl": {
+						"value": "https://accounts.google.com/o/oauth2/v2/auth"
+					},
+					"instructions": "Complete the sign-in in your browser.",
+					"callback": {
+						"port": 51121,
+						"path": "/oauth-callback",
+						"hostname": "127.0.0.1",
+						"portFallback": true,
+						"manualOnly": false
+					},
+					"token": {
+						"url": {
+							"value": "https://oauth2.googleapis.com/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"userinfo": {
+						"url": "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
+						"email": "email"
+					},
+					"afterExchange": "google-antigravity-project",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [
+						"projectId"
+					],
+					"afterRefresh": "google-antigravity-project",
+					"token": {
+						"url": {
+							"value": "https://oauth2.googleapis.com/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						}
+					}
+				},
+				"callbackPort": 51121,
+				"pasteCode": true
+			},
+			{
+				"id": "google-gemini-cli",
+				"apiKeyFormat": "structured",
+				"name": "Google Cloud Code Assist (Gemini CLI)",
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [
+						"https://www.googleapis.com/auth/cloud-platform",
+						"https://www.googleapis.com/auth/userinfo.email",
+						"https://www.googleapis.com/auth/userinfo.profile"
+					],
+					"scopeSeparator": " ",
+					"pkce": false,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {
+						"access_type": "offline",
+						"prompt": "consent"
+					},
+					"clientId": {
+						"value": "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t",
+						"encoding": "base64"
+					},
+					"clientSecret": {
+						"value": "R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=",
+						"encoding": "base64"
+					},
+					"authorizeUrl": {
+						"value": "https://accounts.google.com/o/oauth2/v2/auth"
+					},
+					"instructions": "Complete the sign-in in your browser.",
+					"callback": {
+						"port": 8085,
+						"path": "/oauth2callback",
+						"hostname": "127.0.0.1",
+						"portFallback": true,
+						"manualOnly": false
+					},
+					"token": {
+						"url": {
+							"value": "https://oauth2.googleapis.com/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"userinfo": {
+						"url": "https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
+						"email": "email"
+					},
+					"afterExchange": "google-gemini-cli-project",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [
+						"projectId"
+					],
+					"afterRefresh": "google-gemini-cli-project",
+					"token": {
+						"url": {
+							"value": "https://oauth2.googleapis.com/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						}
+					}
+				},
+				"callbackPort": 8085,
+				"pasteCode": true
+			},
+			{
+				"id": "openai-codex-device",
+				"apiKeyFormat": "bearer",
+				"name": "ChatGPT Plus/Pro (Codex, headless/device)",
+				"login": {
+					"kind": "custom",
+					"hook": "openai-codex-device"
+				},
+				"storeAs": "openai-codex",
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"token": {
+						"url": {
+							"value": "https://auth.openai.com/oauth/token"
+						},
+						"body": "form",
+						"standard": false,
+						"params": {
+							"grant_type": "refresh_token",
+							"refresh_token": "{refresh_token}",
+							"client_id": "app_EMoamEEZ73f0CkXaXp7hrann"
+						},
+						"headers": {},
+						"timeoutMs": 15000
+					},
+					"afterRefresh": "openai-codex-profile",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 0
+						}
+					}
+				}
+			},
+			{
+				"id": "xai",
+				"apiKeyFormat": "bearer",
+				"name": "xAI API",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://console.x.ai/team/default/api-keys",
+					"instructions": "Create or copy your API key from the xAI Console",
+					"prompt": "Paste your xAI API key",
+					"placeholder": "xai-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "xAI",
+						"url": "https://api.x.ai/v1/models"
+					}
+				}
+			},
+			{
+				"id": "xai-oauth",
+				"apiKeyFormat": "bearer",
+				"name": "xAI Grok OAuth (SuperGrok or X Premium+)",
+				"login": {
+					"kind": "device-code",
+					"scopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"grok-cli:access",
+						"api:access"
+					],
+					"scopeSeparator": " ",
+					"clientId": {
+						"value": "b1a00492-073a-47ea-816f-4c329264a828"
+					},
+					"device": {
+						"url": {
+							"value": "https://auth.x.ai/oauth2/device/code"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"Accept": "application/json"
+						}
+					},
+					"token": {
+						"url": {
+							"hook": "xai-token-endpoint"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"Accept": "application/json"
+						}
+					},
+					"response": {
+						"userCode": "user_code",
+						"deviceCode": "device_code",
+						"verificationUri": "verification_uri",
+						"verificationUriComplete": "verification_uri_complete",
+						"interval": "interval",
+						"expiresIn": "expires_in"
+					},
+					"instructions": "Enter code: {user_code}",
+					"userinfo": {
+						"url": "https://auth.x.ai/oauth2/userinfo",
+						"email": "email",
+						"accountId": "sub"
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						},
+						"accountId": {
+							"claim": [
+								"sub"
+							]
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"userinfo": {
+						"url": "https://auth.x.ai/oauth2/userinfo",
+						"email": "email",
+						"accountId": "sub"
+					},
+					"token": {
+						"url": {
+							"hook": "xai-token-endpoint"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000
+						},
+						"accountId": {
+							"claim": [
+								"sub"
+							]
+						}
+					}
+				}
+			},
+			{
+				"id": "gitlab-duo",
+				"apiKeyFormat": "bearer",
+				"name": "GitLab Duo Non-Agentic",
+				"env": {
+					"vars": [
+						"GITLAB_TOKEN"
+					]
+				},
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [
+						"api"
+					],
+					"scopeSeparator": " ",
+					"pkce": true,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {},
+					"clientId": {
+						"value": "da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b",
+						"env": [
+							"GITLAB_CLIENT_ID"
+						]
+					},
+					"authorizeUrl": {
+						"value": "https://gitlab.com/oauth/authorize"
+					},
+					"instructions": "Complete GitLab login in browser. If GitLab responds with \"The redirect URI included is not valid\", register your own GitLab OAuth application and set GITLAB_CLIENT_ID + GITLAB_REDIRECT_URI, or use a Personal Access Token via GITLAB_TOKEN.",
+					"callback": {
+						"port": 8080,
+						"path": "/callback",
+						"hostname": "localhost",
+						"portFallback": true,
+						"manualOnly": false,
+						"redirectUri": {
+							"env": [
+								"GITLAB_REDIRECT_URI"
+							]
+						}
+					},
+					"token": {
+						"url": {
+							"value": "https://gitlab.com/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"afterExchange": "gitlab-duo-clear-cache",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000,
+							"fromPath": "created_at"
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"afterRefresh": "gitlab-duo-clear-cache",
+					"token": {
+						"url": {
+							"value": "https://gitlab.com/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000,
+							"fromPath": "created_at"
+						}
+					}
+				},
+				"callbackPort": 8080,
+				"pasteCode": true
+			},
+			{
+				"id": "gitlab-duo-agent",
+				"apiKeyFormat": "bearer",
+				"name": "GitLab Duo Agent",
+				"env": {
+					"vars": [
+						"GITLAB_TOKEN"
+					]
+				},
+				"login": {
+					"kind": "oauth-code",
+					"scopes": [
+						"api"
+					],
+					"scopeSeparator": " ",
+					"pkce": true,
+					"state": "hex",
+					"standardAuthorizeParams": true,
+					"authorizeParams": {},
+					"clientId": {
+						"value": "36f2a70cddeb5a0889d4fd8295c241b7e9848e89cf9e599d0eed2d8e5350fbf5"
+					},
+					"authorizeUrl": {
+						"value": "https://gitlab.com/oauth/authorize"
+					},
+					"instructions": "Complete GitLab login in your browser. This uses GitLab's official VS Code OAuth application. If the redirect opens VS Code instead of returning to OMP, copy the full vscode://gitlab.gitlab-workflow/authentication?... callback URL from VS Code/browser and paste it back into OMP.",
+					"callback": {
+						"port": 0,
+						"path": "/callback",
+						"hostname": "localhost",
+						"portFallback": true,
+						"manualOnly": true,
+						"redirectUri": {
+							"value": "vscode://gitlab.gitlab-workflow/authentication"
+						}
+					},
+					"token": {
+						"url": {
+							"value": "https://gitlab.com/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000,
+							"fromPath": "created_at"
+						}
+					}
+				},
+				"refresh": {
+					"kind": "request",
+					"require": [],
+					"token": {
+						"url": {
+							"value": "https://gitlab.com/oauth/token"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {
+							"redirect_uri": "{redirect_uri}"
+						},
+						"headers": {}
+					},
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "seconds",
+							"path": "expires_in",
+							"skewMs": 300000,
+							"fromPath": "created_at"
+						}
+					}
+				},
+				"callbackPort": 0,
+				"pasteCode": true
+			},
+			{
+				"id": "alibaba-coding-plan",
+				"apiKeyFormat": "structured",
+				"name": "Alibaba Coding Plan",
+				"login": {
+					"kind": "custom",
+					"hook": "alibaba-coding-plan"
+				}
+			},
+			{
+				"id": "alibaba-token-plan",
+				"apiKeyFormat": "bearer",
+				"name": "QwenCloud Token Plan",
+				"login": {
+					"kind": "custom",
+					"hook": "alibaba-token-plan"
+				}
+			},
+			{
+				"id": "aiand",
+				"apiKeyFormat": "bearer",
+				"name": "ai&",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://console.aiand.com/api-keys",
+					"instructions": "Copy your API key from the ai& console",
+					"prompt": "Paste your ai& API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "ai&",
+						"url": "https://api.aiand.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "abliteration",
+				"apiKeyFormat": "bearer",
+				"name": "Abliteration",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://abliteration.ai/console",
+					"instructions": "Copy your API key from the Abliteration console",
+					"prompt": "Paste your Abliteration API key",
+					"placeholder": "ak_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://api.abliteration.ai/v1/models"
+					}
+				}
+			},
+			{
+				"id": "zhipu-coding-plan",
+				"apiKeyFormat": "bearer",
+				"name": "Zhipu Coding Plan (智谱)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://bigmodel.cn/coding-plan/personal/overview",
+					"instructions": "Copy your API key from the Coding Plan dashboard",
+					"prompt": "Paste your Zhipu API key",
+					"placeholder": "<id>.<secret>",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "Zhipu",
+						"baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+						"model": "glm-5.1"
+					}
+				}
+			},
+			{
+				"id": "umans",
+				"apiKeyFormat": "bearer",
+				"name": "Umans AI Coding Plan",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.umans.ai/billing",
+					"instructions": "Create or copy your Umans API key from Dashboard → API Keys.",
+					"prompt": "Paste your Umans API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "anthropic-messages",
+						"baseUrl": "https://api.code.umans.ai",
+						"model": "umans-coder"
+					}
+				}
+			},
+			{
+				"id": "qwen-portal",
+				"apiKeyFormat": "bearer",
+				"name": "Qwen Portal",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://chat.qwen.ai",
+					"instructions": "Copy your Qwen OAuth token or API key",
+					"prompt": "Paste your Qwen OAuth token or API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "qwen-portal",
+						"baseUrl": "https://portal.qwen.ai/v1",
+						"model": "coder-model"
+					}
+				}
+			},
+			{
+				"id": "sakana",
+				"apiKeyFormat": "bearer",
+				"name": "Sakana AI",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://console.sakana.ai/api-keys",
+					"instructions": "Copy your API key from the Sakana AI console",
+					"prompt": "Paste your Sakana AI API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://api.sakana.ai/v1/models"
+					}
+				}
+			},
+			{
+				"id": "minimax-code",
+				"apiKeyFormat": "bearer",
+				"name": "MiniMax Token Plan (International)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.minimax.io/subscribe/token-plan",
+					"instructions": "Subscribe to Token Plan and copy your API key",
+					"prompt": "Paste your MiniMax Token Plan API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "MiniMax Token Plan",
+						"baseUrl": "https://api.minimax.io/v1",
+						"model": "MiniMax-M3"
+					}
+				}
+			},
+			{
+				"id": "minimax-code-cn",
+				"apiKeyFormat": "bearer",
+				"name": "MiniMax Token Plan (China)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.minimaxi.com/subscribe/token-plan",
+					"instructions": "Subscribe to Token Plan and copy your API key",
+					"prompt": "Paste your MiniMax Token Plan API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "chat-completions",
+						"baseUrl": "https://api.minimaxi.com/v1",
+						"model": "MiniMax-M3"
+					}
+				}
+			},
+			{
+				"id": "xiaomi",
+				"apiKeyFormat": "bearer",
+				"name": "Xiaomi MiMo",
+				"login": {
+					"kind": "custom",
+					"hook": "xiaomi"
+				}
+			},
+			{
+				"id": "xiaomi-token-plan-sgp",
+				"apiKeyFormat": "bearer",
+				"name": "Xiaomi Token Plan (Singapore)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.xiaomimimo.com/console/plan-manage",
+					"instructions": "Copy your token-plan API key for the Singapore region",
+					"prompt": "Paste your Xiaomi Token Plan Singapore API key (tp-...)",
+					"placeholder": "tp-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "xiaomi",
+						"baseUrl": "https://token-plan-sgp.xiaomimimo.com/v1",
+						"model": "mimo-v2.5"
+					}
+				}
+			},
+			{
+				"id": "xiaomi-token-plan-ams",
+				"apiKeyFormat": "bearer",
+				"name": "Xiaomi Token Plan (Europe)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.xiaomimimo.com/console/plan-manage",
+					"instructions": "Copy your token-plan API key for the Europe region",
+					"prompt": "Paste your Xiaomi Token Plan Europe API key (tp-...)",
+					"placeholder": "tp-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "xiaomi",
+						"baseUrl": "https://token-plan-ams.xiaomimimo.com/v1",
+						"model": "mimo-v2.5"
+					}
+				}
+			},
+			{
+				"id": "xiaomi-token-plan-cn",
+				"apiKeyFormat": "bearer",
+				"name": "Xiaomi Token Plan (China)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.xiaomimimo.com/console/plan-manage",
+					"instructions": "Copy your token-plan API key for the China region",
+					"prompt": "Paste your Xiaomi Token Plan China API key (tp-...)",
+					"placeholder": "tp-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "xiaomi",
+						"baseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+						"model": "mimo-v2.5"
+					}
+				}
+			},
+			{
+				"id": "firepass",
+				"apiKeyFormat": "bearer",
+				"name": "Fire Pass (Fireworks Kimi K2.6 Turbo subscription)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.fireworks.ai/settings/users/api-keys",
+					"instructions": "Create a dedicated Fire Pass API key in the Fireworks dashboard",
+					"prompt": "Paste your Fire Pass API key",
+					"placeholder": "fpk_...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "Fire Pass",
+						"baseUrl": "https://api.fireworks.ai/inference/v1",
+						"model": "accounts/fireworks/routers/kimi-k2p6-turbo"
+					}
+				}
+			},
+			{
+				"id": "cline-pass",
+				"apiKeyFormat": "bearer",
+				"name": "ClinePass",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.cline.bot/dashboard/account",
+					"instructions": "Create an API key in the Cline dashboard under Settings → API Keys",
+					"prompt": "Paste your Cline API key",
+					"placeholder": "sk_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "ClinePass",
+						"url": "https://api.cline.bot/api/v1/users/me",
+						"headersHook": "cline-pass-client"
+					}
+				}
+			},
+			{
+				"id": "deepseek",
+				"apiKeyFormat": "bearer",
+				"name": "DeepSeek",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.deepseek.com/api_keys",
+					"instructions": "Create or copy your API key from the DeepSeek dashboard",
+					"prompt": "Paste your DeepSeek API key",
+					"placeholder": "sk-...",
+					"normalize": "strip-bearer",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "deepseek",
+						"url": "https://api.deepseek.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "meta",
+				"apiKeyFormat": "bearer",
+				"name": "Meta Model API",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://developer.meta.com/ai/",
+					"instructions": "Create or copy your key from the Meta Model API dashboard",
+					"prompt": "Paste your Meta Model API key",
+					"placeholder": "Model API key",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://api.meta.ai/v1/models"
+					}
+				}
+			},
+			{
+				"id": "moonshot",
+				"apiKeyFormat": "bearer",
+				"name": "Moonshot (Kimi API)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.moonshot.ai/console/api-keys",
+					"instructions": "Copy your API key from the Moonshot dashboard",
+					"prompt": "Paste your Moonshot API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "moonshot",
+						"url": "https://api.moonshot.ai/v1/models",
+						"baseUrlEnv": "MOONSHOT_BASE_URL"
+					}
+				}
+			},
+			{
+				"id": "cerebras",
+				"apiKeyFormat": "bearer",
+				"name": "Cerebras",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://cloud.cerebras.ai/platform/",
+					"instructions": "Copy your API key from the Cerebras dashboard",
+					"prompt": "Paste your Cerebras API key",
+					"placeholder": "csk-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "Cerebras",
+						"baseUrl": "https://api.cerebras.ai/v1",
+						"model": "gpt-oss-120b"
+					}
+				}
+			},
+			{
+				"id": "baseten",
+				"apiKeyFormat": "bearer",
+				"name": "Baseten",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.baseten.co/settings/api_keys",
+					"instructions": "Copy your API key from the Baseten dashboard",
+					"prompt": "Paste your Baseten API key",
+					"placeholder": "bt_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Baseten",
+						"url": "https://inference.baseten.co/v1/models"
+					}
+				}
+			},
+			{
+				"id": "fireworks",
+				"apiKeyFormat": "bearer",
+				"name": "Fireworks",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.fireworks.ai/settings/users/api-keys",
+					"instructions": "Create or copy your Fireworks API key",
+					"prompt": "Paste your Fireworks API key",
+					"placeholder": "fw_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Fireworks",
+						"url": "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1"
+					}
+				}
+			},
+			{
+				"id": "together",
+				"apiKeyFormat": "bearer",
+				"name": "Together",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://api.together.xyz/settings/api-keys",
+					"instructions": "Copy your API key from the Together dashboard",
+					"prompt": "Paste your Together API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "together",
+						"url": "https://api.together.xyz/v1/models"
+					}
+				}
+			},
+			{
+				"id": "nvidia",
+				"apiKeyFormat": "bearer",
+				"name": "NVIDIA",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://org.ngc.nvidia.com/setup/personal-keys",
+					"instructions": "Copy your API key from NVIDIA NGC Personal Keys",
+					"prompt": "Paste your NVIDIA API key",
+					"placeholder": "nvapi-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "nvidia",
+						"optional": true,
+						"baseUrl": "https://integrate.api.nvidia.com/v1",
+						"model": "nvidia/llama-3.1-nemotron-70b-instruct"
+					}
+				}
+			},
+			{
+				"id": "novita",
+				"apiKeyFormat": "bearer",
+				"name": "Novita",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://novita.ai/settings/key-management",
+					"instructions": "Create or copy your API key from the Novita dashboard",
+					"prompt": "Paste your Novita API key",
+					"placeholder": "sk_...",
+					"validate": {
+						"kind": "chat-completions",
+						"baseUrl": "https://api.novita.ai/openai/v1",
+						"model": "moonshotai/kimi-k2.7-code"
+					}
+				}
+			},
+			{
+				"id": "deepinfra",
+				"apiKeyFormat": "bearer",
+				"name": "DeepInfra",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://deepinfra.com/dash/api_keys",
+					"instructions": "Create or copy your API key from the DeepInfra dashboard",
+					"prompt": "Paste your DeepInfra API key",
+					"placeholder": "...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "DeepInfra",
+						"baseUrl": "https://api.deepinfra.com/v1/openai",
+						"model": "deepseek-ai/DeepSeek-V4-Flash-0731"
+					}
+				}
+			},
+			{
+				"id": "huggingface",
+				"apiKeyFormat": "bearer",
+				"name": "Hugging Face Inference",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://huggingface.co/settings/tokens/new?ownUserPermissions=inference.serverless.write&tokenType=fineGrained",
+					"instructions": "Create/copy a token with Make calls to Inference Providers permission (usable as HUGGINGFACE_HUB_TOKEN or HF_TOKEN)",
+					"prompt": "Paste your Hugging Face token (HUGGINGFACE_HUB_TOKEN / HF_TOKEN)",
+					"placeholder": "hf_...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "Hugging Face",
+						"baseUrl": "https://router.huggingface.co/v1",
+						"model": "openai/gpt-oss-120b"
+					}
+				}
+			},
+			{
+				"id": "perplexity",
+				"apiKeyFormat": "bearer",
+				"name": "Perplexity (Pro/Max)",
+				"env": {
+					"vars": [
+						"PERPLEXITY_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "custom",
+					"hook": "perplexity"
+				},
+				"expiry": "jwt-or-never",
+				"refresh": {
+					"kind": "none"
+				}
+			},
+			{
+				"id": "qianfan",
+				"apiKeyFormat": "bearer",
+				"name": "Qianfan",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://console.bce.baidu.com/qianfan/ais/console/apiKey",
+					"instructions": "Copy your Qianfan API key from the console",
+					"prompt": "Paste your Qianfan API key",
+					"placeholder": "bce-v3/ALTAK-...",
+					"validate": {
+						"kind": "chat-completions",
+						"label": "qianfan",
+						"baseUrl": "https://qianfan.baidubce.com/v2",
+						"model": "deepseek-v3.2",
+						"tolerateModelDenied": true
+					}
+				}
+			},
+			{
+				"id": "venice",
+				"apiKeyFormat": "bearer",
+				"name": "Venice",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://venice.ai/settings/api",
+					"instructions": "Copy your API key from the Venice dashboard",
+					"prompt": "Paste your Venice API key",
+					"placeholder": "vapi_...",
+					"validate": {
+						"kind": "chat-completions",
+						"baseUrl": "https://api.venice.ai/api/v1",
+						"model": "qwen3-4b"
+					}
+				}
+			},
+			{
+				"id": "siliconflow",
+				"apiKeyFormat": "bearer",
+				"name": "SiliconFlow",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://cloud.siliconflow.com/account/ak",
+					"instructions": "Create or copy your API key from the SiliconFlow console",
+					"prompt": "Paste your SiliconFlow API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "siliconflow",
+						"url": "https://api.siliconflow.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "siliconflow-cn",
+				"apiKeyFormat": "bearer",
+				"name": "SiliconFlow (China)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://cloud.siliconflow.cn/account/ak",
+					"instructions": "Create or copy your API key from the SiliconFlow console",
+					"prompt": "Paste your SiliconFlow API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "siliconflow-cn",
+						"url": "https://api.siliconflow.cn/v1/models"
+					}
+				}
+			},
+			{
+				"id": "synthetic",
+				"apiKeyFormat": "bearer",
+				"name": "Synthetic",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://dev.synthetic.new/docs/api/overview",
+					"instructions": "Copy your API key from the Synthetic dashboard",
+					"prompt": "Paste your Synthetic API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://api.synthetic.new/openai/v1/models"
+					}
+				}
+			},
+			{
+				"id": "nanogpt",
+				"apiKeyFormat": "bearer",
+				"name": "NanoGPT",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://nano-gpt.com/api",
+					"instructions": "Create or copy your NanoGPT API key",
+					"prompt": "Paste your NanoGPT API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://nano-gpt.com/api/v1/models"
+					}
+				}
+			},
+			{
+				"id": "wafer-serverless",
+				"apiKeyFormat": "bearer",
+				"name": "Wafer Serverless (pay-as-you-go)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.wafer.ai/usage",
+					"instructions": "Create or copy your Wafer Serverless API key from the Wafer dashboard",
+					"prompt": "Paste your Wafer Serverless API key",
+					"placeholder": "wfr_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Wafer Serverless",
+						"url": "https://pass.wafer.ai/v1/models"
+					}
+				}
+			},
+			{
+				"id": "coreweave",
+				"apiKeyFormat": "bearer",
+				"name": "CoreWeave Serverless Inference",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://wandb.ai/settings",
+					"instructions": "Create or select a CoreWeave Serverless Inference project, add export COREWEAVE_PROJECT=<team>/<project> to your shell startup file (for example ~/.zshrc, ~/.bashrc, or your shell's profile/rc file) for the OpenAI-Project header, then copy your API key from account settings",
+					"prompt": "Paste your CoreWeave Serverless Inference API key",
+					"placeholder": "api-key",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "CoreWeave Serverless Inference",
+						"url": "https://api.inference.wandb.ai/v1/models",
+						"headersHook": "coreweave-project"
+					}
+				}
+			},
+			{
+				"id": "vercel-ai-gateway",
+				"apiKeyFormat": "bearer",
+				"name": "Vercel AI Gateway",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys",
+					"instructions": "Copy your Vercel AI Gateway API key from the Vercel dashboard",
+					"prompt": "Paste your Vercel AI Gateway API key",
+					"placeholder": "vck_..."
+				}
+			},
+			{
+				"id": "cloudflare-ai-gateway",
+				"apiKeyFormat": "bearer",
+				"name": "Cloudflare AI Gateway",
+				"login": {
+					"kind": "custom",
+					"hook": "cloudflare-ai-gateway"
+				}
+			},
+			{
+				"id": "litellm",
+				"apiKeyFormat": "bearer",
+				"name": "LiteLLM",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://docs.litellm.ai/docs/proxy/deploy",
+					"instructions": "Run LiteLLM proxy (default http://localhost:4000/v1; set LITELLM_BASE_URL to customize it), then copy your master key or virtual key",
+					"prompt": "Paste your LiteLLM API key (master key or virtual key)",
+					"placeholder": "sk-..."
+				}
+			},
+			{
+				"id": "kilo",
+				"apiKeyFormat": "bearer",
+				"name": "Kilo Gateway",
+				"login": {
+					"kind": "custom",
+					"hook": "kilo"
+				}
+			},
+			{
+				"id": "zenmux",
+				"apiKeyFormat": "bearer",
+				"name": "ZenMux",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://zenmux.ai/settings/keys",
+					"instructions": "Create or copy your ZenMux API key",
+					"prompt": "Paste your ZenMux API key",
+					"placeholder": "sk-...",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://zenmux.ai/api/v1/models"
+					}
+				}
+			},
+			{
+				"id": "opencode-zen",
+				"apiKeyFormat": "bearer",
+				"name": "OpenCode Zen",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://opencode.ai/auth",
+					"instructions": "Log in to the OpenCode Zen console and copy your OpenCode Zen API key",
+					"prompt": "Paste your OpenCode Zen API key",
+					"placeholder": "sk-..."
+				}
+			},
+			{
+				"id": "opencode-go",
+				"apiKeyFormat": "bearer",
+				"name": "OpenCode Go",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://opencode.ai/auth",
+					"instructions": "Log in to the OpenCode Zen console and copy your OpenCode Go API key",
+					"prompt": "Paste your OpenCode Go API key",
+					"placeholder": "sk-..."
+				}
+			},
+			{
+				"id": "yolo-auto",
+				"apiKeyFormat": "bearer",
+				"name": "Yolo-Auto",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://yolo-auto.com/app",
+					"instructions": "Create or copy your Yolo-Auto API key (yolo_...)",
+					"prompt": "Paste your Yolo-Auto API key",
+					"placeholder": "yolo_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "Yolo-Auto",
+						"url": "https://yolo-auto.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "tavily",
+				"apiKeyFormat": "bearer",
+				"name": "Tavily",
+				"env": {
+					"vars": [
+						"TAVILY_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.tavily.com/home",
+					"instructions": "Copy your Tavily API key from the API Keys page.",
+					"prompt": "Paste your Tavily API key",
+					"placeholder": "tvly-..."
+				}
+			},
+			{
+				"id": "kagi",
+				"apiKeyFormat": "bearer",
+				"name": "Kagi",
+				"env": {
+					"vars": [
+						"KAGI_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://kagi.com/settings/api",
+					"instructions": "Copy your Kagi Search API key from Kagi API settings. Search API access is beta-only; if unavailable, email support@kagi.com.",
+					"prompt": "Paste your Kagi API key",
+					"placeholder": "KG_..."
+				}
+			},
+			{
+				"id": "exa",
+				"apiKeyFormat": "bearer",
+				"name": "Exa",
+				"env": {
+					"vars": [
+						"EXA_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://dashboard.exa.ai/api-keys",
+					"instructions": "Create or copy your API key from the Exa dashboard.",
+					"prompt": "Paste your Exa API key",
+					"placeholder": "API key"
+				}
+			},
+			{
+				"id": "parallel",
+				"apiKeyFormat": "bearer",
+				"name": "Parallel",
+				"env": {
+					"vars": [
+						"PARALLEL_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://platform.parallel.ai/settings?tab=api-keys",
+					"instructions": "Copy your Parallel API key from the Parallel settings page.",
+					"prompt": "Paste your Parallel API key",
+					"placeholder": "sk_..."
+				}
+			},
+			{
+				"id": "ollama",
+				"apiKeyFormat": "bearer",
+				"name": "Ollama (Local OpenAI-compatible)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://github.com/ollama/ollama/blob/main/docs/api.md",
+					"instructions": "Optional: paste an Ollama API key/token for authenticated hosts. Leave empty for local no-auth mode.",
+					"prompt": "Paste your Ollama API key/token (optional)",
+					"placeholder": "ollama-local",
+					"emptyFallback": ""
+				}
+			},
+			{
+				"id": "ollama-cloud",
+				"apiKeyFormat": "bearer",
+				"name": "Ollama Cloud",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://ollama.com/settings/keys",
+					"instructions": "Create an Ollama Cloud API key, then paste it here.",
+					"prompt": "Paste your Ollama Cloud API key",
+					"placeholder": "ollama-cloud-api-key"
+				}
+			},
+			{
+				"id": "lm-studio",
+				"apiKeyFormat": "bearer",
+				"name": "LM Studio (Local OpenAI-compatible)",
+				"login": {
+					"kind": "api-key",
+					"prompt": "Optional: Paste LM Studio API key (to customize endpoint URL, set LM_STUDIO_BASE_URL env var)",
+					"placeholder": "lm-studio-local",
+					"emptyFallback": "lm-studio-local"
+				}
+			},
+			{
+				"id": "llama.cpp",
+				"apiKeyFormat": "bearer",
+				"name": "llama.cpp (Local OpenAI-compatible)",
+				"env": {
+					"vars": [
+						"LLAMA_CPP_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://github.com/ggml-org/llama.cpp#quick-start",
+					"instructions": "Paste your llama.cpp API key if your server requires auth. Leave empty for local no-auth mode (default base URL: http://127.0.0.1:8080; set LLAMA_CPP_BASE_URL to customize).",
+					"prompt": "Paste your llama.cpp API key (optional for local no-auth)",
+					"placeholder": "llama-cpp-local",
+					"emptyFallback": "llama-cpp-local"
+				}
+			},
+			{
+				"id": "vllm",
+				"apiKeyFormat": "bearer",
+				"name": "vLLM (Local OpenAI-compatible)",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
+					"instructions": "Paste your vLLM API key if your server requires auth. Leave empty for local no-auth mode (default base URL: http://127.0.0.1:8000/v1).",
+					"prompt": "Paste your vLLM API key (optional for local no-auth)",
+					"placeholder": "vllm-local",
+					"emptyFallback": "vllm-local"
+				}
+			},
+			{
+				"id": "gmi-cloud",
+				"apiKeyFormat": "bearer",
+				"name": "GMI Cloud",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://console.gmicloud.ai",
+					"instructions": "Create or copy your GMI Cloud API key",
+					"prompt": "Paste your GMI Cloud API key",
+					"placeholder": "eyJ...",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "GMI Cloud",
+						"url": "https://api.gmi-serving.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "aimlapi",
+				"apiKeyFormat": "bearer",
+				"name": "AIML API"
+			},
+			{
+				"id": "amazon-bedrock",
+				"apiKeyFormat": "bearer",
+				"name": "Amazon Bedrock",
+				"env": {
+					"hook": "aws-bedrock"
+				}
+			},
+			{
+				"id": "azure",
+				"apiKeyFormat": "bearer",
+				"name": "Azure OpenAI"
+			},
+			{
+				"id": "bedrock-mantle",
+				"apiKeyFormat": "bearer",
+				"name": "Amazon Bedrock Mantle",
+				"env": {
+					"hook": "aws-bedrock-mantle"
+				},
+				"allowsMissingApiKey": true
+			},
+			{
+				"id": "google",
+				"apiKeyFormat": "bearer",
+				"name": "Google Gemini"
+			},
+			{
+				"id": "google-vertex",
+				"apiKeyFormat": "bearer",
+				"name": "Google Vertex AI",
+				"env": {
+					"hook": "google-vertex-adc"
+				}
+			},
+			{
+				"id": "groq",
+				"apiKeyFormat": "bearer",
+				"name": "Groq"
+			},
+			{
+				"id": "minimax",
+				"apiKeyFormat": "bearer",
+				"name": "MiniMax"
+			},
+			{
+				"id": "mistral",
+				"apiKeyFormat": "bearer",
+				"name": "Mistral"
+			},
+			{
+				"id": "openai",
+				"apiKeyFormat": "bearer",
+				"name": "OpenAI"
+			}
+		]
 	}
 }

@@ -115,7 +115,34 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain('not available for integrator "opencode"');
 		expect(result.errorMessage).toContain("Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]");
-		expect(result.errorMessage).not.toContain("only part of its fleet");
+	});
+
+	it("surfaces chat completions model_not_supported after a single request", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							message: "The requested model is not supported.",
+							code: "model_not_supported",
+							param: "model",
+							type: "invalid_request_error",
+						},
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+		);
+
+		const model = getBundledModel("github-copilot", "gpt-4o") as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(result.errorMessage).toContain("The requested model is not supported.");
 	});
 
 	it("omits OpenAI priority service tier while native OpenAI keeps it", async () => {

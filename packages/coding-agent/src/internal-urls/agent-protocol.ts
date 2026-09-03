@@ -116,16 +116,23 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			const query = hasQueryExtraction ? queryParam! : pathToQuery(urlPath);
 			if (query) {
 				const extracted = applyQuery(jsonValue, query);
-				try {
-					content = JSON.stringify(extracted, null, 2) ?? "null";
-				} catch {
-					content = String(extracted);
+				if (typeof extracted === "string") {
+					// A string field (e.g. a scout's markdown `report`) reads as prose,
+					// not as a JSON-escaped single line.
+					content = extracted;
+				} else {
+					try {
+						content = JSON.stringify(extracted, null, 2) ?? "null";
+					} catch {
+						content = String(extracted);
+					}
+					contentType = "application/json";
 				}
 				notes.push(`Extracted: ${query}`);
 			} else {
 				content = JSON.stringify(jsonValue, null, 2);
+				contentType = "application/json";
 			}
-			contentType = "application/json";
 		}
 
 		return {

@@ -88,7 +88,6 @@ import {
 	formatDuration,
 	getAgentDbPath,
 	isBunTestRuntime,
-	isEnoent,
 	isInteractiveHost,
 	isRecord,
 	logger,
@@ -165,6 +164,7 @@ import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
+import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import type { PlanModeState } from "../plan-mode/state";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
@@ -610,6 +610,8 @@ export class AgentSession {
 	#titleSystemPrompt: string | undefined;
 	#titleGenerationStart: (() => void) | undefined;
 	#titleGenerationInFlightFor: string | undefined;
+	#titleProviderSessionId: string | undefined;
+	#titleProviderParentSessionId: string | undefined;
 	/** Host hook invoked when a typed user prompt is dropped before dispatch;
 	 *  see {@link setPromptDropped}. */
 	#promptDropped: ((prompt: DroppedPrompt) => void) | undefined;
@@ -762,6 +764,7 @@ export class AgentSession {
 
 	#resetPromptMaintenanceState(): void {
 		this.#recovery.resetForNewPrompt();
+		this.#maintenance.resetForNewPrompt();
 		this.#yieldTerminationPending = false;
 	}
 
@@ -3309,6 +3312,13 @@ export class AgentSession {
 					await emitAgentEndNotification({ willContinue: true });
 					return;
 				}
+			} else if (this.#recovery.handleMalformedFunctionCallStop(msg)) {
+				// A malformed call with committed text cannot be replayed, but it
+				// never executed anything either: keep the turn and continue with a
+				// corrective reminder rather than stopping on a pinned error.
+				maintenanceRoute("malformed-function-call-handled");
+				await emitAgentEndNotification({ willContinue: true });
+				return;
 			} else if (this.#recovery.isHardErrorFallbackEligible(msg)) {
 				// A non-retryable hard error on a model covered by a configured
 				// fallback chain: retrying the SAME model is pointless, but a
@@ -5564,27 +5574,22 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Build a plan mode message.
-	 * Returns null if plan mode is not enabled.
-	 * @returns The plan mode message, or null if plan mode is not enabled.
+	 * Build the approved-plan reference message re-injected after a history
+	 * rewrite (new session, compaction, edit). Inlines the plan body so the
+	 * executor need not re-read it; the durable `local://` path stays in the
+	 * prompt as the recovery route when a compressor expires the inline copy.
+	 * Returns null during plan mode, once already sent, or when no plan exists.
 	 */
 	async #buildPlanReferenceMessage(): Promise<CustomMessage | null> {
 		if (this.#planModeState?.enabled) return null;
 		if (this.#planReferenceSent) return null;
 
-		const planFilePath = this.#planReferencePath;
-		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, this.#localProtocolOptions());
-		try {
-			await fs.promises.access(resolvedPlanPath, fs.constants.R_OK);
-		} catch (error) {
-			if (isEnoent(error)) {
-				return null;
-			}
-			throw error;
-		}
+		const plan = await loadOverallPlanReference(this.#planReferencePath, this.#localProtocolOptions());
+		if (!plan) return null;
 
 		const content = prompt.render(planModeReferencePrompt, {
-			planFilePath,
+			planFilePath: plan.path,
+			planContent: plan.content,
 		});
 
 		return {
@@ -7075,6 +7080,7 @@ export class AgentSession {
 	}
 
 	#scheduleReplanTitleRefresh(): void {
+		if ($env.PI_NO_TITLE) return;
 		// Headless subagent sessions have no operator-visible title, so a todo-init
 		// replan refresh only burns a tiny-model call whose result lands in JSONL
 		// and is never shown (issue #5910). In an interactive host the operator can
@@ -7159,23 +7165,38 @@ export class AgentSession {
 			});
 	}
 
+	#resolveTitleProviderSessionId(parentSessionId: string): string {
+		if (this.#titleProviderParentSessionId === parentSessionId && this.#titleProviderSessionId) {
+			return this.#titleProviderSessionId;
+		}
+		const titleSessionId = Bun.randomUUIDv7();
+		this.#titleProviderParentSessionId = parentSessionId;
+		this.#titleProviderSessionId = titleSessionId;
+		return titleSessionId;
+	}
+
 	/**
 	 * Generate an automatic session title tied to this session's lifecycle.
 	 * Input and replan callers share the signal so disposal cancels provider and
 	 * local-worker requests instead of leaving background inference alive.
+	 * Online calls use a stable side-request identity so they cannot advance the
+	 * foreground provider session while its request is waiting.
 	 * `customSystemPrompt` swaps the title prompt for special-purpose titling
 	 * (e.g. plan-save filename topics) without touching the session override.
 	 */
 	generateTitle(firstMessage: string, customSystemPrompt?: string): Promise<string | null> {
+		const parentSessionId = this.sessionId;
+		const sessionId = this.#resolveTitleProviderSessionId(parentSessionId);
 		return generateSessionTitle(
 			firstMessage,
 			this.#modelRegistry,
 			this.settings,
-			this.sessionId,
+			sessionId,
 			this.model,
-			provider => this.agent.metadataForProvider(provider),
+			provider => buildSessionMetadata(sessionId, provider, this.#modelRegistry.authStorage),
 			customSystemPrompt ?? this.#titleSystemPrompt,
 			this.#titleGenerationAbortController.signal,
+			parentSessionId,
 		);
 	}
 
@@ -8212,9 +8233,14 @@ export class AgentSession {
 		return this.#irc.deliver(msg, opts);
 	}
 
-	/** Waits for side-channel IRC auto-replies currently owned by this session. */
-	waitForIrcAutoReplies(): Promise<void> {
-		return this.#irc.waitForAutoReplies();
+	/** Waits for every IRC reply this session still owes a peer (auto-replies, wake-turn relays). */
+	waitForIrcReplies(): Promise<void> {
+		return this.#irc.waitForReplies();
+	}
+
+	/** Registers an in-flight IRC reply obligation; peers awaiting an answer hold their stop verdict on it. */
+	trackIrcReply(pending: Promise<void>): void {
+		this.#irc.trackReply(pending);
 	}
 
 	/** Installs task-executor monitoring around autonomous IRC wake turns. */

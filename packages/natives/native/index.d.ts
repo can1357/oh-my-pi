@@ -381,7 +381,7 @@ export declare class VcsGitRepo {
   /** List worktrees. */
   worktrees(signal?: unknown | undefined | null): Promise<Array<VcsWorktreeEntry>>
   /** Add worktree. */
-  worktreeAdd(path: string, refName: string, detach: boolean, signal?: unknown | undefined | null): Promise<undefined>
+  worktreeAdd(path: string, refName: string, options: VcsWorktreeAddOptions, signal?: unknown | undefined | null): Promise<VcsWorktreeAddResult>
   /** Remove worktree. */
   worktreeRemove(path: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
   /** Prune worktrees. */
@@ -573,7 +573,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_1_4(): void
+export declare function __piNativesV18_1_5(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -2588,6 +2588,24 @@ export interface VcsStatusSummary {
 
 /** Validate hunk selections. */
 export declare function vcsValidateHunkSelections(rawDiff: string, selections: Array<VcsHunkSelection>): Array<VcsHunkSelectionError>
+
+/** Worktree creation options. */
+export interface VcsWorktreeAddOptions {
+  detach: boolean
+  clone: boolean
+  backend?: IsoBackendKind
+  /**
+   * Carry the source checkout's uncommitted changes into the new worktree
+   * (target must be the source `HEAD`).
+   */
+  keepChanges?: boolean
+}
+
+/** Worktree creation outcome. */
+export interface VcsWorktreeAddResult {
+  clonedWith?: IsoBackendKind
+  cloneError?: string
+}
 
 /** One worktree listing row. */
 export interface VcsWorktreeEntry {

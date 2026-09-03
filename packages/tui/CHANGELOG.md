@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the band composer dropping its status row while the top border has no content, so the status line no longer pushes the prompt down when it attaches.
+
+## [18.1.5] - 2026-09-03
+
+### Fixed
+
+- Fixed terminal query support in supervised PTY processes, including cursor position reports.
+- Fixed paste-and-submit handling so an Enter keypress received with a bracketed paste is delivered to the previously focused component; `Editor.onLargePaste` now receives `PasteOptions` describing the queued submit.
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed
