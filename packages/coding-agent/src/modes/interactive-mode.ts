@@ -2169,9 +2169,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Snapshot the current status chrome (top border/band content, standalone
-	 * bottom rows, border color) into the composer cache so the next launch's
-	 * prepaint frame shows a status row before the session hydrates.
+	 * Cache placeholder-only status chrome so the next launch paints the row
+	 * immediately without presenting values from the previous session.
 	 */
 	#persistComposerStatus(): void {
 		if (!this.sessionManager.getSessionFile()) return;
@@ -2179,17 +2178,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		const style = getComposerStyle(shape);
 		const terminalWidth = this.ui.terminal.columns;
 		const availableWidth = this.editor.getTopBorderAvailableWidth(terminalWidth);
-		const topBorder =
+		const topContent =
 			style.statusAttachment === "top-border"
-				? this.statusLine.getTopBorder(availableWidth)
+				? this.statusLine.renderStartupPlaceholder(availableWidth, "box")
 				: style.statusAttachment === "top-band"
-					? this.statusLine.getBandTopBorder(availableWidth)
+					? this.statusLine.renderStartupPlaceholder(availableWidth, "band")
 					: style.statusAttachment === "top-rule-chip"
-						? this.statusLine.getStandaloneTopBorder(availableWidth)
+						? this.statusLine.renderStartupPlaceholder(availableWidth, "plain-right")
 						: undefined;
 		const bottomLines: string[] = [];
 		if (style.bottomBar !== "none") {
-			const content = this.statusLine.renderBottomBar(terminalWidth, style.bottomBar);
+			const content = this.statusLine.renderStartupPlaceholder(
+				terminalWidth,
+				style.bottomBar === "left" ? "plain-left" : "plain-full",
+			);
 			if (content) {
 				if (style.bottomBarGap) bottomLines.push("");
 				bottomLines.push(content);
@@ -2205,7 +2207,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				markerIndex < 0
 					? undefined
 					: { prefix: colored.slice(0, markerIndex), suffix: colored.slice(markerIndex + marker.length) },
-			topBorder: topBorder?.content ? { content: topBorder.content, width: topBorder.width } : undefined,
+			topBorder: topContent ? { content: topContent, width: visibleWidth(topContent) } : undefined,
 			bottomLines,
 		};
 		void writeComposerStatusCache(this.sessionManager.getCwd(), snapshot).catch(error => {
@@ -4738,7 +4740,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#appearanceRefreshRequest = undefined;
-		// Last chance to capture a fully hydrated status row for the next launch.
+		// Last chance to refresh the startup status placeholder for the next launch.
 		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);

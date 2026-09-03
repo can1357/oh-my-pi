@@ -106,14 +106,14 @@ describe("tiny title client prompt options", () => {
 		const client = new TinyTitleClient(() => worker);
 
 		try {
-			const title = await client.generate("lfm2-350m", "Investigate routing", {
+			const title = await client.generate("lfm2.5-230m", "Investigate routing", {
 				systemPrompt: "Custom title prompt",
 			});
 
 			expect(title).toBe("custom title");
 			expect(sent).toMatchObject({
 				type: "generate",
-				modelKey: "lfm2-350m",
+				modelKey: "lfm2.5-230m",
 				message: "Investigate routing",
 				systemPrompt: "Custom title prompt",
 			});
@@ -185,13 +185,13 @@ describe("issue #1940 — local model failures release the worker process", () =
 
 		try {
 			const crashedMemory = client.complete("qwen3-1.7b", "first prompt");
-			const queuedTitle = client.generate("lfm2-350m", "title prompt");
+			const queuedTitle = client.generate("lfm2.5-230m", "title prompt");
 			first.emitError(new Error("tiny model subprocess exited with signal SIGKILL"));
 
 			expect(await crashedMemory).toBeNull();
 			expect(await queuedTitle).toBeNull();
 			expect(first.terminated).toBe(true);
-			expect(await client.generate("lfm2-350m", "retry title")).toBe("recovered title");
+			expect(await client.generate("lfm2.5-230m", "retry title")).toBe("recovered title");
 			expect(nextWorker).toBe(2);
 		} finally {
 			await client.terminate();
@@ -208,7 +208,7 @@ describe("issue #3291 — tiny-model downloads keep the worker referenced", () =
 		const client = new TinyTitleClient(() => worker);
 
 		try {
-			const download = client.downloadModel("lfm2-700m");
+			const download = client.downloadModel("lfm2.5-350m");
 
 			expect(downloadRequestId).not.toBe("");
 			expect(worker.refCalls).toBe(1);
@@ -231,7 +231,7 @@ describe("issue #3291 — tiny-model downloads keep the worker referenced", () =
 		const client = new TinyTitleClient(() => worker);
 
 		try {
-			const download = client.downloadModel("lfm2-700m");
+			const download = client.downloadModel("lfm2.5-350m");
 
 			expect(downloadRequestId).not.toBe("");
 			worker.emit({ type: "error", id: downloadRequestId, error: "Error: runtime install failed" });

@@ -6,6 +6,8 @@
 members = [
    "crates/pi-ast",
    "crates/pi-builtins",
+   "crates/pi-diff",
+   "crates/pi-edit",
    "crates/pi-iso",
    "crates/pi-natives",
    "crates/pi-shell",
@@ -208,6 +210,8 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 # Internal Libraries
 # ──────────────────────────────────────────────────────────────────────────────
 pi-ast = { path = "crates/pi-ast" }
+pi-diff = { path = "crates/pi-diff" }
+pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
@@ -271,7 +275,7 @@ smallvec = { version = "1.15.1", features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Hashing
 # ──────────────────────────────────────────────────────────────────────────────
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media

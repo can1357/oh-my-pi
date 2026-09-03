@@ -51,13 +51,13 @@ fallback is used when that role is unset.
   - Conclusion: **1B–1.7B models are viable on CPU.**
 - **`session_options.graphOptimizationLevel`** trades load vs inference speed: `disabled` = fastest
   load, slightly slower inference; `all` = default.
-- **First run** downloads weights from the HF Hub to a cache dir (q4 weights ~200MB–1.1GB depending
+- **First run** downloads weights from the HF Hub to a cache dir (q4 weights ~150MB–1.1GB depending
   on model); subsequent **warm** loads are sub-second to ~3s. Inference is async and
   background-friendly for memory tasks; titles are semi-interactive.
 
 ## Task 1: Session title generation (`providers.tinyModel`)
 
-**Task**: turn the first user message into a 3–6 word title. Tiny models (sub-1B) suffice.
+**Task**: turn the first user message into a 3–7 word title. Tiny models (sub-1B) suffice.
 
 **Winning recipe**:
 
@@ -67,23 +67,23 @@ fallback is used when that role is unset.
 
 **What we learned**:
 
-- **Few-shot examples HURT sub-0.6B models** for titles; the tag-prefill rescues even 270M models.
+- **Few-shot examples contaminate sub-0.6B titles** with copied example subjects. The shared prompt
+  gates examples off for embedded models while retaining them for capable online models.
+- **Casing instructions become output** on the smallest models. [`normalizeGeneratedTitle`](../packages/coding-agent/src/tiny/text.ts)
+  reconciles casing after generation, so the prompt omits that rule.
 - **Token biasing (`bad_words_ids`) is a confirmed no-op** here — the prefill already controls the
   opener.
 
-**Leaderboard** (tag trick, CPU, warm):
+**Replacement benchmark** (30 recent first-session prompts, q4 CPU, no examples):
 
-| Model         | Verdict                             |
-| ------------- | ----------------------------------- |
-| LFM2-350M     | Best speed/quality balance (~212MB) |
-| Qwen3-0.6B    | Most robust                         |
-| gemma-3-270m  | Smallest viable                     |
-| Qwen2.5-0.5B  | Acceptable                          |
-| SmolLM2-135M  | Too small                           |
-| flan-t5-small | Rejected — just echoes the input    |
+| Model              | Cache | Warm mean / p95 | 3–7 words | Observed tradeoff                               |
+| ------------------ | ----: | --------------: | ----------: | ----------------------------------------------- |
+| LFM2.5-230M        | 214MB |      93 / 194ms |       21/28 | Best semantic balance; occasional generic title |
+| Falcon-H1-Tiny-90M | 147MB |     117 / 174ms |       17/29 | Smallest; lower fidelity on complex inputs       |
+| LFM2.5-350M        | 292MB |     166 / 266ms |        4/30 | Aggressively terse, often a one-word label       |
 
-**Shipped local options**: `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`.
-**Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2-700m`.
+**Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`.
+**Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2.5-230m`.
 
 ## Task 2: Mnemopi memory (`providers.memoryModel`)
 

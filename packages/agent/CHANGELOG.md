@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled support for streaming tool argument updates to improve interactivity
+
+### Changed
+
+- Normalize trailing periods in tool intents
+
 ## [18.1.2] - 2026-09-01
 
 ### Fixed

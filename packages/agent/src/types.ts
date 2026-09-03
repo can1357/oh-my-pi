@@ -758,6 +758,25 @@ export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = an
 	context?: AgentToolContext,
 ) => Promise<AgentToolResult<TDetails, TParameters>>;
 
+/** Live receiver for a tool call's streamed arguments (see AgentTool.openArgStream). */
+export interface AgentToolArgStream {
+	/** Raw wire fragment of the arguments (JSON text, or verbatim payload for custom-format tools). */
+	push(delta: string): void;
+	/** Arguments are complete; `args` is the final parsed object the loop will pass to `execute`. */
+	end(args: unknown): void;
+	/** The call will never execute (stream error, abort, blocked). Release resources. */
+	cancel(): void;
+}
+
+export interface AgentToolArgStreamInit {
+	toolCallId: string;
+	toolName: string;
+	/** Wire-level name for custom-format tools; undefined for JSON function tools. */
+	customWireName?: string;
+	/** Push a serializable projection of the in-flight call (e.g. diff previews); surfaces as `tool_stream_update`. */
+	emit(update: unknown): void;
+}
+
 // AgentTool extends Tool but adds the execute function
 export interface AgentTool<
 	TParameters extends TSchema = TSchema,
@@ -766,6 +785,10 @@ export interface AgentTool<
 > extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
+	/**
+	 * Called at `toolcall_start`, before any argument delta. Return `undefined` to opt out.
+	 */
+	openArgStream?: (init: AgentToolArgStreamInit) => AgentToolArgStream | undefined;
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
 	hidden?: boolean;
 	/** If true, tool can stage a pending action that requires explicit resolution via the resolve tool. */
@@ -885,4 +908,5 @@ export type AgentEvent =
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+	| { type: "tool_stream_update"; toolCallId: string; toolName: string; update: unknown }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };

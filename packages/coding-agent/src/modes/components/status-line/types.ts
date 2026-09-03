@@ -69,6 +69,8 @@ export interface SegmentContext {
 	sessionAccent?: boolean;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
+	/** Replace dynamic values with ellipses while preserving each segment's icon, color, and static text. */
+	startupPlaceholder?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;

@@ -514,7 +514,12 @@ async function collectSessionsFromFiles(
 					)
 				).flat();
 
-	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	sessions.sort(
+		(a, b) =>
+			b.modified.getTime() - a.modified.getTime() ||
+			b.created.getTime() - a.created.getTime() ||
+			b.path.localeCompare(a.path),
+	);
 	return sessions;
 }
 
