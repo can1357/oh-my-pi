@@ -10399,7 +10399,10 @@ describe("RelayBridge attachment release", () => {
 		// recheck and detach immediately so the debugger attachment (and its infobar)
 		// is not orphaned until a later relay outage.
 		ack(bridge, ext2, "attach");
-		await flush();
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"unheld recovery detach",
+		);
 		expect(ext2.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
 	});
 

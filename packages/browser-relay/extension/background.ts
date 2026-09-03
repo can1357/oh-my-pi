@@ -845,9 +845,11 @@ async function attachTabOperation(
 					} catch {
 						if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
 							return;
-						attachmentGuard.onDisconnected();
-						attachmentGuard.track(tabId);
-						void maybeScheduleOrphanSweep(true);
+						attachmentGuard.retry(
+							tabId,
+							() =>
+								(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+						);
 					}
 				}
 			}),
@@ -863,9 +865,12 @@ async function attachTabOperation(
 				guardDetachments.delete(tabId);
 				const targets = await chrome.debugger.getTargets().catch(() => null);
 				if (shouldRetrackAfterDetachFailure(targets, tabId)) {
-					attachmentGuard.onDisconnected();
-					attachmentGuard.track(tabId);
-					void maybeScheduleOrphanSweep(true);
+					const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+					attachmentGuard.retry(
+						tabId,
+						() =>
+							(attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch,
+					);
 				}
 			},
 		);

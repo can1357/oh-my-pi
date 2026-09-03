@@ -2,6 +2,7 @@
 class AttachmentGuard {
   options;
   #attached = new Set;
+  #targetedRetries = new Map;
   #disconnected = false;
   #pending = null;
   constructor(options) {
@@ -13,8 +14,27 @@ class AttachmentGuard {
   }
   untrack(tabId) {
     this.#attached.delete(tabId);
+    const retry = this.#targetedRetries.get(tabId);
+    if (retry !== undefined) {
+      this.options.clearTimer(retry);
+      this.#targetedRetries.delete(tabId);
+    }
     if (this.#attached.size === 0)
       this.#cancel();
+  }
+  retry(tabId, isFresh = () => true) {
+    this.#attached.add(tabId);
+    if (this.#targetedRetries.has(tabId))
+      return;
+    const pending = this.options.setTimer(() => {
+      this.#targetedRetries.delete(tabId);
+      if (!isFresh())
+        return;
+      if (!this.#attached.delete(tabId))
+        return;
+      this.options.detachAll([tabId]);
+    }, this.options.graceMs);
+    this.#targetedRetries.set(tabId, pending);
   }
   attachedTabIds() {
     return [...this.#attached];
@@ -50,6 +70,9 @@ class AttachmentGuard {
       return;
     const tabIds = [...this.#attached];
     this.#attached.clear();
+    for (const retry of this.#targetedRetries.values())
+      this.options.clearTimer(retry);
+    this.#targetedRetries.clear();
     this.options.detachAll(tabIds);
   }
 }
@@ -640,9 +663,7 @@ async function attachTabOperation(tabId, socket) {
         } catch {
           if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
             return;
-          attachmentGuard.onDisconnected();
-          attachmentGuard.track(tabId);
-          maybeScheduleOrphanSweep(true);
+          attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
         }
       }
     }));
@@ -656,9 +677,8 @@ async function attachTabOperation(tabId, socket) {
       guardDetachments.delete(tabId);
       const targets = await chrome.debugger.getTargets().catch(() => null);
       if (shouldRetrackAfterDetachFailure(targets, tabId)) {
-        attachmentGuard.onDisconnected();
-        attachmentGuard.track(tabId);
-        maybeScheduleOrphanSweep(true);
+        const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+        attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
       }
     });
     throw error;

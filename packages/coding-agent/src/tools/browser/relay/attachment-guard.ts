@@ -32,6 +32,7 @@ export interface AttachmentGuardOptions<H> {
 
 export class AttachmentGuard<H> {
 	readonly #attached = new Set<number>();
+	readonly #targetedRetries = new Map<number, H>();
 	#disconnected = false;
 	#pending: H | null = null;
 
@@ -46,7 +47,25 @@ export class AttachmentGuard<H> {
 	/** Forget a tab that has been detached (explicit RPC, user cancel, or navigation). */
 	untrack(tabId: number): void {
 		this.#attached.delete(tabId);
+		const retry = this.#targetedRetries.get(tabId);
+		if (retry !== undefined) {
+			this.options.clearTimer(retry);
+			this.#targetedRetries.delete(tabId);
+		}
 		if (this.#attached.size === 0) this.#cancel();
+	}
+
+	/** Retry cleanup for one failed attachment without sweeping healthy tabs. */
+	retry(tabId: number, isFresh: () => boolean = () => true): void {
+		this.#attached.add(tabId);
+		if (this.#targetedRetries.has(tabId)) return;
+		const pending = this.options.setTimer(() => {
+			this.#targetedRetries.delete(tabId);
+			if (!isFresh()) return;
+			if (!this.#attached.delete(tabId)) return;
+			this.options.detachAll([tabId]);
+		}, this.options.graceMs);
+		this.#targetedRetries.set(tabId, pending);
 	}
 
 	/** Tabs currently believed to hold an extension-owned attachment. */
@@ -90,6 +109,9 @@ export class AttachmentGuard<H> {
 		if (this.#attached.size === 0) return;
 		const tabIds = [...this.#attached];
 		this.#attached.clear();
+		for (const retry of this.#targetedRetries.values())
+			this.options.clearTimer(retry);
+		this.#targetedRetries.clear();
 		this.options.detachAll(tabIds);
 	}
 }

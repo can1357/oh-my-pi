@@ -88,6 +88,30 @@ describe("AttachmentGuard", () => {
 		expect(detached).toEqual([[1]]);
 	});
 
+	it("retries only the failed attachment while the relay remains connected", () => {
+		const { guard, timers, detached } = makeGuard();
+		guard.track(1);
+		guard.track(2);
+
+		guard.retry(1);
+		expect(timers.pendingCount).toBe(1);
+		timers.flush();
+
+		expect(detached).toEqual([[1]]);
+		expect(guard.attachedTabIds()).toEqual([2]);
+	});
+
+	it("does not retry a failed attachment after its ownership changes", () => {
+		const { guard, timers, detached } = makeGuard();
+		let fresh = true;
+		guard.retry(1, () => fresh);
+
+		fresh = false;
+		timers.flush();
+
+		expect(detached).toEqual([]);
+	});
+
 	it("arms a sweep when a new attachment appears after the relay already disconnected", () => {
 		const { guard, timers, detached } = makeGuard();
 		guard.onDisconnected();
