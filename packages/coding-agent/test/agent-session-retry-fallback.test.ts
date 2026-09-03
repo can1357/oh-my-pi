@@ -501,7 +501,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2056,7 +2058,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2108,7 +2112,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2440,7 +2446,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		// No exact key for this model and no role assignment: only the
 		// `anthropic/*` wildcard can match, proving provider-level coverage.
@@ -2853,7 +2861,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		// `google-vertex/*` is not a fixed target: it must adopt the failing
 		// model's id (google/gemini-2.5-flash -> google-vertex/gemini-2.5-flash).
@@ -2906,7 +2916,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		// `openrouter/google/*` splits into provider `openrouter` + id prefix
 		// `google`: the failing bare id is re-prefixed into the aggregator's
@@ -2960,7 +2972,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		// Key `openrouter/google/*` covers only openrouter's google-namespaced
 		// ids; the plain `google-vertex/*` target drops the aggregator's vendor
@@ -3015,7 +3029,9 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -4332,7 +4348,7 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(requested);
 				if (requestedModel.provider === "openrouter" && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
 				} else {
 					mock.push({ content: [`ok:${requested}`] });
 				}
@@ -4388,7 +4404,7 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
 				if (requestedModel.provider === primaryModel.provider && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: `rate limit exceeded retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}` });
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
 				} else {
 					mock.push({ content: [`ok:${requestedModel.provider}/${requestedModel.id}`] });
 				}
@@ -4429,7 +4445,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "Too many requests",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -4469,7 +4487,7 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 
-		now += 240;
+		now += 31000;
 		await session.prompt("Third prompt should lazily revert to primary");
 		await session.waitForIdle();
 		expect(requestedModels).toEqual([
@@ -4659,7 +4677,7 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				if (model.id === primaryModel.id && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					mock.push({ throw: "Too many requests" });
 				} else if (model.id === fallbackModel.id && fallbackTurns === 0) {
 					fallbackTurns += 1;
 					mock.push({ content: [bigText] });
@@ -4778,7 +4796,7 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				if (model.id === primaryModel.id && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
 				} else {
 					mock.push({ content: ["ok"] });
 				}
@@ -4862,7 +4880,7 @@ describe("AgentSession retry fallback", () => {
 					mock.push({
 						content: [{ type: "thinking", thinking: "lorem ipsum ".repeat(5000) }],
 						stopReason: "error",
-						errorMessage: "rate limit exceeded retry-after-ms=200",
+						errorMessage: "overloaded_error: provider returned error 503",
 					});
 				} else {
 					mock.push({ content: ["ok"] });
@@ -5022,7 +5040,7 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(requested);
 				if (requested === "openrouter/z-ai/glm-4.7@cerebras" && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					mock.push({ throw: "Too many requests" });
 				} else {
 					mock.push({ content: [`ok:${requested}`] });
 				}
@@ -5056,7 +5074,7 @@ describe("AgentSession retry fallback", () => {
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
 
-		now += 240;
+		now += 31000;
 		await session.prompt("Second prompt should restore routed primary");
 		await session.waitForIdle();
 		expect(requestedModels).toEqual([
@@ -5078,7 +5096,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "Too many requests",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -5111,7 +5131,7 @@ describe("AgentSession retry fallback", () => {
 		expect(session.thinkingLevel).toBeUndefined();
 
 		session.setThinkingLevel(Effort.Low);
-		now += 240;
+		now += 31000;
 		await session.prompt("Second prompt should restore model but preserve user thinking change");
 		await session.waitForIdle();
 		expect(requestedModels).toEqual([
@@ -5132,7 +5152,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -5177,7 +5199,9 @@ describe("AgentSession retry fallback", () => {
 		}
 		const requestedModels: string[] = [];
 		const usageChecks: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
@@ -5905,7 +5929,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
@@ -5944,7 +5970,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: "overloaded_error: provider returned error 503",
+		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
@@ -6095,6 +6123,248 @@ describe("AgentSession retry fallback", () => {
 
 		// Proactive: the primary was never requested, so no retry saga ran.
 		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(session.servingModel).toEqual({
+			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			isFallback: true,
+		});
+	});
+
+	it("consults the chain on a capacity 503 even when it carries an explicit retry-after", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const mock = createMockModel({
+			responses: [
+				{ throw: "503 Hosted inference is temporarily unavailable. retry-after-ms=38895" },
+				{ content: ["Recovered on the fallback"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 5,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents } = trackRetryEvents(session);
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+		});
+
+		await session.prompt("Fail over instead of waiting out an outage");
+		await session.waitForIdle();
+
+		// The route is down, so its retry-after is a guess. The chain engages on
+		// the first attempt rather than spending the budget on a dead model.
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(fallbackAppliedEvents).toHaveLength(1);
+		expect(fallbackAppliedEvents[0]).toMatchObject({
+			from: `${primaryModel.provider}/${primaryModel.id}`,
+			to: `${fallbackModel.provider}/${fallbackModel.id}`,
+			role: "default",
+		});
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0]).toMatchObject({ delayMs: 0 });
+		expect(waitSpy).not.toHaveBeenCalledWith(38895, expect.anything());
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("parks the fallback consult on an explicit retry-after while budget remains", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
+		const mock = createMockModel({
+			responses: [{ throw: "rate limit exceeded retry-after-ms=200" }, { content: ["Recovered on primary retry"] }],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+			if (event.type === "retry_fallback_succeeded") {
+				fallbackSucceededEvents.push(event);
+			}
+		});
+
+		await session.prompt("Retry on the primary despite a configured chain");
+		await session.waitForIdle();
+
+		// The explicit retry-after parks the chain consult mid-budget: the same
+		// primary is retried after honoring the wait, never a cold fallback.
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+		]);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0]).toMatchObject({
+			attempt: 1,
+			maxAttempts: 1,
+			delayMs: 200,
+			errorMessage: "rate limit exceeded retry-after-ms=200",
+		});
+		expect(waitSpy).toHaveBeenCalledWith(200, { signal: expect.any(AbortSignal) });
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+		expect(fallbackAppliedEvents).toHaveLength(0);
+		expect(fallbackSucceededEvents).toHaveLength(0);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+		const lastAssistant = getLastAssistantMessage(session);
+		expect(lastAssistant.stopReason).toBe("stop");
+		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered on primary retry" });
+	});
+
+	it("engages the fallback chain once the retry budget exhausts despite an explicit retry-after", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.id === primaryModel.id && primaryAttempts < 2) {
+					primaryAttempts += 1;
+					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+				} else {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+		});
+
+		await session.prompt("Exhaust the retry budget, then fail over");
+		await session.waitForIdle();
+
+		// The first park retries the primary after honoring the retry-after; the
+		// exhausted attempt finally consults the chain and lands on the fallback,
+		// which gets a fresh retry budget.
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryStartEvents[0]).toMatchObject({ maxAttempts: 1, delayMs: 200 });
+		expect(retryStartEvents[1]).toMatchObject({ maxAttempts: 1, delayMs: 0 });
+		expect(fallbackAppliedEvents).toHaveLength(1);
+		expect(fallbackAppliedEvents[0]).toMatchObject({
+			type: "retry_fallback_applied",
+			from: `${primaryModel.provider}/${primaryModel.id}`,
+			to: `${fallbackModel.provider}/${fallbackModel.id}`,
+			role: "default",
+		});
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
 			isFallback: true,
