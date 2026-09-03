@@ -736,6 +736,49 @@ describe("ModelRegistry", () => {
 			expect(getReplayUnsignedThinking(registry.find("anthropic", "claude-sonnet-5"))).toBe(false);
 		});
 
+		test("catalog metrics enrich models discovered through a custom provider", async () => {
+			writeRawModelsJson({
+				cliproxy: {
+					baseUrl: "https://proxy.example/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-responses",
+					discovery: { type: "openai-models-list" },
+					models: [],
+				},
+			});
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url === "https://catalog.stencil.so/models.json.zstd") {
+					return Response.json({
+						openai: {
+							id: "openai",
+							name: "OpenAI",
+							models: {
+								"gpt-5.6-sol": {
+									id: "gpt-5.6-sol",
+									name: "GPT-5.6 Sol",
+									tool_call: true,
+									int: 60.9,
+									tps: 70.4,
+								},
+							},
+						},
+					});
+				}
+				if (url === "https://proxy.example/v1/models") {
+					return Response.json({ data: [{ id: "gpt-5.6-sol" }] });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refresh("online");
+
+			const model = registry.find("cliproxy", "gpt-5.6-sol");
+			expect(model?.int).toBe(60.9);
+			expect(model?.tps).toBe(70.4);
+		});
+
 		test("custom Responses providers can disable original image detail", () => {
 			const model = customResponsesCompat.find("cc-switch", "gpt-5.5");
 			const compat = getOpenAICompat(model);
@@ -1802,6 +1845,7 @@ describe("ModelRegistry", () => {
 						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
 						guardrailVersion: "1",
 						guardrailTrace: "enabled",
+						requestMetadata: { team: "growth", environment: "prod" },
 					},
 					"custom-bedrock": {
 						baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -1810,6 +1854,7 @@ describe("ModelRegistry", () => {
 						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
 						guardrailVersion: "1",
 						guardrailTrace: "enabled",
+						requestMetadata: { team: "growth", environment: "prod" },
 						models: [
 							{
 								id: "custom-bedrock-model",
@@ -1833,6 +1878,7 @@ describe("ModelRegistry", () => {
 				expect(model.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 				expect(model.guardrailVersion).toBe("1");
 				expect(model.guardrailTrace).toBe("enabled");
+				expect(model.requestMetadata).toEqual({ team: "growth", environment: "prod" });
 			}
 		});
 
@@ -1842,6 +1888,7 @@ describe("ModelRegistry", () => {
 			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 			expect(model?.guardrailVersion).toBe("1");
 			expect(model?.guardrailTrace).toBe("enabled");
+			expect(model?.requestMetadata).toEqual({ team: "growth", environment: "prod" });
 		});
 
 		test("guardrail fields are absent on built-in bedrock models without override", () => {
@@ -1851,6 +1898,7 @@ describe("ModelRegistry", () => {
 				expect(model.guardrailIdentifier).toBeUndefined();
 				expect(model.guardrailVersion).toBeUndefined();
 				expect(model.guardrailTrace).toBeUndefined();
+				expect(model.requestMetadata).toBeUndefined();
 			}
 		});
 

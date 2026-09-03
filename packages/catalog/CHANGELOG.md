@@ -5,6 +5,15 @@
 ### Added
 
 - Added shared Codex wire constants and residency-header handling for ChatGPT OAuth request integrations ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added catalog-delivered model intelligence scores and estimated output throughput to help compare model capabilities and performance.
+
+### Changed
+
+- Improved model search and selection so configured roles, provider preferences, and recent usage are prioritized while browsing and filtering models.
 
 ## [18.1.5] - 2026-09-03
 

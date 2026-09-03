@@ -7,7 +7,11 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams, UsageLimit } from "@oh-my-pi/pi-ai/usage";
-import { antigravityRankingStrategy, antigravityUsageProvider } from "@oh-my-pi/pi-ai/usage/google-antigravity";
+import {
+	antigravityRankingStrategy,
+	antigravityUsageProvider,
+	scopeAntigravityLimitsForModel,
+} from "@oh-my-pi/pi-ai/usage/google-antigravity";
 
 const accessTokenFixture = (() => {
 	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -70,6 +74,87 @@ function makeApiModel(
 // ── tests ────────────────────────────────────────────────────────────
 
 describe("antigravity usage provider", () => {
+	it("reports the official five-hour and weekly quota summary", async () => {
+		const requestedUrls: string[] = [];
+		const summary = {
+			groups: [
+				{
+					displayName: "Gemini Models",
+					buckets: [
+						{
+							bucketId: "gemini-weekly",
+							displayName: "Weekly Limit Remaining",
+							window: "weekly",
+							remainingFraction: 0.88,
+							resetTime: "2026-09-10T00:00:00Z",
+						},
+						{
+							bucketId: "gemini-5h",
+							displayName: "Five Hour Limit Remaining",
+							window: "5h",
+							remainingFraction: 0.59,
+							resetTime: "2026-09-03T12:00:00Z",
+						},
+					],
+				},
+				{
+					displayName: "Claude and GPT models",
+					buckets: [
+						{
+							bucketId: "3p-weekly",
+							displayName: "Weekly Limit Remaining",
+							window: "weekly",
+							remainingFraction: 1,
+							resetTime: "2026-09-10T12:00:00Z",
+						},
+						{
+							bucketId: "3p-5h",
+							displayName: "Five Hour Limit Remaining",
+							window: "5h",
+							remainingFraction: 1,
+							resetTime: "2026-09-03T15:00:00Z",
+						},
+					],
+				},
+			],
+		};
+		const fetchImpl: FetchImpl = async input => {
+			requestedUrls.push(String(input));
+			return new Response(JSON.stringify(summary), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+
+		const report = await antigravityUsageProvider.fetchUsage!(
+			{
+				provider: "google-antigravity",
+				credential: makeCredential(),
+				signal: undefined,
+			},
+			makeCtx(fetchImpl),
+		);
+
+		expect(requestedUrls).toEqual(["https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"]);
+		expect(report?.limits).toHaveLength(6);
+
+		const googleLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gemini-3.8-flash" });
+		const weekly = googleLimits.find(limit => limit.scope.windowId === "weekly");
+		const fiveHour = googleLimits.find(limit => limit.scope.windowId === "5h");
+		expect(weekly?.amount.usedFraction).toBeCloseTo(0.12);
+		expect(weekly?.window?.durationMs).toBe(7 * 24 * 60 * 60 * 1000);
+		expect(fiveHour?.amount.usedFraction).toBeCloseTo(0.41);
+		expect(fiveHour?.window?.label).toBe("5 Hour");
+		expect(fiveHour?.window?.durationMs).toBe(5 * 60 * 60 * 1000);
+
+		const claudeLimits = scopeAntigravityLimitsForModel(report!, { modelId: "claude-sonnet-4-6" });
+		const gptLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gpt-oss-120b" });
+		expect(claudeLimits).toHaveLength(2);
+		expect(gptLimits).toHaveLength(2);
+		expect(claudeLimits.every(limit => limit.scope.shared === true)).toBeTrue();
+		expect(gptLimits.every(limit => limit.scope.shared === true)).toBeTrue();
+	});
+
 	it("merges two models with same tier into one limit", async () => {
 		const payload = {
 			models: {

@@ -114,6 +114,7 @@ import type {
 	ResponseStatus,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
+import { applyInferenceHeaders, setHeaderIfAbsent } from "./inference-headers";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
@@ -171,7 +172,7 @@ export interface OpenAIRequestSetupOptions {
 		apiVersion: string;
 		deploymentName: string;
 	};
-	openAISessionId?: string;
+	sessionId?: string;
 	promptCacheSessionId?: string;
 }
 
@@ -203,14 +204,6 @@ function applyCoreWeaveProjectHeader(headers: Record<string, string>): void {
 	if (projectHeaders) {
 		headers[COREWEAVE_PROJECT_HEADER] = projectHeaders[COREWEAVE_PROJECT_HEADER];
 	}
-}
-
-function setHeaderIfAbsent(headers: Record<string, string>, name: string, value: string): void {
-	const normalizedName = name.toLowerCase();
-	for (const existingName in headers) {
-		if (existingName.toLowerCase() === normalizedName) return;
-	}
-	headers[name] = value;
 }
 
 export function resolveOpenAIRequestSetup(
@@ -307,10 +300,12 @@ export function resolveOpenAIRequestSetup(
 		query = { "api-version": options.azureChatCompletions.apiVersion };
 	}
 
-	if (options.openAISessionId && model.provider === "openai") {
-		setHeaderIfAbsent(headers, "session_id", options.openAISessionId);
-		setHeaderIfAbsent(headers, "x-client-request-id", options.openAISessionId);
-	}
+	const sessionId = options.sessionId ?? options.promptCacheSessionId;
+	applyInferenceHeaders(headers, {
+		provider: model.provider,
+		protocol: "openai",
+		sessionId,
+	});
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
 		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
 	}
