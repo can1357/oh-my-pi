@@ -29,6 +29,7 @@ afterEach(async () => {
 	__providerInFlightForTesting.setLeaseRemover(undefined);
 	__providerInFlightForTesting.setWaitObserver(undefined);
 	__providerInFlightForTesting.setLockCreatedObserver(undefined);
+	__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
 	if (limiterRoot !== undefined) {
 		await fs.rm(limiterRoot, { recursive: true, force: true });
 		limiterRoot = undefined;
@@ -495,6 +496,20 @@ describe("provider in-flight request limits", () => {
 		__providerInFlightForTesting.setLockCreatedObserver(async lockDir => {
 			await fs.rm(lockDir, { recursive: true, force: true });
 			__providerInFlightForTesting.setLockCreatedObserver(undefined);
+		});
+
+		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+		expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	test("retries when another process removes an identified lock before its info write", async () => {
+		registerMockApi();
+		const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+		__providerInFlightForTesting.setLockIdentifiedObserver(async lockDir => {
+			await fs.rm(lockDir, { recursive: true, force: true });
+			__providerInFlightForTesting.setLockIdentifiedObserver(undefined);
 		});
 
 		const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();

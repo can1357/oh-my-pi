@@ -201,6 +201,7 @@ let providerInFlightHeartbeatWriterOverride:
 let providerInFlightLeaseRemoverOverride: ((leasePath: string) => Promise<void>) | undefined;
 let providerInFlightWaitObserverOverride: ((provider: string) => void) | undefined;
 let providerInFlightLockCreatedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
+let providerInFlightLockIdentifiedObserverOverride: ((lockDir: string) => Promise<void>) | undefined;
 
 export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
 	configuredProviderMaxInFlightRequests = limits ?? {};
@@ -383,9 +384,11 @@ async function acquireProviderInFlightLock(provider: string, signal?: AbortSigna
 			}
 			const token = crypto.randomUUID();
 			try {
+				await providerInFlightLockIdentifiedObserverOverride?.(lockDir);
 				await writeProviderInFlightInfo(lockDir, token);
 			} catch (error) {
 				await releaseProviderInFlightLockDirIfSame(lockDir, lockIdentity);
+				if (isEnoent(error)) continue;
 				throw error;
 			}
 			return async () => {
@@ -640,6 +643,9 @@ export const __providerInFlightForTesting = {
 	},
 	setLockCreatedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
 		providerInFlightLockCreatedObserverOverride = observer;
+	},
+	setLockIdentifiedObserver(observer: ((lockDir: string) => Promise<void>) | undefined): void {
+		providerInFlightLockIdentifiedObserverOverride = observer;
 	},
 	providerDir(provider: string): string {
 		return providerInFlightDir(provider);
