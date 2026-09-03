@@ -203,6 +203,53 @@ describe("ModelRegistry runtime provider registration", () => {
 		).toEqual(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.4-preview", "muse-spark-2.0.1"]);
 	});
 
+	test("keeps retained Meta credentials off custom discovery endpoints", async () => {
+		await authStorage.set("meta", [
+			{
+				type: "oauth",
+				access: "meta-account-access",
+				refresh: "meta-account-refresh",
+				expires: Date.now() + 3_600_000,
+				apiKey: "LLM|subscription-catalog",
+				accountId: "meta-account",
+			},
+			{
+				type: "api_key",
+				key: "LLM|payg-catalog",
+				source: "login",
+			},
+		]);
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					meta: {
+						baseUrl: "https://proxy.example/v1",
+						apiKey: "proxy-key",
+					},
+				},
+			}),
+		);
+		const authorizations: string[] = [];
+		const customRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: (input, init) => {
+				const url = String(input);
+				if (url === "https://proxy.example/v1/models") {
+					authorizations.push(new Headers(init?.headers).get("Authorization") ?? "");
+					return Promise.resolve(Response.json({ data: [{ id: "proxy-model" }] }));
+				}
+				return Promise.reject(new Error(`network disabled for ${url}`));
+			},
+		});
+		const discoveryKeysSpy = vi.spyOn(authStorage, "getModelDiscoveryApiKeys");
+
+		await customRegistry.refreshProvider("meta", "online");
+
+		expect(discoveryKeysSpy).not.toHaveBeenCalled();
+		expect(authorizations).toEqual(["Bearer proxy-key"]);
+		discoveryKeysSpy.mockRestore();
+	});
+
 	test("validates provider config before mutating custom API state", () => {
 		const beforeAnthropicCount = registry.getAll().filter(model => model.provider === "anthropic").length;
 

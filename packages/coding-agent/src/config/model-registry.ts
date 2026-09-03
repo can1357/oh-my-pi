@@ -1855,7 +1855,14 @@ export class ModelRegistry {
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
-				const unionOAuthRosters = strategy !== "offline" && unionsOAuthModelRosters(descriptor.providerId);
+				const baseUrl = this.#descriptorBaseUrl(descriptor.providerId);
+				const accountScopedCredentialsBaseUrl = descriptor.catalogDiscovery?.accountScopedCredentialsBaseUrl;
+				const unionOAuthRosters =
+					strategy !== "offline" &&
+					unionsOAuthModelRosters(descriptor.providerId) &&
+					accountScopedCredentialsBaseUrl !== undefined &&
+					(baseUrl === undefined ||
+						baseUrl.replace(/\/+$/, "") === accountScopedCredentialsBaseUrl.replace(/\/+$/, ""));
 				const discoveryKeys = unionOAuthRosters
 					? await this.authStorage.getModelDiscoveryApiKeys(descriptor.providerId)
 					: { apiKeys: [], complete: true };
@@ -1867,7 +1874,7 @@ export class ModelRegistry {
 						apiKeys: [...apiKeys],
 						apiKeysComplete: discoveryKeys.complete,
 					}),
-					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
+					baseUrl,
 					fetch: this.#fetch,
 				};
 				const preparedConfig =

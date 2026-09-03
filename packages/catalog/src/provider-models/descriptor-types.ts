@@ -27,6 +27,8 @@ export interface CatalogDiscoveryConfig {
 	oauthProvider?: string;
 	/** When true, catalog discovery proceeds even without credentials. */
 	allowUnauthenticated?: boolean;
+	/** Only this first-party base URL may receive retained account credentials during roster union. */
+	accountScopedCredentialsBaseUrl?: string;
 }
 
 /** Unified provider descriptor used by both runtime discovery and catalog generation. */

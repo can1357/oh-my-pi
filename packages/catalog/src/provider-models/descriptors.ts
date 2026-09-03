@@ -320,7 +320,10 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "muse-spark-1.1",
 		envVars: ["MODEL_API_KEY", "META_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => metaModelManagerOptions(config),
-		catalogDiscovery: { label: "Meta Model API" },
+		catalogDiscovery: {
+			label: "Meta Model API",
+			accountScopedCredentialsBaseUrl: "https://api.meta.ai/v1",
+		},
 	},
 	{
 		id: "moonshot",

@@ -2,6 +2,9 @@ import type { CompiledApiKeyLogin } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../error";
 import type { ProviderTransport } from "./build";
 import { createApiKeyLogin } from "./engine/api-key";
+import metaApiKeyInstructions from "./meta-api-key-instructions.md" with { type: "text" };
+import metaApiKeyPlaceholder from "./meta-api-key-placeholder.md" with { type: "text" };
+import metaApiKeyPrompt from "./meta-api-key-prompt.md" with { type: "text" };
 import metaLoginPrompt from "./meta-login.md" with { type: "text" };
 import { loginMetaMuse } from "./oauth/meta-muse";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
@@ -10,9 +13,9 @@ const loginMetaApiKey = createApiKeyLogin(
 	{
 		kind: "api-key",
 		authUrl: "https://developer.meta.com/ai/",
-		instructions: "Create or copy your key from the Meta Model API dashboard",
-		prompt: "Paste your Meta Model API key",
-		placeholder: "Model API key",
+		instructions: metaApiKeyInstructions,
+		prompt: metaApiKeyPrompt,
+		placeholder: metaApiKeyPlaceholder,
 		validate: {
 			kind: "models-endpoint",
 			label: "Meta Model API",
