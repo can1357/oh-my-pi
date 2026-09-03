@@ -48,10 +48,18 @@ export async function readSSHConfigFile(filePath: string): Promise<SSHConfigFile
  * Creates parent directories if they don't exist.
  */
 export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile): Promise<void> {
-	// Stage the temp and the rename against the symlink referent so a
-	// user-managed link (dotfiles checkout) is preserved, and temp and target
-	// share a directory so the rename cannot fail with EXDEV across mounts.
 	const writePath = await resolveSymlinkWriteTarget(filePath);
+	await publishSSHConfig(writePath, config);
+}
+
+/**
+ * Stage and publish against an ALREADY-RESOLVED target — the path pinned by
+ * `withConfigFileLock`. No re-resolution happens here, so a symlink swapped in
+ * at the target mid-lock cannot redirect the write to a file this lock does
+ * not cover. The temp file is staged in the target's own directory so the
+ * atomic rename can never fail with EXDEV across mounts.
+ */
+async function publishSSHConfig(writePath: string, config: SSHConfigFile): Promise<void> {
 	const dir = path.dirname(writePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
@@ -139,8 +147,8 @@ export async function addSSHHost(filePath: string, name: string, hostConfig: SSH
 			},
 		};
 
-		// Write back
-		await writeSSHConfigFile(writePath, updated);
+		// Write back (against the pinned, already-resolved target)
+		await publishSSHConfig(writePath, updated);
 	});
 }
 
@@ -175,8 +183,8 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
 			},
 		};
 
-		// Write back
-		await writeSSHConfigFile(writePath, updated);
+		// Write back (against the pinned, already-resolved target)
+		await publishSSHConfig(writePath, updated);
 	});
 }
 
@@ -202,8 +210,8 @@ export async function removeSSHHost(filePath: string, name: string): Promise<voi
 			hosts: remaining,
 		};
 
-		// Write back
-		await writeSSHConfigFile(writePath, updated);
+		// Write back (against the pinned, already-resolved target)
+		await publishSSHConfig(writePath, updated);
 	});
 }
 

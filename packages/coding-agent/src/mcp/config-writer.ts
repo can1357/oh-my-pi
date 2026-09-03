@@ -43,11 +43,20 @@ export async function readMCPConfigFile(filePath: string): Promise<MCPConfigFile
  * Creates parent directories if they don't exist.
  */
 export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile): Promise<void> {
-	// Stage the temp file and the rename against the symlink referent: besides
-	// preserving the link, keeping temp and target in the same directory means
-	// the rename can never cross a filesystem boundary (EXDEV) when the link
-	// points outside this directory.
 	const writePath = await resolveSymlinkWriteTarget(filePath);
+	await publishMCPConfig(writePath, config);
+	invalidateFsCache(filePath);
+	if (writePath !== filePath) invalidateFsCache(writePath);
+}
+
+/**
+ * Stage and publish against an ALREADY-RESOLVED target — the path pinned by
+ * {@link withConfigFileLock}. No re-resolution happens here, so a symlink
+ * swapped in at the target mid-lock cannot redirect the write to a file this
+ * lock does not cover. The temp file is staged in the target's own directory
+ * so the atomic rename can never cross a filesystem boundary (EXDEV).
+ */
+async function publishMCPConfig(writePath: string, config: MCPConfigFile): Promise<void> {
 	const dir = path.dirname(writePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
@@ -81,8 +90,7 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 		throw error;
 	}
 	// Invalidate the capability fs cache so subsequent reads see the new content
-	invalidateFsCache(filePath);
-	if (writePath !== filePath) invalidateFsCache(writePath);
+	invalidateFsCache(writePath);
 }
 
 /**
@@ -144,9 +152,9 @@ export async function addMCPServer(filePath: string, name: string, config: MCPSe
 				[name]: config,
 			},
 		};
-		await writeMCPConfigFile(writePath, updated);
-		// writeMCPConfigFile dropped the pinned target's cache entry; readers
-		// also reach the file through the logical (possibly aliased) path.
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
 		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
@@ -181,9 +189,9 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
 				[name]: config,
 			},
 		};
-		await writeMCPConfigFile(writePath, updated);
-		// writeMCPConfigFile dropped the pinned target's cache entry; readers
-		// also reach the file through the logical (possibly aliased) path.
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
 		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
@@ -207,9 +215,9 @@ export async function removeMCPServer(filePath: string, name: string): Promise<v
 			...existing,
 			mcpServers: remaining,
 		};
-		await writeMCPConfigFile(writePath, updated);
-		// writeMCPConfigFile dropped the pinned target's cache entry; readers
-		// also reach the file through the logical (possibly aliased) path.
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
 		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
@@ -263,9 +271,9 @@ export async function setServerDisabled(filePath: string, name: string, disabled
 			delete updated.disabledServers;
 		}
 
-		await writeMCPConfigFile(writePath, updated);
-		// writeMCPConfigFile dropped the pinned target's cache entry; readers
-		// also reach the file through the logical (possibly aliased) path.
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
 		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
@@ -305,9 +313,9 @@ export async function setServerForceEnabled(filePath: string, name: string, forc
 			delete updated.enabledServers;
 		}
 
-		await writeMCPConfigFile(writePath, updated);
-		// writeMCPConfigFile dropped the pinned target's cache entry; readers
-		// also reach the file through the logical (possibly aliased) path.
+		await publishMCPConfig(writePath, updated);
+		// The publisher dropped the pinned target's cache entry; readers also
+		// reach the file through the logical (possibly aliased) path.
 		if (writePath !== filePath) invalidateFsCache(filePath);
 	});
 }
