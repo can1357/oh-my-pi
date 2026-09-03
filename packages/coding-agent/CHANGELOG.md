@@ -5,6 +5,7 @@
 ### Added
 
 - Added `/continue` as a discoverable equivalent to the existing `.`/`c` shortcut (when the session is idle), resuming the current intent without a user message after rewinds or interrupts.
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes
