@@ -68,6 +68,7 @@ import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import type * as SetupWizardModule from "./modes/setup-wizard";
 import type { SetupScene } from "./modes/setup-wizard";
+import { buildSkillCommandPrompt, isKnownSkillCommand } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
@@ -304,7 +305,11 @@ export function buildModelScopeNotification(
 export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
-		"markPendingSubmissionStarted" | "finishPendingSubmission" | "showError" | "checkShutdownRequested"
+		| "markPendingSubmissionStarted"
+		| "finishPendingSubmission"
+		| "showError"
+		| "checkShutdownRequested"
+		| "skillCommands"
 	>,
 	session: Pick<AgentSession, "prompt" | "promptCustomMessage" | "isStreaming">,
 	input: SubmittedUserInput,
@@ -333,6 +338,11 @@ export async function submitInteractiveInput(
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
 			return;
 		}
+		const skillHost = {
+			skillCommands: mode.skillCommands,
+			session: session as AgentSession,
+			showError: mode.showError,
+		};
 		if (input.customType) {
 			const message = {
 				customType: input.customType,
@@ -353,6 +363,15 @@ export async function submitInteractiveInput(
 				expandPromptTemplates: false,
 				userInitiated: input.userInitiated,
 			});
+		} else if (isKnownSkillCommand(skillHost, input.text)) {
+			// Without this, a resubmitted loop prompt reaches the model as a literal
+			// `/skill:` token instead of the skill's expanded content (matches #8138).
+			const built = await buildSkillCommandPrompt(skillHost, input.text, streamingBehavior, input.images);
+			if (built) {
+				await session.promptCustomMessage(built.message, built.options);
+			} else {
+				await session.prompt(input.text, { images: input.images, streamingBehavior });
+			}
 		} else {
 			await session.prompt(input.text, { images: input.images, streamingBehavior });
 		}

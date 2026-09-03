@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	applyResolvedSystemPromptInputs,
 	readPipedInput,
@@ -9,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/main";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -76,6 +78,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -98,6 +101,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -120,6 +124,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -152,6 +157,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -172,6 +178,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -195,6 +202,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -225,6 +233,7 @@ describe("submitInteractiveInput", () => {
 			finishPendingSubmission: vi.fn(),
 			showError: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map(),
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
@@ -238,6 +247,41 @@ describe("submitInteractiveInput", () => {
 		expect(session.prompt).toHaveBeenCalledWith("loop prompt", { images: undefined, streamingBehavior: "followUp" });
 		expect(session.promptCustomMessage).not.toHaveBeenCalled();
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
+		expect(mode.showError).not.toHaveBeenCalled();
+	});
+
+	it("routes a resubmitted /skill: prompt through promptCustomMessage instead of raw text (regression for #8137-style loop resubmit)", async () => {
+		const skillDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-command-"));
+		cleanupDirs.push(skillDir);
+		const skillPath = path.join(skillDir, "recap.md");
+		await fs.writeFile(skillPath, "---\nname: recap\n---\nSummarize recent changes.\n");
+		const skill: Skill = { name: "recap", description: "", filePath: skillPath, baseDir: skillDir, source: "test" };
+		const mode = {
+			markPendingSubmissionStarted: vi.fn(() => true),
+			finishPendingSubmission: vi.fn(),
+			showError: vi.fn(),
+			checkShutdownRequested: vi.fn(async () => {}),
+			skillCommands: new Map([["skill:recap", skill]]),
+		};
+		const session = {
+			prompt: vi.fn(async () => true),
+			promptCustomMessage: vi.fn(async () => true),
+			isStreaming: false,
+		};
+		const input = createInput({ text: "/skill:recap what changed" });
+
+		await submitInteractiveInput(mode, session, input);
+
+		expect(session.prompt).not.toHaveBeenCalled();
+		expect(session.promptCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				attribution: "user",
+				display: true,
+				details: expect.objectContaining({ name: "recap", args: "what changed" }),
+			}),
+			expect.objectContaining({ streamingBehavior: "followUp" }),
+		);
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
 });
