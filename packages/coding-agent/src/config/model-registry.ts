@@ -1849,25 +1849,27 @@ export class ModelRegistry {
 					this.#keylessProviders.has(descriptor.providerId));
 			const supportsSharedCatalog = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[descriptor.providerId] === true;
 			const canUseSharedCatalogWithoutAuth = supportsSharedCatalog && !descriptor.dynamicModelsAuthoritative;
+			const baseUrl = this.#descriptorBaseUrl(descriptor.providerId);
+			const accountScopedCredentialsBaseUrl = descriptor.catalogDiscovery?.accountScopedCredentialsBaseUrl;
+			const unionOAuthRosters =
+				unionsOAuthModelRosters(descriptor.providerId) &&
+				accountScopedCredentialsBaseUrl !== undefined &&
+				(baseUrl === undefined ||
+					baseUrl.replace(/\/+$/, "") === accountScopedCredentialsBaseUrl.replace(/\/+$/, ""));
+			const discoveryKeys = unionOAuthRosters
+				? await this.authStorage.getModelDiscoveryApiKeys(descriptor.providerId, {
+						refreshOAuth: strategy !== "offline",
+					})
+				: { apiKeys: [], complete: true };
+			const apiKeys = new Set(discoveryKeys.apiKeys);
+			if (isDiscoveryBearerApiKey(apiKey)) apiKeys.add(apiKey);
 			if (
 				isAuthenticated(apiKey) ||
+				apiKeys.size > 0 ||
 				descriptor.allowUnauthenticated ||
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
-				const baseUrl = this.#descriptorBaseUrl(descriptor.providerId);
-				const accountScopedCredentialsBaseUrl = descriptor.catalogDiscovery?.accountScopedCredentialsBaseUrl;
-				const unionOAuthRosters =
-					strategy !== "offline" &&
-					unionsOAuthModelRosters(descriptor.providerId) &&
-					accountScopedCredentialsBaseUrl !== undefined &&
-					(baseUrl === undefined ||
-						baseUrl.replace(/\/+$/, "") === accountScopedCredentialsBaseUrl.replace(/\/+$/, ""));
-				const discoveryKeys = unionOAuthRosters
-					? await this.authStorage.getModelDiscoveryApiKeys(descriptor.providerId)
-					: { apiKeys: [], complete: true };
-				const apiKeys = new Set(discoveryKeys.apiKeys);
-				if (isDiscoveryBearerApiKey(apiKey)) apiKeys.add(apiKey);
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					...(unionOAuthRosters && {

@@ -830,6 +830,12 @@ type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/**
+	 * Whether account-scoped model discovery may refresh stored OAuth rows.
+	 * Offline catalog hydration sets this false so cache identity can use the
+	 * already-minted provider keys without network or credential mutation.
+	 */
+	refreshOAuth?: boolean;
 };
 type OAuthResolutionResult = {
 	apiKey: string;
@@ -6171,25 +6177,39 @@ export class AuthStorage {
 		const directCredentials = this.#getCredentialsForProvider(provider).filter(
 			(credential): credential is ApiKeyCredential => credential.type === "api_key",
 		);
+		const oauthSelections = this.#getStoredOAuthSelections(provider);
 		const oauthProviderKey = this.#getProviderTypeKey(provider, "oauth");
+		const refreshOAuth = options?.refreshOAuth !== false;
 		const [directKeys, oauthAccesses] = await Promise.all([
 			Promise.all(directCredentials.map(credential => this.#configValueResolver(credential.key))),
-			Promise.all(
-				this.#getStoredOAuthSelections(provider).map(selection =>
-					this.#resolveStoredOAuthAccess(provider, selection, oauthProviderKey, options),
-				),
-			),
+			refreshOAuth
+				? Promise.all(
+						oauthSelections.map(selection =>
+							this.#resolveStoredOAuthAccess(provider, selection, oauthProviderKey, options),
+						),
+					)
+				: Promise.resolve([]),
 		]);
 		for (const directKey of directKeys) {
 			if (directKey) apiKeys.add(directKey);
 		}
-		for (const access of oauthAccesses) {
-			if (access.ok && access.apiKey) apiKeys.add(access.apiKey);
+		if (refreshOAuth) {
+			for (const access of oauthAccesses) {
+				if (access.ok && access.apiKey) apiKeys.add(access.apiKey);
+			}
+		} else {
+			for (const selection of oauthSelections) {
+				const apiKey = selection.credential.apiKey?.trim();
+				if (apiKey) apiKeys.add(apiKey);
+			}
 		}
 		return {
 			apiKeys: [...apiKeys],
 			complete:
-				directKeys.every(key => key !== undefined && key.length > 0) && oauthAccesses.every(access => access.ok),
+				directKeys.every(key => key !== undefined && key.length > 0) &&
+				(refreshOAuth
+					? oauthAccesses.every(access => access.ok)
+					: oauthSelections.every(selection => Boolean(selection.credential.apiKey?.trim()))),
 		};
 	}
 

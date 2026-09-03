@@ -183,7 +183,8 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 		const discoveryKeysSpy = vi.spyOn(authStorage, "getModelDiscoveryApiKeys");
 		await oauthRegistry.refreshProvider("meta", "offline");
-		expect(discoveryKeysSpy).not.toHaveBeenCalled();
+		expect(discoveryKeysSpy).toHaveBeenCalledWith("meta", { refreshOAuth: false });
+		expect(authorizations).toEqual([]);
 		discoveryKeysSpy.mockRestore();
 
 		await oauthRegistry.refreshProvider("meta", "online");
@@ -196,11 +197,26 @@ describe("ModelRegistry runtime provider registration", () => {
 				"Bearer LLM|subscription-catalog-b",
 			]),
 		);
+		const discoveredIds = [
+			"muse-spark-1.3",
+			"muse-spark-1.3-contributor",
+			"muse-spark-1.4-preview",
+			"muse-spark-2.0.1",
+		];
 		expect(
 			getProviderModels(oauthRegistry, "meta")
 				.map(model => model.id)
 				.sort(),
-		).toEqual(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.4-preview", "muse-spark-2.0.1"]);
+		).toEqual(discoveredIds);
+
+		authorizations.length = 0;
+		await oauthRegistry.refreshProvider("meta", "offline");
+		expect(authorizations).toEqual([]);
+		expect(
+			getProviderModels(oauthRegistry, "meta")
+				.map(model => model.id)
+				.sort(),
+		).toEqual(discoveredIds);
 	});
 
 	test("keeps retained Meta credentials off custom discovery endpoints", async () => {
