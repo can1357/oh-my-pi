@@ -295,6 +295,14 @@ export function setCodexAttestationProvider(provider: CodexAttestationProvider |
 }
 
 /**
+ * Read the installed attestation hook so hosts and tests can restore the
+ * previous provider after a temporary override.
+ */
+export function getCodexAttestationProvider(): CodexAttestationProvider | undefined {
+	return codexAttestationProvider;
+}
+
+/**
  * Resolve the `x-oai-attestation` header value for one upstream request.
  * Gated on ChatGPT-OAuth credentials (a Codex JWT carries `chatgpt_account_id`;
  * codex-rs gates on `auth.is_chatgpt_auth()`). A throwing hook degrades to no

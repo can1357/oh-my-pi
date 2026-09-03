@@ -1929,6 +1929,20 @@ export class Settings {
 			raw.doubleEscapeAction = "rewind";
 		}
 
+		// stt.modelName -> stt.transcriber. The new key wins when both are
+		// present; remove both legacy nested and quoted-dotted forms.
+		const sttObj = isRecord(raw.stt) ? (raw.stt as Record<string, unknown>) : undefined;
+		const legacySttModelName = sttObj?.modelName ?? raw["stt.modelName"];
+		const flatSttTranscriber = raw["stt.transcriber"];
+		if (legacySttModelName !== undefined || flatSttTranscriber !== undefined) {
+			if (!sttObj) raw.stt = {};
+			const target = raw.stt as Record<string, unknown>;
+			if (target.transcriber === undefined) target.transcriber = flatSttTranscriber ?? legacySttModelName;
+			delete target.modelName;
+		}
+		delete raw["stt.modelName"];
+		delete raw["stt.transcriber"];
+
 		// lastChangelogVersion moved out of config.yml into the
 		// <agentDir>/last-changelog-version marker file so version bumps no
 		// longer dirty user-tracked configs. Capture for marker seeding (see

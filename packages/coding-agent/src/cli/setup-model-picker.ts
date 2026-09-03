@@ -6,7 +6,7 @@
  * tear the UI down. The standalone TUI auto-renders on input, so no manual
  * render wiring is needed beyond `addChild`/`setFocus`/`start`.
  */
-import { ProcessTerminal, type SelectItem, SelectList, TUI } from "@oh-my-pi/pi-tui";
+import { ProcessTerminal, type SelectItem, SelectList, Text, TUI } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme } from "../modes/theme/theme";
 
 /**
@@ -35,7 +35,7 @@ export async function selectSetupModel(
 	list.onSelect = item => finish(item.value);
 	list.onCancel = () => finish(null);
 
-	process.stdout.write(`${title}\n`);
+	ui.addChild(new Text(title, 0, 0));
 	ui.addChild(list);
 	ui.setFocus(list);
 	ui.start();

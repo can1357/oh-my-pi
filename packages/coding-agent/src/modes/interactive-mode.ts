@@ -5537,7 +5537,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (!this.#sttController) {
-			this.#sttController = new STTController();
+			this.#sttController = new STTController({
+				modelRegistry: this.session.modelRegistry,
+				getSessionId: () => this.session.sessionId,
+			});
 		}
 		await this.#sttController.toggle(this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),

@@ -21,7 +21,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
+import { DEFAULT_STT_TRANSCRIBER_ID, STT_TRANSCRIBER_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
@@ -1032,20 +1032,20 @@ describe("ACP agent", () => {
 
 		expect(result).toEqual({
 			settings: {
-				speechToTextModel: "stt.modelName",
+				speechToTextModel: "stt.transcriber",
 				textToSpeechModel: "tts.localModel",
 				textToSpeechVoice: "tts.localVoice",
 				speechVoice: "speech.voice",
 			},
 			defaults: {
-				speechToTextModel: DEFAULT_STT_MODEL_KEY,
+				speechToTextModel: DEFAULT_STT_TRANSCRIBER_ID,
 				textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
 				voice: DEFAULT_TTS_VOICE,
 			},
 			speechToText: {
-				setting: "stt.modelName",
-				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+				setting: "stt.transcriber",
+				defaultValue: DEFAULT_STT_TRANSCRIBER_ID,
+				models: STT_TRANSCRIBER_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
 			},
 			textToSpeech: {
 				modelSetting: "tts.localModel",

@@ -1920,6 +1920,32 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
 		});
 
+		it("migrates stt.modelName to stt.transcriber and preserves the new value", async () => {
+			await writeSettings({
+				stt: { modelName: "fast", transcriber: "codex" },
+				"stt.modelName": "turbo",
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("stt.transcriber")).toBe("codex");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const onDisk = await readSettings();
+			const stt = onDisk.stt as Record<string, unknown>;
+			expect(stt.transcriber).toBe("codex");
+			expect("modelName" in stt).toBe(false);
+			expect("stt.modelName" in onDisk).toBe(false);
+		});
+
+		it("migrates a quoted dotted stt.modelName setting", async () => {
+			await writeSettings({ "stt.modelName": "balanced" });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("stt.transcriber")).toBe("balanced");
+		});
+
 		it("migrates legacy find and search settings to glob and grep", async () => {
 			await writeSettings({
 				find: { enabled: false },

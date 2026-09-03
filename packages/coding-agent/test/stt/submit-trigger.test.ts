@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Settings, settings } from "../src/config/settings";
-import * as asrClient from "../src/stt/asr-client";
-import * as downloader from "../src/stt/downloader";
-import { STTController } from "../src/stt/stt-controller";
-import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../src/stt/submit-trigger";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import type { ModelRegistry } from "../../src/config/model-registry";
+import { Settings, settings } from "../../src/config/settings";
+import * as asrClient from "../../src/stt/asr-client";
+import * as downloader from "../../src/stt/downloader";
+import { STTController } from "../../src/stt/stt-controller";
+import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../../src/stt/submit-trigger";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 describe("STT Submit Trigger Evaluation", () => {
 	describe("never trigger", () => {
@@ -197,7 +198,10 @@ describe("STTController submit trigger integration", () => {
 		});
 		const editor = makeEditor();
 		const options = makeOptions();
-		controller = new STTController(() => ({ stop: vi.fn() }));
+		controller = new STTController({
+			createCapture: () => ({ stop: vi.fn() }),
+			modelRegistry: { authStorage: {} } as unknown as ModelRegistry,
+		});
 
 		await controller.toggle(editor, options);
 		expect(controller.state).toBe("recording");
@@ -210,7 +214,7 @@ describe("STTController submit trigger integration", () => {
 	beforeEach(async () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
-		settings.set("stt.modelName", "fast");
+		settings.set("stt.transcriber", "fast");
 		settings.set("stt.submitTrigger", "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);

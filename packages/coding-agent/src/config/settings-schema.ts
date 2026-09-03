@@ -13,8 +13,8 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
-import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
+import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES, type SttSubmitTrigger } from "../stt/submit-trigger";
+import { DEFAULT_STT_TRANSCRIBER_ID, STT_TRANSCRIBER_OPTIONS, STT_TRANSCRIBER_VALUES } from "../stt/types";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
@@ -2459,17 +2459,17 @@ export const SETTINGS_SCHEMA = {
 		default: "en",
 	},
 
-	"stt.modelName": {
+	"stt.transcriber": {
 		type: "enum",
-		values: STT_MODEL_VALUES,
-		default: DEFAULT_STT_MODEL_KEY,
+		values: STT_TRANSCRIBER_VALUES,
+		default: DEFAULT_STT_TRANSCRIBER_ID,
 		ui: {
 			tab: "interaction",
 			group: "Speech",
-			label: "Speech Model",
+			label: "Speech Transcriber",
 			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
-			options: STT_MODEL_OPTIONS,
+				"Cloud providers use the configured provider account.\nLocal on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
+			options: STT_TRANSCRIBER_OPTIONS,
 		},
 	},
 	"stt.submitTrigger": {
@@ -6311,8 +6311,8 @@ export interface ThinkingBudgetsSettings {
 export interface SttSettings {
 	enabled: boolean;
 	language: string | undefined;
-	modelName: string;
-	streaming: boolean;
+	transcriber: string;
+	submitTrigger: SttSubmitTrigger;
 }
 
 export interface BashInterceptorRule {
