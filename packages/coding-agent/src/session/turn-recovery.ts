@@ -479,7 +479,7 @@ export class TurnRecovery {
 	}
 
 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
-	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<boolean> {
+	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
 		return this.#handleUnexpectedAssistantStop(message);
 	}
 
@@ -878,14 +878,16 @@ export class TurnRecovery {
 			maxRetries: EMPTY_STOP_MAX_RETRIES,
 		});
 	}
-	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
+	async #handleUnexpectedAssistantStop(
+		assistantMessage: AssistantMessage,
+	): Promise<"continue" | "terminal" | undefined> {
 		const mode = this.#host.settings.get("features.unexpectedStopDetection");
 		if (mode === "none") {
-			return false;
+			return undefined;
 		}
 		if (!isUnexpectedStopCandidate(assistantMessage)) {
 			this.#unexpectedStopRetryCount = 0;
-			return false;
+			return undefined;
 		}
 
 		let text = assistantMessage.content
@@ -904,11 +906,11 @@ export class TurnRecovery {
 				.join("\n");
 			if (!hasNonWhitespace(text)) {
 				this.#unexpectedStopRetryCount = 0;
-				return false;
+				return undefined;
 			}
 		} else if (mode === "mechanical") {
 			this.#unexpectedStopRetryCount = 0;
-			return false;
+			return undefined;
 		} else {
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
@@ -927,19 +929,36 @@ export class TurnRecovery {
 
 			if (classification !== true) {
 				this.#unexpectedStopRetryCount = 0;
-				return false;
+				return undefined;
 			}
 		}
 
 		this.#unexpectedStopRetryCount++;
 		if (this.#unexpectedStopRetryCount > UNEXPECTED_STOP_MAX_RETRIES) {
-			logger.warn("Assistant returned unexpected stop after retry cap", {
-				attempts: this.#unexpectedStopRetryCount - 1,
+			const attempts = this.#unexpectedStopRetryCount - 1;
+			const finalError = `Assistant stopped unexpectedly after ${attempts} recovery retries; try compacting context or switching models`;
+			// Mark the turn as a terminal error so every settle surface (TUI error
+			// row, headless stderr, session_stop hooks) treats it as a failure. The
+			// caller MUST short-circuit the retry/fallback gates on the "terminal"
+			// outcome: thinking-only output is replay-safe, so leaving this synthetic
+			// error to fall through would let the hard-error / Fireworks-fast fallback
+			// gates issue another model request past the advertised retry cap.
+			assistantMessage.stopReason = "error";
+			assistantMessage.errorMessage = finalError;
+			logger.warn(finalError, {
+				attempts,
 				model: assistantMessage.model,
 				provider: assistantMessage.provider,
 			});
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt: attempts,
+				finalError,
+			});
+			await this.#host.sessionManager.rewriteEntries();
 			this.#unexpectedStopRetryCount = 0;
-			return false;
+			return "terminal";
 		}
 
 		this.#host.agent.appendMessage({
@@ -952,7 +971,7 @@ export class TurnRecovery {
 			source: "unexpected-stop-retry",
 			generation: this.#host.promptGeneration(),
 		});
-		return true;
+		return "continue";
 	}
 
 	#unexpectedStopRetryReminder(): string {
