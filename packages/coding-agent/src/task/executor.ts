@@ -1559,6 +1559,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						});
 						if (data !== undefined) {
+							// Bind the contemporaneous assistant turn to each yield: a
+							// data-less/`useLastTurn` section resolves from the text current
+							// when it executed, so multiple incremental sections keep their
+							// own reports instead of collapsing onto the run's final message.
+							if (event.toolName === "yield" && isRecord(data) && lastAssistantText !== undefined) {
+								data.lastTurnText = lastAssistantText;
+							}
 							recordExtractedToolData(event.toolName, data);
 						}
 					}

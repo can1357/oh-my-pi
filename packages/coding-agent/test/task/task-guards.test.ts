@@ -85,6 +85,19 @@ function dataLessYieldToolEnd(): AgentSessionEvent {
 	} as unknown as AgentSessionEvent;
 }
 
+function incrementalYieldToolEnd(id: string, label: string): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId: id,
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", type: [label], useLastTurn: true },
+		},
+		isError: false,
+	} as unknown as AgentSessionEvent;
+}
+
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 	let abortCount = 0;
 	const steerCalls: SteerCall[] = [];
@@ -310,6 +323,33 @@ describe("runSubprocess request guards", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toBe(report);
+	});
+
+	it("binds each data-less incremental yield to its own report turn", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [
+				assistantMessageEnd("first finding report"),
+				incrementalYieldToolEnd("tool-inc-1", "findings"),
+				assistantMessageEnd("second finding report"),
+				incrementalYieldToolEnd("tool-inc-2", "findings"),
+				assistantMessageEnd(""),
+				dataLessYieldToolEnd(),
+			],
+			lastAssistantMessage: {
+				role: "assistant",
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tool-yield", name: "yield", arguments: {} }],
+			},
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-incremental-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		// Each section keeps its contemporaneous report instead of both collapsing
+		// onto the run's final assistant message.
+		expect(JSON.parse(result.output)).toEqual({ findings: ["first finding report", "second finding report"] });
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {

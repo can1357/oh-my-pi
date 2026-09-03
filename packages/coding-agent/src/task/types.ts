@@ -406,6 +406,13 @@ export interface YieldItem {
 	/** True when an incremental workpool yield completed every item in its batch. */
 	complete?: boolean;
 	/**
+	 * Assistant text captured when this yield executed, used to resolve a
+	 * data-less/`useLastTurn` payload. Stamped per yield so multiple data-less
+	 * incremental sections each bind their own contemporaneous turn instead of
+	 * every item collapsing onto the run's final assistant message.
+	 */
+	lastTurnText?: string;
+	/**
 	 * Set by the in-tool yield validator when it exhausted its retry budget and
 	 * accepted schema-invalid data anyway. The executor preserves that override
 	 * during post-mortem validation.
