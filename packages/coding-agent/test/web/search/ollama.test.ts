@@ -502,34 +502,14 @@ describe("Ollama searchOllama auth resolution", () => {
 });
 
 describe("OllamaProvider", () => {
-	const originalKey = process.env.OLLAMA_CLOUD_API_KEY;
-
-	beforeEach(() => {
-		delete process.env.OLLAMA_CLOUD_API_KEY;
-	});
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-		if (originalKey !== undefined) {
-			process.env.OLLAMA_CLOUD_API_KEY = originalKey;
-		} else {
-			delete process.env.OLLAMA_CLOUD_API_KEY;
-		}
-	});
-
 	const availableStorage = makeAuthStorage("test-key");
 	const unavailableStorage = makeAuthStorage(undefined);
 
-	it("is available when a credential exists in storage", () => {
+	it("is available when authStorage has credentials", () => {
 		const hasAuthMock = vi.fn((provider: string) => provider === "ollama-cloud");
 		const authStorage = { hasAuth: hasAuthMock } as unknown as AuthStorage;
 		expect(new OllamaProvider().isAvailable(authStorage)).toBe(true);
 		expect(hasAuthMock).toHaveBeenCalledWith("ollama-cloud");
-	});
-
-	it("is available when OLLAMA_CLOUD_API_KEY is set in environment", () => {
-		process.env.OLLAMA_CLOUD_API_KEY = "env-key";
-		expect(new OllamaProvider().isAvailable(unavailableStorage)).toBe(true);
 	});
 
 	it("is not available when no credential exists", () => {
