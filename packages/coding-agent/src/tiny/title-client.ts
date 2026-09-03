@@ -49,6 +49,7 @@ import {
 	type TinyWorkerRequest,
 	type TinyWorkerResponse,
 	tinyWorkerEndpoint,
+	tinyWorkerLogPath,
 } from "./title-protocol";
 
 const TITLE_PREFILL = "<title>";
@@ -471,7 +472,7 @@ export async function connectTinyWorker(
 ): Promise<WorkerHandle> {
 	await fs.promises.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const endpoint = tinyWorkerEndpoint(runtimeDir, modelKey, launch.backend);
-	const logPath = `${endpoint}.log`;
+	const logPath = tinyWorkerLogPath(runtimeDir, modelKey, launch.backend);
 	const probed = await probeTinyWorker(endpoint, launch.tag);
 	if (probed.kind === "live") return createSocketWorkerHandle(probed.socket, logPath);
 	if (probed.kind === "stale") await waitForEndpointRelease(endpoint);
@@ -828,7 +829,7 @@ export async function smokeTestTinyTitleWorker({
 	const modelKey: TinyLocalModelKey = "lfm2.5-230m";
 	const launch = onnxLaunch(modelKey, {});
 	const endpoint = tinyWorkerEndpoint(dir, modelKey, "onnx");
-	const spawned = await launch.spawn(endpoint, `${endpoint}.log`);
+	const spawned = await launch.spawn(endpoint, tinyWorkerLogPath(dir, modelKey, "onnx"));
 	try {
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
