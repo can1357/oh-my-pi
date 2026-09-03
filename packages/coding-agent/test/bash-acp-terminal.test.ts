@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe("BashTool ACP terminal routing", () => {
-	it("routes through bridge, emits terminalId update, and releases the handle", async () => {
+	it("emits a live terminal update but releases it before the completed result", async () => {
 		const stubText = "hello from terminal\n";
 
 		const handle: ClientBridgeTerminalHandle = {
@@ -103,8 +103,8 @@ describe("BashTool ACP terminal routing", () => {
 		const text = result.content.find(c => c.type === "text");
 		expect(text?.text).toContain("hello from terminal");
 
-		// The result details must carry terminalId for the ACP event mapper
-		expect(result.details?.terminalId).toBe("term-xyz");
+		// Completed tool updates must not refer clients to the released terminal.
+		expect(result.details?.terminalId).toBeUndefined();
 
 		// The handle must always be released
 		expect(releaseSpy).toHaveBeenCalledTimes(1);

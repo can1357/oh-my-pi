@@ -10,7 +10,13 @@
 import * as path from "node:path";
 import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
-import { BaseKernel, getRemainingTimeMs, type KernelStartOptions } from "../kernel-base";
+import {
+	BaseKernel,
+	getRemainingTimeMs,
+	type KernelExecuteOptions,
+	type KernelExecuteResult,
+	type KernelStartOptions,
+} from "../kernel-base";
 import { type BackendProbeOptions, probeCandidates } from "../probe";
 import { stageRunnerScript } from "../runner-cache";
 import { PYTHON_PRELUDE } from "./prelude";
@@ -23,6 +29,7 @@ import {
 	resolvePythonRuntime,
 } from "./runtime";
 import { hostHasInheritableConsole, shouldDetachKernel, shouldHideKernelWindow } from "./spawn-options";
+import type { PythonToolRequest } from "./executor";
 
 export type {
 	KernelExecuteOptions,
@@ -138,6 +145,12 @@ export class PythonKernel extends BaseKernel {
 					storeHistory: opts?.storeHistory ?? !(opts?.silent ?? false),
 				}),
 		});
+	}
+
+	/** Describe or invoke a tool defined in this retained Python kernel. */
+	async invokeTool(request: PythonToolRequest, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
+		const id = options?.id ?? Snowflake.next();
+		return await this.submitRequest(id, JSON.stringify({ type: "tool", id, ...request }), options);
 	}
 
 	static async start(options: KernelStartOptions): Promise<PythonKernel> {

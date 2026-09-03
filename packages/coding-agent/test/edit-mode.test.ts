@@ -41,30 +41,32 @@ describe("resolveEditMode", () => {
 		restoreEnv();
 	});
 
-	test("falls back from hashline to sloppy for Kimi models", () => {
+	test("falls back from hashline to replace for Kimi models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
-		expect(resolveEditMode(createSession({ activeModel: "openrouter/moonshotai/Kimi-K2-Instruct" }))).toBe("sloppy");
+		expect(resolveEditMode(createSession({ activeModel: "openrouter/moonshotai/Kimi-K2-Instruct" }))).toBe("replace");
 	});
 
-	test("falls back from hashline to sloppy for MiMo models", () => {
+	test("falls back from hashline to replace for MiMo models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
-		expect(resolveEditMode(createSession({ activeModel: "xiaomi/MiMo-V2.5-Pro" }))).toBe("sloppy");
+		expect(resolveEditMode(createSession({ activeModel: "xiaomi/MiMo-V2.5-Pro" }))).toBe("replace");
 	});
 
-	test("falls back from hashline to sloppy for DeepSeek V4 Flash models", () => {
+	test("falls back from hashline to replace for DeepSeek models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
 		expect(resolveEditMode(createSession({ activeModel: "tensormesh/deepseek-ai/DeepSeek-V4-Flash" }))).toBe(
-			"sloppy",
+			"replace",
 		);
+		expect(resolveEditMode(createSession({ activeModel: "deepseek/deepseek-chat" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "deepseek/deepseek-reasoner" }))).toBe("replace");
 	});
 
-	test("falls back from hashline to sloppy for Step 3.7 Flash models", () => {
+	test("falls back from hashline to replace for Step 3.7 Flash models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
-		expect(resolveEditMode(createSession({ activeModel: "kilo/stepfun/step-3.7-flash:free" }))).toBe("sloppy");
+		expect(resolveEditMode(createSession({ activeModel: "kilo/stepfun/step-3.7-flash:free" }))).toBe("replace");
 	});
 
 	test("does not exclude non-Kimi Moonshot models", () => {

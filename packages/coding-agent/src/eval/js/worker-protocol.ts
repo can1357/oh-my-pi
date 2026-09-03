@@ -23,9 +23,15 @@ export interface RunErrorPayload {
 
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
+/** Request to inspect or invoke the retained JavaScript tool registry. */
+export type JsToolRequest =
+	| { op: "describe"; names: string[] }
+	| { op: "call"; name: string; args: Record<string, unknown> };
+
 export type WorkerInbound =
 	| { type: "init"; snapshot: SessionSnapshot }
 	| { type: "run"; runId: string; code: string; filename: string; snapshot: SessionSnapshot }
+	| ({ type: "tool"; runId: string } & JsToolRequest)
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
