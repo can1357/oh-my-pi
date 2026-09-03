@@ -577,25 +577,36 @@ describe("sloppy v8", () => {
 		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
 	});
 
-	test("recovers a genuinely missing separator only when the split is structurally similar", () => {
-		// A real "forgot »" payload pairs current text with a near-identical
-		// rewrite; the split applies and the note names the omitted separator.
+	test("never implicitly splits structurally similar halves and falls through to whole-block replacement", () => {
+		// Similarity between the apparent current/final halves and dissimilarity
+		// from the following line cannot prove a separator was omitted. Without
+		// an explicit <SM:PUT>, this must fall through to safe whole-block
+		// replacement rather than splitting the text into MATCH/REWRITE halves.
 		const content = "const timeout = 1000;\nreport(timeout);\n";
+		const input = "<SM:EDIT>\nconst timeout = 1000;\nconst timeout = 5000;";
 		const notes: string[] = [];
 
-		expect(
-			applySloppy(content, "<SM:EDIT>\nconst timeout = 1000;\nconst timeout = 5000;", { path: "c.ts", notes }),
-		).toBe("const timeout = 5000;\nreport(timeout);\n");
-		expect(notes.join("\n")).toMatch(/omitted the <SM:PUT> separator/);
+		expect(applySloppy(content, input, { path: "c.ts", notes })).toBe(
+			"const timeout = 1000;\nconst timeout = 5000;\n",
+		);
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+	});
+
+	test("rejects the reviewer repro that would replace item1 and preserve a dissimilar continuation", () => {
+		// Regression (latest review on #10527): implicit splitting rewrote item1
+		// to item2 while preserving runLegacy(), despite no explicit separator.
+		const content = "const item1 = value;\nrunLegacy();\n";
+		const input = "<SM:EDIT>\nconst item1 = value;\nconst item2 = value;";
+
+		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
 	test("rejects a marker-less whole-block restatement whose prefix line alone matches", () => {
 		// Regression (review P1 on #10527): a desired-state restatement that
-		// begins with one unchanged file line scores high on shared frame
-		// similarity (e.g. an added import above a kept call), which would let
-		// the separator recovery split at that line and replace only it —
-		// duplicating the kept call. The split requires an equal non-blank line
-		// count, so this falls through to the fail-closed error.
+		// begins with one unchanged file line must remain one plain marker-less
+		// desired block, never inferred as current/final halves. No safe
+		// whole-block replacement applies here, so it fails closed rather than
+		// replacing only the prefix and duplicating the kept call.
 		const content = 'import { a } from "x";\nrun();\n';
 		const input = '<SM:EDIT>\nimport { a } from "x";\nimport { b } from "x";\nrun();';
 
@@ -604,16 +615,10 @@ describe("sloppy v8", () => {
 
 	test("rejects an equal-line-count desired block whose prefix matches and remainder edits the continuation", () => {
 		// Regression (review P1 round 2 on #10527): a four-line desired-state
-		// block that keeps the first two lines and changes the last two passes
-		// the equal-line-count and similarity gates — the declarations share
-		// enough structure to score above 0.65 — but splitting at the matching
-		// two-line prefix replaces only those lines and strands the original
-		// latter half, dropping alpha/beta and duplicating gamma/delta. The
-		// continuation gate rejects the split: the rewrite resembles the file's
-		// continuation (the lines after the match) at least as much as it
-		// resembles the matched prefix, so the split is a desired-state edit of
-		// the continuation, not a rewrite of the match. The block then falls
-		// through to the closest-block path, which replaces the whole block.
+		// block that keeps the first two lines and changes the last two must not
+		// be inferred as current/final halves. Treating it as one plain
+		// marker-less desired block lets the closest-block fallback replace the
+		// whole block instead of dropping alpha/beta and duplicating gamma/delta.
 		const content = "alpha = A;\nbeta = B;\ngamma = C;\ndelta = D;\n";
 		const input = "<SM:EDIT>\nalpha = A;\nbeta = B;\ngamma = C2;\ndelta = D2;";
 		const notes: string[] = [];
@@ -627,20 +632,19 @@ describe("sloppy v8", () => {
 	test("rejects a missing-separator split when the matching prefix is at EOF", () => {
 		// Regression (review P1 round 3 on #10527): a two-line file with a
 		// marker-less desired block that appends only moderately similar
-		// declarations. With no continuation lines after the matching prefix,
-		// insufficient continuation itself rejects the split, so the payload
-		// fails closed instead of silently corrupting the file.
+		// declarations must not be inferred as current/final halves. No safe
+		// whole-block replacement applies, so the payload fails closed instead
+		// of silently rewriting the matching EOF prefix.
 		const content = "const item1 = oldA;\nconst item2 = oldB;\n";
 		const input = "<SM:EDIT>\nconst item1 = oldA;\nconst item2 = oldB;\nconst item3 = newC;\nconst item4 = newD;";
 		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
 	test("rejects a high-similarity missing-separator split with insufficient EOF continuation", () => {
-		// Regression (latest review on #10527): similarity alone cannot prove a
-		// forgotten separator when the uniquely matching prefix has fewer
-		// following nonblank lines than the candidate rewrite. Even this highly
-		// similar append must fail closed rather than replace item1/item2 with
-		// item3/item4.
+		// Regression (latest review on #10527): even highly similar plain
+		// marker-less text must not be inferred as current/final halves. No safe
+		// whole-block replacement applies to this append, so it fails closed
+		// rather than replacing item1/item2 with item3/item4.
 		const content = "const item1 = value;\nconst item2 = value;\n";
 		const input = "<SM:EDIT>\nconst item1 = value;\nconst item2 = value;\nconst item3 = value;\nconst item4 = value;";
 
@@ -2308,13 +2312,6 @@ describe("sloppy v8", () => {
 				context,
 			),
 		).toThrow(/must reference an earlier deletion operation/);
-	});
-
-	test("auto-splits a uniquely matching MATCH prefix from an omitted separator", () => {
-		const content = "const value = oldValue;\nreport(value);\n";
-		const input = `${M.open}\nconst value = oldValue;\nconst value = newValue;`;
-
-		expect(variant.apply(content, input, context)).toBe("const value = newValue;\nreport(value);\n");
 	});
 
 	test("accepts evidence-backed alternating MATCH and REWRITE blocks", () => {

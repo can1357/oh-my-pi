@@ -9,7 +9,7 @@ import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "./blackbox";
 import { type DiffError, type DiffResult, generateDiffString } from "./diff";
-import { levenshteinDistance, similarity } from "./modes/replace";
+import { levenshteinDistance } from "./modes/replace";
 import { detectLineEnding, normalizeToLF, normalizeUnicode, restoreLineEndings, stripBom } from "./normalize";
 import { readEditFileText, serializeEditFileText } from "./read-file";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "./renderer";
@@ -607,113 +607,6 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 		}
 	}
 	return cleaned.join("\n");
-}
-
-/**
- * Minimum normalized similarity between a recovered MATCH prefix and its
- * recovered REWRITE remainder for the missing-separator split to be trusted,
- * and the maximum normalized length either side may occupy before the
- * quadratic Levenshtein computation is skipped. A real "forgot the »
- * separator" payload replaces the matched text with a same-shape rewrite
- * (same line count, high similarity, and the rewrite resembles the matched
- * text more than the file's continuation after it). A marker-less
- * desired-state block whose first lines happen to exist in the file pairs a
- * stray prefix with the block's remaining lines — the remainder edits the
- * continuation, not the matched text, so its similarity to the continuation
- * meets or exceeds its similarity to the match. The continuation must contain
- * the same number of non-blank lines as the rewrite; an EOF prefix provides no
- * evidence that the remainder is a rewrite rather than an append, so it fails
- * closed. The split is only accepted when all gates agree; anything else falls
- * through to the gated closest-block path (or the fail-closed error) instead
- * of silently replacing a prefix line.
- */
-const RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY = 0.65;
-const RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH = 1000;
-
-function recoverMissingSeparator(
-	lines: string[],
-	content: string,
-): { patternText: string; rewrite: string } | undefined {
-	// A unified-diff-shaped body is a foreign dialect, not a forgotten `»`:
-	// splitting it at a matching context prefix splices the collapsed remainder
-	// after the prefix, leaving the real block in place (duplication) and
-	// writing diff context gaps literally. Let the diff reinterpretation own it.
-	if (isDiffShaped(lines.join("\n"))) return undefined;
-	const candidates: Array<{ patternText: string; rewrite: string }> = [];
-	for (let split = 1; split < lines.length; split++) {
-		let remainderStart = split;
-		while (lines[remainderStart]?.trim() === "") remainderStart++;
-		if (remainderStart >= lines.length) continue;
-		const patternText = normalizeBlock(lines.slice(0, split), false);
-		const rewrite = normalizeBlock(lines.slice(remainderStart), true);
-		// A gap-only remainder is context elision, never final text; adopting it
-		// as the rewrite would write literal `…` into the file.
-		if (patternText.length < 4 || rewrite.replaceAll(GAP, "").trim() === "") continue;
-		// Same for any whole line that is only gaps: a recovered rewrite is never
-		// authored final text, so a `…` line in it means elided context.
-		if (rewrite.split("\n").some(line => line.trim() !== "" && line.trim().replaceAll(GAP, "") === "")) continue;
-		const matches = exactOccurrences(content, patternText);
-		if (matches.length !== 1) continue;
-		const throughFirstRewriteLine = normalizeBlock(lines.slice(0, remainderStart + 1), false);
-		if (content.startsWith(throughFirstRewriteLine, matches[0].start)) continue;
-		// Structural gate: a recovered split must look like a same-shape rewrite
-		// of the matched text (equal non-blank line count, similar normalized
-		// shape, and the rewrite resembles the match more than the file's
-		// continuation after it), not a marker-less desired-state block whose
-		// first lines merely exist in the file. Splitting the latter replaces
-		// only the prefix lines and strands the rest — the silent corruption
-		// this gate exists to prevent. Line-count equality alone rejects
-		// whole-block restatements whose prefix is a single matching line
-		// (e.g. an added import above a kept call), even when the shared frame
-		// keeps similarity high. The continuation gate rejects equal-line-count
-		// restatements whose prefix is a matching multi-line run: the remainder
-		// edits the lines that follow the match, so it resembles the
-		// continuation at least as much as it resembles the match.
-		const patternLines = patternText.split("\n").filter(line => line.trim() !== "");
-		const rewriteLines = rewrite.split("\n").filter(line => line.trim() !== "");
-		const patternNormalized = normalizeText(patternText).text;
-		const rewriteNormalized = normalizeText(rewrite).text;
-		if (
-			patternNormalized === "" ||
-			rewriteNormalized === "" ||
-			patternLines.length !== rewriteLines.length ||
-			patternNormalized.length > RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH ||
-			rewriteNormalized.length > RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH
-		) {
-			continue;
-		}
-		const rewriteSimilarity = similarity(patternNormalized, rewriteNormalized);
-		if (rewriteSimilarity < RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY) continue;
-		// Continuation gate: extract the same number of non-blank lines from
-		// the file immediately after the match. When the rewrite resembles the
-		// continuation at least as much as it resembles the matched text, the
-		// remainder is a desired-state edit of the following lines, not a
-		// rewrite of the match — reject the split. When the file has fewer
-		// non-blank lines after the match than the rewrite has (the prefix is
-		// at or near EOF), there is not enough continuation evidence to
-		// distinguish a desired-state append from a genuine rewrite, so reject
-		// the split rather than risk replacing the prefix with appended text.
-		const matchEnd = matches[0].end;
-		const fileLinesAfter = content.slice(matchEnd).split("\n");
-		const continuationLines: string[] = [];
-		for (const line of fileLinesAfter) {
-			if (line.trim() === "") continue;
-			continuationLines.push(line);
-			if (continuationLines.length >= rewriteLines.length) break;
-		}
-		if (continuationLines.length < rewriteLines.length) continue;
-		const continuationNormalized = normalizeText(continuationLines.join("\n")).text;
-		if (
-			continuationNormalized.length <= RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH &&
-			similarity(rewriteNormalized, continuationNormalized) >= rewriteSimilarity
-		) {
-			continue;
-		}
-		if (!candidates.some(candidate => candidate.patternText === patternText && candidate.rewrite === rewrite)) {
-			candidates.push({ patternText, rewrite });
-		}
-	}
-	return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function recoverAlternatingSeparators(lines: string[], content: string): string[] | undefined {
@@ -1485,19 +1378,10 @@ function parseOperations(input: string, content: string): Operation[] {
 			operations.push(createOperation(sourcePatternText, "", allMatches, operations.length + 1, false));
 			return;
 		}
-		const recovered = recoverMissingSeparator(patternLines, content);
-		if (recovered) {
-			const operation = createOperation(
-				recovered.patternText,
-				recovered.rewrite,
-				allMatches,
-				operations.length + 1,
-				true,
-			);
-			operation.recoveryNote = `Note: operation ${operations.length + 1} omitted the <SM:PUT> separator, so the text was split into current text and final text at the first matching line. Add <SM:PUT> explicitly next time.`;
-			operations.push(operation);
-			return;
-		}
+		// Never infer a missing <SM:PUT> separator by splitting plain text.
+		// Content similarity cannot distinguish a forgotten separator from a
+		// marker-less desired-state block, so guessing can silently replace only
+		// a matching prefix. Safe whole-block fallbacks below may still apply.
 		// Unified-diff habit: reinterpret `-`/`+`/`@@` bodies as inline changes.
 		let diffFallback: Operation | undefined;
 		for (const candidate of diffShapedCandidates(sourcePatternText)) {

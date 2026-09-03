@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed sloppy edit missing-separator recovery so equal-line-count desired-state blocks that edit the file's continuation are no longer split at the matching prefix, and the similarity computation is now size-capped to avoid stalling on large payloads ([#10527](https://github.com/can1357/oh-my-pi/pull/10527) by [@CaiJingLong](https://github.com/CaiJingLong)).
+- Fixed sloppy edits without an explicit `<SM:PUT>` so plain text is no longer split into inferred current and final halves, preventing marker-less desired-state blocks from replacing only a matching prefix; safe whole-block recoveries remain, and recovery paths now surface explanatory notes ([#10527](https://github.com/can1357/oh-my-pi/pull/10527) by [@CaiJingLong](https://github.com/CaiJingLong)).
+
 ### Added
 
 - Added `report` field to scout agent definitions for detailed, non-summarized findings
