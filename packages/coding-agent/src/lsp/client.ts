@@ -50,10 +50,16 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 // tests that drive getOrCreateClient directly never touch the daemon broker;
 // the SDK turns it on from the `lsp.shared` setting at session creation.
 let sharedLspEnabled = false;
+let sharedLspRequired = false;
 
 /** Enable or disable attaching to broker-shared language servers. */
 export function setSharedLspEnabled(enabled: boolean): void {
 	sharedLspEnabled = enabled;
+}
+
+/** Require the broker-shared transport instead of allowing a private fallback. */
+export function setSharedLspRequired(required: boolean): void {
+	sharedLspRequired = required;
 }
 
 /**
@@ -1006,11 +1012,18 @@ export async function getOrCreateClient(
 			: { command: baseCommand, args: baseArgs };
 
 		// Prefer the broker-shared server unless an external lspmux wrapper is
-		// already multiplexing this command. Any shared-path failure falls back
-		// to a private spawn so LSP never regresses on broker trouble.
+		// already multiplexing this command. By default, shared-path failure
+		// falls back to a private spawn; requireShared makes that path fail closed.
 		let proc: LspTransport | null = null;
 		if (sharedLspEnabled && command === baseCommand) {
-			proc = await connectSharedLspTransport({ command, args, cwd, env, signal });
+			proc = await connectSharedLspTransport({
+				command,
+				args,
+				cwd,
+				env,
+				signal,
+				requireShared: sharedLspRequired,
+			});
 		}
 		proc ??= ptree.spawn([command, ...args], {
 			cwd,
@@ -1143,6 +1156,11 @@ export async function getOrCreateClient(
 	})();
 
 	clientLocks.set(key, { promise: clientPromise, cwd, config, token: lockToken });
+	// Shared transport setup can reject before the initialization try/finally
+	// below is entered; never leave a rejected promise wedged in clientLocks.
+	void clientPromise.catch(() => {
+		if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
+	});
 	return clientPromise;
 }
 

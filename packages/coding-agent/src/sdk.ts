@@ -128,7 +128,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
-import { setSharedLspEnabled } from "./lsp/client";
+import { setSharedLspEnabled, setSharedLspRequired } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -4034,8 +4034,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Broker-shared language servers: one server per project, multiplexed
 		// across omp instances by the LSP mux daemon. Session-level because the
-		// flag lives in module state consulted on every client cold-start.
-		setSharedLspEnabled(enableLsp && settings.get("lsp.shared"));
+		// flags live in module state consulted on every client cold-start.
+		const sharedLsp = enableLsp && settings.get("lsp.shared");
+		setSharedLspEnabled(sharedLsp);
+		setSharedLspRequired(sharedLsp && settings.get("lsp.requireShared"));
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
 		// With `lsp.lazy` (the default) the warmup is skipped: recognized servers are still discovered and

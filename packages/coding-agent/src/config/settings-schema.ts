@@ -3819,6 +3819,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"lsp.requireShared": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "files",
+			group: "LSP",
+			label: "Require Shared Language Servers",
+			description: "Fail LSP requests when shared mode is unavailable instead of spawning a private language server",
+		},
+	},
+
 	"lsp.formatOnWrite": {
 		type: "boolean",
 		default: false,
