@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { loginKagi } from "@oh-my-pi/pi-ai/registry/kagi";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+
+const loginKagi = getProviderDefinition("kagi")?.login;
+if (!loginKagi) throw new Error("Kagi login is not registered");
 
 describe("kagi login", () => {
 	it("opens Kagi API settings and prompts for key", async () => {

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import * as kimiOauth from "@oh-my-pi/pi-ai/registry/oauth/kimi";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -21,11 +22,11 @@ const kimiHeadersStub = {
 } as const;
 
 describe("issue #957 - Kimi OAuth refresh", () => {
-	it("subtracts the 5-minute skew when parsing Kimi token expiry", async () => {
+	it("subtracts the 5-minute skew when mapping Kimi token expiry", async () => {
 		// Kimi tokens claim a 60-minute lifetime via `expires_in`, but in
 		// practice the server invalidates them roughly 5 minutes earlier than
-		// that. parseTokenPayload subtracts OAUTH_EXPIRY_SKEW_MS (5 min) so we
-		// schedule the refresh before the real server cutoff.
+		// that. The declarative credential map applies the standard 5-minute
+		// OAuth skew so we schedule the refresh before the real server cutoff.
 		const issuedAt = 1_700_000_000_000;
 		vi.spyOn(Date, "now").mockReturnValue(issuedAt);
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(kimiHeadersStub);
@@ -48,7 +49,9 @@ describe("issue #957 - Kimi OAuth refresh", () => {
 			),
 		);
 
-		const refreshed = await kimiOauth.refreshKimiToken("refresh-0");
+		const refreshToken = getProviderDefinition("kimi-code")?.refreshToken;
+		if (!refreshToken) throw new Error("expected kimi-code refresh");
+		const refreshed = await refreshToken({ access: "access-0", refresh: "refresh-0", expires: issuedAt });
 
 		expect(refreshed.access).toBe("access-1");
 		expect(refreshed.refresh).toBe("refresh-1");

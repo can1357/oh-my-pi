@@ -6,6 +6,7 @@ import {
 	Editor,
 	type EditorTextDecorationContext,
 	type EditorTheme,
+	getKeybindings,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -786,6 +787,13 @@ export class CustomEditor extends Editor {
 		return canonical !== undefined && (this.#actionMatchKeys.get(action)?.has(canonical) ?? false);
 	}
 
+	/** Whether `data` is exactly one keypress the base editor would treat as submit. */
+	#isSubmitKey(data: string): boolean {
+		if (data === "\n") return true;
+		const key = parseKey(data);
+		return key !== undefined && getKeybindings().matchesCanonical(canonicalKeyId(key), "tui.input.submit");
+	}
+
 	/**
 	 * Register a custom key handler. Extensions use this for shortcuts.
 	 */
@@ -966,7 +974,11 @@ export class CustomEditor extends Editor {
 				);
 				return;
 			}
-			this.pasteText(content);
+			// A submit key that shared the read (see `StdinBuffer`'s paste event) is
+			// about to be drained below, so a large-paste host must stage the paste
+			// synchronously instead of opening a menu the submit would land in.
+			if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
+			else this.pasteText(content);
 			// No async paste was started; drain the queued trailing bytes ourselves.
 			const drained = this.#pendingInput.splice(0);
 			for (const chunk of drained) this.handleInput(chunk);

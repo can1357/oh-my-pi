@@ -13,7 +13,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
-import type { OAuthCredentials } from "./types";
+import type { OAuthController, OAuthCredentials } from "./types";
 
 const CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm";
 const OAUTH_SCOPE = "read:user,read:org,repo,gist,codespace";
@@ -224,6 +224,10 @@ export function refreshGitHubCopilotToken(
 	};
 }
 
+export async function refreshGitHubCopilotHook(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+	return refreshGitHubCopilotToken(credentials.refresh, credentials.enterpriseUrl, credentials.apiEndpoint);
+}
+
 /**
  * Enable a model for the user's GitHub Copilot account.
  * This is required for some models (like Claude, Grok) before they can be used.
@@ -345,4 +349,16 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 	options.onProgress?.("Enabling models...");
 	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
 	return credentials;
+}
+
+export async function loginGitHubCopilotHook(callbacks: OAuthController): Promise<OAuthCredentials> {
+	const onPrompt = callbacks.onPrompt;
+	if (!onPrompt) throw new AIError.OnPromptRequiredError("GitHub Copilot");
+	return loginGitHubCopilot({
+		onAuth: (url, instructions) => callbacks.onAuth?.({ url, instructions }),
+		onPrompt,
+		onProgress: callbacks.onProgress,
+		signal: callbacks.signal,
+		fetch: callbacks.fetch,
+	});
 }

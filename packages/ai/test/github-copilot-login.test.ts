@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/registry/oauth";
-import { loginGitHubCopilot, refreshGitHubCopilotToken } from "@oh-my-pi/pi-ai/registry/oauth/github-copilot";
+import { loginGitHubCopilot } from "@oh-my-pi/pi-ai/registry/oauth/github-copilot";
 
 const FAST_POLL_OPTIONS = { pollIntervalFloorMs: 0, pollIntervalScaleMs: 1 } as const;
 
@@ -96,12 +97,16 @@ describe("loginGitHubCopilot", () => {
 		expect(pollCount).toBeGreaterThanOrEqual(1);
 	});
 
-	it("preserves credentials minted by the former OAuth app", () => {
-		const credentials = refreshGitHubCopilotToken(
-			"ghu_existing_opencode_token",
-			"ghe.example.com",
-			"https://api.business.githubcopilot.com",
-		);
+	it("preserves credentials minted by the former OAuth app", async () => {
+		const refreshToken = getProviderDefinition("github-copilot")?.refreshToken;
+		if (!refreshToken) throw new Error("expected github-copilot refresh");
+		const credentials = await refreshToken({
+			access: "ghu_existing_opencode_token",
+			refresh: "ghu_existing_opencode_token",
+			expires: 0,
+			enterpriseUrl: "ghe.example.com",
+			apiEndpoint: "https://api.business.githubcopilot.com",
+		});
 		expect(credentials).toMatchObject({
 			access: "ghu_existing_opencode_token",
 			refresh: "ghu_existing_opencode_token",
@@ -236,9 +241,11 @@ describe("loginGitHubCopilot", () => {
 		expect(credentials.enterpriseUrl).toBeUndefined();
 	});
 
-	it("invalid domain rejects", async () => {
+	it("invalid domain rejects through the registered custom hook", async () => {
+		const provider = getProviderDefinition("github-copilot");
+		if (!provider?.login) throw new Error("expected github-copilot provider");
 		await expect(
-			loginGitHubCopilot({
+			provider.login({
 				onAuth: vi.fn(),
 				onPrompt: mockOnPrompt("not a valid domain!!!://"),
 			}),

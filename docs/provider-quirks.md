@@ -81,7 +81,7 @@ The OpenAI Responses provider (`packages/ai/src/providers/openai-responses.ts`) 
 - **Reasoning summary config & effort ladders**: `buildParams` applies reasoning parameters via `applyResponsesCompatPolicy`. Effort parameters map through model-specific maps (`reasoningEffortMap` or `thinking.effortMap`). For `gpt-5.6+` models and 5-tier effort scales (including `xhigh` and `max`), `model-thinking.ts` configures effort ladders (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`), mapping `xhigh` and `max` 1:1 or shifting per host dialect (e.g. `KIMI_K3_REASONING_EFFORT_MAP`, `MIMO_REASONING_EFFORT_MAP`). Generated pro aliases (`gpt-5.6-*-pro`) automatically attach `reasoningMode: "pro"`.
 
 ## OpenAI Codex
-The OpenAI Codex provider integrates ChatGPT Plus/Pro subscription models using the OpenAI Responses API surface over SSE or WebSocket transport. Requests target the ChatGPT backend (`https://chatgpt.com/backend-api/codex/responses` or custom base URL) using ChatGPT OAuth tokens with account-level isolation. Entry modules include streaming in `packages/ai/src/providers/openai-codex-responses.ts`, request transformation in `packages/ai/src/providers/openai-codex/request-transformer.ts`, error and rate-limit parsing in `packages/ai/src/providers/openai-codex/response-handler.ts`, quota and usage tracking in `packages/ai/src/usage/openai-codex.ts`, reset management in `packages/ai/src/usage/openai-codex-reset.ts`, base URL normalization in `packages/ai/src/usage/openai-codex-base-url.ts`, provider registry in `packages/ai/src/registry/openai-codex.ts`, and OAuth login flow in `packages/ai/src/registry/oauth/openai-codex.ts`.
+The OpenAI Codex provider integrates ChatGPT Plus/Pro subscription models using the OpenAI Responses API surface over SSE or WebSocket transport. Requests target the ChatGPT backend (`https://chatgpt.com/backend-api/codex/responses` or custom base URL) using ChatGPT OAuth tokens with account-level isolation. Entry modules include streaming in `packages/ai/src/providers/openai-codex-responses.ts`, request transformation in `packages/ai/src/providers/openai-codex/request-transformer.ts`, error and rate-limit parsing in `packages/ai/src/providers/openai-codex/response-handler.ts`, quota and usage tracking in `packages/ai/src/usage/openai-codex.ts`, reset management in `packages/ai/src/usage/openai-codex-reset.ts`, base URL normalization in `packages/ai/src/usage/openai-codex-base-url.ts`, auth policy in `packages/catalog/src/compat/rules/auth/openai-codex.kdl`, and OAuth handling in `packages/ai/src/registry/oauth/openai-codex.ts`.
 
 ### Special casings
 - **WebSocket vs SSE dual transport**: Supports WebSocket streaming (`v2StreamingEnabled: true`, header `OpenAI-Beta: responses_websockets=2026-02-06`, `preferWebsockets` option) via `CodexWebSocketConnection` in `packages/ai/src/providers/openai-codex-responses.ts`. Reuses sockets with a max idle reuse cap (`CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS` = 30s), ping/pong heartbeats (10s interval, 60s timeout), and queue capacity (4096). Instantly falls back to SSE on connection/handshake failures (`CODEX_WEBSOCKET_FATAL_PATTERNS`, `CodexWebSocketTransportError`).
@@ -102,7 +102,7 @@ The OpenAI Codex provider integrates ChatGPT Plus/Pro subscription models using 
 - **Concurrent reasoning summaries**: Request body includes `stream_options: { reasoning_summary_delivery: "sequential_cutoff" }` when reasoning summaries are requested (`supportsCodexReasoningSummary`), enabling output text streaming before summary completion.
 
 ### Auth & usage
-- **OAuth login flows**: Implements ChatGPT OAuth in `packages/ai/src/registry/oauth/openai-codex.ts`. Browser flow uses PKCE S256 (`createOpenAICodexAuthorizationUrl`) with fixed local port 1455 (`http://localhost:1455/auth/callback`), client ID `app_EMoamEEZ73f0CkXaXp7hrann`, and simplified CLI flow flags. Headless device-code flow (`loginOpenAICodexDevice`) uses `https://auth.openai.com/api/accounts/deviceauth/usercode` and polls `deviceauth/token`.
+- **OAuth login flows**: Implements ChatGPT OAuth declared in `packages/catalog/src/compat/rules/auth/openai-codex.kdl` (`login "oauth-code"`, engine `packages/ai/src/registry/engine/oauth-code.ts`) and `openai-codex-device.kdl` with hooks in `packages/ai/src/registry/oauth/openai-codex.ts`. Browser flow uses PKCE S256 (`createOpenAICodexAuthorizationUrl`) with fixed local port 1455 (`http://localhost:1455/auth/callback`), client ID `app_EMoamEEZ73f0CkXaXp7hrann`, and simplified CLI flow flags. Headless device-code flow (`loginOpenAICodexDevice`) uses `https://auth.openai.com/api/accounts/deviceauth/usercode` and polls `deviceauth/token`.
 - **Token refresh & claims**: `refreshOpenAICodexToken` posts `grant_type: refresh_token` to `https://auth.openai.com/oauth/token`. Extracts `chatgpt_account_id` and user `email` from JWT claims (`https://api.openai.com/auth` and `https://api.openai.com/profile` in `getTokenProfile`).
 - **Account rotation & rate-limit ranking**: Account identity is set via `ChatGPT-Account-Id` header (`getCodexAccountId`). `codexRankingStrategy` in `packages/ai/src/usage/openai-codex.ts` isolates standard chat limits (5h primary, 7d secondary) from Spark meter limits (`-spark` model suffix spends `spark` scope), preventing Spark exhaustion from blocking normal chat requests.
 - **Usage tracking**: `openaiCodexUsageProvider` queries `/wham/usage` on canonical ChatGPT origins. Parses `primary_window` (5h) and `secondary_window` (7d), plus `additional_rate_limits` (Spark/extra meters). Ingests response headers (`x-codex-primary-used-percent`, `x-codex-primary-window-minutes`, `x-codex-primary-reset-at`, `x-codex-secondary-*`) in `parseCodexRateLimitHeaders` (`response-handler.ts` `parseCodexError`).
@@ -164,7 +164,7 @@ The Anthropic provider (`packages/ai/src/providers/anthropic.ts`) implements the
 - **Stream Watchdogs & Healing**: Streams are monitored for stall timeouts using `getStreamFirstEventTimeoutMs` and `getStreamIdleTimeoutMs` inside `iterateWithIdleTimeout`. `ping` events (`ANTHROPIC_PING_EVENT`) reset idle timeout multipliers. Empty completion responses (0 tokens) trigger automatic retry via `withReplaySafeStreamRetry`. Fast mode (`speed: "fast"`) failures clear session fast mode state (`clearAnthropicFastModeFallback`, `dropAnthropicFastMode`) to fallback to standard execution.
 
 ### Auth & usage
-- **OAuth Authentication & PKCE**: `AnthropicOAuthFlow` (`packages/ai/src/registry/oauth/anthropic.ts`) performs PKCE `S256` authentication against `https://claude.ai/oauth/authorize` and `https://api.anthropic.com/v1/oauth/token` using decoded Client ID (`OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl`). OAuth tokens carry an absolute grant TTL of 30 days (`ANTHROPIC_OAUTH_GRANT_TTL_MS` in `anthropic-constants.ts`), requiring monthly interactive re-login regardless of refresh token rotation. Account identity is resolved via `extractAccountFromTokenResponse` or `fetchBootstrapIdentity` (`/api/claude_cli/bootstrap`).
+- **OAuth Authentication & PKCE**: Declared in `packages/catalog/src/compat/rules/auth/anthropic.kdl` as a `login "oauth-code"` rule (`packages/ai/src/registry/engine/oauth-code.ts`) with identity hooks in `packages/ai/src/registry/oauth/anthropic.ts`, performing PKCE `S256` authentication against `https://claude.ai/oauth/authorize` and `https://api.anthropic.com/v1/oauth/token` using decoded Client ID (`OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl`). OAuth tokens carry an absolute grant TTL of 30 days (`ANTHROPIC_OAUTH_GRANT_TTL_MS` in `anthropic-constants.ts`), requiring monthly interactive re-login regardless of refresh token rotation. Account identity is resolved via `extractAccountFromTokenResponse` or `fetchBootstrapIdentity` (`/api/claude_cli/bootstrap`).
 - **Quota Tracking & Account Rotation**: `packages/ai/src/usage/claude.ts` polls `https://api.anthropic.com/api/oauth/usage` to track rolling `five_hour`, `seven_day`, `limits[]` (`weekly_scoped`), and `anthropic-ratelimit-unified-*` headers. Errors matching `isUsageLimitOutcome` (`packages/ai/src/error/rate-limit.ts`) and `parseRateLimitReason` (`QUOTA_EXHAUSTED`) trigger automatic credential rotation.
 - **Error Classification**: HTTP errors are categorized by `parseRateLimitReason` (`packages/ai/src/error/rate-limit.ts`) into `QUOTA_EXHAUSTED` (30m backoff / rotation), `RATE_LIMIT_EXCEEDED` (30s backoff), `CONCURRENT_LIMIT` (5s backoff), and `MODEL_CAPACITY_EXHAUSTED` (45s ± 15s backoff). Transient HTTP 408/409/429/5xx errors are retried by `AnthropicMessagesClient` (`packages/ai/src/providers/anthropic-client.ts`), respecting `retry-after-ms` / `retry-after` headers.
 
@@ -237,10 +237,10 @@ The Google Vertex AI provider enables streaming generation for Gemini models hos
 ### Catalog model handling
 * **Catalog API Resolution**: `resolveGoogleVertexApi` in `packages/catalog/src/provider-models/openai-compat.ts` routes `@ai-sdk/google-vertex/anthropic` npm package models to `api: "anthropic-messages"` with `GOOGLE_VERTEX_ANTHROPIC_BASE_URL` (`https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict`). Models with slash IDs or `@ai-sdk/openai-compatible` route to `api: "openai-completions"`. All other models route to `api: "google-vertex"` with `GOOGLE_VERTEX_BASE_URL` (`https://{location}-aiplatform.googleapis.com`).
 * **Provider Descriptor**: `packages/catalog/src/provider-models/descriptors.ts` registers `id: "google-vertex"` with `defaultModel: "gemini-3.1-pro-preview"`.
-* **Registry Credentials Guard**: `googleVertexProvider` in `packages/ai/src/registry/google-vertex.ts` exports `envKeys()`. Returns `$env.GOOGLE_CLOUD_API_KEY` if set, or `AUTHENTICATED_SENTINEL` (`"<authenticated>"`) if ADC credentials exist (`hasVertexAdcCredentials()`) AND project env (`GOOGLE_CLOUD_PROJECT`/`GCP_PROJECT`/`GCLOUD_PROJECT`) AND location env (`GOOGLE_VERTEX_LOCATION`/`GOOGLE_CLOUD_LOCATION`/`VERTEX_LOCATION`) are present. Returns `undefined` otherwise, preventing models from appearing in catalog listings without proper auth.
+* **Registry Credentials Guard**: Declared in `packages/catalog/src/compat/rules/auth/google-vertex.kdl` via `env hook="google-vertex-adc"` (`packages/ai/src/registry/hooks/env.ts`). Returns `$env.GOOGLE_CLOUD_API_KEY` if set, or `AUTHENTICATED_SENTINEL` (`"<authenticated>"`) if ADC credentials exist (`hasVertexAdcCredentials()`) AND project env (`GOOGLE_CLOUD_PROJECT`/`GCP_PROJECT`/`GCLOUD_PROJECT`) AND location env (`GOOGLE_VERTEX_LOCATION`/`GOOGLE_CLOUD_LOCATION`/`VERTEX_LOCATION`) are present. Returns `undefined` otherwise, preventing models from appearing in catalog listings without proper auth.
 
 ## Google Gemini CLI / Antigravity
-Google Cloud Code Assist (CCA) transport wrapper accessing Gemini and Claude models over `/v1internal:streamGenerateContent` SSE endpoints. Implementation spans `packages/ai/src/providers/google-gemini-cli.ts` (shared execution engine, request construction, stream parsing, and planning leak filters), `packages/ai/src/registry/google-gemini-cli.ts` & `packages/ai/src/registry/google-antigravity.ts` (provider definitions and OAuth lazy-loaders), `packages/ai/src/registry/oauth/google-gemini-cli.ts` & `google-antigravity.ts` (OAuth login flows, project discovery, and onboarding), `packages/ai/src/usage/google-antigravity.ts` & `packages/ai/src/usage/gemini.ts` (quota tracking and credential ranking), and `packages/catalog/src/discovery/antigravity.ts` (model catalog discovery).
+Google Cloud Code Assist (CCA) transport wrapper accessing Gemini and Claude models over `/v1internal:streamGenerateContent` SSE endpoints. Implementation spans `packages/ai/src/providers/google-gemini-cli.ts` (shared execution engine, request construction, stream parsing, and planning leak filters), `packages/catalog/src/compat/rules/auth/google-gemini-cli.kdl` & `packages/catalog/src/compat/rules/auth/google-antigravity.kdl` (auth policy declarations), `packages/ai/src/registry/oauth/google-gemini-cli.ts` & `google-antigravity.ts` (OAuth hooks, project discovery, and onboarding), `packages/ai/src/usage/google-antigravity.ts` & `packages/ai/src/usage/gemini.ts` (quota tracking and credential ranking), and `packages/catalog/src/discovery/antigravity.ts` (model catalog discovery).
 
 ### Special casings
 - **CCA JSON Schema Normalization**: `normalizeSchemaForCCA` (`packages/ai/src/utils/schema/normalize.ts`) recursively strips unsupported JSON Schema keywords (`propertyNames`, `additionalProperties`, `patternProperties`, `$schema`, `title`, `description`, etc.) to prevent HTTP 400 errors from CCA. Accurately tracks context inside properties named `properties` to avoid premature re-assertion of property stripping. Tools are normalized in `buildRequest` (`packages/ai/src/providers/google-gemini-cli.ts`) via `normalizeSchemaForCCA`.
@@ -265,8 +265,8 @@ Google Cloud Code Assist (CCA) transport wrapper accessing Gemini and Claude mod
 - **Credential Model & Token Expiry**: Credentials stored as JSON (`parseGeminiCliCredentials`): `{ token, projectId, refreshToken, expiresAt, email }`. AuthStorage is the sole refresh authority. `shouldRefreshGeminiCliCredentials` checks token expiry with a 60s skew (`ANTIGRAVITY_REFRESH_SKEW_MS` / `GOOGLE_GEMINI_REFRESH_SKEW_MS`). Stale tokens fail fast before making HTTP requests.
 - **OAuth Installed-App Flow**: Callback ports are `8085` (`google-gemini-cli`, `/oauth2callback`) and `51121` (`google-antigravity`, `/oauth-callback`). Supports paste code flow (`pasteCodeFlow: true`). Authorizes via Google PKCE OAuth 2.0 (`accounts.google.com/o/oauth2/v2/auth`). Antigravity scopes include `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`, and `experimentsandconfigs`.
 - **Project Discovery & Onboarding**:
-  - `google-gemini-cli` (`packages/ai/src/registry/oauth/google-gemini-cli.ts`): calls `POST /v1internal:loadCodeAssist` with `$GOOGLE_CLOUD_PROJECT` fallback. If project absent, calls `POST /v1internal:onboardUser` with `tierId` (`free-tier`, `legacy-tier`, `standard-tier`) and polls `LongRunningOperationResponse` via `pollOperation` (up to `POLL_MAX_ATTEMPTS = 24` at 5s intervals). Detects VPC-SC restriction (`SECURITY_POLICY_VIOLATED`).
-  - `google-antigravity` (`packages/ai/src/registry/oauth/google-antigravity.ts`): mirrors the native `antigravity/hub` flow against `https://daily-cloudcode-pa.googleapis.com`: `loadCodeAssist` requests carry `{ metadata: { ideType: "ANTIGRAVITY" } }`, repeat with `cloudaicompanionProject` when the response lacks `paidTier`, and refresh after resolving the account state. Accounts without `currentTier` are provisioned once with `onboardUser` and `tierId: "free-tier"`; its long-running operation is polled with `GET /v1internal/{operation.name}` every second under one 30-second deadline.
+  - `google-gemini-cli` (`packages/catalog/src/compat/rules/auth/google-gemini-cli.kdl`, hook in `packages/ai/src/registry/oauth/google-gemini-cli.ts`): calls `POST /v1internal:loadCodeAssist` with `$GOOGLE_CLOUD_PROJECT` fallback. If project absent, calls `POST /v1internal:onboardUser` with `tierId` (`free-tier`, `legacy-tier`, `standard-tier`) and polls `LongRunningOperationResponse` via `pollOperation` (up to `POLL_MAX_ATTEMPTS = 24` at 5s intervals). Detects VPC-SC restriction (`SECURITY_POLICY_VIOLATED`).
+  - `google-antigravity` (`packages/catalog/src/compat/rules/auth/google-antigravity.kdl`, hook in `packages/ai/src/registry/oauth/google-antigravity.ts`): mirrors the native `antigravity/hub` flow against `https://daily-cloudcode-pa.googleapis.com`: `loadCodeAssist` requests carry `{ metadata: { ideType: "ANTIGRAVITY" } }`, repeat with `cloudaicompanionProject` when the response lacks `paidTier`, and refresh after resolving the account state. Accounts without `currentTier` are provisioned once with `onboardUser` and `tierId: "free-tier"`; its long-running operation is polled with `GET /v1internal/{operation.name}` every second under one 30-second deadline.
 - **Usage & Quota Tracking (`google-antigravity`)**: `antigravityUsageProvider` (`packages/ai/src/usage/google-antigravity.ts`) queries `POST /v1internal:fetchAvailableModels`. Normalizes quota buckets into daily (24h) and weekly (7d) windows. Deduplicates quotas into backend counter keys (`Anthropic`, `Google`, `OpenAI`). `antigravityRankingStrategy` scopes ranking by requested model family (`getAntigravityCounterKeyForModel`: `claude-` → Anthropic, `gemini-`/`gemma-` → Google, `gpt-`/`openai/` → OpenAI), selecting stored OAuth credentials with available quota headroom.
 - **Usage & Quota Tracking (`google-gemini-cli`)**: `googleGeminiCliUsageProvider` (`packages/ai/src/usage/gemini.ts`) queries `loadCodeAssist` and `retrieveUserQuota`, surfacing quota percentages per model tier (`3-Flash`, `Flash`, `Pro`).
 
@@ -282,7 +282,7 @@ Google Cloud Code Assist (CCA) transport wrapper accessing Gemini and Claude mod
 - **Catalog Generator Integration**: `fetchAntigravityModels` (`packages/catalog/scripts/generate-models.ts`) fetches models via discovery token (falling back from `google-antigravity` to `google-gemini-cli` OAuth credentials) and fixes `baseUrl` to `https://daily-cloudcode-pa.googleapis.com`.
 
 ## Amazon Bedrock
-Amazon Bedrock (`amazon-bedrock` provider, `bedrock-converse-stream` API) communicates directly with `bedrock-runtime.{region}.amazonaws.com/model/{modelId}/converse-stream` via HTTPS POST requests using AWS SigV4 signatures or explicit bearer tokens, decoding binary `application/vnd.amazon.eventstream` responses. The implementation bypasses heavy AWS SDK dependencies (`@aws-sdk/*`, `@smithy/*`), executing native fetches signed with WebCrypto and decoded via a lightweight eventstream parser. Entry modules comprise `packages/ai/src/providers/amazon-bedrock.ts` (`streamBedrock`), `packages/ai/src/registry/amazon-bedrock.ts` (`amazonBedrockProvider`), `packages/ai/src/registry/aws.ts`, `packages/ai/src/providers/aws-credentials.ts` (`resolveAwsCredentials`), `packages/ai/src/providers/aws-eventstream.ts` (`decodeEventStream`), and `packages/ai/src/providers/aws-sigv4.ts` (`signRequest`).
+Amazon Bedrock (`amazon-bedrock` provider, `bedrock-converse-stream` API) communicates directly with `bedrock-runtime.{region}.amazonaws.com/model/{modelId}/converse-stream` via HTTPS POST requests using AWS SigV4 signatures or explicit bearer tokens, decoding binary `application/vnd.amazon.eventstream` responses. The implementation bypasses heavy AWS SDK dependencies (`@aws-sdk/*`, `@smithy/*`), executing native fetches signed with WebCrypto and decoded via a lightweight eventstream parser. Entry modules comprise `packages/ai/src/providers/amazon-bedrock.ts` (`streamBedrock`), `packages/ai/src/registry/amazon-bedrock.ts` (`amazonBedrockTransport`), auth policy in `packages/catalog/src/compat/rules/auth/amazon-bedrock.kdl`, `packages/ai/src/registry/aws.ts`, `packages/ai/src/providers/aws-credentials.ts` (`resolveAwsCredentials`), `packages/ai/src/providers/aws-eventstream.ts` (`decodeEventStream`), and `packages/ai/src/providers/aws-sigv4.ts` (`signRequest`).
 
 ### Special casings
 - **Converse API Payload & Message Mapping**: Requests build a `ConverseStreamRequest` with `messages`, `system`, `inferenceConfig` (`maxTokens`, `temperature`, `topP`), `toolConfig`, and `additionalModelRequestFields`. System prompts normalize to `SystemContent[]` with text blocks and `CachePoint` markers (`{ cachePoint: { type: "default", ttl?: "1h" } }`). User content maps to `text`, `image` (`jpeg`/`png`/`gif`/`webp` base64 via `createImageBlock`), `toolResult`, or `cachePoint`. Bedrock requires consecutive tool result blocks to be consolidated into a single `user` role `WireMessage` (`convertMessages` loops to merge adjacent `toolResult` turns). Empty text blocks and empty content arrays are filtered to avoid HTTP 400 validation failures.
@@ -316,7 +316,7 @@ Amazon Bedrock (`amazon-bedrock` provider, `bedrock-converse-stream` API) commun
   3. Shared Config / Profile (`~/.aws/credentials`, `~/.aws/config` parsed via `parseAwsIni`): Static keys (file session tokens capped at 5 min TTL via `FILE_SESSION_CREDS_TTL_MS`), AWS SSO (`sso_account_id`, `sso_role_name`, legacy `sso_start_url`/`sso_region` or `sso-session` block; reads cached token from `~/.aws/sso/cache/*.json` and calls `portal.sso.{ssoRegion}.amazonaws.com/federation/credentials`), or `credential_process` (spawns external process using POSIX tokenization `tokenizeCredentialProcessCommand`; Windows `.cmd`/`.bat` routed through `cmd.exe /c`; expects Version 1 JSON envelope).
   4. ECS / Container: `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` (on `http://169.254.170.2/`) or `AWS_CONTAINER_CREDENTIALS_FULL_URI` with optional auth token/file.
   5. EC2 IMDSv2: `169.254.169.254` (or IPv6 `[fd00:ec2::254]`), requests PUT token from `latest/api/token` with 1s timeout (`IMDS_TIMEOUT_MS`).
-- **Cache Invalidation & Registry Status**: On 401/403 HTTP response, `streamBedrock` calls `invalidateAwsCredentialCache({ profile, region })` to drop cached credentials so subsequent turns re-resolve fresh credentials. `amazonBedrockProvider` (`packages/ai/src/registry/amazon-bedrock.ts`) evaluates `hasAwsCredentialSource()` (`packages/ai/src/registry/aws.ts`) to return `AUTHENTICATED_SENTINEL` when valid credentials or environment tokens exist.
+- **Cache Invalidation & Registry Status**: On 401/403 HTTP response, `streamBedrock` calls `invalidateAwsCredentialCache({ profile, region })` to drop cached credentials so subsequent turns re-resolve fresh credentials. Auth resolution in `packages/catalog/src/compat/rules/auth/amazon-bedrock.kdl` (`env hook="aws-bedrock"`) evaluates `hasAwsCredentialSource()` (`packages/ai/src/registry/aws.ts`) to return `AUTHENTICATED_SENTINEL` when valid credentials or environment tokens exist.
 
 ### Catalog model handling
 - **Descriptor Registration**: Registered in `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`) with default model `us.anthropic.claude-opus-4-8`.
@@ -332,7 +332,7 @@ Amazon Bedrock Mantle is AWS's gateway endpoint serving OpenAI-compatible models
 - **Endpoint Structure**: Unlike standard Bedrock Converse endpoints (`bedrock-runtime.{region}.amazonaws.com`), Mantle requests target `https://bedrock-mantle.{region}.api.aws/openai/v1`. The `{region}` template placeholder in `model.baseUrl` is dynamically replaced at request preparation time in `prepareBedrockMantleRequest` (`packages/ai/src/providers/bedrock-mantle.ts`).
 - **Region Resolution Hierarchy**: Region substitution in `resolveAwsRegion` (`packages/ai/src/utils/aws-profile.ts`) evaluates in order: explicit `providerOptions.region` -> `AWS_REGION` -> `AWS_DEFAULT_REGION` -> region from active AWS shared-config profile in `~/.aws/config` (`resolveAwsProfileRegion`) -> fallback default `"us-east-1"`.
 - **401/403 Credential Invalidation**: When using SigV4 signed requests in `createSignedFetch` (`packages/ai/src/providers/bedrock-mantle.ts`), an HTTP 401 or 403 response triggers `invalidateAwsCredentialCache({ profile, region })` (`packages/ai/src/providers/aws-credentials.ts`) so subsequent attempts re-resolve fresh credentials from profile, environment, or STS roles.
-- **Registry Sentinel & Auth Flag**: `bedrockMantleProvider` in `packages/ai/src/registry/bedrock-mantle.ts` sets `allowsMissingApiKey: true`. When ambient AWS credentials exist (`hasAwsCredentialSource` in `packages/ai/src/registry/aws.ts`), `resolveAwsRegistryApiKey` returns `AUTHENTICATED_SENTINEL`. `resolveAwsBearerToken` strips this sentinel value so SigV4 authentication is selected unless an actual bearer token is present.
+- **Registry Sentinel & Auth Flag**: `packages/catalog/src/compat/rules/auth/bedrock-mantle.kdl` sets `allows-missing-api-key #true` and `env hook="aws-bedrock-mantle"` (with transport in `packages/ai/src/registry/bedrock-mantle.ts`). When ambient AWS credentials exist (`hasAwsCredentialSource` in `packages/ai/src/registry/aws.ts`), `resolveAwsRegistryApiKey` returns `AUTHENTICATED_SENTINEL`. `resolveAwsBearerToken` strips this sentinel value so SigV4 authentication is selected unless an actual bearer token is present.
 - **Generator Model Drop Policy**: In `packages/catalog/scripts/generated-policies.ts`, `dropBedrockMantleOpenAIModels` filters out `openai.gpt-5.*` rows from the `amazon-bedrock` provider (where upstream `models.dev` incorrectly assigns them under Bedrock Converse) so that only working `bedrock-mantle` Responses API models are exposed.
 
 ### Stream behavior
@@ -376,7 +376,7 @@ Kimi Code (`kimi-code`) and Moonshot (`moonshot`) provide access to Moonshot AI'
 - **Idle Watchdog Timeout**: `streamIdleTimeoutMs` floor is extended to 300s for native K2.7 Code models (`packages/catalog/src/compat/openai.ts`) to prevent premature stream aborts during long initial reasoning generation.
 
 ### Auth & usage
-- **Device OAuth Flow**: Implemented in `packages/ai/src/registry/oauth/kimi.ts` (`loginKimi`, `refreshKimiToken`). Uses OAuth 2.0 Device Authorization Grant (`urn:ietf:params:oauth:grant-type:device_code`) with client ID `17e5f671-d194-4dfb-9706-5516cb48c098` against host `${resolveOAuthHost()}` (`https://auth.kimi.com`, configurable via `KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST`).
+- **Device OAuth Flow**: Declared in `packages/catalog/src/compat/rules/auth/kimi-code.kdl` as a `login "device-code"` rule (`packages/ai/src/registry/engine/device-code.ts`) with headers hook in `packages/ai/src/registry/oauth/kimi.ts`. Uses OAuth 2.0 Device Authorization Grant (`urn:ietf:params:oauth:grant-type:device_code`) with client ID `17e5f671-d194-4dfb-9706-5516cb48c098` against host `${resolveOAuthHost()}` (`https://auth.kimi.com`, configurable via `KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST`).
   - Initiates via `POST /api/oauth/device_authorization`, prompts user with `userCode` and `verificationUriComplete`, and polls `POST /api/oauth/token` with backoff on `authorization_pending` and `slow_down`. Token refresh uses `grant_type: "refresh_token"`.
 - **Fingerprinting Headers & Device ID**: `getKimiCommonHeaders()` in `packages/ai/src/registry/oauth/kimi.ts` injects device tracking headers: `User-Agent: KimiCLI/<ver>`, `X-Msh-Platform: kimi_cli`, `X-Msh-Version`, `X-Msh-Device-Name`, `X-Msh-Device-Model`, `X-Msh-Os-Version`, and `X-Msh-Device-Id`. `getDeviceId` persists a random hex UUID to `path.join(getAgentDir(), "kimi-device-id")` (mode 0600) or falls back to an ephemeral process UUID.
 - **Usage & Quota Tracker**: `kimiUsageProvider` in `packages/ai/src/usage/kimi.ts` targets `GET /coding/v1/usages` (`https://api.kimi.com/coding/v1/usages`, configurable via `KIMI_CODE_BASE_URL`) with OAuth bearer token and `getKimiCommonHeaders()`.
@@ -412,7 +412,7 @@ The Ollama integration consists of two distinct provider definitions in `package
 - **Empty Completion Retry**: `streamOllama` is wrapped with `withReplaySafeStreamRetry` to transparently retry EOS-only empty completions.
 
 ### Auth & usage
-- **Credential Source**: `loginOllama` (`packages/ai/src/registry/ollama.ts`) prompts for an optional API key (`allowEmpty: true`), defaulting to no-auth local usage with `envVars: ["OLLAMA_API_KEY"]`. `loginOllamaCloud` (`packages/ai/src/registry/ollama-cloud.ts`) mandates an API key created at `https://ollama.com/settings/keys` with `envVars: ["OLLAMA_CLOUD_API_KEY"]`.
+- **Credential Source**: Declared in `packages/catalog/src/compat/rules/auth/ollama.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) prompting for an optional API key (`allowEmpty: true`), defaulting to no-auth local usage with `envVars: ["OLLAMA_API_KEY"]`. `packages/catalog/src/compat/rules/auth/ollama-cloud.kdl` mandates an API key created at `https://ollama.com/settings/keys` with `envVars: ["OLLAMA_CLOUD_API_KEY"]`.
 - **Authentication Headers**: Local requests attach `Authorization: Bearer ${apiKey}` if provided; `ollama-cloud` requires `Authorization: Bearer ${apiKey}`.
 - **Usage & Quota**: Quota tracking is registered via `ollamaUsageProvider` and `ollamaCloudUsageProvider` in `packages/ai/src/usage/ollama.ts`. Neither provider exposes a standalone usage/quota API (`validatesCredentials: false`, empty `limits`), relying on per-response `prompt_eval_count` (input) and `eval_count` (output) returned in stream completion chunks.
 
@@ -430,7 +430,7 @@ The Ollama integration consists of two distinct provider definitions in `package
 
 ## Cursor
 
-Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transport (`/agent.v1.AgentService/Run`) sending length-prefixed binary Protobuf messages (`AgentClientMessage` and `AgentServerMessage`). Key implementation entry points include `packages/ai/src/providers/cursor.ts` for connection lifecycle, Connect message streaming, and frame dispatching; `packages/ai/src/providers/cursor-pi-args.ts` for pure argument and path transformations; `packages/ai/src/providers/cursor/exec-modern.ts` for local tool result frame builders; `packages/ai/src/registry/cursor.ts` and `packages/ai/src/registry/oauth/cursor.ts` for PKCE browser authentication and token refresh; `packages/ai/src/usage/cursor.ts` for multi-endpoint quota tracking; and `packages/catalog/src/discovery/cursor.ts` for Connect RPC model discovery.
+Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transport (`/agent.v1.AgentService/Run`) sending length-prefixed binary Protobuf messages (`AgentClientMessage` and `AgentServerMessage`). Key implementation entry points include `packages/ai/src/providers/cursor.ts` for connection lifecycle, Connect message streaming, and frame dispatching; `packages/ai/src/providers/cursor-pi-args.ts` for pure argument and path transformations; `packages/ai/src/providers/cursor/exec-modern.ts` for local tool result frame builders; auth policy in `packages/catalog/src/compat/rules/auth/cursor.kdl` (`login "custom" hook="cursor"`) and `packages/ai/src/registry/oauth/cursor.ts` for PKCE browser authentication and token refresh; `packages/ai/src/usage/cursor.ts` for multi-endpoint quota tracking; and `packages/catalog/src/discovery/cursor.ts` for Connect RPC model discovery.
 
 ### Special casings
 - **Pure Argument Translation (`cursor-pi-args.ts`)**: Path and argument formatting functions (`piReadPath`, `piReadPathHasRange`, `piReadDisplayPath`, `piGrepSkip`, `piJoinPath`, `piLsPath`, `piEscapeRegexLiteral`, `piLimit`, `piTimeout`) are kept strictly independent of Protobuf imports so legacy shims can share them without bundling protobuf schemas into virtual registries.
@@ -486,7 +486,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
   - Dynamic discovery merges with bundled reference models from `models.json`.
 
 ## Devin
-The Devin integration (`devin-agent` API) communicates with Codeium Cascade backend services over HTTP/1.1 using the Connect protocol and gRPC/Protobuf messages. Its implementation spans provider stream logic in `packages/ai/src/providers/devin.ts` (`streamDevin`, `DEVIN_API_URL`), provider registry entry in `packages/ai/src/registry/devin.ts` (`devinProvider`), CLI OAuth handling in `packages/ai/src/registry/oauth/devin.ts` (`loginDevin`), and Connect protobuf schemas located in `packages/catalog/src/discovery/devin-gen/exa/*`.
+The Devin integration (`devin-agent` API) communicates with Codeium Cascade backend services over HTTP/1.1 using the Connect protocol and gRPC/Protobuf messages. Its implementation spans provider stream logic in `packages/ai/src/providers/devin.ts` (`streamDevin`, `DEVIN_API_URL`), auth policy in `packages/catalog/src/compat/rules/auth/devin.kdl` (`login "oauth-code"` rule, `packages/ai/src/registry/engine/oauth-code.ts`), and Connect protobuf schemas located in `packages/catalog/src/discovery/devin-gen/exa/*`.
 
 ### Special casings
 * **Connect Binary Protocol & Frame Wrapping:** Transport uses Connect protocol over HTTP/1.1 targeting `https://server.codeium.com`. Request payloads are serialized Protobuf (`GetChatMessageRequestSchema`), compressed with gzip, and wrapped in 5-byte Connect streaming binary frame headers (`CONNECT_COMPRESSED_FLAG = 0x01`, 4-byte big-endian payload length). End-of-stream frames carry `CONNECT_END_STREAM_FLAG = 0x02` with JSON error trailers (`readConnectTrailerError`).
@@ -512,7 +512,7 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 * **Dual Auth Lifecycle:**
   * **Session Token Prefixing:** API key credentials are normalized via `normalizeDevinSessionToken` to ensure a `devin-session-token$` prefix.
   * **JWT Exchange:** `fetchDevinAuthMetadata` sends an initial Connect request (`GetUserJwtRequestSchema`) to `/exa.auth_pb.AuthService/GetUserJwt` using `apiKey` inside `MetadataSchema`. The server returns a `userJwt` (and optional server base URL override) which is included in subsequent chat request metadata.
-* **CLI OAuth Flow:** `loginDevin` in `packages/ai/src/registry/oauth/devin.ts` executes a PKCE OAuth flow using `https://app.devin.ai/auth/cli/continue`. Tokens are exchanged at `https://api.devin.ai/auth/cli/token` (`exchangeDevinCliToken`) with expiration derived from JWT payload or a 1-year default fallback.
+* **CLI OAuth Flow:** Declared in `packages/catalog/src/compat/rules/auth/devin.kdl` as a `login "oauth-code"` rule (`packages/ai/src/registry/engine/oauth-code.ts`) executing a PKCE OAuth flow using `https://app.devin.ai/auth/cli/continue`. Tokens are exchanged at `https://api.devin.ai/auth/cli/token` with expiration derived from JWT payload or a 1-year default fallback.
 * **Usage Surface:** Streaming response frames include token counts (`msg.usage`: `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`), which feed directly into `calculateCost(model, output.usage)`, plus credit metering (`creditCost`, `committedCreditCost`, `committedAcuCost`) surfaced on `usage.credits`. Account plan and balance reporting uses `devinUsageProvider` (`packages/ai/src/usage/devin.ts`), which calls `SeatManagementService/GetUserStatus` with the native CLI identity and maps prompt/flow/flex credit buckets, dated daily/weekly quota windows, plan tier, overage balance, and account/org identity into `/usage`. Credit-billed plans omit undated percent windows so they do not render as exhausted quotas.
 
 ### Catalog model handling
@@ -527,7 +527,7 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 ## GitLab Duo
 
-GitLab Duo is integrated via two distinct providers in OMP: **GitLab Duo Non-Agentic** (`gitlab-duo`), which proxies LLM requests through GitLab AI Gateway using standard HTTP/SSE sub-providers, and **GitLab Duo Agent** (`gitlab-duo-agent`), which connects to the GitLab Duo Workflow Service (DWS) over a WebSocket-based agent execution protocol. Entry modules for `gitlab-duo` are `packages/ai/src/providers/gitlab-duo.ts` and `packages/ai/src/registry/gitlab-duo.ts` (OAuth in `packages/ai/src/registry/oauth/gitlab-duo.ts`), while `gitlab-duo-agent` is implemented in `packages/ai/src/providers/gitlab-duo-workflow.ts`, `packages/ai/src/registry/gitlab-duo-workflow.ts` (OAuth in `packages/ai/src/registry/oauth/gitlab-duo-workflow.ts`), and catalog discovery in `packages/catalog/src/discovery/gitlab-duo-workflow.ts`.
+GitLab Duo is integrated via two distinct providers in OMP: **GitLab Duo Non-Agentic** (`gitlab-duo`), which proxies LLM requests through GitLab AI Gateway using standard HTTP/SSE sub-providers, and **GitLab Duo Agent** (`gitlab-duo-agent`), which connects to the GitLab Duo Workflow Service (DWS) over a WebSocket-based agent execution protocol. Entry modules for `gitlab-duo` are `packages/ai/src/providers/gitlab-duo.ts` and `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl` (OAuth hooks in `packages/ai/src/registry/oauth/gitlab-duo.ts`), while `gitlab-duo-agent` is implemented in `packages/ai/src/providers/gitlab-duo-workflow.ts`, `packages/catalog/src/compat/rules/auth/gitlab-duo-agent.kdl`, and catalog discovery in `packages/catalog/src/discovery/gitlab-duo-workflow.ts`.
 
 ### Special casings
 - **`gitlab-duo` Model Routing & Proxying**: Maps Duo model identifiers (`duo-chat-opus-4-6`, `duo-chat-sonnet-4-6`, `duo-chat-gpt-5-1`, `duo-chat-gpt-5-codex`, etc.) in `MODEL_MAPPINGS` (`packages/ai/src/providers/gitlab-duo.ts`) to underlying provider types (`anthropic` or `openai`) and API flavors (`anthropic-messages`, `openai-completions`, `openai-responses`). Requests are proxied to GitLab AI Gateway endpoints (`https://cloud.gitlab.com/ai/v1/proxy/anthropic/` or `https://cloud.gitlab.com/ai/v1/proxy/openai/v1`) using direct access tokens exchanged via `getDirectAccessToken`.
@@ -549,8 +549,8 @@ GitLab Duo is integrated via two distinct providers in OMP: **GitLab Duo Non-Age
   - Stall detection: Up to 2 restarts (`GITLAB_DUO_WORKFLOW_MAX_STALL_RESTARTS`) when `detectGitLabDuoWorkflowStall` detects consecutive unchanged checkpoint content lengths at tool boundaries (`lastToolBoundaryContentLength`).
 
 ### Auth & usage
-- **`gitlab-duo` Authentication**: Supports PAT via `GITLAB_TOKEN` or OAuth (`loginGitLabDuo` in `packages/ai/src/registry/oauth/gitlab-duo.ts`). Direct Access tokens are fetched via `POST /api/v4/ai/third_party_agents/direct_access` with `DuoAgentPlatformNext: true` (`getDirectAccessToken` in `packages/ai/src/providers/gitlab-duo.ts`) and cached for 25 minutes (`DIRECT_ACCESS_TTL_MS`). OAuth uses PKCE with `DEFAULT_CLIENT_ID` (overrideable via `GITLAB_CLIENT_ID` / `GITLAB_REDIRECT_URI`) and callback port 8080 (`packages/ai/src/registry/gitlab-duo.ts`).
-- **`gitlab-duo-agent` Authentication**: Accepts PAT via `GITLAB_TOKEN` or OAuth (`loginGitLabDuoWorkflow` in `packages/ai/src/registry/oauth/gitlab-duo-workflow.ts`). Direct Access workflow tokens are obtained via `POST /api/v4/ai/duo_workflows/direct_access` (`requestGitLabDuoWorkflowDirectAccess`). OAuth relies on the official GitLab VS Code client ID (`GITLAB_DUO_WORKFLOW_OAUTH_CLIENT_ID = "36f2a70cddeb5a0889d4fd8295c241b7e9848e89cf9e599d0eed2d8e5350fbf5"`), redirecting to `vscode://gitlab.gitlab-workflow/authentication` (`pasteCodeFlow: true`).
+- **`gitlab-duo` Authentication**: Supports PAT via `GITLAB_TOKEN` or OAuth declared in `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl` (`login "oauth-code"`, engine `packages/ai/src/registry/engine/oauth-code.ts`) with cache-clearing hook in `packages/ai/src/registry/oauth/gitlab-duo.ts`. Direct Access tokens are fetched via `POST /api/v4/ai/third_party_agents/direct_access` with `DuoAgentPlatformNext: true` (`getDirectAccessToken` in `packages/ai/src/providers/gitlab-duo.ts`) and cached for 25 minutes (`DIRECT_ACCESS_TTL_MS`). OAuth uses PKCE with `DEFAULT_CLIENT_ID` (overrideable via `GITLAB_CLIENT_ID` / `GITLAB_REDIRECT_URI`) and callback port 8080.
+- **`gitlab-duo-agent` Authentication**: Accepts PAT via `GITLAB_TOKEN` or OAuth declared in `packages/catalog/src/compat/rules/auth/gitlab-duo-agent.kdl` as a `login "oauth-code"` rule (`packages/ai/src/registry/engine/oauth-code.ts`). Direct Access workflow tokens are obtained via `POST /api/v4/ai/duo_workflows/direct_access` (`requestGitLabDuoWorkflowDirectAccess`). OAuth relies on the official GitLab VS Code client ID (`GITLAB_DUO_WORKFLOW_OAUTH_CLIENT_ID = "36f2a70cddeb5a0889d4fd8295c241b7e9848e89cf9e599d0eed2d8e5350fbf5"`), redirecting to `vscode://gitlab.gitlab-workflow/authentication` (`pasteCodeFlow: true`).
 - **`gitlab-duo-agent` Protocol Headers**: Requests include `x-gitlab-client-type: node-websocket`, `x-gitlab-language-server-version: 8.104.0`, and resource scope headers (`x-gitlab-project-id`, `x-gitlab-namespace-id`, `x-gitlab-root-namespace-id`) constructed by `buildGitLabDuoWorkflowWebSocketHeaders`.
 - **Usage Tracking**: Neither provider uses a module under `packages/ai/src/usage/`. For `gitlab-duo-agent`, context occupancy is extracted from server checkpoint telemetry (`extractGitLabDuoWorkflowContextUsage` reading `agent_context_usage`), prioritizing `"Chat Agent"` and `"context_builder"` entries, and applied to prompt token estimates in `applyGitLabDuoWorkflowContextUsage`.
 
@@ -606,7 +606,7 @@ ai& (`aiand`) is an OpenAI-compatible inference API provider (aiand.com) offerin
 
 ### Auth & usage
 - **API-Key Authentication**: Supports API key authentication configured via the `AIAND_API_KEY` environment variable (resolved via `getEnvApiKey("aiand")` in `packages/ai/src/stream.ts`) or explicit `apiKey` options.
-- **Console Login & Validation**: Interactive login (`loginAiand` in `packages/ai/src/registry/aiand.ts`) prompts for an API key from `https://console.aiand.com/api-keys` and validates credentials via `createApiKeyLogin` against `https://api.aiand.com/v1/models`. Registered as `aiandProvider` in `packages/ai/src/registry/registry.ts`.
+- **Console Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/aiand.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), prompting for an API key from `https://console.aiand.com/api-keys` and validating credentials against `https://api.aiand.com/v1/models` (`validate "models-endpoint"`). Registered in `packages/ai/src/registry/registry.ts`.
 
 ### Catalog model handling
 - **Provider Descriptor**: Registered in `packages/catalog/src/provider-models/descriptors.ts` with `defaultModel: "moonshotai/kimi-k2.7-code"`, `envVars: ["AIAND_API_KEY"]`, and `dynamicModelsAuthoritative: true`.
@@ -624,7 +624,7 @@ AIML API is an AI model aggregator platform providing access to diverse multi-ve
 - **Standard transport pipeline**: Uses un-customized `openai-completions` transport with no custom request transformers or error handlers (`packages/catalog/src/provider-models/openai-compat.ts`).
 
 ### Auth & usage
-- **Environment authentication**: Configured to discover credentials via the `AIMLAPI_API_KEY` environment variable (`packages/catalog/src/provider-models/descriptors.ts`, `packages/ai/src/registry/aimlapi.ts`).
+- **Environment authentication**: Configured to discover credentials via the `AIMLAPI_API_KEY` environment variable (`packages/catalog/src/provider-models/descriptors.ts`, `packages/catalog/src/compat/rules/auth/aimlapi.kdl`).
 - **API authorization**: Transmits key as an HTTP `Authorization: Bearer <key>` header to target host `https://api.aimlapi.com/v1`.
 - **Usage tracking**: Has no dedicated quota or usage parsing module registered in `packages/ai/src/usage/`.
 
@@ -643,8 +643,8 @@ Alibaba Coding Plan provides coding-oriented model endpoints hosted on Alibaba C
 - **OAuth structured key flag**: Registered in `needsStructuredApiKey` (`packages/ai/src/registry/oauth/index.ts`) to serialize endpoint and token metadata (`enterpriseUrl`, `access`, `refresh`, `expires`) into a JSON key string.
 
 ### Auth & usage
-- **Interactive login & endpoint selection**: `loginAlibabaCodingPlan` (`packages/ai/src/registry/alibaba-coding-plan.ts`) prompts users to select between International (`https://coding-intl.dashscope.aliyuncs.com/v1`), Mainland China (`https://coding.dashscope.aliyuncs.com/v1`), or a custom proxy base URL.
-- **API key validation**: Validates credentials via `apiKeyValidation.validateOpenAICompatibleApiKey` against model `qwen3.5-plus` for preset endpoints, or `validateApiKeyAgainstModelsEndpoint` for custom URLs (`packages/ai/src/registry/alibaba-coding-plan.ts`).
+- **Interactive login & endpoint selection**: Declared in `packages/catalog/src/compat/rules/auth/alibaba-coding-plan.kdl` (`login "custom" hook="alibaba-coding-plan"`) and implemented in `packages/ai/src/registry/oauth/alibaba-coding-plan.ts` (`loginAlibabaCodingPlan`), prompting users to select between International (`https://coding-intl.dashscope.aliyuncs.com/v1`), Mainland China (`https://coding.dashscope.aliyuncs.com/v1`), or a custom proxy base URL.
+- **API key validation**: Validates credentials via `apiKeyValidation.validateOpenAICompatibleApiKey` (`packages/ai/src/registry/api-key-validation.ts`) against model `qwen3.5-plus` for preset endpoints, or `validateApiKeyAgainstModelsEndpoint` for custom URLs (`packages/ai/src/registry/oauth/alibaba-coding-plan.ts`).
 - **Environment variable**: API key is retrieved via `ALIBABA_CODING_PLAN_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`).
 - **Usage & quota tracking**: Unlike `alibaba-token-plan`, `alibaba-coding-plan` has no dedicated usage provider or quota tracking in `packages/ai/src/usage/`.
 
@@ -666,7 +666,7 @@ QwenCloud Token Plan provides model subscription access to Alibaba Cloud's Qwen 
 
 ### Auth & usage
 - **Environment & Wire Credential**: Resolves `ALIBABA_TOKEN_PLAN_API_KEY` then `BAILIAN_TOKEN_PLAN_API_KEY`. Supports plain bearer keys (`sk-sp-...`) or serialized JSON strings (`{ token, cookie?, baseUrl? }`) parsed via `parseAlibabaTokenPlanCredential` and formatted via `serializeAlibabaTokenPlanCredential` (`packages/catalog/src/wire/alibaba-token-plan.ts`).
-- **Interactive Login**: `loginAlibabaTokenPlan` (`packages/ai/src/registry/alibaba-token-plan.ts`) prompts for region (1=International, 2=China Beijing, 3=Custom URL), validates the API key via `${baseUrl}/models` (`validateApiKeyAgainstModelsEndpoint`), and accepts an optional `cs-data.qwencloud.com` browser `Cookie` header for quota reporting.
+- **Interactive Login**: Declared in `packages/catalog/src/compat/rules/auth/alibaba-token-plan.kdl` (`login "custom" hook="alibaba-token-plan"`) and implemented in `packages/ai/src/registry/oauth/alibaba-token-plan.ts` (`loginAlibabaTokenPlan`), prompting for region (1=International, 2=China Beijing, 3=Custom URL), validating the API key via `${baseUrl}/models` (`validateApiKeyAgainstModelsEndpoint`), and accepting an optional `cs-data.qwencloud.com` browser `Cookie` header for quota reporting.
 - **Console Quota Scraping**: `alibabaTokenPlanUsageProvider` (`packages/ai/src/usage/alibaba-token-plan.ts`) uses the stored `Cookie` header to fetch `secToken` from `https://home.qwencloud.com/tool/user/info.json` and issues a POST to `https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage` with URL-encoded parameters.
 - **Quota Windows & Ranking**: Parses `per5HourPercentage`/`per5HourResetTime` (5-hour window, `credits:5h`) and `per1WeekPercentage`/`per1WeekResetTime` (7-day window, `credits:7d`). `alibabaTokenPlanRankingStrategy` configures `credits:5h` as primary limit (5h window) and `credits:7d` as secondary limit (7d window).
 
@@ -682,8 +682,8 @@ Baseten provides high-performance infrastructure for hosting open-weight LLMs (i
 - Nothing beyond the `openai-completions` pipeline.
 
 ### Auth & usage
-- **API Key Authentication**: Authenticates via `BASETEN_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`). Login flow `loginBaseten` (`packages/ai/src/registry/baseten.ts`) uses `createApiKeyLogin` pointing to dashboard `https://app.baseten.co/settings/api_keys` with placeholder `bt_...`.
-- **Endpoint Validation**: API key validation in `loginBaseten` (`packages/ai/src/registry/baseten.ts`) verifies credentials via `GET https://inference.baseten.co/v1/models` (`models-endpoint` validation kind).
+- **API Key Authentication**: Authenticates via `BASETEN_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`). Login flow declared in `packages/catalog/src/compat/rules/auth/baseten.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) pointing to dashboard `https://app.baseten.co/settings/api_keys` with placeholder `bt_...`.
+- **Endpoint Validation**: API key validation in `packages/catalog/src/compat/rules/auth/baseten.kdl` verifies credentials via `GET https://inference.baseten.co/v1/models` (`models-endpoint` validation kind).
 - **Usage Accounting**: Reconciles token usage and pricing through standard OpenAI Chat Completions usage handling (`calculateOpenAIUsageAccounting` in `packages/ai/src/providers/openai-shared.ts`).
 
 ### Catalog model handling
@@ -704,8 +704,8 @@ Cerebras provides ultra-fast inference on wafer-scale engine hardware for open-w
 - **Gemma Image Input Serialization**: Models matching `gemma-4-31b` serialize attached image blocks into Chat Completions `image_url` data URIs (`data:image/png;base64,...`) when processed by `convertMessages` in `packages/ai/src/providers/openai-completions.ts`.
 
 ### Auth & usage
-- **API Key Login**: Configured via `loginCerebras` in `packages/ai/src/registry/cerebras.ts` using `createApiKeyLogin` with default validation model `gpt-oss-120b` and base URL `https://api.cerebras.ai/v1`.
-- **Environment Resolution**: Registered as `cerebrasProvider` in `packages/ai/src/registry/cerebras.ts` and catalog descriptor `descriptors.ts` using environment variable `CEREBRAS_API_KEY`.
+- **API Key Login**: Declared in `packages/catalog/src/compat/rules/auth/cerebras.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) with default validation model `gpt-oss-120b` and base URL `https://api.cerebras.ai/v1`.
+- **Environment Resolution**: Registered in catalog descriptor `descriptors.ts` and `packages/catalog/src/compat/rules/auth/cerebras.kdl` using environment variable `CEREBRAS_API_KEY`.
 
 ### Catalog model handling
 - **Provider Registration**: Catalog entry in `descriptors.ts` (`CATALOG_PROVIDERS`) sets `id: "cerebras"`, `defaultModel: "zai-glm-4.7"`, and delegates option construction to `cerebrasModelManagerOptions`.
@@ -722,7 +722,7 @@ Cloudflare AI Gateway proxies requests through Cloudflare's edge infrastructure 
 - **OAuth Session Protection**: Excluded from receiving Claude OAuth `account_uuid` headers to prevent identity leakage to third-party proxies (`packages/coding-agent/src/session/session-metadata.ts`).
 
 ### Auth & usage
-- **Authentication Prompt**: `loginCloudflareAiGateway` prompts for a Cloudflare AI Gateway token/API key (`cf-aig-...`) and directs users to Cloudflare's authentication documentation (`packages/ai/src/registry/cloudflare-ai-gateway.ts`).
+- **Authentication Prompt**: Declared in `packages/catalog/src/compat/rules/auth/cloudflare-ai-gateway.kdl` (`login "custom" hook="cloudflare-ai-gateway"`), implemented in `packages/ai/src/registry/oauth/cloudflare-ai-gateway.ts` (with transport in `packages/ai/src/registry/cloudflare-ai-gateway.ts`), prompting for a Cloudflare AI Gateway token/API key (`cf-aig-...`) and directing users to Cloudflare's authentication documentation.
 - **Environment Variable**: Reads API key credentials from `CLOUDFLARE_AI_GATEWAY_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`).
 - **Account & Gateway Resolution**: Uses `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic` as the base URL template where `<account>` and `<gateway>` placeholders are replaced with the user's Cloudflare account ID and gateway slug (`packages/catalog/src/provider-models/openai-compat.ts:cloudflareAiGatewayModelManagerOptions`).
 
@@ -740,7 +740,7 @@ CoreWeave Serverless Inference provides hosted AI model inference powered by Wei
 
 ### Auth & usage
 - **API Key & Environment Resolution**: Authenticates via `COREWEAVE_API_KEY`, falling back to `WANDB_API_KEY` (`descriptors.ts`, `getEnvApiKey` in `packages/ai/src/stream.ts`).
-- **Login Flow & Project Validation**: Interactive login is configured in `loginCoreWeave` (`packages/ai/src/registry/coreweave.ts`), referencing settings at `https://wandb.ai/settings`. `requireCoreWeaveProjectHeaders` enforces that a valid `OpenAI-Project` header can be constructed from environment variables before validating credentials against `https://api.inference.wandb.ai/v1/models`.
+- **Login Flow & Project Validation**: Interactive login is declared in `packages/catalog/src/compat/rules/auth/coreweave.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), referencing settings at `https://wandb.ai/settings`. `requireCoreWeaveProjectHeaders` (`packages/ai/src/registry/oauth/coreweave.ts`) enforces that a valid `OpenAI-Project` header can be constructed from environment variables before validating credentials against `https://api.inference.wandb.ai/v1/models`.
 
 ### Catalog model handling
 - **Descriptor Configuration**: Registered in `CATALOG_PROVIDERS` in `packages/catalog/src/provider-models/descriptors.ts` with ID `coreweave`, default model `openai/gpt-oss-120b`, and discovery label `"CoreWeave Serverless Inference"`.
@@ -756,7 +756,7 @@ The DeepSeek provider interfaces directly with DeepSeek's API (`https://api.deep
 - **Wire Parameters & Stream Watchdog**: Output token ceiling uses `max_tokens` (`maxTokensField: "max_tokens"`). Inter-event stream watchdog extends to 300 s (`DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS`) to allow for lengthy prefill/thinking delays. `supportsStrictMode: true` is enabled for function tools.
 
 ### Auth & usage
-- **API Key Normalization & Login**: `normalizeDeepSeekApiKey` in `packages/ai/src/registry/deepseek.ts` trims inputs and strips any leading `Bearer ` prefix (case-insensitive), throwing `ApiKeyRequiredError` if empty. Interactive `loginDeepSeek` wraps `onPrompt` with normalization and validates against `/v1/models`. Runtime credential relies on `DEEPSEEK_API_KEY`.
+- **API Key Normalization & Login**: Declared in `packages/catalog/src/compat/rules/auth/deepseek.kdl` as a `login "api-key"` rule with `normalize "strip-bearer"` (`packages/ai/src/registry/engine/api-key.ts`), trimming inputs and stripping any leading `Bearer ` prefix (case-insensitive) and validating against `/v1/models`. Runtime credential relies on `DEEPSEEK_API_KEY`.
 - **Prompt-Cache Usage Accounting**: DeepSeek returns top-level usage fields `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`. `calculateOpenAIUsageAccounting` (`packages/ai/src/providers/openai-shared.ts`) detects `isDeepSeekUsage`, mapping net input tokens to `Math.max(0, promptTokens - cachedTokens)` (the miss count) and setting `cacheWrite` to `0` to avoid double-charging uncached prompt tokens as explicit cache writes.
 
 ### Catalog model handling
@@ -772,8 +772,8 @@ Fire Pass is a Fireworks AI subscription tier providing dedicated high-throughpu
 - **Five-Tier Thinking Effort**: `getThinkingConfig` (`packages/catalog/src/model-thinking.ts`) maps `firepass` to `FIVE_TIER_EFFORTS_LOW_TO_MAX` (`low`, `medium`, `high`, `xhigh`, `max`).
 
 ### Auth & usage
-- **Authentication**: Defined in `packages/ai/src/registry/firepass.ts` (`firepassProvider`, `loginFirepass`) using environment variable `FIREPASS_API_KEY` (`fpk_...`).
-- **Validation**: Dedicated `fpk_...` keys only authorize the router endpoint and fail on `/v1/models`. `loginFirepass` uses `validation.kind: "chat-completions"` targeting `accounts/fireworks/routers/kimi-k2p6-turbo` directly.
+- **Authentication**: Defined in `packages/catalog/src/compat/rules/auth/firepass.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) using environment variable `FIREPASS_API_KEY` (`fpk_...`).
+- **Validation**: Dedicated `fpk_...` keys only authorize the router endpoint and fail on `/v1/models`. Validation in `packages/catalog/src/compat/rules/auth/firepass.kdl` uses `validate "chat-completions"` targeting `accounts/fireworks/routers/kimi-k2p6-turbo` directly.
 
 ### Catalog model handling
 - **Descriptor**: Registered in `packages/catalog/src/provider-models/descriptors.ts` (`id: "firepass"`, `defaultModel: "kimi-k2.6-turbo"`, `envVars: ["FIREPASS_API_KEY"]`).
@@ -781,7 +781,7 @@ Fire Pass is a Fireworks AI subscription tier providing dedicated high-throughpu
 - **Script Cleanups**: `dropFireworksWireIds` (`packages/catalog/scripts/generate-models.ts`) strips internal `accounts/fireworks/` wire IDs during catalog generation.
 
 ## Fireworks (`fireworks`)
-Fireworks (`packages/ai/src/registry/fireworks.ts`) is a high-throughput AI inference provider serving serverless and dedicated models via an OpenAI-compatible HTTP REST API (`https://api.fireworks.ai/inference/v1`). It uses the OpenAI Chat Completions transport (`streamOpenAICompletions` in `packages/ai/src/providers/openai-completions.ts`) with custom model ID wire translation, thinking parameter conflict resolution, and priority tier handling.
+Fireworks (`packages/catalog/src/compat/rules/auth/fireworks.kdl`) is a high-throughput AI inference provider serving serverless and dedicated models via an OpenAI-compatible HTTP REST API (`https://api.fireworks.ai/inference/v1`). It uses the OpenAI Chat Completions transport (`streamOpenAICompletions` in `packages/ai/src/providers/openai-completions.ts`) with custom model ID wire translation, thinking parameter conflict resolution, and priority tier handling.
 
 ### Special casings
 - **`wireModelIdMode: "fireworks"` & Wire Model ID Transformation**: `applyWireModelIdTransform` (`packages/ai/src/providers/openai-shared.ts`), enabled by `wireModelIdMode: "fireworks"` resolved in `packages/catalog/src/compat/openai.ts`, invokes `toFireworksWireModelId` (`packages/catalog/src/fireworks-model-id.ts`) to prefix public catalog model IDs with `accounts/fireworks/models/` and convert version dots to `p` (e.g., `glm-5.1` maps to `accounts/fireworks/models/glm-5p1`). Public catalog normalization uses `toFireworksPublicModelId`.
@@ -793,7 +793,7 @@ Fireworks (`packages/ai/src/registry/fireworks.ts`) is a high-throughput AI infe
 
 ### Auth & usage
 - **API Key Authentication**: Authenticates with HTTP Bearer tokens (`Authorization: Bearer ${apiKey}`) configured via `FIREWORKS_API_KEY` (resolved via `getEnvApiKey` in `packages/ai/src/stream.ts`).
-- **Control-Plane Login Validation**: `/login fireworks` (`loginFireworks` in `packages/ai/src/registry/fireworks.ts`) validates credentials against the static control-plane catalog `GET /v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1` rather than `/v1/models` (the inference endpoint serves per-account deployments and returns 500 for accounts without active deployments).
+- **Control-Plane Login Validation**: `/login fireworks` (declared in `packages/catalog/src/compat/rules/auth/fireworks.kdl` as a `login "api-key"` rule, `packages/ai/src/registry/engine/api-key.ts`) validates credentials against the static control-plane catalog `GET /v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1` rather than `/v1/models` (the inference endpoint serves per-account deployments and returns 500 for accounts without active deployments).
 - **Usage Accounting**: Token usage is processed via standard `openai-completions` accounting in `calculateOpenAIUsageAccounting` (`packages/ai/src/providers/openai-shared.ts`), extracting `prompt_tokens`, `completion_tokens`, `prompt_tokens_details.cached_tokens`, and `completion_tokens_details.reasoning_tokens`.
 
 ### Catalog model handling
@@ -807,9 +807,9 @@ Fireworks (`packages/ai/src/registry/fireworks.ts`) is a high-throughput AI infe
 GitHub Copilot routes multi-vendor model execution (OpenAI GPT, Anthropic Claude, xAI Grok, Google Gemini) through GitHub's unified proxy endpoints (`https://api.githubcopilot.com` or Enterprise `copilot-api.<domain>`). The provider dynamically dispatches across three wire transports: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages.
 
 ### Special casings
-- **Dynamic Copilot Headers & Initiator**: `buildCopilotDynamicHeaders` (`packages/ai/src/registry/github-copilot.ts`) injects per-request headers `X-Initiator` (`"user"` vs `"agent"` inferred from message history via `inferCopilotInitiator` or overridden via `getCopilotInitiatorOverride`), `Openai-Intent: conversation-edits`, and `Copilot-Vision-Request: true` when `hasCopilotVisionInput` detects image payloads in user or tool result blocks.
+- **Dynamic Copilot Headers & Initiator**: `buildCopilotDynamicHeaders` (`packages/ai/src/providers/github-copilot-headers.ts`) injects per-request headers `X-Initiator` (`"user"` vs `"agent"` inferred from message history via `inferCopilotInitiator` or overridden via `getCopilotInitiatorOverride`), `Openai-Intent: conversation-edits`, and `Copilot-Vision-Request: true` when `hasCopilotVisionInput` detects image payloads in user or tool result blocks.
 - **API Versioning & Wire Headers**: `COPILOT_API_HEADERS` (`packages/catalog/src/wire/github-copilot.ts`) mandates `User-Agent: opencode/1.3.15` (`COPILOT_USER_AGENT`) and `X-GitHub-Api-Version: 2026-06-01` (`COPILOT_API_VERSION`). `restorableHeaderFallback` in `packages/catalog/src/provider-models/openai-compat.ts` preserves static wire headers during offline cache rehydration.
-- **Base URL & Endpoint Resolution**: `resolveGitHubCopilotBaseUrl` (`packages/ai/src/registry/github-copilot.ts`) and `parseGitHubCopilotApiKey` (`packages/catalog/src/wire/github-copilot.ts`) parse custom `enterpriseUrl` and `apiEndpoint` properties embedded in API keys or credentials, defaulting to `https://api.githubcopilot.com` (`PERSONAL_GITHUB_COPILOT_BASE_URL`).
+- **Base URL & Endpoint Resolution**: `resolveGitHubCopilotBaseUrl` (`packages/ai/src/providers/github-copilot-headers.ts`) and `parseGitHubCopilotApiKey` (`packages/catalog/src/wire/github-copilot.ts`) parse custom `enterpriseUrl` and `apiEndpoint` properties embedded in API keys or credentials, defaulting to `https://api.githubcopilot.com` (`PERSONAL_GITHUB_COPILOT_BASE_URL`).
 - **OpenAI & Responses Compat Flags**:
   - `supportsReasoningParams`: Disabled (`supportsReasoningParams: provider !== "github-copilot"`) in `packages/catalog/src/compat/openai.ts` because Copilot Chat Completions endpoints reject `reasoning_effort` and reasoning fields with HTTP 400.
   - `supportsDeveloperRole`: Disabled for Chat Completions specs (`openai-compat.ts`) but enabled on OpenAI Responses specs.
@@ -821,7 +821,7 @@ GitHub Copilot routes multi-vendor model execution (OpenAI GPT, Anthropic Claude
 
 ### Auth & usage
 - **Device-Flow OAuth (`opencode` OAuth app)**:
-  - `loginGitHubCopilot` in `packages/ai/src/registry/oauth/github-copilot.ts` executes the GitHub Device Authorization Flow using client ID `Ov23li8tweQw6odWQebz` (`CLIENT_ID`) and scope `read:user`.
+  - Declared in `packages/catalog/src/compat/rules/auth/github-copilot.kdl` (`login "custom" hook="github-copilot"`), `loginGitHubCopilotHook` in `packages/ai/src/registry/oauth/github-copilot.ts` executes the GitHub Device Authorization Flow using client ID `Ov23li8tweQw6odWQebz` (`CLIENT_ID`) and scope `read:user`.
   - `startDeviceFlow` posts to `https://<domain>/login/device/code` with `OPENCODE_HEADERS`. `pollForGitHubAccessToken` polls `https://<domain>/login/oauth/access_token`, automatically handling `authorization_pending` and `slow_down` rate-limit backoffs.
   - Post-login, `discoverGitHubCopilotApiEndpoint` queries `https://api.github.com/copilot_internal/user`, and `enableAllGitHubCopilotModels` issues model enablement requests (`POST /models/{modelId}/policy` with `{ state: "enabled" }` and `openai-intent: chat-policy`).
 - **Token Exchange & Refresh**:
@@ -829,7 +829,7 @@ GitHub Copilot routes multi-vendor model execution (OpenAI GPT, Anthropic Claude
 - **Usage & Quota Accounting**:
   - `fetchInternalUsage` in `packages/ai/src/usage/github-copilot.ts` queries `GET /copilot_internal/user` on `resolveGitHubApiBaseUrl` with `OPENCODE_HEADERS`.
   - `normalizeQuotaSnapshots` and `buildLimitFromQuota` convert `quota_snapshots` (`chat`, `completions`, `premium_interactions`) and `quota_reset_date` into monthly `UsageLimit` structures (`copilot:premium`, `copilot:chat`, `copilot:completions`). `fetchBillingUsage` provides supplementary user billing details (`/settings/billing/premium_request/usage`).
-  - `getCopilotPremiumRequests` (`packages/ai/src/registry/github-copilot.ts`) calculates model premium request cost: `0` for agent turns (`initiator === "agent"`), or `getCopilotPremiumMultiplier(premiumMultiplier, planTier)` for user turns.
+  - `getCopilotPremiumRequests` (`packages/ai/src/providers/github-copilot-headers.ts`) calculates model premium request cost: `0` for agent turns (`initiator === "agent"`), or `getCopilotPremiumMultiplier(premiumMultiplier, planTier)` for user turns.
 
 ### Catalog model handling
 - **Descriptor & Management**: Registered as `github-copilot` descriptor in `PROVIDER_DESCRIPTORS` (`packages/catalog/src/provider-models/descriptors.ts`) with `defaultModel: "gpt-5.5"` and env var `COPILOT_GITHUB_TOKEN`. Options constructed via `githubCopilotModelManagerOptions`.
@@ -848,9 +848,9 @@ GitHub Copilot routes multi-vendor model execution (OpenAI GPT, Anthropic Claude
 - **Delegated Stream Dispatch:** `streamGitLabDuo` in `packages/ai/src/providers/gitlab-duo.ts` validates the user token (`MissingApiKeyError`), fetches direct access headers, translates Anthropic tool choice via `mapAnthropicToolChoice` (`packages/ai/src/stream.ts`), and dispatches to `streamAnthropic`, `streamOpenAICompletions`, or `streamOpenAIResponses` (`packages/ai/src/providers/register-builtins.ts`) using synthesized model specs (`buildModel`).
 
 ### Auth & usage
-- **PAT & OAuth Support:** `gitlabDuoProvider` in `packages/ai/src/registry/gitlab-duo.ts` supports Personal Access Tokens via `GITLAB_TOKEN` or PKCE browser OAuth via `loginGitLabDuo` in `packages/ai/src/registry/oauth/gitlab-duo.ts`.
-- **OAuth Authorization & Client ID:** `GitLabDuoOAuthFlow` in `packages/ai/src/registry/oauth/gitlab-duo.ts` executes PKCE OAuth against `https://gitlab.com/oauth/authorize` (`scope: "api"`, `callbackPort: 8080`, `pasteCodeFlow: true`). Uses `DEFAULT_CLIENT_ID` (`"da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b"`), overrideable via `GITLAB_CLIENT_ID` (`resolveClientId`) and `GITLAB_REDIRECT_URI` (`resolveCallbackOptions`).
-- **Token Refresh & Cache Invalidation:** `refreshGitLabDuoToken` in `packages/ai/src/registry/oauth/gitlab-duo.ts` exchanges refresh tokens at `https://gitlab.com/oauth/token`. Both exchange and refresh clear cached direct access tokens via `clearGitLabDuoDirectAccessCache` (`packages/ai/src/providers/gitlab-duo.ts`).
+- **PAT & OAuth Support:** Declared in `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl` (`login "oauth-code"`, engine `packages/ai/src/registry/engine/oauth-code.ts`) with cache-clearing hook in `packages/ai/src/registry/oauth/gitlab-duo.ts`, supporting Personal Access Tokens via `GITLAB_TOKEN` or PKCE browser OAuth.
+- **OAuth Authorization & Client ID:** Declared in `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl`, executing PKCE OAuth against `https://gitlab.com/oauth/authorize` (`scope: "api"`, `callbackPort: 8080`, `pasteCodeFlow: true`). Uses `client-id` (`"da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b"`), overrideable via `GITLAB_CLIENT_ID` (`env="GITLAB_CLIENT_ID"`) and `GITLAB_REDIRECT_URI` (`redirect-uri-env="GITLAB_REDIRECT_URI"`).
+- **Token Refresh & Cache Invalidation:** Token refresh in `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl` exchanges refresh tokens at `https://gitlab.com/oauth/token`. Both exchange and refresh clear cached direct access tokens via `gitLabDuoClearCacheHook` (`packages/ai/src/registry/oauth/gitlab-duo.ts`, calling `clearGitLabDuoDirectAccessCache` in `packages/ai/src/providers/gitlab-duo.ts`).
 - **Usage Surface:** Nothing beyond the [GitLab Duo](#gitlab-duo) pipeline.
 
 ### Catalog model handling
@@ -868,8 +868,8 @@ The `gitlab-duo-agent` provider connects OMP to the GitLab Duo Workflow Service 
 - **WebSocket Action Bridge**: Tool definitions are converted into MCP format (`buildGitLabDuoWorkflowMcpTools`) in `startRequest.mcpTools`. Incoming `runMCPTool`/`run_mcp_tool` actions over the WebSocket are extracted (`extractGitLabDuoWorkflowAction`), executed locally, and returned via `buildGitLabDuoWorkflowActionResponse`.
 
 ### Auth & usage
-- **Registry & Credential Resolution**: Provider definition `gitLabDuoWorkflowProvider` (`packages/ai/src/registry/gitlab-duo-workflow.ts`) requires `GITLAB_TOKEN` (PAT or OAuth token).
-- **OAuth PKCE & Official Client ID**: Browser authentication (`loginGitLabDuoWorkflow` in `packages/ai/src/registry/oauth/gitlab-duo-workflow.ts`) uses S256 PKCE with `pasteCodeFlow: true` on callback port 8080. It uses official GitLab VS Code client ID `GITLAB_DUO_WORKFLOW_OAUTH_CLIENT_ID` (`36f2a70cddeb5a0889d4fd8295c241b7e9848e89cf9e599d0eed2d8e5350fbf5`) and redirect URI `vscode://gitlab.gitlab-workflow/authentication`, supporting manual callback URL pasting if VS Code intercepts the redirect. Token refresh uses `refreshGitLabDuoWorkflowToken`.
+- **Registry & Credential Resolution**: Declared in `packages/catalog/src/compat/rules/auth/gitlab-duo-agent.kdl`, requiring `GITLAB_TOKEN` (PAT or OAuth token via `env "GITLAB_TOKEN"`).
+- **OAuth PKCE & Official Client ID**: Browser authentication declared in `packages/catalog/src/compat/rules/auth/gitlab-duo-agent.kdl` (`login "oauth-code"`, engine `packages/ai/src/registry/engine/oauth-code.ts`) uses S256 PKCE with `manual-only=#true` on `vscode://gitlab.gitlab-workflow/authentication`. It uses official GitLab VS Code client ID (`36f2a70cddeb5a0889d4fd8295c241b7e9848e89cf9e599d0eed2d8e5350fbf5`), supporting manual callback URL pasting if VS Code intercepts the redirect. Token refresh is declared under `refresh` in the KDL rule (`packages/ai/src/registry/engine/refresh.ts`).
 - **Direct Access Tokens**: Requests ephemeral credentials via `POST /api/v4/ai/duo_workflows/direct_access` (`requestGitLabDuoWorkflowDirectAccess` in `packages/ai/src/providers/gitlab-duo-workflow.ts`). No dedicated usage module exists under `packages/ai/src/usage/`.
 - **Context Telemetry Usage**: `extractGitLabDuoWorkflowContextUsage` extracts checkpoint telemetry (`agent_context_usage`), prioritizing `"Chat Agent"` and `"context_builder"` entries, and updates token estimates via `applyGitLabDuoWorkflowContextUsage`.
 
@@ -887,9 +887,9 @@ GMI Cloud is an AI GPU infrastructure and cloud model inference provider hosting
 - Nothing beyond the OpenAI Chat Completions pipeline.
 
 ### Auth & usage
-- **API Key Login & Validation**: `loginGmiCloud` (`packages/ai/src/registry/gmi-cloud.ts`) implements interactive API key authentication via `createApiKeyLogin`, pointing users to `https://console.gmicloud.ai`. Key validation uses `kind: "models-endpoint"` hitting `https://api.gmi-serving.com/v1/models` through `validateOpenAICompatibleApiKey` (`packages/ai/src/registry/api-key-validation.ts`).
+- **API Key Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/gmi-cloud.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), pointing users to `https://console.gmicloud.ai`. Key validation uses `kind: "models-endpoint"` hitting `https://api.gmi-serving.com/v1/models`.
 - **Environment Variables**: Primary credential resolution inspects `GMI_API_KEY` (`envVars` in `packages/catalog/src/provider-models/descriptors.ts`).
-- **Provider Registry**: `gmiCloudProvider` (`packages/ai/src/registry/gmi-cloud.ts`) is exported in `packages/ai/src/registry/registry.ts` within the provider definitions array.
+- **Provider Registry**: Compiled into `packages/ai/src/registry/registry.ts` from `packages/catalog/src/compat/rules/auth/gmi-cloud.kdl` via `packages/ai/src/registry/build.ts`.
 
 ### Catalog model handling
 - **Descriptor & Gateway Options**: Registered in `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`) with `id: "gmi-cloud"`, `defaultModel: "deepseek-ai/DeepSeek-V4-Flash"`, and `dynamicModelsAuthoritative: true`. Gateway options are created by `gmiCloudModelManagerOptions` wrapping `createSimpleOpenAICompletionsOptions` with `GMI_CLOUD_BASE_URL` (`https://api.gmi-serving.com/v1`) (`packages/catalog/src/provider-models/openai-compat.ts`).
@@ -905,7 +905,7 @@ The Google Antigravity provider (`google-antigravity`) routes requests to Google
 - **Endpoint Auto-Failover**: Operates across `ANTIGRAVITY_DAILY_ENDPOINT` (`https://daily-cloudcode-pa.googleapis.com`) and `ANTIGRAVITY_SANDBOX_ENDPOINT` (`https://daily-cloudcode-pa.sandbox.googleapis.com`) with state-tracked fallback in `getAntigravityProviderSessionState` (`packages/ai/src/providers/google-gemini-cli.ts`).
 
 ### Auth & usage
-- **Dedicated OAuth Flow**: `loginAntigravity` and `refreshAntigravityToken` (`packages/ai/src/registry/oauth/google-antigravity.ts`) execute an independent OAuth flow with distinct client credentials and callback port 51121. Project discovery mirrors native `antigravity/hub`: exact-200 `loadCodeAssist` calls use `ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA`, free-tier eligibility is honored, missing tiers trigger one `onboardUser` request plus 1s operation polling under a 30s deadline, and a final load refresh supplies `cloudaicompanionProject`.
+- **Dedicated OAuth Flow**: Declared in `packages/catalog/src/compat/rules/auth/google-antigravity.kdl` (`login "oauth-code"` rule, `packages/ai/src/registry/engine/oauth-code.ts`) with project discovery hook in `packages/ai/src/registry/oauth/google-antigravity.ts` (`googleAntigravityProjectHook`), executing an independent OAuth flow with distinct client credentials and callback port 51121. Project discovery mirrors native `antigravity/hub`: exact-200 `loadCodeAssist` calls use `ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA`, free-tier eligibility is honored, missing tiers trigger one `onboardUser` request plus 1s operation polling under a 30s deadline, and a final load refresh supplies `cloudaicompanionProject`.
 - **Model-Family Credential Ranking**: `antigravityRankingStrategy` (`packages/ai/src/usage/google-antigravity.ts`) scopes usage limits by model family (`scopeAntigravityLimitsForModel` via `getAntigravityCounterKeyForModel`: `anthropic` for `claude-`, `google` for `gemini-`/`gemma-`, `openai` for `gpt-`/`openai/`). This prevents quota exhaustion on one counter (e.g. Gemini) from blocking multi-account credential selection for another family (e.g. Claude).
 
 ### Catalog model handling
@@ -922,7 +922,7 @@ Google Cloud Code Assist (Gemini CLI) (`google-gemini-cli`) is Google's OAuth-au
 - Standard request pipeline: Nothing beyond the Google Gemini CLI / Antigravity transport pipeline.
 
 ### Auth & usage
-- **OAuth Installed-App Flow**: Authorizes via Google PKCE OAuth 2.0 (`loginGeminiCli` in `packages/ai/src/registry/oauth/google-gemini-cli.ts`) on callback port `8085` (`/oauth2callback`) requesting Google Cloud scopes (`cloud-platform`, `userinfo.email`, `userinfo.profile`). Refresh is handled via `refreshGoogleCloudToken` (`packages/ai/src/registry/oauth/google-gemini-cli.ts`).
+- **OAuth Installed-App Flow**: Authorizes via Google PKCE OAuth 2.0 declared in `packages/catalog/src/compat/rules/auth/google-gemini-cli.kdl` (`login "oauth-code"`, engine `packages/ai/src/registry/engine/oauth-code.ts`) on callback port `8085` (`/oauth2callback`) requesting Google Cloud scopes (`cloud-platform`, `userinfo.email`, `userinfo.profile`). Refresh is declared under `refresh` (`packages/ai/src/registry/engine/refresh.ts`) with project hook in `packages/ai/src/registry/oauth/google-gemini-cli.ts`.
 - **Project Discovery & Onboarding**: `discoverProject` (`packages/ai/src/registry/oauth/google-gemini-cli.ts`) checks existing projects via `POST /v1internal:loadCodeAssist` with `$GOOGLE_CLOUD_PROJECT` / `$GOOGLE_CLOUD_PROJECT_ID` fallback. Non-free tiers (`legacy-tier`, `standard-tier`) or new accounts call `POST /v1internal:onboardUser` with `tierId` (`free-tier`, `legacy-tier`, `standard-tier`) and poll `pollOperation` (up to `POLL_MAX_ATTEMPTS = 24` at 5s intervals). Detects VPC-SC restrictions (`isVpcScAffectedUser` checking `SECURITY_POLICY_VIOLATED`).
 - **Quota & Usage Provider**: `googleGeminiCliUsageProvider` (`packages/ai/src/usage/gemini.ts`) posts to `loadCodeAssist` and `retrieveUserQuota` (`/v1internal:retrieveUserQuota`), mapping remaining bucket fractions into usage percentages grouped by model tier (`3-Flash`, `Flash`, `Pro` via `getModelTier`).
 
@@ -941,7 +941,7 @@ Groq provides high-speed LLM inference powered by custom LPU hardware for open-w
 
 ### Auth & usage
 - **Auth**: Authenticates via `GROQ_API_KEY` environment variable (`packages/catalog/src/provider-models/descriptors.ts`).
-- **Provider Registry**: Registered as `groqProvider` (`packages/ai/src/registry/groq.ts`).
+- **Provider Registry**: Declared in `packages/catalog/src/compat/rules/auth/groq.kdl` and compiled into `packages/ai/src/registry/registry.ts`.
 - **Priority**: Listed 19th in provider priority ordering (`packages/catalog/src/identity/priority.ts`).
 
 ### Catalog model handling
@@ -957,9 +957,9 @@ Hugging Face Inference provides access to open-source model serverless endpoints
 
 ### Auth & usage
 - **Environment Fallbacks**: Environment variable resolution in `getEnvApiKey` (`packages/ai/src/stream.ts`) consults `envVars` from `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`), checking `HUGGINGFACE_HUB_TOKEN` first, followed by `HF_TOKEN`.
-- **Interactive CLI Login**: `loginHuggingface` in `packages/ai/src/registry/huggingface.ts` uses `createApiKeyLogin` (`packages/ai/src/registry/api-key-login.ts`) to prompt for fine-grained user access tokens (placeholder `hf_...`).
-- **Fine-Grained Token Permission**: Auth setup directs users to `https://huggingface.co/settings/tokens/new?ownUserPermissions=inference.serverless.write&tokenType=fineGrained` (`AUTH_URL` in `packages/ai/src/registry/huggingface.ts`), which automatically selects fine-grained tokens with the required "Make calls to Inference Providers" permission (`inference.serverless.write`).
-- **Credential Validation**: `loginHuggingface` validates API keys using lightweight chat completion requests to base URL `https://router.huggingface.co/v1` (`API_BASE_URL`) against validation model `openai/gpt-oss-120b` (`VALIDATION_MODEL` in `packages/ai/src/registry/huggingface.ts`).
+- **Interactive CLI Login**: Declared in `packages/catalog/src/compat/rules/auth/huggingface.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) to prompt for fine-grained user access tokens (placeholder `hf_...`).
+- **Fine-Grained Token Permission**: Auth setup directs users to `https://huggingface.co/settings/tokens/new?ownUserPermissions=inference.serverless.write&tokenType=fineGrained` (`AUTH_URL` in `packages/catalog/src/compat/rules/auth/huggingface.kdl`), which automatically selects fine-grained tokens with the required "Make calls to Inference Providers" permission (`inference.serverless.write`).
+- **Credential Validation**: Declared in `packages/catalog/src/compat/rules/auth/huggingface.kdl`, validating API keys using lightweight chat completion requests (`validate "chat-completions"`) to base URL `https://router.huggingface.co/v1` against validation model `openai/gpt-oss-120b`.
 
 ### Catalog model handling
 - **Provider Descriptor**: Registered in `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`) with `id: "huggingface"`, `defaultModel: "deepseek-ai/DeepSeek-R1"`, environment fallbacks `envVars: ["HUGGINGFACE_HUB_TOKEN", "HF_TOKEN"]`, and `catalogDiscovery: { label: "Hugging Face" }`.
@@ -971,7 +971,7 @@ Hugging Face Inference provides access to open-source model serverless endpoints
 Kilo Gateway (`kilo`) is an AI model aggregator and proxy service (`https://api.kilo.ai/api/gateway`) using the OpenAI Chat Completions transport (`api: "openai-completions"`). It supports authentication via `KILO_API_KEY` or device-code OAuth flow (`/login kilo`), and allows unauthenticated dynamic model discovery from its OpenAI-compatible `/models` catalog endpoint.
 
 ### Special casings
-- **Device-Code OAuth Authentication**: `loginKilo` in `packages/ai/src/registry/kilo.ts` initiates device authorization via `POST https://api.kilo.ai/api/device-auth/codes`, returning a user `code`, `verificationUrl`, and `expiresIn` seconds. It displays instructions via `callbacks.onAuth` and polls `GET https://api.kilo.ai/api/device-auth/codes/<userCode>` every 5,000ms until expiration. Handles HTTP 202 (pending), 403/410 (denied/expired), and rate limiting (HTTP 429), returning access tokens with 1-year expiration upon approval (`pollData.status === "approved"`). Supports cancellation via `callbacks.signal`.
+- **Device-Code OAuth Authentication**: Declared in `packages/catalog/src/compat/rules/auth/kilo.kdl` (`login "custom" hook="kilo"`) and implemented in `packages/ai/src/registry/oauth/kilo.ts` (`loginKilo`), initiating device authorization via `POST https://api.kilo.ai/api/device-auth/codes`, returning a user `code`, `verificationUrl`, and `expiresIn` seconds. It displays instructions via `callbacks.onAuth` and polls `GET https://api.kilo.ai/api/device-auth/codes/<userCode>` every 5,000ms until expiration. Handles HTTP 202 (pending), 403/410 (denied/expired), and rate limiting (HTTP 429), returning access tokens with 1-year expiration upon approval (`pollData.status === "approved"`). Supports cancellation via `callbacks.signal`.
 - **Non-Standard Host Classification**: `modelMatchesHost(hostModel, "kilo")` sets `isKilo` in `packages/catalog/src/compat/openai.ts`, placing Kilo among non-standard OpenAI-compatible providers (`isNonStandard`) to govern transport compatibility behavior.
 - **Host URL Matching**: Host mapping in `packages/catalog/src/hosts.ts` associates URL marker `api.kilo.ai` with provider `"kilo"`.
 - **Provider Priority**: Included in `packages/catalog/src/identity/priority.ts` provider priority sequence (`"opencode-go"`, `"kilo"`, `"vercel-ai-gateway"`).
@@ -995,7 +995,7 @@ Kimi Code provides subscription-backed access to Kimi models (`kimi-for-coding`,
 - **Reasoning Guard**: `stream.ts:1214` checks `isKimiModel` before execution, disabling unsupported reasoning configurations on K3 (`packages/ai/src/providers/openai-completions.ts:1454`).
 
 ### Auth & usage
-- **Device OAuth Flow**: `kimiCodeProvider` (`packages/ai/src/registry/kimi-code.ts`) lazy-loads `loginKimi` and `refreshKimiToken` (`packages/ai/src/registry/oauth/kimi.ts`). Uses OAuth 2.0 Device Code Authorization (`CLIENT_ID` `17e5f671-d194-4dfb-9706-5516cb48c098`) against `${resolveOAuthHost()}` (`https://auth.kimi.com`, overrideable via `KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST`).
+- **Device OAuth Flow**: Declared in `packages/catalog/src/compat/rules/auth/kimi-code.kdl` as a `login "device-code"` rule (`packages/ai/src/registry/engine/device-code.ts`) with headers hook in `packages/ai/src/registry/oauth/kimi.ts`. Uses OAuth 2.0 Device Code Authorization (`client-id` `17e5f671-d194-4dfb-9706-5516cb48c098`) against base URL `https://auth.kimi.com` (overrideable via `KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST`).
 - **Fingerprinting & Device Persistence**: `getKimiCommonHeaders()` injects tracking headers (`User-Agent: KimiCLI/<ver>`, `X-Msh-Platform`, `X-Msh-Version`, `X-Msh-Device-Name`, `X-Msh-Device-Model`, `X-Msh-Os-Version`, `X-Msh-Device-Id`). `getDeviceId` persists a random hex UUID to `path.join(getAgentDir(), "kimi-device-id")` (mode `0600`), falling back to an in-memory ephemeral UUID if file writing fails.
 - **Usage & Quota Tracker**: `kimiUsageProvider` (`packages/ai/src/usage/kimi.ts`) fetches `GET /coding/v1/usages` (`https://api.kimi.com/coding/v1/usages`, configurable via `KIMI_CODE_BASE_URL`) for OAuth credentials. Short-circuits when tokens are expired (`credential.expiresAt <= nowMs`). Parses `usage` and `limits` into `UsageLimit` entries, carrying row-level reset timestamps (`reset_at`, `resetTime`, `ttl`) to the window object when window reset time is absent.
 
@@ -1016,8 +1016,8 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Telemetry & gateway header detection (`packages/agent/src/telemetry.ts`, `packages/ai/src/auth-gateway/http.ts`)**: `detectGatewayFromHeaders` inspects `x-litellm-call-id` (falling back to `x-litellm-model-id` or `x-litellm-model-group`) to populate `pi.gen_ai.gateway.*` span attributes. Auth gateway HTTP endpoints expose `x-litellm-model-id`, `x-litellm-model-api-base`, `x-litellm-response-cost`, and `x-litellm-response-duration-ms`.
 
 ### Auth & usage
-- **Credentials & env (`packages/catalog/src/provider-models/descriptors.ts`, `packages/ai/src/registry/litellm.ts`)**: Authenticates via `LITELLM_API_KEY`.
-- **Login onboarding (`packages/ai/src/registry/litellm.ts`)**: `loginLiteLLM` (via `createApiKeyLogin`) directs users to setup docs (`https://docs.litellm.ai/docs/proxy/deploy`), prompts for master/virtual keys (`sk-...`), and notes `LITELLM_BASE_URL` for custom proxy endpoints. CLI `login` delegates to `SqliteAuthCredentialStore.login()`.
+- **Credentials & env (`packages/catalog/src/provider-models/descriptors.ts`, `packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Authenticates via `LITELLM_API_KEY`.
+- **Login onboarding (`packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Declared as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users to setup docs (`https://docs.litellm.ai/docs/proxy/deploy`), prompting for master/virtual keys (`sk-...`), and noting `LITELLM_BASE_URL` for custom proxy endpoints. CLI `login` delegates to `SqliteAuthCredentialStore.login()`.
 - **Default base URL (`packages/catalog/src/provider-models/cache-provider-id.ts`)**: Resolves to `Bun.env.LITELLM_BASE_URL` or `http://localhost:4000/v1`.
 
 ### Catalog model handling
@@ -1039,8 +1039,8 @@ LM Studio is a local OpenAI-compatible model server running on user hardware (de
 - **Watchdog Timeout Floors**: Configures `streamFirstEventTimeoutMs: 0` (`packages/catalog/src/compat/openai.ts`) to disable the pre-response first-event watchdog during long local model cold-loads or prompt prefills, and sets `streamIdleTimeoutMs: 300_000` (300s inter-event floor; see [Provider compat reference](./provider-compat-reference.md)) to prevent stream cancellation during slow token generation.
 
 ### Auth & usage
-- **Keyless Local Auth**: Defined as a keyless provider (`lmStudioProvider` in `packages/ai/src/registry/lm-studio.ts`, `allowUnauthenticated: true` in `packages/catalog/src/provider-models/descriptors.ts`). Uses `DEFAULT_LOCAL_TOKEN = "lm-studio-local"` when `LM_STUDIO_API_KEY` is not provided.
-- **Endpoint & Credentials**: Base URL defaults to `http://127.0.0.1:1234/v1` or `LM_STUDIO_BASE_URL`. Interactive CLI login uses `loginLmStudio` (`createApiKeyLogin` in `packages/ai/src/registry/lm-studio.ts`).
+- **Keyless Local Auth**: Defined as a keyless provider in `packages/catalog/src/compat/rules/auth/lm-studio.kdl` (`empty-fallback "lm-studio-local"`, `allowUnauthenticated: true` in `packages/catalog/src/provider-models/descriptors.ts`). Uses placeholder `"lm-studio-local"` when `LM_STUDIO_API_KEY` is not provided.
+- **Endpoint & Credentials**: Base URL defaults to `http://127.0.0.1:1234/v1` or `LM_STUDIO_BASE_URL`. Interactive CLI login is declared in `packages/catalog/src/compat/rules/auth/lm-studio.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`).
 - **Usage Accounting**: Employs standard OpenAI Chat Completions usage accounting (`calculateOpenAIUsageAccounting` in `packages/ai/src/providers/openai-shared.ts`).
 
 ### Catalog model handling
@@ -1055,7 +1055,7 @@ Meta Model API is Meta's commercial API platform hosting first-party models such
 - **Output Token Clamp Bypass**: `resolveOpenAIResponsesOutputClamp` (`packages/ai/src/providers/openai-shared.ts`) checks `model.provider === "meta"` to allow Meta requests to output up to `model.maxTokens` (131,072 tokens) rather than being restricted by the default 64,000 token ceiling (`OPENAI_MAX_OUTPUT_TOKENS`).
 
 ### Auth & usage
-- **API Key Login**: Configured via `loginMeta` / `metaProvider` (`packages/ai/src/registry/meta.ts`) using `createApiKeyLogin` with dashboard URL `https://developer.meta.com/ai/`. Validation issues a GET request to `https://api.meta.ai/v1/models`.
+- **API Key Login**: Declared in `packages/catalog/src/compat/rules/auth/meta.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) with dashboard URL `https://developer.meta.com/ai/`. Validation issues a GET request to `https://api.meta.ai/v1/models` (`validate "models-endpoint"`).
 - **Environment Variables**: Key resolution checks `MODEL_API_KEY` first, falling back to `META_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`).
 
 ### Catalog model handling
@@ -1079,7 +1079,7 @@ MiniMax provides foundation models (including MiniMax-M3 and M2 generation) acce
 
 ### Auth & usage
 - **Auth keys**: Uses `MINIMAX_API_KEY` (`minimax`), `MINIMAX_CODE_API_KEY` (`minimax-code`), and `MINIMAX_CODE_CN_API_KEY` (`minimax-code-cn`) declared in `packages/catalog/src/provider-models/descriptors.ts`.
-- **Token Plan login**: `loginMiniMaxCode` and `loginMiniMaxCodeCn` in `packages/ai/src/registry/oauth/minimax-code.ts` drive browser login flows to `platform.minimax.io` (international) and `platform.minimaxi.com` (China) to prompt and validate API key setup against model `MiniMax-M3`.
+- **Token Plan login**: Declared in `packages/catalog/src/compat/rules/auth/minimax-code.kdl` and `minimax-code-cn.kdl` as `login "api-key"` rules (`packages/ai/src/registry/engine/api-key.ts`), driving prompts linking to `https://platform.minimax.io/subscribe/token-plan` (international) and `https://platform.minimaxi.com/subscribe/token-plan` (China) and validating API key setup against model `MiniMax-M3`.
 - **Usage quota**: `minimaxCodeUsageProvider` in `packages/ai/src/usage/minimax-code.ts` polls `GET /v1/token_plan/remains` at `https://api.minimax.io` (or China equivalent), parsing rolling interval and weekly usage windows per plan bucket into remaining percentages for `omp usage`.
 
 ### Catalog model handling
@@ -1097,7 +1097,7 @@ The MiniMax Token Plan provider (`minimax-code`, alongside its mainland China re
 - **Compat Flag Restrictions**: OpenAI compatibility policy explicitly disables `store`, developer system roles, and reasoning effort controls (`supportsStore: false`, `supportsDeveloperRole: false`, `supportsReasoningEffort: false` in `packages/catalog/src/provider-models/openai-compat.ts`).
 
 ### Auth & usage
-- **Interactive Subscription Login Flow**: Implemented via `createApiKeyLogin` in `packages/ai/src/registry/oauth/minimax-code.ts` (lazy-loaded by `packages/ai/src/registry/minimax-code.ts` and `minimax-code-cn.ts`). Despite residing under `oauth/`, this is an interactive API key prompt rather than OAuth PKCE: it opens the regional subscription portal (`https://platform.minimax.io/subscribe/token-plan` for international, `https://platform.minimaxi.com/subscribe/token-plan` for China), prompts for key entry (`sk-...`), and validates the key via a `POST /v1/chat/completions` request using `MiniMax-M3`.
+- **Interactive Subscription Login Flow**: Declared in `packages/catalog/src/compat/rules/auth/minimax-code.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`). This is an interactive API key prompt: it directs to the subscription portal (`https://platform.minimax.io/subscribe/token-plan`), prompts for key entry (`sk-...`), and validates the key via a `POST /v1/chat/completions` request (`validate "chat-completions"`) using `MiniMax-M3`.
 - **Environment Variables**: Resolves credentials from `MINIMAX_CODE_API_KEY` for international `minimax-code` and `MINIMAX_CODE_CN_API_KEY` for China `minimax-code-cn` (plain `minimax` resolves `MINIMAX_API_KEY` / `MINIMAX_CN_API_KEY`).
 - **Token Plan Quota Tracking**: `minimaxCodeUsageProvider` in `packages/ai/src/usage/minimax-code.ts` queries `GET /v1/token_plan/remains` with `Authorization: Bearer ${apiKey}`.
 - **Quota Metric Parsing & Normalization**: Parses `model_remains[]` entries into rolling interval windows (`current_interval_*`) and 7-day windows (`current_weekly_*`). The shared plan quota `general` is scoped as `{ shared: true }`. Calculates `usedFraction` via `(100 - remainingPercent) / 100` and overrides status if `current_*_status === 2` (`STATUS_EXHAUSTED`). Out-of-plan models (status 3 `STATUS_UNLIMITED` with zero totals) are filtered out into `metadata.unavailableModels`. Validates success via `base_resp.status_code === 0` to catch API errors returned under HTTP 200 responses.
@@ -1117,7 +1117,7 @@ MiniMax Token Plan (China) provides access to MiniMax models for mainland China 
 - **Unsupported Feature Stripping**: Requests omit unsupported thinking options (`test/issue-955-repro.test.ts`) and apply static compatibility overrides in `packages/catalog/src/provider-models/openai-compat.ts` (`supportsStore: false`, `supportsDeveloperRole: false`, `supportsReasoningEffort: false`, `reasoningContentField: "reasoning_content"`).
 
 ### Auth & usage
-- **API Key & Interactive Login**: Authenticates via `MINIMAX_CODE_CN_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`). Interactive login (`loginMiniMaxCodeCn` in `packages/ai/src/registry/oauth/minimax-code.ts`) opens `https://platform.minimaxi.com/subscribe/token-plan` and validates the pasted key via a `MiniMax-M3` completions check against `https://api.minimaxi.com/v1`.
+- **API Key & Interactive Login**: Authenticates via `MINIMAX_CODE_CN_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts`). Interactive login declared in `packages/catalog/src/compat/rules/auth/minimax-code-cn.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) points to `https://platform.minimaxi.com/subscribe/token-plan` and validates the pasted key via a `MiniMax-M3` completions check against `https://api.minimaxi.com/v1`.
 - **Endpoints & Host Detection**: API requests target `https://api.minimaxi.com/v1` (`packages/catalog/src/models.json`). `urlMarkers` includes `api.minimaxi.com` under the `minimax` host classification in `packages/catalog/src/hosts.ts`.
 - **Usage Telemetry Availability**: Unlike `minimax-code` (which fetches quota remaining percentages from `https://api.minimax.io/v1/token_plan/remains` via `minimaxCodeUsageProvider` in `packages/ai/src/usage/minimax-code.ts`), `minimax-code-cn` has no usage provider registered (`storage.usageProviderFor("minimax-code-cn")` returns `undefined` in `packages/ai/src/auth-storage.ts` and `test/minimax-token-plan-usage.test.ts`), so usage telemetry is disabled for China regional accounts.
 
@@ -1158,8 +1158,8 @@ Moonshot is the pay-as-you-go open platform provider for Moonshot AI endpoints (
 - **Reasoning Content Replay Requirement**: `requiresReasoningContentForToolCalls` (`packages/catalog/src/compat/openai.ts`) forces tool-call continuation turns to replay prior `reasoning_content` (or a synthetic placeholder `.`), preventing Moonshot from aborting or re-deriving reasoning from scratch.
 
 ### Auth & usage
-- **API-Key Authentication**: `loginMoonshot` (`packages/ai/src/registry/moonshot.ts`) uses `createApiKeyLogin` pointing users to dashboard `https://platform.moonshot.ai/console/api-keys`.
-- **Endpoint Validation**: `resolveMoonshotModelsUrl` (`packages/ai/src/registry/moonshot.ts`) validates keys via `GET ${MOONSHOT_BASE_URL || "https://api.moonshot.ai/v1"}/models` (`kind: "models-endpoint"`).
+- **API-Key Authentication**: Declared in `packages/catalog/src/compat/rules/auth/moonshot.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) pointing users to dashboard `https://platform.moonshot.ai/console/api-keys`.
+- **Endpoint Validation**: Validates keys via `GET ${MOONSHOT_BASE_URL || "https://api.moonshot.ai/v1"}/models` (`validate "models-endpoint"` in `packages/catalog/src/compat/rules/auth/moonshot.kdl` with `base-url-env="MOONSHOT_BASE_URL"`).
 - **Environment Variable Resolution**: `envVars: ["MOONSHOT_API_KEY", "KIMI_API_KEY"]` in `packages/catalog/src/provider-models/descriptors.ts` accepts `KIMI_API_KEY` as a fallback for mainland China users who configure Kimi keys without `MOONSHOT_API_KEY` (issue #2883).
 - **No Dedicated Usage Tracker**: Token usage is returned directly in OpenAI stream chunk `usage` objects in `openai-completions`; no separate usage API or file exists in `packages/ai/src/usage/`.
 
@@ -1181,7 +1181,7 @@ NanoGPT is a pay-per-token API gateway exposing diverse open-weights and commerc
 
 ### Auth & usage
 - **API Key & Environment Variables**: Authenticates via `NANO_GPT_API_KEY` (resolved via `getEnvApiKey` in `packages/ai/src/stream.ts` and configured in catalog descriptors `packages/catalog/src/provider-models/descriptors.ts`).
-- **Interactive Login**: `loginNanoGPT` in `packages/ai/src/registry/nanogpt.ts` prompts for an API key linked from `https://nano-gpt.com/api` and validates credentials via `models-endpoint` against `https://nano-gpt.com/api/v1/models`.
+- **Interactive Login**: Declared in `packages/catalog/src/compat/rules/auth/nanogpt.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), prompting for an API key linked from `https://nano-gpt.com/api` and validating credentials via `validate "models-endpoint"` against `https://nano-gpt.com/api/v1/models`.
 
 ### Catalog model handling
 - **Descriptor & Options**: Registered in `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`) with default model `openai/gpt-5.5` and options configured via `nanoGptModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`).
@@ -1195,8 +1195,8 @@ Novita AI is an AI cloud platform offering serverless OpenAI-compatible LLM infe
 - Nothing beyond the OpenAI Chat Completions pipeline.
 
 ### Auth & usage
-- **Authentication**: Configured via `loginNovita` (`packages/ai/src/registry/novita.ts`) using standard API key prompt (`sk_...`) linking to `https://novita.ai/settings/key-management`. Environment variable `NOVITA_API_KEY` is checked via catalog descriptors (`packages/catalog/src/provider-models/descriptors.ts`).
-- **Inference-based key validation**: `loginNovita` (`packages/ai/src/registry/novita.ts`) validates keys by sending a 1-token request to `/chat/completions` using `moonshotai/kimi-k2.7-code`. Novita's Developer and Basic team roles lack permission for `/openapi/v1/billing/balance/detail`, so inference validation avoids rejecting valid developer keys.
+- **Authentication**: Declared in `packages/catalog/src/compat/rules/auth/novita.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) using standard API key prompt (`sk_...`) linking to `https://novita.ai/settings/key-management`. Environment variable `NOVITA_API_KEY` is checked via catalog descriptors (`packages/catalog/src/provider-models/descriptors.ts`).
+- **Inference-based key validation**: Validates keys in `packages/catalog/src/compat/rules/auth/novita.kdl` by sending a request to `/chat/completions` using `moonshotai/kimi-k2.7-code` (`validate "chat-completions"`). Novita's Developer and Basic team roles lack permission for `/openapi/v1/billing/balance/detail`, so inference validation avoids rejecting valid developer keys.
 
 ### Catalog model handling
 - **Model discovery**: Configured via `novitaModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) with `defaultBaseUrl: "https://api.novita.ai/openai/v1"` and `dynamicModelsAuthoritative: true`.
@@ -1214,9 +1214,9 @@ NVIDIA NIM (Inference Microservice) provides access to hosted open and proprieta
 - **Tool Choice & Reasoning**: DeepSeek reasoning models disable reasoning when tool choice is active (`disableReasoningOnToolChoice`, `packages/catalog/src/compat/openai.ts:487`), while standard models support forced tool choice (`supportsForcedToolChoice: true`, `packages/ai/test/openai-completions-compat.test.ts:1801`).
 
 ### Auth & usage
-- **Authentication**: Key-based auth using NVIDIA NGC Personal Keys (`AUTH_URL = "https://org.ngc.nvidia.com/setup/personal-keys"`, `packages/ai/src/registry/nvidia.ts:6`), stored in `NVIDIA_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts:316`). Base URL is `API_BASE_URL = "https://integrate.api.nvidia.com/v1"` (`packages/ai/src/registry/nvidia.ts:7`).
-- **Login & Validation**: CLI login (`loginNvidia`, `packages/ai/src/registry/nvidia.ts:12`) validates keys against `VALIDATION_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct"` (`packages/ai/src/registry/nvidia.ts:8`) using `validateOpenAICompatibleApiKey`. Fatal auth errors (`401`/`403`, `AIError.Flag.AuthFailed`) abort login; non-fatal validation errors are caught to allow custom or newly deployed models.
-- **Provider Registration**: Registered as `nvidiaProvider` (`packages/ai/src/registry/nvidia.ts:57`, `packages/ai/src/registry/registry.ts:126`). Credential storage and deduplication are tested in `packages/ai/test/auth-storage-email-dedupe.test.ts:756-775`.
+- **Authentication**: Key-based auth using NVIDIA NGC Personal Keys (`auth-url "https://org.ngc.nvidia.com/setup/personal-keys"` in `packages/catalog/src/compat/rules/auth/nvidia.kdl`), stored in `NVIDIA_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts:316`). Base URL is `https://integrate.api.nvidia.com/v1`.
+- **Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/nvidia.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), validating keys against `nvidia/llama-3.1-nemotron-70b-instruct` (`validate "chat-completions"` with `optional=#true`). Fatal auth errors (`401`/`403`, `AIError.Flag.AuthFailed`) abort login; non-fatal validation errors are caught to allow custom or newly deployed models.
+- **Provider Registration**: Compiled into `packages/ai/src/registry/registry.ts` from `packages/catalog/src/compat/rules/auth/nvidia.kdl` via `packages/ai/src/registry/build.ts`. Credential storage and deduplication are tested in `packages/ai/test/auth-storage-email-dedupe.test.ts:756-775`.
 - **Usage**: Standard OpenAI Chat Completions usage metrics; no custom usage handler or quota endpoint.
 
 ### Catalog model handling
@@ -1235,7 +1235,7 @@ Local OpenAI-compatible provider integration running on local or self-hosted Oll
 - **Wire Reasoning Effort Ladder**: `spec.provider === "ollama"` in `packages/catalog/src/model-thinking.ts` returns `OLLAMA_REASONING_EFFORTS` (`[low, medium, high, max]`), matching Ollama's native wire effort vocabulary without requiring compat-level effort remapping.
 
 ### Auth & usage
-- **Interactive Login & Optional Key**: `loginOllama` in `packages/ai/src/registry/ollama.ts` prompts via `options.onPrompt` for an optional API key/token (`allowEmpty: true`, placeholder `"ollama-local"`) pointing to `OLLAMA_DOCS_URL`; returning `""` signals local keyless mode. `ollamaProvider` registers `loginOllama`.
+- **Interactive Login & Optional Key**: Declared in `packages/catalog/src/compat/rules/auth/ollama.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), prompting for an optional API key/token (`empty-fallback ""`, placeholder `"ollama-local"`) pointing to `auth-url`; returning `""` signals local keyless mode.
 - **Usage Provider & Quota Surfacing**: `ollamaUsageProvider` in `packages/ai/src/usage/ollama.ts` (`id: "ollama"`) implements `fetchUsage`, returning a `UsageReport` with empty `limits` and a note that standalone quota endpoints are not exposed; `validatesCredentials` is set to `false`.
 - **Environment Variable Fallback**: `envVars: ["OLLAMA_API_KEY"]` in `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`) resolves optional caller credentials from `process.env.OLLAMA_API_KEY`.
 
@@ -1256,7 +1256,7 @@ Ollama Cloud provides managed cloud access to open-weight LLMs via native `ollam
 - **Stream Markup Healing**: Registered in `DSML_HEALING_PROVIDERS` (`packages/catalog/src/compat/openai.ts`) and `getStreamMarkupHealingPattern` (`packages/ai/src/utils/stream-markup-healing.ts`) for XML/markdown tool call and reasoning recovery.
 
 ### Auth & usage
-- **Interactive Key Authentication**: `loginOllamaCloud` (`packages/ai/src/registry/ollama-cloud.ts`) prompts for an API key generated at `https://ollama.com/settings/keys`, rejecting empty input with `ApiKeyRequiredError`.
+- **Interactive Key Authentication**: Declared in `packages/catalog/src/compat/rules/auth/ollama-cloud.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), prompting for an API key generated at `https://ollama.com/settings/keys`, rejecting empty input with `ApiKeyRequiredError`.
 - **Environment Variable Resolution**: `descriptors.ts` (`packages/catalog/src/provider-models/descriptors.ts`) and `getEnvApiKey` (`packages/ai/src/stream.ts`) resolve credentials via `OLLAMA_CLOUD_API_KEY`.
 - **Usage Accounting**: `ollamaCloudUsageProvider` (`packages/ai/src/usage/ollama.ts`) handles usage for `ollama-cloud` using `fetchOllamaUsage`. Because Ollama Cloud has no standalone quota API (`validatesCredentials: false`), usage is tracked per-response via `prompt_eval_count` and `eval_count` stream metrics.
 
@@ -1274,7 +1274,7 @@ OpenCode Go provides access to multi-provider subscription models (including Kim
 - **`X-Api-Key` Auth Normalization**: In `packages/ai/src/providers/anthropic.ts` (lines 3045–3046), when `model.provider === "opencode-go"`, the transport deletes auto-generated `Authorization` Bearer headers so `AnthropicMessagesClient` emits `X-Api-Key`. Bearer-only requests to OpenCode Anthropic endpoints fail with HTTP `401 Missing API key` (#6510).
 
 ### Auth & usage
-- **API Key Login Flow**: `opencodeGoProvider` (`packages/ai/src/registry/opencode-go.ts`) lazy-imports `loginOpenCode` from `packages/ai/src/registry/oauth/opencode.ts`. It directs the user to `https://opencode.ai/auth` via `onAuth`, prompts for the API key via `onPrompt`, and returns the trimmed key stored under `OPENCODE_API_KEY`.
+- **API Key Login Flow**: Declared in `packages/catalog/src/compat/rules/auth/opencode-go.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`). It directs the user to `https://opencode.ai/auth`, prompts for the API key, and returns the trimmed key stored under `OPENCODE_API_KEY`.
 - **Rolling Spend Windows**: `opencodeGoUsageProvider` (`packages/ai/src/usage/opencode-go.ts`) tracks OMP-observed request costs across three rolling time windows: `rolling-5h` ($12 / 5 hours), `weekly` ($30 / 7 days), and `monthly` ($60 / 30 days). Costs are aggregated from `ctx.listUsageCosts` via `sumWindowCosts` to compute fractional usage, reset timestamps (`resetsAt`), and limit statuses (`ok`, `warning` at >=80%, `exhausted` at >=100%).
 
 ### Catalog model handling
@@ -1291,7 +1291,7 @@ OpenCode Zen (`opencode-zen`) is a subscription service providing access to mult
 
 ### Auth & usage
 - **API Key Manual Auth**: Configured via the `OPENCODE_API_KEY` environment variable (`CATALOG_PROVIDERS` descriptor in `packages/catalog/src/provider-models/descriptors.ts`).
-- **Interactive CLI Login Flow**: `opencodeZenProvider.login` (`packages/ai/src/registry/opencode-zen.ts`) lazily invokes `loginOpenCode` in `packages/ai/src/registry/oauth/opencode.ts`. Despite residing under `oauth/`, it is an API key prompt flow: it opens `https://opencode.ai/auth` in the browser and prompts the user to paste their API key.
+- **Interactive CLI Login Flow**: Declared in `packages/catalog/src/compat/rules/auth/opencode-zen.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`): it opens `https://opencode.ai/auth` in the browser and prompts the user to paste their API key.
 - **Wire Authentication**: Credentials across both Anthropic and OpenAI-compatible protocol endpoints are passed via `X-Api-Key` headers rather than standard Bearer tokens.
 
 ### Catalog model handling
@@ -1315,7 +1315,7 @@ OpenRouter is a unified multi-provider routing gateway serving hundreds of third
 - **Custom Request Headers**: `getOpenRouterHeaders` in `packages/ai/src/utils/openrouter-headers.ts` attaches `User-Agent: omp/<ver>`, `HTTP-Referer: https://omp.sh/`, `X-OpenRouter-Title: omp`, `X-OpenRouter-Categories: cli-agent`, `X-OpenRouter-Cache: true`, and `X-OpenRouter-Cache-TTL: 3600` to all requests for edge response caching.
 
 ### Auth & usage
-- **Auth Key Validation via `/api/v1/auth/key`**: `loginOpenRouter` in `packages/ai/src/registry/openrouter.ts` configures API key validation using `validateApiKeyAgainstModelsEndpoint` targeted at `https://openrouter.ai/api/v1/auth/key`. Public `/api/v1/models` returns HTTP 200 for unauthenticated requests, so `/api/v1/auth/key` is used as the canonical identity check (returning 200 for valid keys, 401 otherwise). Key resolution checks `OPENROUTER_API_KEY` via `getEnvApiKey` in `packages/ai/src/stream.ts`.
+- **Auth Key Validation via `/api/v1/auth/key`**: Declared in `packages/catalog/src/compat/rules/auth/openrouter.kdl` as a `login "oauth-code"` rule (`packages/ai/src/registry/engine/oauth-code.ts`) with `paste-key` validation targeted at `https://openrouter.ai/api/v1/auth/key`. Public `/api/v1/models` returns HTTP 200 for unauthenticated requests, so `/api/v1/auth/key` is used as the canonical identity check (returning 200 for valid keys, 401 otherwise). Key resolution checks `OPENROUTER_API_KEY` via `getEnvApiKey` in `packages/ai/src/stream.ts`.
 - **Authoritative Reported Cost Reconciling**: `applyProviderReportedCost` in `packages/ai/src/providers/openai-shared.ts` extracts `rawUsage.cost` echoed by OpenRouter and ClinePass. If estimated token cost is finite and positive, input, output, cache-read, and cache-write costs are scaled by `reportedCost / estimatedCost` to match the exact billable total; otherwise, `usage.cost.input` is assigned the reported cost directly.
 
 ### Catalog model handling
@@ -1324,13 +1324,13 @@ OpenRouter is a unified multi-provider routing gateway serving hundreds of third
 - **Spec Mapping**: `openrouterModelManagerOptions` maps `modality` (`text`/`image`), pricing per million tokens (`prompt`, `completion`, `input_cache_read`, `input_cache_write`), `context_length`, `top_provider.max_completion_tokens`, and reasoning effort ladders via `mapOpenRouterThinking`.
 
 ## Qianfan (`qianfan`)
-Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an OpenAI-compatible v2 API using the OpenAI Chat Completions transport. Entry points include `packages/ai/src/registry/qianfan.ts` (`qianfanProvider`, `loginQianfan`) for provider registration and API key authentication, `packages/catalog/src/provider-models/descriptors.ts` (`CATALOG_PROVIDERS`) for catalog registration, and `packages/catalog/src/provider-models/openai-compat.ts` (`qianfanModelManagerOptions`) for model manager options.
+Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an OpenAI-compatible v2 API using the OpenAI Chat Completions transport. Entry points include `packages/catalog/src/compat/rules/auth/qianfan.kdl` for auth policy and API key authentication, `packages/catalog/src/provider-models/descriptors.ts` (`CATALOG_PROVIDERS`) for catalog registration, and `packages/catalog/src/provider-models/openai-compat.ts` (`qianfanModelManagerOptions`) for model manager options.
 
 ### Special casings
 - Nothing beyond the OpenAI Chat Completions pipeline.
 
 ### Auth & usage
-- **API Key Authentication & Validation**: Authenticates via `QIANFAN_API_KEY` or stored credentials using API keys with format `bce-v3/ALTAK-...` obtained from `https://console.bce.baidu.com/qianfan/ais/console/apiKey`. The CLI login flow (`loginQianfan` in `packages/ai/src/registry/qianfan.ts`) validates credentials using `createApiKeyLogin` by issuing an `openai-completions` request to `https://qianfan.baidubce.com/v2` with `deepseek-v3.2`.
+- **API Key Authentication & Validation**: Authenticates via `QIANFAN_API_KEY` or stored credentials using API keys with format `bce-v3/ALTAK-...` obtained from `https://console.bce.baidu.com/qianfan/ais/console/apiKey`. The CLI login flow is declared in `packages/catalog/src/compat/rules/auth/qianfan.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), validating credentials by issuing a chat completion request (`validate "chat-completions"`) to `https://qianfan.baidubce.com/v2` with `deepseek-v3.2`.
 - **Usage & Quotas**: Standard OpenAI Chat Completions token usage tracking (`input`, `output`, `reasoning`) and HTTP status code error handling apply.
 
 ### Catalog model handling
@@ -1346,8 +1346,8 @@ Qwen Portal provides access to Qwen hosted models via an OpenAI-compatible endpo
 
 ### Auth & usage
 - **Environment variables**: Automatically resolves credentials from `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts:385`).
-- **Interactive login**: `loginQwenPortal` (`packages/ai/src/registry/qwen-portal.ts:8`) guides users to copy a token or API key from `https://chat.qwen.ai` and prompts for input via `options.onPrompt`.
-- **Credential validation**: Validates input tokens against `https://portal.qwen.ai/v1` using `validateOpenAICompatibleApiKey` targeting the `coder-model` (`packages/ai/src/registry/qwen-portal.ts:35`).
+- **Interactive login**: Declared in `packages/catalog/src/compat/rules/auth/qwen-portal.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), guiding users to copy a token or API key from `https://chat.qwen.ai` and prompting for input.
+- **Credential validation**: Validates input tokens against `https://portal.qwen.ai/v1` using `validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/qwen-portal.kdl` targeting the `coder-model`.
 - **Usage tracking**: No dedicated usage reporting module exists under `packages/ai/src/usage/`.
 
 ### Catalog model handling
@@ -1368,7 +1368,7 @@ Requests are routed through the stateful OpenAI Responses transport (`api: "open
 ### Auth & usage
 - **API Key Resolution**: Environment variable discovery checks `SAKANA_API_KEY` first, then falls back to `FUGU_API_KEY`
   (configured in descriptor `packages/catalog/src/provider-models/descriptors.ts`).
-- **Interactive Login**: `loginSakana` in `packages/ai/src/registry/sakana.ts` configures API key login directing users
+- **Interactive Login**: Declared in `packages/catalog/src/compat/rules/auth/sakana.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users
   to the Sakana AI console (`https://console.sakana.ai/api-keys`), validating credentials against `https://api.sakana.ai/v1/models`.
 
 ### Catalog model handling
@@ -1389,7 +1389,7 @@ SiliconFlow is a high-performance AI inference platform providing access to open
 - **Runtime Metadata Hydration & Fallbacks**: `loadSiliconFlowModelsDevReferences` queries models.dev with a 5,000ms timeout (`SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS`). Missing models fall back to canonical bundled specs (`resolveModelReference`) to infer context window, max tokens, and reasoning capabilities while excluding pricing.
 
 ### Auth & usage
-- **API Key Login**: Authenticates via API key stored in `SILICONFLOW_API_KEY` (or `SILICONFLOW_CN_API_KEY` for `siliconflow-cn`). Interactively registered via `loginSiliconFlow` (`packages/ai/src/registry/siliconflow.ts`) and `loginSiliconFlowCn` (`packages/ai/src/registry/siliconflow-cn.ts`).
+- **API Key Login**: Authenticates via API key stored in `SILICONFLOW_API_KEY` (or `SILICONFLOW_CN_API_KEY` for `siliconflow-cn`). Interactively declared in `packages/catalog/src/compat/rules/auth/siliconflow.kdl` and `siliconflow-cn.kdl` as `login "api-key"` rules (`packages/ai/src/registry/engine/api-key.ts`).
 - **Endpoint Validation**: Credentials are validated during login via a `models-endpoint` request to `https://api.siliconflow.com/v1/models` (`https://api.siliconflow.cn/v1/models`).
 - **Console URLs**: Key creation instructions point to `https://cloud.siliconflow.com/account/ak` (`https://cloud.siliconflow.cn/account/ak` for China region).
 
@@ -1408,7 +1408,7 @@ SiliconFlow (China) is the domestic China deployment of SiliconFlow's AI model p
 
 ### Auth & usage
 - **Environment Variable**: Authenticates via `SILICONFLOW_CN_API_KEY` configured in descriptor `envVars` (`packages/catalog/src/provider-models/descriptors.ts`), separate from global `SILICONFLOW_API_KEY`.
-- **API Key Login**: Configured via `createApiKeyLogin` in `packages/ai/src/registry/siliconflow-cn.ts` with management console URL `https://cloud.siliconflow.cn/account/ak` and validation endpoint `https://api.siliconflow.cn/v1/models`.
+- **API Key Login**: Declared in `packages/catalog/src/compat/rules/auth/siliconflow-cn.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) with management console URL `https://cloud.siliconflow.cn/account/ak` and validation endpoint `https://api.siliconflow.cn/v1/models`.
 - **No Usage Tracking**: No dedicated quota or usage resolution module is present under `packages/ai/src/usage/`.
 
 ### Catalog model handling
@@ -1425,7 +1425,7 @@ Synthetic is an AI platform offering dual API format support for its models, exp
 - **Dynamic Reasoning & Features**: In `packages/catalog/src/provider-models/openai-compat.ts`, `syntheticModelManagerOptions` maps dynamic model entries from `GET /openai/v1/models`. It checks `supported_features` for `"reasoning"` and parses wire effort tiers (e.g. `reasoning_parameters.efforts`) to construct `thinking` options and set the `reasoning` flag appropriately.
 
 ### Auth & usage
-- **Authentication**: Key-based auth using `SYNTHETIC_API_KEY` (`packages/ai/src/registry/synthetic.ts`). Validated via `createApiKeyLogin` against `GET https://api.synthetic.new/openai/v1/models`.
+- **Authentication**: Key-based auth using `SYNTHETIC_API_KEY` (`packages/catalog/src/compat/rules/auth/synthetic.kdl`). Validated via a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) against `GET https://api.synthetic.new/openai/v1/models`.
 - **Usage & Quota Polling**: `syntheticUsageProvider` (`packages/ai/src/usage/synthetic.ts`) polls `GET https://api.synthetic.new/v2/quotas` with the bearer API key. It reports two distinct limit windows:
   - `synthetic:requests:5h`: Rolling 5-hour request limit with per-tick regeneration percentage (`rollingFiveHourLimit`).
   - `synthetic:usd:7d`: Weekly credit limit in USD (`weeklyTokenLimit`) with per-tick dollar regeneration rates.
@@ -1445,7 +1445,7 @@ Together is a cloud inference provider offering access to various open-source an
 
 ### Auth & usage
 - **API Key Auth**: Authenticates using the `TOGETHER_API_KEY` environment variable or API key input during `pi-ai login together`.
-- **Validation**: `loginTogether` validates keys via `createApiKeyLogin` using `chat-completions` against `https://api.together.xyz/v1` with model `moonshotai/Kimi-K2.5`.
+- **Validation**: Validates keys in `packages/catalog/src/compat/rules/auth/together.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) against `https://api.together.xyz/v1/models`.
 - **API Base URL**: `https://api.together.xyz/v1`.
 
 ### Catalog model handling
@@ -1457,13 +1457,13 @@ Together is a cloud inference provider offering access to various open-source an
 Umans AI Coding Plan is a proxy service for AI coding models, operating via the Anthropic Messages wire format ("Anthropic Messages") with its default base URL set to `https://api.code.umans.ai`.
 
 ### Special casings
-- **Auth header strategy**: Anthropic-compatible Umans requests force `X-Api-Key` header authentication (`loginUmans` in `packages/ai/src/registry/umans.ts`) instead of `Authorization: Bearer` (`buildAnthropicClientOptions` in `packages/ai/src/providers/anthropic.ts`).
+- **Auth header strategy**: Anthropic-compatible Umans requests force `X-Api-Key` header authentication (declared in `packages/catalog/src/compat/rules/auth/umans.kdl`) instead of `Authorization: Bearer` (`buildAnthropicClientOptions` in `packages/ai/src/providers/anthropic.ts`).
 - **Tool name escaping**: Configured with `compat.escapeBuiltinToolNames: true` (`packages/catalog/src/compat/anthropic.ts`) to prefix client tool names with `_` on outbound requests and strip them on return, avoiding collision with gateway built-in tool names unless gateway web search is active (`packages/ai/src/providers/anthropic.ts`).
 - **Gateway web search**: Routes web search requests by inspecting `X-Umans-Websearch-Provider` caller headers or the `UMANS_WEBSEARCH_PROVIDER` (`native` | `exa`) environment variable (`packages/ai/src/providers/anthropic.ts`). When enabled, `web_search` tool names pass through unescaped.
 - **Thinking / reasoning effort**: Supports thinking configurations with levels mapped via `UMANS_REASONING_EFFORT_BY_LEVEL` (`packages/catalog/src/provider-models/openai-compat.ts`). GLM-5.2 on Umans uses a two-tier high/max effort scale where `max` maps to the `anthropic-budget-effort` mode (`xhigh` effort) (`packages/catalog/src/model-thinking.ts`).
 
 ### Auth & usage
-- **Auth**: Uses `UMANS_AI_CODING_PLAN_API_KEY` environment variable or `/login umans` key prompt (`packages/ai/src/registry/umans.ts`, `packages/ai/src/registry/registry.ts`). Key validation executes a lightweight Anthropic messages call (`max_tokens: 1`) to `https://api.code.umans.ai/v1/messages`.
+- **Auth**: Uses `UMANS_AI_CODING_PLAN_API_KEY` environment variable or `/login umans` key prompt (`packages/catalog/src/compat/rules/auth/umans.kdl`, `packages/ai/src/registry/engine/api-key.ts`). Key validation executes a lightweight Anthropic messages call (`max_tokens: 1`) to `https://api.code.umans.ai`.
 - **Usage endpoint**: Fetches quota and rate limit status from `GET /v1/usage` (`packages/ai/src/usage/umans.ts`) using `Authorization: Bearer <key>`.
 - **Limits surfaced**: Returns a rolling 5-hour request split into a model-weighted soft cap (`umans:requests:soft`, the "effective requests" contract) and a raw burst ceiling (`umans:requests:hard`, `hard_cap`), plus an instantaneous session concurrency limit (`umans:concurrency`). The soft cap only ever warns — `exhausted` is reserved for the burst ceiling, where throttling actually starts. Payloads without a reported burst ceiling (`hard_cap`) collapse to a single weighted `umans:requests` row that can exhaust at the effective-request limit, so request exhaustion is never unreportable; legacy payloads without weighted counters fall back to a single raw `umans:requests` row. In both single-row shapes the weighted counter (when present) stays authoritative — raw burst traffic above the limit never fabricates an exhausted state. Also surfaces low-priority status notes when rate-limit bursts occur.
 
@@ -1480,7 +1480,7 @@ Venice is a privacy-focused AI platform delivering uncensored and open-source mo
 - **Explicit Thinking Off**: `reasoningDisableMode: "venice-disable-thinking"` encodes an explicit off selection as `venice_parameters.disable_thinking: true`, preserving sibling Venice settings such as `include_venice_system_prompt`.
 
 ### Auth & usage
-- **API Key Login & Validation**: `loginVenice` in `packages/ai/src/registry/venice.ts` uses `createApiKeyLogin` (`packages/ai/src/registry/api-key-login.ts`) to direct users to `https://venice.ai/settings/api` for API keys (`vapi_...` placeholder prefix) and validates credentials via a lightweight `chat-completions` request using validation model `qwen3-4b`. Registered as `veniceProvider` in `packages/ai/src/registry/registry.ts`.
+- **API Key Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/venice.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) to direct users to `https://venice.ai/settings/api` for API keys (`vapi_...` placeholder prefix) and validate credentials via a lightweight `chat-completions` request using validation model `qwen3-4b`. Registered in `packages/ai/src/registry/registry.ts`.
 - **Environment Variables & Credentials**: Resolves API keys from the `VENICE_API_KEY` environment variable configured in `CATALOG_PROVIDERS` (`packages/catalog/src/provider-models/descriptors.ts`).
 - **Usage Accounting**: Uses standard OpenAI Chat Completions usage accounting (`calculateOpenAIUsageAccounting` in `packages/ai/src/providers/openai-shared.ts`) without custom quota or usage endpoints.
 
@@ -1498,7 +1498,7 @@ Vercel AI Gateway routes LLM requests through a unified proxy (`https://ai-gatew
 - **Host Detection**: `isVercelGatewayHost` is evaluated via `modelMatchesHost({ provider, baseUrl }, "vercelAIGateway")` (`packages/catalog/src/compat/openai.ts`, `packages/catalog/src/hosts.ts`), matching `provider === "vercel-ai-gateway"
 
 ## vLLM (Local OpenAI-compatible) (`vllm`)
-vLLM is an open-source high-throughput LLM serving engine running local or self-hosted OpenAI-compatible inference servers. It uses the OpenAI Chat Completions transport over HTTP/SSE. Entry modules include `packages/ai/src/registry/vllm.ts` for authentication and credential handling, and `packages/catalog/src/provider-models/openai-compat.ts` (`vllmModelManagerOptions`) for catalog options and dynamic model discovery.
+vLLM is an open-source high-throughput LLM serving engine running local or self-hosted OpenAI-compatible inference servers. It uses the OpenAI Chat Completions transport over HTTP/SSE. Entry modules include `packages/catalog/src/compat/rules/auth/vllm.kdl` for authentication and credential handling, and `packages/catalog/src/provider-models/openai-compat.ts` (`vllmModelManagerOptions`) for catalog options and dynamic model discovery.
 
 ### Special casings
 - **Reasoning Content Replay (`replayReasoningContent`)**: Registered in `LOCAL_OPENAI_COMPAT_PROVIDERS` (`packages/catalog/src/compat/openai.ts`). Because local inference backends rely on prefix KV-cache reuse, `isLocalOpenAICompatBackend` auto-enables `replayReasoningContent: true`. When assistant history contains reasoning content (`<think>` blocks), it is replayed in `reasoning_content` on subsequent requests to maintain exact prompt token alignments.
@@ -1507,7 +1507,7 @@ vLLM is an open-source high-throughput LLM serving engine running local or self-
 - **Dynamic-Only Catalog Exclusion**: Included in `DISCOVERY_ONLY_PROVIDERS` (`scripts/generate-models.ts`) and `LOCAL_ONLY_PROVIDERS` (`test/models-json-no-local-endpoints.test.ts`). Local vLLM models are excluded from static catalog generation so machine-specific endpoints are never committed to `models.json`.
 
 ### Auth & usage
-- **Credential Resolution & Defaults**: Managed via `loginVllm` (`createApiKeyLogin` in `packages/ai/src/registry/vllm.ts`). Reads optional API keys from the `VLLM_API_KEY` environment variable or credentials stored via `omp auth-broker login vllm`.
+- **Credential Resolution & Defaults**: Declared in `packages/catalog/src/compat/rules/auth/vllm.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`). Reads optional API keys from the `VLLM_API_KEY` environment variable or credentials stored via `omp auth-broker login vllm`.
 - **Unauthenticated Local Mode**: Defaults to base URL `http://127.0.0.1:8000/v1` and placeholder token `"vllm-local"` (`DEFAULT_LOCAL_TOKEN`) when no key is supplied (`emptyKeyFallback: "vllm-local"`). Descriptor settings specify `catalogDiscovery: { label: "vLLM", allowUnauthenticated: true }`.
 - **Documentation & Endpoint Setup**: The login helper points to `https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html` for configuring local vLLM OpenAI-compatible server endpoints.
 
@@ -1531,8 +1531,8 @@ Wafer Serverless is a pay-as-you-go provider proxying multiple upstream models (
 
 ### Auth & usage
 - Authenticates using Bearer API keys (`wfr_…` prefix) supplied via the `WAFER_SERVERLESS_API_KEY` environment variable (`packages/catalog/src/provider-models/descriptors.ts:465`).
-- Interactive login is handled by `loginWaferServerless` using `createApiKeyLogin` (`packages/ai/src/registry/oauth/wafer.ts:14`), pointing users to `https://app.wafer.ai/usage`.
-- Key validation probes `https://pass.wafer.ai/v1/models` (`packages/ai/src/registry/oauth/wafer.ts:11`).
+- Interactive login is declared in `packages/catalog/src/compat/rules/auth/wafer-serverless.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), pointing users to `https://app.wafer.ai/usage`.
+- Key validation probes `https://pass.wafer.ai/v1/models` (`validate "models-endpoint"` in `packages/catalog/src/compat/rules/auth/wafer-serverless.kdl`).
 
 ### Catalog model handling
 - Registered in provider descriptors with `defaultModel: "GLM-5.1"` and base URL `https://pass.wafer.ai/v1` (`packages/catalog/src/provider-models/descriptors.ts:463`).
@@ -1552,8 +1552,8 @@ xAI API (`xai`) provides access to xAI's Grok model suite using standard API key
 - **Provider Priority Ranking**: Positioned in provider priority (`packages/catalog/src/identity/priority.ts` symbol `PROVIDER_PRIORITY`) below `xai-oauth` (`"xai-oauth"` > `"xai"` > `"mistral"`).
 
 ### Auth & usage
-- **Authentication**: Key-based auth implemented via `createApiKeyLogin` in `packages/ai/src/registry/xai.ts` (symbols `loginXAI`, `xaiProvider`). Directs users to `"https://console.x.ai/team/default/api-keys"` with prompt `"Paste your xAI API key"` (placeholder `"xai-..."`).
-- **Validation**: Performs credentials check via `models-endpoint` against `"https://api.x.ai/v1/models"` (`packages/ai/src/registry/xai.ts` symbol `loginXAI`).
+- **Authentication**: Key-based auth declared in `packages/catalog/src/compat/rules/auth/xai.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`). Directs users to `"https://console.x.ai/team/default/api-keys"` with prompt `"Paste your xAI API key"` (placeholder `"xai-..."`).
+- **Validation**: Performs credentials check via `models-endpoint` against `"https://api.x.ai/v1/models"` (`validate "models-endpoint"` in `packages/catalog/src/compat/rules/auth/xai.kdl`).
 - **Environment Fallback**: Configured to resolve `XAI_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts` symbol `descriptors`).
 - **Usage Tracking**: Nothing beyond the `OpenAI Chat Completions` pipeline.
 
@@ -1572,7 +1572,7 @@ xAI Grok OAuth provides subscription-backed access (SuperGrok / X Premium+) to x
 - **Reasoning Effort Map & Caching**: Maps `minimal` to `"low"` (`packages/catalog/src/provider-models/openai-compat.ts` `XAI_REASONING_EFFORT_MAP`). Sends `X-Grok-Conv-Id` for session prompt-cache retention (`promptCacheSessionHeader`).
 
 ### Auth & usage
-- **OAuth Authentication**: `xaiOauthProvider` (`packages/ai/src/registry/xai-oauth.ts`) delegates to `loginXAIOAuth` and `refreshXAIOAuthToken` (`packages/ai/src/registry/oauth/xai-oauth.ts`). Executes RFC 8628 device authorization against `https://auth.x.ai` (client ID `b1a00492-073a-47ea-816f-4c329264a828`, scope `openid profile email offline_access grok-cli:access api:access`). `xaiOAuthDiscovery` fetches OIDC configuration and validates endpoints (`validateXAIEndpoint` pins to HTTPS `*.x.ai`). Fetches user identity from `https://auth.x.ai/oauth2/userinfo` (`fetchXAIOAuthIdentity`). Env fallbacks: `XAI_OAUTH_TOKEN` then `XAI_API_KEY` (`descriptors.ts`).
+- **OAuth Authentication**: Declared in `packages/catalog/src/compat/rules/auth/xai-oauth.kdl` as a `login "device-code"` rule (`packages/ai/src/registry/engine/device-code.ts`) with token hook in `packages/ai/src/registry/oauth/xai-oauth.ts`. Executes RFC 8628 device authorization against `https://auth.x.ai` (client ID `b1a00492-073a-47ea-816f-4c329264a828`, scope `openid profile email offline_access grok-cli:access api:access`). Endpoint validation and identity helpers live in `packages/ai/src/registry/oauth/xai-oauth.ts` (`validateXAIEndpoint`, `fetchXAIOAuthIdentity`). Env fallbacks: `XAI_OAUTH_TOKEN` then `XAI_API_KEY` (`descriptors.ts`).
 - **Usage Tracking**: `xaiOauthUsageProvider` (`packages/ai/src/usage/xai-oauth.ts`) queries `https://cli-chat-proxy.grok.com/v1/billing` (`validateXAIBillingEndpoint` pins to HTTPS `*.grok.com`) with header `X-XAI-Token-Auth: xai-grok-cli` (`getXAICliBillingHeaders`). Only accepts valid OAuth bearer credentials. Probes legacy weekly credits (`?format=credits`, `parseWeeklyBillingConfig` for `creditUsagePercent` and `productUsage`) and unified monthly quota (`parseMonthlyBillingConfig` for `monthlyLimit` and `used`), plus positive `onDemandCap` / `onDemandUsed` limits.
 
 ### Catalog model handling
@@ -1598,8 +1598,8 @@ Xiaomi MiMo delivers Xiaomi's proprietary MiMo model family (such as `mimo-v2.5`
 - **Widen Idle Watchdog Timeout**: `streamIdleTimeoutMs` is widened to 300,000 ms (5 minutes) via `XIAOMI_MIMO_STREAM_IDLE_TIMEOUT_MS` in `packages/catalog/src/compat/openai.ts` because MiMo Pro on `api.xiaomimimo.com` can stall ~2 minutes before emitting its first SSE event (issue #1770).
 
 ### Auth & usage
-- **Registry & Provider Definitions**: Primary provider is defined in `packages/ai/src/registry/xiaomi.ts` (`xiaomiProvider`); regional Token Plan providers are exported in `packages/ai/src/registry/xiaomi-token-plan-{ams,cn,sgp}.ts` (`xiaomiTokenPlanAmsProvider`, `xiaomiTokenPlanCnProvider`, `xiaomiTokenPlanSgpProvider`).
-- **Interactive Key Prompts & Validation**: `loginXiaomi` and `loginXiaomiTokenPlan` (`packages/ai/src/registry/oauth/xiaomi.ts`) prompt for standard (`sk-...`) or Token Plan (`tp-...`) API keys and validate them via `validateXiaomiApiKey`.
+- **Registry & Provider Definitions**: Primary provider is declared in `packages/catalog/src/compat/rules/auth/xiaomi.kdl`; regional Token Plan providers are declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-{ams,cn,sgp}.kdl`.
+- **Interactive Key Prompts & Validation**: Standard Xiaomi login (`loginXiaomi` in `packages/ai/src/registry/oauth/xiaomi.ts`) prompts for standard (`sk-...`) or Token Plan (`tp-...`) API keys and validates them via `validateXiaomiApiKey`, while regional Token Plan providers use declarative `login "api-key"` rules in their respective `.kdl` files.
 - **Token Plan Validation Fallback**: Standard `xiaomi` login with `tp-` keys falls back sequentially through SGP (`https://token-plan-sgp.xiaomimimo.com/v1`) → AMS (`https://token-plan-ams.xiaomimimo.com/v1`) → CN (`https://token-plan-cn.xiaomimimo.com/v1`), using fresh per-endpoint `AbortSignal.timeout(15_000)` signals so regional timeouts do not abort subsequent fallback endpoints. Regional `xiaomi-token-plan-*` logins validate against their specific cluster.
 - **Environment Variables**: `XIAOMI_API_KEY` for standard `xiaomi`, and `XIAOMI_TOKEN_PLAN_AMS_API_KEY`, `XIAOMI_TOKEN_PLAN_CN_API_KEY`, `XIAOMI_TOKEN_PLAN_SGP_API_KEY` for regional Token Plan providers (`packages/catalog/src/provider-models/descriptors.ts`).
 
@@ -1618,9 +1618,9 @@ Xiaomi Token Plan (Europe) (`xiaomi-token-plan-ams`) provides regional access to
 - **Provider ID Retention**: `xiaomiModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) explicitly sets `providerId: "xiaomi-token-plan-ams"` and maps dynamic discovery entries back to `provider: "xiaomi-token-plan-ams"` rather than collapsing them to generic `xiaomi`.
 
 ### Auth & usage
-- **Registry Provider & OAuth Lazy Loader**: `xiaomiTokenPlanAmsProvider` in `packages/ai/src/registry/xiaomi-token-plan-ams.ts` registers ID `"xiaomi-token-plan-ams"` and lazy-loads `loginXiaomiTokenPlan` from `packages/ai/src/registry/oauth/xiaomi.ts`.
-- **Region Console Instructions**: Interactive CLI login (`loginXiaomiTokenPlan(cb, "ams")`) prompts users for a `tp-` prefix API key and directs them to the Token Plan console URL (`https://platform.xiaomimimo.com/console/plan-manage`).
-- **Single-Cluster Validation**: `validateXiaomiApiKey` in `packages/ai/src/registry/oauth/xiaomi.ts` validates keys directly against `https://token-plan-ams.xiaomimimo.com/v1/chat/completions` (using `mimo-v2.5`, `max_tokens: 1`), bypassing the multi-region fallback sequence used by generic `loginXiaomi`.
+- **Registry Provider & Auth Policy**: Declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl` with ID `"xiaomi-token-plan-ams"` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`).
+- **Region Console Instructions**: Interactive CLI login declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl` prompts users for a `tp-` prefix API key and directs them to the Token Plan console URL (`https://platform.xiaomimimo.com/console/plan-manage`).
+- **Single-Cluster Validation**: Validates keys directly against `https://token-plan-ams.xiaomimimo.com/v1` (using `mimo-v2.5` via `validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl`), bypassing the multi-region fallback sequence used by generic `loginXiaomi`.
 - **Headers & Errors**: Requests pass standard `Authorization: Bearer tp-...` headers. Authentication or network failures throw `AIError.OAuthError` or `AIError.ApiKeyRequiredError`.
 
 ### Catalog model handling
@@ -1640,7 +1640,7 @@ Xiaomi Token Plan (China) is the regional China endpoint for Xiaomi MiMo's Token
 - **Audio SKU filtering**: `packages/catalog/scripts/generate-models.ts` filters out speech-synthesis and recognition SKUs containing `-tts` or `-asr` for `xiaomi-token-plan-` providers.
 
 ### Auth & usage
-- **Environment variable & login**: Authenticates via `XIAOMI_TOKEN_PLAN_CN_API_KEY`. `xiaomiTokenPlanCnProvider.login` in `packages/ai/src/registry/xiaomi-token-plan-cn.ts` invokes `loginXiaomiTokenPlan(options, "cn")` in `packages/ai/src/registry/oauth/xiaomi.ts`.
+- **Environment variable & login**: Authenticates via `XIAOMI_TOKEN_PLAN_CN_API_KEY`. Declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-cn.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`).
 - **Regional API key validation**: Prompts for a `tp-...` key from `https://platform.xiaomimimo.com/console/plan-manage` and validates it via `validateXiaomiApiKey` by sending a `POST /v1/chat/completions` request for `mimo-v2.5` strictly against `https://token-plan-cn.xiaomimimo.com/v1` with a 15-second timeout (`VALIDATION_TIMEOUT_MS`).
 - **Usage accounting**: Standard OpenAI Chat Completions usage accounting applies (`calculateOpenAIUsageAccounting`); no provider-specific usage or quota module exists.
 
@@ -1658,9 +1658,9 @@ The Xiaomi Token Plan (Singapore) provider (`xiaomi-token-plan-sgp`) routes requ
 - **Extended Stream Idle Timeout**: `modelMatchesHost` (`packages/catalog/src/hosts.ts`) matches `xiaomi-token-plan-` via `providerPrefixes`, inheriting `XIAOMI_MIMO_STREAM_IDLE_TIMEOUT_MS` (300,000ms / 5 minutes) in `packages/catalog/src/compat/openai.ts` to prevent premature timeouts during long initial response delays on MiMo models.
 
 ### Auth & usage
-- **Pinned Regional Validation**: `loginXiaomiTokenPlan` (`packages/ai/src/registry/oauth/xiaomi.ts`) validates keys strictly against the Singapore endpoint `https://token-plan-sgp.xiaomimimo.com/v1` (`TOKEN_PLAN_VALIDATION_ENDPOINTS.sgp`) using `validateXiaomiApiKey` (`packages/ai/src/registry/oauth/xiaomi.ts`). Unlike generic `loginXiaomi` (which performs SGP -> AMS -> CN fallback for `tp-` keys), `xiaomi-token-plan-sgp` disables cross-region fallback during auth validation.
-- **Plan Management Auth URL**: `loginXiaomiTokenPlan` (`packages/ai/src/registry/oauth/xiaomi.ts`) invoked by `xiaomiTokenPlanSgpProvider` (`packages/ai/src/registry/xiaomi-token-plan-sgp.ts`) prompts users with instructions pointing to `https://platform.xiaomimimo.com/console/plan-manage` (`TOKEN_PLAN_AUTH_URL`) for acquiring regional `tp-` keys (`TOKEN_PLAN_KEY_PREFIX`), contrasting with `STANDARD_AUTH_URL` (`https://platform.xiaomimimo.com/#/console/api-keys`).
-- **Validation Handshake**: `validateXiaomiApiKey` (`packages/ai/src/registry/oauth/xiaomi.ts`) tests credentials via `POST /chat/completions` using model `mimo-v2.5` (`TOKEN_PLAN_VALIDATION_MODEL`), `max_tokens: 1`, and `messages: [{ role: "user", content: "ping" }]`, enforcing a 15-second timeout (`VALIDATION_TIMEOUT_MS = 15_000`).
+- **Pinned Regional Validation**: Validates keys strictly against the Singapore endpoint `https://token-plan-sgp.xiaomimimo.com/v1` (via `validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`). Unlike generic `loginXiaomi` (which performs SGP -> AMS -> CN fallback for `tp-` keys), `xiaomi-token-plan-sgp` disables cross-region fallback during auth validation.
+- **Plan Management Auth URL**: Declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`, prompting users with instructions pointing to `https://platform.xiaomimimo.com/console/plan-manage` for acquiring regional `tp-` keys (`placeholder="tp-..."`), contrasting with standard `https://platform.xiaomimimo.com/#/console/api-keys`.
+- **Validation Handshake**: Validation tests credentials via `POST /chat/completions` using model `mimo-v2.5` (`validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`), `max_tokens: 1`, and `messages: [{ role: "user", content: "ping" }]`, enforcing a 15-second timeout.
 - **Usage Accounting**: Token consumption and cache metrics are calculated using standard OpenAI Chat Completions accounting via `calculateOpenAIUsageAccounting` (`packages/ai/src/providers/openai-shared.ts`).
 
 ### Catalog model handling
@@ -1679,8 +1679,8 @@ Z.AI provides GLM family models (such as `glm-5.2`) via Zhipu AI's coding plan i
 - **Host URL matching**: `hostMatchesUrl` in `packages/catalog/src/hosts.ts` matches Z.AI endpoints against the `api.z.ai` URL marker.
 
 ### Auth & usage
-- **API Key Login**: `loginZai` in `packages/ai/src/registry/zai.ts` prompts for `ZAI_API_KEY` (dashboard `https://z.ai/manage-apikey/apikey-list`) and validates via a chat completions probe against `https://api.z.ai/api/coding/paas/v4` with model `glm-5.2` (`VALIDATION_MODEL`).
-- **OAuth flow & browser sign-in**: `zaiCodingPlanProvider` (`packages/ai/src/registry/zai.ts`) routes sign-in to `loginZaiOAuth` / `ZaiOAuthFlow` (`packages/ai/src/registry/oauth/zai.ts`). It initiates authorization at `AUTHORIZE_URL` (`https://chat.z.ai/api/oauth/authorize`) with the ZCode-registered CLI redirect `http://127.0.0.1:9999/callback` (paste-code fallback) and exchanges authorization codes at `TOKEN_URL` (`https://zcode.z.ai/api/v1/oauth/token`).
+- **API Key Login**: Declared in `packages/catalog/src/compat/rules/auth/zai.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), prompting for `ZAI_API_KEY` (dashboard `https://z.ai/manage-apikey/apikey-list`) and validating via a chat completions probe against `https://api.z.ai/api/coding/paas/v4` with model `glm-5.2`.
+- **OAuth flow & browser sign-in**: Declared in `packages/catalog/src/compat/rules/auth/zai-coding-plan.kdl` as a `login "oauth-code"` rule (`packages/ai/src/registry/engine/oauth-code.ts`) with key minting hook in `packages/ai/src/registry/oauth/zai.ts`. It initiates authorization at `https://chat.z.ai/api/oauth/authorize` with the ZCode-registered CLI redirect `http://127.0.0.1:9999/callback` (paste-code fallback) and exchanges authorization codes at `https://zcode.z.ai/api/v1/oauth/token`.
 - **Durable key minting**: `mintZaiApiKey` (`packages/ai/src/registry/oauth/zai.ts`) exchanges the short-lived OAuth token for a business token via `businessLogin` (`https://api.z.ai/api/auth/z/login`), resolves default org/project via `getCustomerInfo` (`BIZ_BASE` = `https://api.z.ai`), creates or reuses key `"oh-my-pi"` (`KEY_NAME`), and copies the secret via `/copy/${apiKey}` to output a durable 49-char `${apiKey}.${secretKey}` token saved as `storeCredentialsAs: "zai"`.
 - **Usage & quota fetcher**: `fetchZaiUsage` / `zaiUsageProvider` (`packages/ai/src/usage/zai.ts`) queries `QUOTA_PATH` (`/api/monitor/usage/quota/limit`) on `DEFAULT_ENDPOINT` (`https://api.z.ai`) with direct key authorization. `parseLimitItem` parses `TOKENS_LIMIT` into token quotas (`zai:tokens:<window>`), `TIME_LIMIT` into request quotas (`zai:requests:<window>` or `zai:features:zread:<window>` when `isZaiFeatureRequestLimit` matches), and `CREDIT_LIMIT` into credit quotas (`zai:credits:<window>`, unit `credits`) for the credit-based GLM Coding Plan (e.g. 12k credits / 5h + 60k credits / week; `usage` is the allotment, `currentValue` the spend). The payload's `data.level` (e.g. `"lite"`, `"pro"`, `"max"`) is surfaced as `metadata.planType`. `buildZaiWindow` maps time units to 1h, 1d, 1mo, or 1w windows, and optionally fetches `MODEL_USAGE_PATH` (`/api/monitor/usage/model-usage`).
 - **Credential ranking**: `zaiRankingStrategy` (`packages/ai/src/usage/zai.ts`, registered in `packages/ai/src/auth-storage.ts`) ranks request limits via `rankZaiRequestLimits` (falling back to the full credential limit set — tokens/requests/credits — when no request quotas exist), selecting primary 5-hour and secondary weekly quota windows.
@@ -1700,7 +1700,7 @@ ZenMux is a multi-provider gateway using dual transport routing based on model o
 
 ### Auth & usage
 - **API Key Resolution**: `ZENMUX_API_KEY` is registered in `descriptors.ts` (`packages/catalog/src/provider-models/descriptors.ts`) and resolved via `getEnvApiKey("zenmux")` in `packages/ai/src/stream.ts`.
-- **Key Validation & Login**: `loginZenMux` in `packages/ai/src/registry/zenmux.ts` directs users to `https://zenmux.ai/settings/keys` and validates credentials with `kind: "models-endpoint"` against `https://zenmux.ai/api/v1/models`.
+- **Key Validation & Login**: Declared in `packages/catalog/src/compat/rules/auth/zenmux.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users to `https://zenmux.ai/settings/keys` and validating credentials via `validate "models-endpoint"` against `https://zenmux.ai/api/v1/models`.
 - **Unauthenticated Discovery**: `allowUnauthenticated: true` in `descriptors.ts` enables model catalog discovery without requiring an API key.
 
 ### Catalog model handling
@@ -1718,8 +1718,8 @@ Zhipu (智谱) BigModel's domestic coding-plan provider using the OpenAI Chat Co
 - **Max Tokens & System Messages**: Sets `useMaxTokens: true` (`packages/catalog/src/compat/openai.ts` line 362) and enables `supportsMultipleSystemMessages: true` (`packages/catalog/src/compat/openai.ts` line 408) for `isZhipu`.
 
 ### Auth & usage
-- **Credentials & API Base**: Authenticates via `ZHIPU_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts` line 541) with API base URL `https://open.bigmodel.cn/api/coding/paas/v4` (`packages/ai/src/registry/zhipu-coding-plan.ts` line 6) and dashboard URL `https://bigmodel.cn/coding-plan/personal/overview` (`packages/ai/src/registry/zhipu-coding-plan.ts` line 5).
-- **API Key Login & Validation**: `loginZhipuCodingPlan` (`packages/ai/src/registry/zhipu-coding-plan.ts` line 10) uses `createApiKeyLogin` with key format `<id>.<secret>`, validating against `glm-5.1` at `https://open.bigmodel.cn/api/coding/paas/v4`. Host detection is wired via `hosts.ts` (`zhipu`, urlMarker `open.bigmodel.cn`, `packages/catalog/src/hosts.ts` line 42).
+- **Credentials & API Base**: Authenticates via `ZHIPU_API_KEY` (`packages/catalog/src/provider-models/descriptors.ts` line 541) with API base URL `https://open.bigmodel.cn/api/coding/paas/v4` and dashboard URL `https://bigmodel.cn/coding-plan/personal/overview` (`packages/catalog/src/compat/rules/auth/zhipu-coding-plan.kdl`).
+- **API Key Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/zhipu-coding-plan.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) with key format `<id>.<secret>`, validating against `glm-5.1` at `https://open.bigmodel.cn/api/coding/paas/v4`. Host detection is wired via `hosts.ts` (`zhipu`, urlMarker `open.bigmodel.cn`, `packages/catalog/src/hosts.ts` line 42).
 - **Chinese-Language 429 Quota Classification**: `CN_QUOTA_EXHAUSTED_PATTERN` in `packages/ai/src/error/rate-limit.ts` line 60 (`/使用.{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足/`) classifies Zhipu's 429 quota exhaustion responses (`"429 已达到 5 小时的使用上限。您的限额将在 ... 重置。"`) as `QUOTA_EXHAUSTED`, triggering credential rotation instead of transient backoff.
 
 ### Catalog model handling

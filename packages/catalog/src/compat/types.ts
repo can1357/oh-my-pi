@@ -320,6 +320,220 @@ export interface CompiledBehavior {
 	retiredProviders: string[];
 }
 
+/**
+ * A string setting from `auth/*.kdl` that may be overridden by environment
+ * variables (consulted in order before `value`), stored obfuscated, or
+ * resolved at runtime by a named `@oh-my-pi/pi-ai` hook.
+ */
+export interface CompiledAuthValue {
+	value?: string;
+	env?: string[];
+	/** `base64`: the rule tree stores the value base64-encoded; decode before use. */
+	encoding?: "base64";
+	/** Hook name resolving the value at runtime; mutually exclusive with `value`. */
+	hook?: string;
+}
+
+/** One API-key validation probe run after the user pastes a key. */
+export type CompiledAuthValidation =
+	| {
+			kind: "chat-completions";
+			label?: string;
+			baseUrl: string;
+			model: string;
+			tolerateModelDenied?: boolean;
+			maxTokensField?: "max_tokens" | "max_completion_tokens";
+			maxTokens?: number;
+			optional?: boolean;
+	  }
+	| { kind: "anthropic-messages"; label?: string; baseUrl: string; model: string; optional?: boolean }
+	| {
+			kind: "models-endpoint";
+			label?: string;
+			url: string;
+			/** Env var holding an alternate base URL; `/models` is appended to it. */
+			baseUrlEnv?: string;
+			/** Hook returning extra request headers (may throw a configuration error). */
+			headersHook?: string;
+			optional?: boolean;
+	  };
+
+/** Paste-an-API-key login: optional browser hint, prompt, optional validation. */
+export interface CompiledApiKeyLogin {
+	kind: "api-key";
+	authUrl?: string;
+	instructions?: string;
+	prompt: string;
+	placeholder?: string;
+	/** Returned for an empty paste; presence also allows an empty answer. */
+	emptyFallback?: string;
+	normalize?: "strip-bearer";
+	validate?: CompiledAuthValidation;
+}
+
+/** How one `OAuthCredentials` field is derived from a token response. */
+export interface CompiledCredentialField {
+	/** Dot path into the JSON response body. */
+	path?: string;
+	/** JWT claim name read from the access token payload (first present wins). */
+	claim?: string[];
+	literal?: string;
+}
+
+/** Expiry derivation for a token response. */
+export type CompiledCredentialExpiry =
+	| { mode: "seconds"; path: string; fromPath?: string; skewMs: number }
+	| { mode: "jwt"; skewMs: number; fallbackMs?: number }
+	| { mode: "never" };
+
+/** Token-response → `OAuthCredentials` projection. */
+export interface CompiledCredentialMap {
+	access: CompiledCredentialField;
+	refresh?: CompiledCredentialField;
+	expires: CompiledCredentialExpiry;
+	email?: CompiledCredentialField;
+	accountId?: CompiledCredentialField;
+	orgId?: CompiledCredentialField;
+	orgName?: CompiledCredentialField;
+	projectId?: CompiledCredentialField;
+	apiEndpoint?: CompiledCredentialField;
+	enterpriseUrl?: CompiledCredentialField;
+}
+
+/** Bearer GET that enriches credentials with identity fields. */
+export interface CompiledUserinfo {
+	url: string;
+	email?: string;
+	accountId?: string;
+}
+
+/**
+ * One token-endpoint style request. `params` values may use `{placeholders}`
+ * (`code`, `state`, `redirect_uri`, `code_verifier`, `client_id`,
+ * `client_secret`, `refresh_token`, `device_code`, `scope`, `base`).
+ */
+export interface CompiledOAuthRequest {
+	url: CompiledAuthValue;
+	body: "form" | "json";
+	/** Include the grant's standard parameter set before `params`. */
+	standard: boolean;
+	params: Record<string, string>;
+	headers: Record<string, string>;
+	timeoutMs?: number;
+}
+
+/** Loopback callback configuration for authorization-code logins. */
+export interface CompiledCallback {
+	port: number;
+	path: string;
+	hostname: string;
+	redirectUri?: CompiledAuthValue;
+	portFallback: boolean;
+	manualOnly: boolean;
+}
+
+/** Authorization-code login through the loopback callback server. */
+export interface CompiledOAuthCodeLogin {
+	kind: "oauth-code";
+	clientId?: CompiledAuthValue;
+	clientSecret?: CompiledAuthValue;
+	authorizeUrl: CompiledAuthValue;
+	scopes: string[];
+	scopeSeparator: string;
+	pkce: boolean;
+	state: "hex" | "uuid" | "none";
+	/** Include the standard authorize query set before `authorizeParams`. */
+	standardAuthorizeParams: boolean;
+	authorizeParams: Record<string, string>;
+	instructions?: string;
+	callback: CompiledCallback;
+	token: CompiledOAuthRequest;
+	credential: CompiledCredentialMap;
+	userinfo?: CompiledUserinfo;
+	/** Hook run on the mapped credentials with the raw token response. */
+	afterExchange?: string;
+	/** Manual input starting with `prefix` is a pasted API key, validated at `validateUrl`. */
+	pasteKey?: { prefix: string; validateUrl: string };
+}
+
+/** RFC 8628 device-code login. */
+export interface CompiledDeviceCodeLogin {
+	kind: "device-code";
+	clientId: CompiledAuthValue;
+	/** `{base}` placeholder source for request URLs. */
+	baseUrl?: CompiledAuthValue;
+	scopes: string[];
+	scopeSeparator: string;
+	/** Hook returning headers merged into every request of the flow. */
+	headersHook?: string;
+	device: CompiledOAuthRequest;
+	token: CompiledOAuthRequest;
+	response: {
+		userCode: string;
+		deviceCode: string;
+		verificationUri: string;
+		verificationUriComplete?: string;
+		interval?: string;
+		expiresIn?: string;
+	};
+	/** `{user_code}` placeholder allowed. */
+	instructions: string;
+	credential: CompiledCredentialMap;
+	userinfo?: CompiledUserinfo;
+	afterExchange?: string;
+}
+
+/** Login implemented entirely by a named hook. */
+export interface CompiledCustomLogin {
+	kind: "custom";
+	hook: string;
+}
+
+export type CompiledLogin =
+	| CompiledApiKeyLogin
+	| CompiledOAuthCodeLogin
+	| CompiledDeviceCodeLogin
+	| CompiledCustomLogin;
+
+/** Refresh-token grant declared for a provider. */
+export type CompiledRefresh =
+	| { kind: "none" }
+	| { kind: "hook"; hook: string }
+	| {
+			kind: "request";
+			token: CompiledOAuthRequest;
+			/** Stored credential fields that must be present before refreshing. */
+			require: string[];
+			credential: CompiledCredentialMap;
+			userinfo?: CompiledUserinfo;
+			afterRefresh?: string;
+			headersHook?: string;
+	  };
+
+/** One provider's compiled auth policy (`auth/<id>.kdl`). */
+export interface CompiledAuthProvider {
+	id: string;
+	name: string;
+	env?: { vars: string[] } | { hook: string };
+	allowsMissingApiKey?: boolean;
+	available?: boolean;
+	showInLoginList?: boolean;
+	storeAs?: string;
+	callbackPort?: number;
+	pasteCode?: boolean;
+	apiKeyFormat: "bearer" | "structured";
+	expiry?: "jwt-or-never";
+	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */
+	result?: "api-key";
+	login?: CompiledLogin;
+	refresh?: CompiledRefresh;
+}
+
+/** Compiled auth stratum: providers in `/login` display order. */
+export interface CompiledAuth {
+	providers: CompiledAuthProvider[];
+}
+
 /** The complete compiled rule tree persisted as `rules.json`. */
 export interface CompiledCompatRules {
 	/** Compiled-format version; bump on incompatible shape changes. */
@@ -329,6 +543,7 @@ export interface CompiledCompatRules {
 	taxonomy: CompiledTaxonomy;
 	cascade: CompiledCascade;
 	behavior: CompiledBehavior;
+	auth: CompiledAuth;
 }
 
 /** Structured identity of one classified model. */

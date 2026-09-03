@@ -1,0 +1,9 @@
+auth "xiaomi-token-plan-ams" {
+	name "Xiaomi Token Plan (Europe)"
+	login "api-key" {
+		auth-url "https://platform.xiaomimimo.com/console/plan-manage"
+		instructions "Copy your token-plan API key for the Europe region"
+		prompt "Paste your Xiaomi Token Plan Europe API key (tp-...)" placeholder="tp-..."
+		validate "chat-completions" label="xiaomi" base-url="https://token-plan-ams.xiaomimimo.com/v1" model="mimo-v2.5"
+	}
+}
