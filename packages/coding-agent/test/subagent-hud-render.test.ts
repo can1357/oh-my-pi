@@ -15,7 +15,7 @@ import {
 	type ObservableSession,
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -420,6 +420,84 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("eta ~15.0s");
 		expect(out).not.toContain("└ 5.0s");
 	});
+
+	it("leads the stats line with a bar: determinate against the peer median, sweeping without one", () => {
+		const finished = makeSession({
+			id: "DoneScout",
+			agent: "scout",
+			status: "completed",
+			progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 100_000 }),
+		});
+		const live = makeSession({
+			id: "LiveScout",
+			agent: "scout",
+			description: "halfway",
+			progress: makeProgress({ id: "LiveScout", agent: "scout", description: "halfway", durationMs: 50_000 }),
+		});
+		const half = Bun.stripANSI(renderSubagentHudLines([finished, live], 160).join("\n"));
+		expect(half).toContain("└ ━━━━━─────");
+		expect(half).toContain("eta ~50.0s");
+
+		const over = Bun.stripANSI(
+			renderSubagentHudLines(
+				[finished, makeSession({ ...live, progress: { ...live.progress!, durationMs: 130_000 } })],
+				160,
+			).join("\n"),
+		);
+		expect(over).toContain("└ ━━━━━━━━━━");
+		expect(over).toContain("30.0s over");
+
+		// No finished peer: static empty bar when unanimated, a moving 3-cell
+		// sweep (position from the clock) once a spinner frame is supplied.
+		const still = Bun.stripANSI(renderSubagentHudLines([live], 160).join("\n"));
+		expect(still).toContain("└ ──────────");
+		const sweepA = Bun.stripANSI(renderSubagentHudLines([live], 160, 0, 0).join("\n"));
+		const sweepB = Bun.stripANSI(renderSubagentHudLines([live], 160, 160, 2).join("\n"));
+		expect(sweepA).toContain("└ ━━━───────");
+		expect(sweepB).toContain("└ ──━━━─────");
+	});
+
+	it("swaps the dot for the spinner glyph when a frame is supplied", () => {
+		const live = makeSession({ id: "Spinner", description: "moving" });
+		const frames = theme.spinnerFrames;
+		const still = Bun.stripANSI(renderSubagentHudLines([live], 120).join("\n"));
+		expect(still).toContain(`${theme.status.done} Spinner`);
+		const spun = Bun.stripANSI(renderSubagentHudLines([live], 120, Date.now(), 1).join("\n"));
+		expect(spun).toContain(`${Bun.stripANSI(frames[1])} Spinner`);
+		expect(spun).not.toContain(`${theme.status.done} Spinner`);
+	});
+
+	it("shows the in-flight tool and intent, flagging a call that has run past five seconds", () => {
+		const reading = makeSession({
+			id: "Reader",
+			description: "reading",
+			progress: makeProgress({
+				id: "Reader",
+				description: "reading",
+				durationMs: 20_000,
+				currentTool: "read",
+				lastIntent: "Scanning the loader",
+				currentToolStartMs: 1_000_000,
+			}),
+		});
+		const quick = Bun.stripANSI(renderSubagentHudLines([reading], 160, 1_002_000).join("\n"));
+		expect(quick).toContain("read: Scanning the loader");
+		expect(quick).not.toContain("read: Scanning the loader · 2.0s");
+		const slow = Bun.stripANSI(renderSubagentHudLines([reading], 160, 1_012_000).join("\n"));
+		expect(slow).toContain("read: Scanning the loader · 12.0s");
+
+		const between = makeSession({
+			id: "Thinker",
+			description: "thinking",
+			progress: makeProgress({
+				id: "Thinker",
+				description: "thinking",
+				durationMs: 20_000,
+				recentTools: [{ tool: "grep", args: "pattern=foo", endMs: 5 }],
+			}),
+		});
+		expect(Bun.stripANSI(renderSubagentHudLines([between], 160).join("\n"))).toContain("grep: pattern=foo");
+	});
 });
 
 describe("InteractiveMode subagent observer UI sync", () => {
@@ -487,7 +565,9 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		}
 
 		await Promise.resolve();
-		vi.runAllTimers();
+		// Advance only past the coalesce window: the HUD arms the shared 80ms
+		// spinner interval, which `runAllTimers` would spin on forever.
+		vi.advanceTimersByTime(150);
 		await Promise.resolve();
 
 		const hud = Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));

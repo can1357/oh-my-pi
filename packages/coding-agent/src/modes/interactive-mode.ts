@@ -126,6 +126,8 @@ import {
 	agentStatParts,
 	agentTypeBadge,
 	estimateAgentEtaMs,
+	formatAgentActivity,
+	formatAgentProgressBar,
 	formatEta,
 	formatTaskId,
 	shortModelLabel,
@@ -138,6 +140,7 @@ import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	formatDuration as formatElapsedDuration,
 	formatMoreItems,
+	formatStatusIcon,
 	replaceTabs,
 	shortenPath,
 	TRUNCATE_LENGTHS,
@@ -192,7 +195,13 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
 import { SessionInfoOverlay } from "./components/session-info-overlay";
 import { StatusLineComponent } from "./components/status-line";
-import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
+import {
+	registerSpinnerBlock,
+	type SpinnerTickTarget,
+	stopSharedSpinnerTicker,
+	type ToolExecutionHandle,
+	unregisterSpinnerBlock,
+} from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { Composer, type ComposerStatusSnapshot } from "./composer";
@@ -513,10 +522,14 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
  * the inline task rows use (muted task preview when no description was given),
- * each followed by one dim stats line: resolved model, requests, prompt/output
- * volume, cache hit rate, output rate, context gauge, cost, elapsed, and a
- * peer-derived ETA (median runtime of finished agents of the same type this
- * session). Stats appear as soon as the first assistant turn settles.
+ * each followed by one dim line: a progress bar (elapsed over the peer-derived
+ * total — median runtime of finished agents of the same type this session — or
+ * an indeterminate sweep while no peer has finished), elapsed and eta, what the
+ * agent is doing right now (`tool: intent`), then resolved model, requests,
+ * prompt/output volume, cache hit rate, output rate, context gauge, and cost.
+ * Stats appear as soon as the first assistant turn settles. With
+ * `spinnerFrame` the row leads with the shared spinner glyph and the sweep
+ * advances on `nowMs`; without it (no ticker) the row is static.
  * Layout mirrors the Todos HUD exactly: unindented header, then
  * `renderTreeList` rows (dim connectors) shifted right by one space.
  * Only detached background spawns are listed: a sync task call blocks the
@@ -528,6 +541,7 @@ export function renderSubagentHudLines(
 	sessions: ObservableSession[],
 	columns: number,
 	nowMs: number = Date.now(),
+	spinnerFrame?: number,
 ): string[] {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
@@ -539,7 +553,10 @@ export function renderSubagentHudLines(
 		if (session.kind === "subagent" && session.progress) peers.push(session.progress);
 	}
 
-	const dot = theme.styledSymbol("status.done", "accent");
+	const marker =
+		spinnerFrame === undefined
+			? theme.styledSymbol("status.done", "accent")
+			: theme.fg("accent", formatStatusIcon("running", theme, spinnerFrame));
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
 	const rows = renderTreeList(
@@ -550,7 +567,7 @@ export function renderSubagentHudLines(
 				const displayId = formatTaskId(session.id);
 				const role = session.agent ?? session.progress?.agent;
 				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				let line = `${marker} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
@@ -572,19 +589,32 @@ export function renderSubagentHudLines(
 				}
 				const progress = session.progress;
 				if (!progress) return line;
-				const stats: string[] = [];
+				const elapsedMs = agentElapsedMs(progress, nowMs);
+				const etaMs = estimateAgentEtaMs(progress, peers, elapsedMs);
+				// Liveness first, so a narrow viewport truncates the accounting, not
+				// the motion: bar, elapsed/eta, current tool, then usage.
+				const stats: string[] = [
+					formatAgentProgressBar(
+						{ elapsedMs, etaMs, nowMs: spinnerFrame === undefined ? undefined : nowMs },
+						theme,
+					),
+				];
+				if (elapsedMs > 0) stats.push(theme.fg("dim", formatElapsedDuration(elapsedMs)));
+				const eta = formatEta(etaMs);
+				if (eta) stats.push(theme.fg(etaMs !== undefined && etaMs < 0 ? "warning" : "dim", eta));
+				const activity = formatAgentActivity(progress, theme, nowMs);
+				if (activity) stats.push(activity);
 				if (progress.resolvedModel) {
 					stats.push(theme.fg("dim", truncateToWidth(replaceTabs(shortModelLabel(progress.resolvedModel)), 32)));
 				}
 				// Tool count and model badge are covered by the row above / the model
-				// fragment; elapsed sits between the usage fragments and the eta.
-				stats.push(...agentStatParts({ ...progress, toolCount: undefined, resolvedModel: undefined }, theme));
-				const elapsedMs = agentElapsedMs(progress, nowMs);
-				if (elapsedMs > 0) stats.push(theme.fg("dim", formatElapsedDuration(elapsedMs)));
-				const etaMs = estimateAgentEtaMs(progress, peers, elapsedMs);
-				const eta = formatEta(etaMs);
-				if (eta) stats.push(theme.fg(etaMs !== undefined && etaMs < 0 ? "warning" : "dim", eta));
-				if (stats.length === 0) return line;
+				// fragment; eta already sits beside the bar.
+				stats.push(
+					...agentStatParts(
+						{ ...progress, toolCount: undefined, resolvedModel: undefined, etaMs: undefined },
+						theme,
+					),
+				);
 				const statsLine = ` ${theme.fg("dim", theme.tree.hook)} ${stats.join(theme.fg("dim", theme.sep.dot))}`;
 				return [line, truncateToWidth(statsLine, Math.max(TRUNCATE_LENGTHS.SHORT, columns - 4))];
 			},
@@ -598,15 +628,27 @@ export function renderSubagentHudLines(
 }
 
 /**
- * Dynamic HUD component. The TUI already repaints while task/job spinners are
- * live; deriving rows here lets elapsed/eta advance on those frames without
- * owning another timer or leaking lifecycle work.
+ * Live HUD component. Registered with the shared tool spinner ticker while any
+ * detached subagent runs, so the spinner glyph, sweep bar, elapsed, and
+ * current-tool fragment advance every glyph step even though detached spawns
+ * leave no live tool block behind to drive repaints. Ticks are
+ * component-scoped so the transcript subtree is reused per frame.
  */
-class SubagentHudComponent implements Component {
-	constructor(private readonly sessions: () => ObservableSession[]) {}
+class SubagentHudComponent implements Component, SpinnerTickTarget {
+	#frame: number | undefined;
+
+	constructor(
+		private readonly ui: TUI,
+		private readonly sessions: () => ObservableSession[],
+	) {}
+
+	tickSpinner(frame: number): void {
+		this.#frame = frame;
+		this.ui.requestComponentRender(this);
+	}
 
 	render(width: number): readonly string[] {
-		return renderSubagentHudLines(this.sessions(), width);
+		return renderSubagentHudLines(this.sessions(), width, Date.now(), this.#frame);
 	}
 }
 
@@ -889,6 +931,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** The one live HUD instance; present exactly while it is registered with the spinner ticker. */
+	#subagentHud?: SubagentHudComponent;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
 	#mcpStatusOrder: string[] = [];
@@ -2849,15 +2893,26 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
-	 * editor. Driven entirely by observer-registry change events, so rows appear
-	 * on spawn and the whole block clears itself once the last subagent leaves
-	 * the "active" state.
+	 * editor. Rows appear on observer-registry change events; while any are
+	 * shown the single HUD component stays registered with the shared spinner
+	 * ticker so it repaints per glyph step, and it unregisters (stopping the
+	 * ticker if nothing else is live) once the last subagent leaves "active".
 	 */
 	#renderSubagentList(): void {
-		this.subagentContainer.clear();
 		const sessions = this.#observerRegistry.getSessions();
-		if (renderSubagentHudLines(sessions, this.ui.terminal.columns).length === 0) return;
-		this.subagentContainer.addChild(new SubagentHudComponent(() => this.#observerRegistry.getSessions()));
+		if (renderSubagentHudLines(sessions, this.ui.terminal.columns).length === 0) {
+			if (this.#subagentHud) {
+				unregisterSpinnerBlock(this.#subagentHud);
+				this.#subagentHud = undefined;
+			}
+			this.subagentContainer.clear();
+			return;
+		}
+		if (this.#subagentHud) return;
+		this.#subagentHud = new SubagentHudComponent(this.ui, () => this.#observerRegistry.getSessions());
+		this.subagentContainer.clear();
+		this.subagentContainer.addChild(this.#subagentHud);
+		registerSpinnerBlock(this.#subagentHud);
 	}
 
 	async #loadTodoList(source: AgentSession = this.session): Promise<void> {

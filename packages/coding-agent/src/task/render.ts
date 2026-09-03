@@ -181,6 +181,78 @@ export function shortModelLabel(selector: string): string {
 	return slash === -1 ? selector : selector.slice(slash + 1);
 }
 
+/** Cells in the HUD progress bar. */
+export const AGENT_PROGRESS_BAR_WIDTH = 10;
+const AGENT_PROGRESS_SWEEP_WIDTH = 3;
+/** Matches the shared spinner cadence so the sweep advances one cell per repaint. */
+const AGENT_PROGRESS_SWEEP_STEP_MS = 80;
+/** A single tool call past this reads as stuck; the activity fragment shows its elapsed. */
+const AGENT_SLOW_TOOL_MS = 5000;
+
+/**
+ * Progress bar for a live agent. Determinate — elapsed over the peer-derived
+ * total, full and warning-colored once over — when an eta exists. Without one
+ * there is nothing honest to fill against, so the bar is an indeterminate
+ * sweep driven by `nowMs`: it reads as motion only while a ticker repaints the
+ * row. `nowMs` undefined (frozen row) renders the static empty bar.
+ */
+export function formatAgentProgressBar(
+	opts: { elapsedMs: number; etaMs?: number; nowMs?: number },
+	theme: Theme,
+	width = AGENT_PROGRESS_BAR_WIDTH,
+): string {
+	const { filled, empty } = theme.progress;
+	if (opts.etaMs !== undefined && Number.isFinite(opts.etaMs)) {
+		const over = opts.etaMs < 0;
+		const total = opts.elapsedMs + opts.etaMs;
+		const cells = over || total <= 0 ? width : Math.min(width, Math.round((opts.elapsedMs / total) * width));
+		return theme.fg(over ? "warning" : "accent", filled.repeat(cells)) + theme.fg("dim", empty.repeat(width - cells));
+	}
+	if (opts.nowMs === undefined) return theme.fg("dim", empty.repeat(width));
+	const span = width - AGENT_PROGRESS_SWEEP_WIDTH;
+	const tick = Math.floor(opts.nowMs / AGENT_PROGRESS_SWEEP_STEP_MS) % (span * 2);
+	const start = tick <= span ? tick : span * 2 - tick;
+	return (
+		theme.fg("dim", empty.repeat(start)) +
+		theme.fg("accent", filled.repeat(AGENT_PROGRESS_SWEEP_WIDTH)) +
+		theme.fg("dim", empty.repeat(span - start))
+	);
+}
+
+/**
+ * What a running agent is doing right now: `tool: intent` for the in-flight
+ * call (plus its elapsed once it passes {@link AGENT_SLOW_TOOL_MS}), or the
+ * most recent finished call, dimmed, while the model is between tools.
+ * Undefined when the agent is not running or has no tool history yet.
+ */
+export function formatAgentActivity(
+	progress: Pick<
+		AgentProgress,
+		"status" | "currentTool" | "currentToolArgs" | "currentToolStartMs" | "lastIntent" | "recentTools"
+	>,
+	theme: Theme,
+	nowMs: number,
+): string | undefined {
+	if (progress.status !== "running") return undefined;
+	if (progress.currentTool) {
+		let fragment = theme.fg("muted", sanitizeText(progress.currentTool));
+		const detail = progress.lastIntent ?? progress.currentToolArgs;
+		if (detail) fragment += `: ${theme.fg("dim", previewLine(sanitizeText(detail), 40))}`;
+		if (progress.currentToolStartMs) {
+			const elapsed = nowMs - progress.currentToolStartMs;
+			if (elapsed > AGENT_SLOW_TOOL_MS)
+				fragment += `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`;
+		}
+		return fragment;
+	}
+	const recent = progress.recentTools[0];
+	if (!recent) return undefined;
+	let fragment = theme.fg("dim", sanitizeText(recent.tool));
+	const detail = progress.lastIntent ?? recent.args;
+	if (detail) fragment += `: ${theme.fg("dim", previewLine(sanitizeText(detail), 40))}`;
+	return fragment;
+}
+
 /**
  * Styled stat fragments for an agent row, in display order: tools, requests,
  * prompt/completion volume, cache hit rate, output rate, context gauge, cost,
@@ -1071,31 +1143,8 @@ function renderAgentProgress(
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
 	// Current tool (if running) or most recent completed tool
-	if (progress.status === "running") {
-		if (progress.currentTool) {
-			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", sanitizeText(progress.currentTool))}`;
-			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
-			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
-			}
-			if (progress.currentToolStartMs) {
-				const elapsed = nowMs - progress.currentToolStartMs;
-				if (elapsed > 5000) {
-					toolLine += `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`;
-				}
-			}
-			lines.push(toolLine);
-		} else if (progress.recentTools.length > 0) {
-			// Show most recent completed tool when idle between tools
-			const recent = progress.recentTools[0];
-			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", sanitizeText(recent.tool))}`;
-			const toolDetail = progress.lastIntent ?? recent.args;
-			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
-			}
-			lines.push(toolLine);
-		}
-	}
+	const activity = formatAgentActivity(progress, theme, nowMs);
+	if (activity) lines.push(`${continuePrefix}${theme.tree.hook} ${activity}`);
 
 	// Retry detail line: surface why the subagent is paused and roughly how
 	// long until the next attempt. Without this, the parent UI would just
