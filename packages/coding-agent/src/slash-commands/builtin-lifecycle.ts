@@ -369,6 +369,31 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "continue",
+		description: "Continue the agent's current work without initiating a user turn",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before continuing.", runtime);
+			}
+			if (!runtime.session.continueTurn()) {
+				return usage("Nothing to continue.", runtime);
+			}
+			await runtime.output("Continuing the agent's work.");
+			// `AgentSession.continueTurn()` only schedules the continuation as a
+			// post-prompt task; it returns before the continued turn streams. Hosts
+			// whose prompt turn owns the event subscription (ACP) must stay open
+			// across that turn — same contract as `/retry`.
+			await runtime.keepTurnOpenUntilIdle?.();
+			return commandConsumed({ agentInvoked: true });
+		},
+		handleTui: async (_command, runtime) => {
+			if (!runtime.ctx.session.continueTurn()) {
+				runtime.ctx.showStatus("Nothing to continue");
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "debug",
 		description: "Open debug tools selector",
 		handleTui: async (_command, runtime) => {
