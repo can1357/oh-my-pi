@@ -602,6 +602,28 @@ describe("sloppy v8", () => {
 		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
 	});
 
+	test("rejects an equal-line-count desired block whose prefix matches and remainder edits the continuation", () => {
+		// Regression (review P1 round 2 on #10527): a four-line desired-state
+		// block that keeps the first two lines and changes the last two passes
+		// the equal-line-count and similarity gates — the declarations share
+		// enough structure to score above 0.65 — but splitting at the matching
+		// two-line prefix replaces only those lines and strands the original
+		// latter half, dropping alpha/beta and duplicating gamma/delta. The
+		// continuation gate rejects the split: the rewrite resembles the file's
+		// continuation (the lines after the match) at least as much as it
+		// resembles the matched prefix, so the split is a desired-state edit of
+		// the continuation, not a rewrite of the match. The block then falls
+		// through to the closest-block path, which replaces the whole block.
+		const content = "alpha = A;\nbeta = B;\ngamma = C;\ndelta = D;\n";
+		const input = "<SM:EDIT>\nalpha = A;\nbeta = B;\ngamma = C2;\ndelta = D2;";
+		const notes: string[] = [];
+
+		expect(applySloppy(content, input, { path: "c.ts", notes })).toBe(
+			"alpha = A;\nbeta = B;\ngamma = C2;\ndelta = D2;\n",
+		);
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+	});
+
 	test("keeps the fail-closed error when no block resembles the stated text", () => {
 		const content = "const a = 1;\nkeep();\n";
 

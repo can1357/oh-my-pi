@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sloppy edit missing-separator recovery so equal-line-count desired-state blocks that edit the file's continuation are no longer split at the matching prefix, and the similarity computation is now size-capped to avoid stalling on large payloads ([#10527](https://github.com/can1357/oh-my-pi/pull/10527) by [@CaiJingLong](https://github.com/CaiJingLong)).
+
 ## [18.1.5] - 2026-09-03
 
 ### Added

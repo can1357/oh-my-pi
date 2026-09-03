@@ -611,17 +611,22 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 
 /**
  * Minimum normalized similarity between a recovered MATCH prefix and its
- * recovered REWRITE remainder for the missing-separator split to be trusted.
- * A real "forgot the » separator" payload replaces the matched text with a
- * same-shape rewrite (same line count, high similarity). A marker-less
- * desired-state block whose first line happens to exist in the file pairs a
- * stray prefix with the block's remaining lines — usually a different line
- * count, and often a tail that is really the file's own continuation. The
- * split is only accepted when both agree with the same-construct reading;
- * anything else falls through to the gated closest-block path (or the
- * fail-closed error) instead of silently replacing a prefix line.
+ * recovered REWRITE remainder for the missing-separator split to be trusted,
+ * and the maximum normalized length either side may occupy before the
+ * quadratic Levenshtein computation is skipped. A real "forgot the »
+ * separator" payload replaces the matched text with a same-shape rewrite
+ * (same line count, high similarity, and the rewrite resembles the matched
+ * text more than the file's continuation after it). A marker-less
+ * desired-state block whose first lines happen to exist in the file pairs a
+ * stray prefix with the block's remaining lines — the remainder edits the
+ * continuation, not the matched text, so its similarity to the continuation
+ * meets or exceeds its similarity to the match. The split is only accepted
+ * when all three gates agree; anything else falls through to the gated
+ * closest-block path (or the fail-closed error) instead of silently
+ * replacing a prefix line.
  */
 const RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY = 0.65;
+const RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH = 1000;
 
 function recoverMissingSeparator(
 	lines: string[],
@@ -651,12 +656,17 @@ function recoverMissingSeparator(
 		if (content.startsWith(throughFirstRewriteLine, matches[0].start)) continue;
 		// Structural gate: a recovered split must look like a same-shape rewrite
 		// of the matched text (equal non-blank line count, similar normalized
-		// shape), not a marker-less desired-state block whose first line merely
-		// exists in the file. Splitting the latter replaces only the prefix line
-		// and strands the rest — the silent corruption this gate exists to
-		// prevent. Line-count equality alone rejects whole-block restatements
-		// whose prefix is a single matching line (e.g. an added import above a
-		// kept call), even when the shared frame keeps similarity high.
+		// shape, and the rewrite resembles the match more than the file's
+		// continuation after it), not a marker-less desired-state block whose
+		// first lines merely exist in the file. Splitting the latter replaces
+		// only the prefix lines and strands the rest — the silent corruption
+		// this gate exists to prevent. Line-count equality alone rejects
+		// whole-block restatements whose prefix is a single matching line
+		// (e.g. an added import above a kept call), even when the shared frame
+		// keeps similarity high. The continuation gate rejects equal-line-count
+		// restatements whose prefix is a matching multi-line run: the remainder
+		// edits the lines that follow the match, so it resembles the
+		// continuation at least as much as it resembles the match.
 		const patternLines = patternText.split("\n").filter(line => line.trim() !== "");
 		const rewriteLines = rewrite.split("\n").filter(line => line.trim() !== "");
 		const patternNormalized = normalizeText(patternText).text;
@@ -665,9 +675,34 @@ function recoverMissingSeparator(
 			patternNormalized === "" ||
 			rewriteNormalized === "" ||
 			patternLines.length !== rewriteLines.length ||
+			patternNormalized.length > RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH ||
+			rewriteNormalized.length > RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH ||
 			similarity(patternNormalized, rewriteNormalized) < RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY
 		) {
 			continue;
+		}
+		// Continuation gate: extract the same number of non-blank lines from
+		// the file immediately after the match. When the rewrite resembles the
+		// continuation at least as much as it resembles the matched text, the
+		// remainder is a desired-state edit of the following lines, not a
+		// rewrite of the match — reject the split.
+		const matchEnd = matches[0].end;
+		const fileLinesAfter = content.slice(matchEnd).split("\n");
+		const continuationLines: string[] = [];
+		for (const line of fileLinesAfter) {
+			if (line.trim() === "") continue;
+			continuationLines.push(line);
+			if (continuationLines.length >= rewriteLines.length) break;
+		}
+		if (continuationLines.length === rewriteLines.length) {
+			const continuationNormalized = normalizeText(continuationLines.join("\n")).text;
+			if (
+				continuationNormalized.length <= RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH &&
+				similarity(rewriteNormalized, continuationNormalized) >=
+					similarity(patternNormalized, rewriteNormalized)
+			) {
+				continue;
+			}
 		}
 		if (!candidates.some(candidate => candidate.patternText === patternText && candidate.rewrite === rewrite)) {
 			candidates.push({ patternText, rewrite });
