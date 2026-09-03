@@ -15,7 +15,22 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
+
+const hasFfprobe = Boolean($which("ffprobe"));
+
+// The video reader owns every video path before the binary sniff: with
+// ffprobe it reports a probe failure naming the file, without it the install
+// hint — either way no decoded byte reaches the text pipeline.
+function expectVideoProbeFailure(text: string, fileName: string): void {
+	if (hasFfprobe) {
+		expect(text).toContain("Could not probe video");
+		expect(text).toContain(fileName);
+	} else {
+		expect(text).toContain("requires ffprobe");
+	}
+	expect(text).not.toContain("\u0000");
+}
 
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
 const TINY_PNG = Buffer.from(
@@ -131,27 +146,19 @@ describe("read local:// images", () => {
 		const tool = new ReadTool(makeSession(testDir));
 
 		const error = await tool.execute("call", { path: "local://clip.mp4" }).catch(e => e);
-		const text = String(error?.message ?? error);
-
-		expect(text).toContain("Could not probe video");
-		expect(text).toContain("clip.mp4");
-		expect(text).not.toContain("\u0000");
+		expectVideoProbeFailure(String(error?.message ?? error), "clip.mp4");
 	});
 
 	it("surfaces a large corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
-		// A NUL-filled blob wearing a video extension must fail in ffprobe, not in
-		// the text pipeline: the video reader owns every video path before the
-		// binary sniff, so no byte budget or line scan ever sees these bytes.
+		// A NUL-filled blob wearing a video extension must fail in the video
+		// reader, not in the text pipeline: no byte budget or line scan ever sees
+		// these bytes.
 		const blob = new Uint8Array(256 * 1024);
 		await Bun.write(path.join(localRoot, "video.mp4"), blob);
 		const tool = new ReadTool(makeSession(testDir));
 
 		const error = await tool.execute("call", { path: "local://video.mp4" }).catch(e => e);
-		const text = String(error?.message ?? error);
-
-		expect(text).toContain("Could not probe video");
-		expect(text).toContain("video.mp4");
-		expect(text).not.toContain("\u0000");
+		expectVideoProbeFailure(String(error?.message ?? error), "video.mp4");
 	});
 
 	it("does not materialize local:// binary resources in the protocol handler", async () => {
