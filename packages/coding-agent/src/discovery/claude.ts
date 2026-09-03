@@ -37,9 +37,26 @@ const DISPLAY_NAME = "Claude Code";
 const PRIORITY = 80;
 const CONFIG_DIR = ".claude";
 
-/** Get the active user-level Claude Code directory, or null if not enabled. */
-function getUserClaude(ctx: LoadContext): string | null {
-	if (!isUserSourceEnabled("claude", ctx)) return null;
+/**
+ * Read a legacy per-capability `~/.claude` toggle. Defaults to off (opt-in);
+ * also off when settings are not initialized (discovery unit tests).
+ */
+function readClaudeUserToggle(key: "skills.enableClaudeUser" | "commands.enableClaudeUser"): boolean {
+	try {
+		return settings.get(key) === true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Get the active user-level Claude Code directory, or null when `~/.claude`
+ * is not opted in. `capabilityToggle` is a legacy per-capability opt-in
+ * (`skills.enableClaudeUser`, `commands.enableClaudeUser`) that admits just
+ * that capability's directory.
+ */
+function getUserClaude(ctx: LoadContext, capabilityToggle = false): string | null {
+	if (!capabilityToggle && !isUserSourceEnabled("claude", ctx)) return null;
 	const { configDir } = resolveClaudePaths(ctx.home);
 	return configDir;
 }
@@ -171,7 +188,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 // =============================================================================
 
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	const userBase = getUserClaude(ctx);
+	const userBase = getUserClaude(ctx, readClaudeUserToggle("skills.enableClaudeUser"));
 	const userSkillsDir = userBase ? path.join(userBase, "skills") : null;
 
 	// Walk up from cwd finding .claude/skills/ in ancestors. Skip $HOME:
@@ -265,18 +282,14 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 // =============================================================================
 
 /**
- * Read the Claude command-loading toggles from settings.
- * Falls back to true (current behavior) when settings are not initialized,
- * e.g. inside discovery unit tests that run without Settings.init().
+ * Read the project command-loading toggle. Falls back to true when settings
+ * are not initialized, e.g. inside discovery unit tests without Settings.init().
  */
-function readClaudeCommandToggles(): { enableUser: boolean; enableProject: boolean } {
+function readClaudeProjectCommandsToggle(): boolean {
 	try {
-		return {
-			enableUser: settings.get("commands.enableClaudeUser") ?? false,
-			enableProject: settings.get("commands.enableClaudeProject") ?? true,
-		};
+		return settings.get("commands.enableClaudeProject") ?? true;
 	} catch {
-		return { enableUser: false, enableProject: true };
+		return true;
 	}
 }
 
@@ -306,29 +319,26 @@ function addClaudeCommandNamespaceAliases(commands: SlashCommand[], commandsDir:
 async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashCommand>> {
 	const items: SlashCommand[] = [];
 	const warnings: string[] = [];
-	const { enableUser, enableProject } = readClaudeCommandToggles();
+	const enableProject = readClaudeProjectCommandsToggle();
 
-	const userBase = getUserClaude(ctx);
-	if (enableUser || userBase) {
-		const effectiveUserBase = userBase ?? (enableUser ? resolveClaudePaths(ctx.home).configDir : null);
-		if (effectiveUserBase) {
-			const userCommandsDir = path.join(effectiveUserBase, "commands");
+	const userBase = getUserClaude(ctx, readClaudeUserToggle("commands.enableClaudeUser"));
+	if (userBase) {
+		const userCommandsDir = path.join(userBase, "commands");
 
-			const userResult = await loadFilesFromDir<SlashCommand>(ctx, userCommandsDir, PROVIDER_ID, "user", {
-				extensions: ["md"],
-				recursive: true,
-				transform: (name, content, filePath, source) => ({
-					name: name.replace(/\.md$/, ""),
-					path: filePath,
-					content,
-					level: "user",
-					_source: source,
-				}),
-			});
+		const userResult = await loadFilesFromDir<SlashCommand>(ctx, userCommandsDir, PROVIDER_ID, "user", {
+			extensions: ["md"],
+			recursive: true,
+			transform: (name, content, filePath, source) => ({
+				name: name.replace(/\.md$/, ""),
+				path: filePath,
+				content,
+				level: "user",
+				_source: source,
+			}),
+		});
 
-			items.push(...addClaudeCommandNamespaceAliases(userResult.items, userCommandsDir));
-			if (userResult.warnings) warnings.push(...userResult.warnings);
-		}
+		items.push(...addClaudeCommandNamespaceAliases(userResult.items, userCommandsDir));
+		if (userResult.warnings) warnings.push(...userResult.warnings);
 	}
 
 	if (enableProject) {

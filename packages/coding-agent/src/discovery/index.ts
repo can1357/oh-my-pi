@@ -45,7 +45,9 @@ export {
 	cacheStats,
 	// Provider management
 	disableProvider,
+	disableUserSource,
 	enableProvider,
+	enableUserSource,
 	getAllCapabilitiesInfo,
 	getAllProvidersInfo,
 	// Introspection
@@ -57,8 +59,8 @@ export {
 	// Initialization
 	initializeWithSettings,
 	invalidate,
+	isForeignUserProvider,
 	isProviderEnabled,
-	isProviderSourceEnabled,
 	isUserSourceEnabled,
 	listCapabilities,
 	// Loading API

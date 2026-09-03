@@ -46,6 +46,12 @@ export interface LoadContext {
 	extensionRoots?: EffectiveExtensionRoots;
 	/** Provider IDs explicitly requested by caller in LoadOptions */
 	explicitProviders?: Set<string>;
+	/**
+	 * Scan foreign `~/` sources even when not opted in. Set for
+	 * `includeDisabled` (dashboard) loads so opted-out items are listed
+	 * and can be switched on.
+	 */
+	includeOptOutUserSources?: boolean;
 }
 
 /**

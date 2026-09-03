@@ -21,6 +21,7 @@ import type { Prompt } from "../capability/prompt";
 import { promptCapability } from "../capability/prompt";
 import type { Settings } from "../capability/settings";
 import { settingsCapability } from "../capability/settings";
+import { settings as activeSettings } from "../config/settings";
 import type { Skill } from "../capability/skill";
 import { skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability, slashCommandFrontmatterDisplay } from "../capability/slash-command";
@@ -46,9 +47,23 @@ function getProjectCodexDir(ctx: LoadContext): string {
 	return path.join(ctx.cwd, ".codex");
 }
 
-function getUserCodexDir(ctx: LoadContext): string | null {
-	if (!isUserSourceEnabled("codex", ctx)) return null;
+/**
+ * `~/.codex`, or null when not opted in. `capabilityToggle` is a legacy
+ * per-capability opt-in (`skills.enableCodexUser`) admitting only that
+ * capability's directory.
+ */
+function getUserCodexDir(ctx: LoadContext, capabilityToggle = false): string | null {
+	if (!capabilityToggle && !isUserSourceEnabled("codex", ctx)) return null;
 	return path.join(ctx.home, SOURCE_PATHS.codex.userBase);
+}
+
+/** Legacy `skills.enableCodexUser` toggle; off by default and without initialized settings. */
+function readCodexUserSkillsToggle(): boolean {
+	try {
+		return activeSettings.get("skills.enableCodexUser") === true;
+	} catch {
+		return false;
+	}
 }
 
 // =============================================================================
@@ -243,7 +258,7 @@ function extractMCPServersFromToml(
 // =============================================================================
 
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	const userDir = getUserCodexDir(ctx);
+	const userDir = getUserCodexDir(ctx, readCodexUserSkillsToggle());
 	const userSkillsDir = userDir ? path.join(userDir, "skills") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectSkillsDir = path.join(codexDir, "skills");

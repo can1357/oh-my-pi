@@ -282,6 +282,7 @@ export async function loadCapability<T>(
 	const repoRoot = await findRepoRoot(cwd);
 	const ctx: LoadContext = { cwd, home, repoRoot };
 	if (options.providers) ctx.explicitProviders = new Set(options.providers);
+	if (options.includeDisabled) ctx.includeOptOutUserSources = true;
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
 	const providers = filterProviders(capability, options);
 
@@ -292,31 +293,39 @@ export async function loadCapability<T>(
 // Provider Enable/Disable API
 // =============================================================================
 
+/** Whether `providerId` is a foreign tool whose `~/` config is opt-in. */
+export function isForeignUserProvider(providerId: string): boolean {
+	return FOREIGN_USER_PROVIDERS[providerId] === true;
+}
+
 /**
  * Check whether a user-level (~/...) config source is enabled.
  * Native (.omp) and .agents directories are enabled by default.
- * Foreign tool directories (~/.cursor, ~/.codex, ~/.claude, etc.) are opt-in.
+ * Foreign tool directories (~/.cursor, ~/.codex, ~/.claude, etc.) are opt-in
+ * via `enabledProviders`. Project-level (cwd) config is unaffected; see
+ * {@link isProviderEnabled} for the whole-provider switch.
  */
 export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean {
 	const id = source.replace(/^\./, "");
 	if (disabledProviders.has(id)) return false;
 	if (FOREIGN_USER_PROVIDERS[id] !== true) return true;
-	if (ctx?.explicitProviders?.has(id)) return true;
+	if (ctx?.explicitProviders?.has(id) || ctx?.includeOptOutUserSources) return true;
 	if (enabledProviders.has(id) || enabledProviders.has("*") || enabledProviders.has("all")) return true;
 	if (id === "claude-plugins" && enabledProviders.has("claude")) return true;
-	if (id === "claude" && typeof process !== "undefined" && process.env.CLAUDE_CONFIG_DIR?.trim()) return true;
-	if (settings) {
-		const configured = settings.get("enabledProviders");
-		if (Array.isArray(configured)) {
-			if (configured.includes(id) || configured.includes("*") || configured.includes("all")) return true;
-			if (id === "claude-plugins" && configured.includes("claude")) return true;
-		}
-		if (id === "claude" && settings.get("skills.enableClaudeUser") === true) return true;
-		if (id === "codex" && settings.get("skills.enableCodexUser") === true) return true;
-		if (id === "claude" && settings.get("commands.enableClaudeUser") === true) return true;
-		if (id === "opencode" && settings.get("commands.enableOpencodeUser") === true) return true;
-	}
+	if (id === "claude" && process.env.CLAUDE_CONFIG_DIR?.trim()) return true;
 	return false;
+}
+
+/** Opt a foreign provider's `~/` config in. */
+export function enableUserSource(providerId: string): void {
+	enabledProviders.add(providerId);
+	persistEnabledProviders();
+}
+
+/** Opt a foreign provider's `~/` config out (project config keeps loading). */
+export function disableUserSource(providerId: string): void {
+	enabledProviders.delete(providerId);
+	persistEnabledProviders();
 }
 
 /**
@@ -362,9 +371,7 @@ function persistEnabledProviders(): void {
  */
 export function disableProvider(providerId: string): void {
 	disabledProviders.add(providerId);
-	enabledProviders.delete(providerId);
 	persistDisabledProviders();
-	persistEnabledProviders();
 }
 
 /**
@@ -372,32 +379,16 @@ export function disableProvider(providerId: string): void {
  */
 export function enableProvider(providerId: string): void {
 	disabledProviders.delete(providerId);
-	if (FOREIGN_USER_PROVIDERS[providerId] === true) {
-		enabledProviders.add(providerId);
-		persistEnabledProviders();
-	}
 	persistDisabledProviders();
 }
 
 /**
- * Check if a provider is enabled.
- * For foreign user providers, reflects whether they have been opted in.
+ * Check if a provider is enabled (the whole-provider switch backed by
+ * `disabledProviders`). Foreign `~/` config additionally needs
+ * {@link isUserSourceEnabled}.
  */
 export function isProviderEnabled(providerId: string): boolean {
-	if (disabledProviders.has(providerId)) return false;
-	if (FOREIGN_USER_PROVIDERS[providerId] === true) {
-		return isUserSourceEnabled(providerId);
-	}
-	return true;
-}
-
-/**
- * Check whether one discovered source is enabled. Foreign provider opt-ins
- * apply only to user-level sources; project configuration stays active.
- */
-export function isProviderSourceEnabled(source: Pick<SourceMeta, "provider" | "level">): boolean {
-	if (disabledProviders.has(source.provider)) return false;
-	return source.level !== "user" || isUserSourceEnabled(source.provider);
+	return !disabledProviders.has(providerId);
 }
 
 /**
