@@ -6,9 +6,11 @@
  * response omits it.
  */
 
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../../error";
 import { claudeCodeVersion } from "../../providers/claude-code-fingerprint";
 import type { FetchImpl } from "../../types";
+import { createRefresh } from "../engine/refresh";
 import type { AfterExchangeHook } from "../hooks/types";
 import type { OAuthCredentials } from "./types";
 
@@ -111,3 +113,22 @@ export const anthropicIdentityHook: AfterExchangeHook = async (credentials, cont
 		return credentials;
 	}
 };
+
+/**
+ * Legacy subpath compatibility for extensions importing
+ * `@mariozechner/pi-ai/utils/oauth/anthropic`.
+ */
+export async function refreshAnthropicToken(
+	refreshToken: string,
+	fetchOverride: FetchImpl = fetch,
+): Promise<OAuthCredentials> {
+	const policy = authPolicyFor("anthropic");
+	const refresh = policy ? createRefresh(policy, fetchOverride) : undefined;
+	if (!refresh) {
+		throw new AIError.OAuthError("Anthropic OAuth refresh policy is unavailable", {
+			kind: "configuration",
+			provider: "anthropic",
+		});
+	}
+	return refresh({ access: "", refresh: refreshToken, expires: 0 });
+}

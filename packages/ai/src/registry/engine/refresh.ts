@@ -6,6 +6,7 @@
 import type { CompiledAuthProvider, CompiledRefresh } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../../error";
 import { claudeCodeSdkVersion } from "../../providers/claude-code-fingerprint";
+import type { FetchImpl } from "../../types";
 import type { OAuthCredentials } from "../oauth/types";
 import {
 	applyAfterExchange,
@@ -45,9 +46,14 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 	return { clientId: undefined, clientSecret: undefined, redirectUri: undefined, base: undefined };
 }
 
-function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider): Refresher {
+function createRequestRefresh(
+	rule: RequestRefresh,
+	policy: CompiledAuthProvider,
+	fetchOverride?: FetchImpl,
+): Refresher {
 	const provider = policy.id;
 	return async (credentials, signal) => {
+		const fetchImpl = fetchOverride ?? fetch;
 		for (const field of rule.require) {
 			if (!credentials[field as keyof OAuthCredentials]) {
 				throw new AIError.OAuthError(`${provider} credentials are missing ${field}; sign in again`, {
@@ -59,7 +65,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 		throwIfCancelled(signal);
 		const client = await loginClient(policy, signal);
 		const hookHeaders = rule.headersHook ? (await loadHeadersHook(rule.headersHook))() : undefined;
-		const context = { provider, fetch, signal, headers: hookHeaders };
+		const context = { provider, fetch: fetchImpl, signal, headers: hookHeaders };
 		const vars: TemplateVars = {
 			refresh_token: credentials.refresh,
 			client_id: client.clientId,
@@ -87,7 +93,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 			provider,
 			phase: "refresh",
 			raw: body,
-			fetch,
+			fetch: fetchImpl,
 			signal,
 			stored: credentials,
 		});
@@ -95,11 +101,11 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 }
 
 /** The refresh function for a provider policy, or undefined when it never refreshes. */
-export function createRefresh(policy: CompiledAuthProvider): Refresher | undefined {
+export function createRefresh(policy: CompiledAuthProvider, fetchImpl?: FetchImpl): Refresher | undefined {
 	const rule = policy.refresh;
 	if (!rule || rule.kind === "none") return undefined;
 	if (rule.kind === "hook") {
 		return async (credentials, signal) => (await loadRefreshHook(rule.hook))(credentials, signal);
 	}
-	return createRequestRefresh(rule, policy);
+	return createRequestRefresh(rule, policy, fetchImpl);
 }
