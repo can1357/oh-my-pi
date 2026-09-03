@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `max-image-dimension` and `max-image-payload-bytes` compat axes so an Anthropic-compatible host whose image limits differ from the canonical API can override them instead of inheriting 8000px and 10 MB.
+
 ## [18.1.5] - 2026-09-03
 
 ### Added
