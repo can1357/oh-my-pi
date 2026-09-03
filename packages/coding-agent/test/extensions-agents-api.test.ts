@@ -718,6 +718,7 @@ describe("ExtensionAPI agents", () => {
 			setIrcWakeTurnObserver: () => {},
 			subscribeRunState: () => () => {},
 			getLastAssistantMessage: () => undefined,
+			discoverStartupSkillPaths: async () => {},
 			extensionRunner: bExtensionRunner,
 			sessionManager: { getSessionFile: () => bFile },
 		} as unknown as AgentSession;
