@@ -179,8 +179,8 @@ import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
-import { Composer } from "./composer";
-import { writeComposerWelcomeCache } from "./composer-cache";
+import { Composer, type ComposerStatusSnapshot } from "./composer";
+import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -1197,6 +1197,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#headerAfter = headerAfter;
 		this.composer.setHeaderExtras(headerBefore, headerAfter);
 		this.statusLine.watchBranch(() => {
+			this.#persistComposerStatus();
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
@@ -2163,7 +2164,55 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.statusLine.setComposerStyle(style);
 		this.updateEditorBorderColor();
+		this.#persistComposerStatus();
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Cache placeholder-only status chrome so the next launch paints the row
+	 * immediately without presenting values from the previous session.
+	 */
+	#persistComposerStatus(): void {
+		if (!this.sessionManager.getSessionFile()) return;
+		const shape = settings.get("composer.shape") ?? "band";
+		const style = getComposerStyle(shape);
+		const terminalWidth = this.ui.terminal.columns;
+		const availableWidth = this.editor.getTopBorderAvailableWidth(terminalWidth);
+		const topContent =
+			style.statusAttachment === "top-border"
+				? this.statusLine.renderStartupPlaceholder(availableWidth, "box")
+				: style.statusAttachment === "top-band"
+					? this.statusLine.renderStartupPlaceholder(availableWidth, "band")
+					: style.statusAttachment === "top-rule-chip"
+						? this.statusLine.renderStartupPlaceholder(availableWidth, "plain-right")
+						: undefined;
+		const bottomLines: string[] = [];
+		if (style.bottomBar !== "none") {
+			const content = this.statusLine.renderStartupPlaceholder(
+				terminalWidth,
+				style.bottomBar === "left" ? "plain-left" : "plain-full",
+			);
+			if (content) {
+				if (style.bottomBarGap) bottomLines.push("");
+				bottomLines.push(content);
+			}
+		}
+		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
+		const marker = "\0";
+		const colored = this.editor.borderColor(marker);
+		const markerIndex = colored.indexOf(marker);
+		const snapshot: ComposerStatusSnapshot = {
+			shape,
+			borderColor:
+				markerIndex < 0
+					? undefined
+					: { prefix: colored.slice(0, markerIndex), suffix: colored.slice(markerIndex + marker.length) },
+			topBorder: topContent ? { content: topContent, width: visibleWidth(topContent) } : undefined,
+			bottomLines,
+		};
+		void writeComposerStatusCache(this.sessionManager.getCwd(), snapshot).catch(error => {
+			logger.debug("composer status cache write failed", { error });
+		});
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -4691,6 +4740,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#appearanceRefreshRequest = undefined;
+		// Last chance to refresh the startup status placeholder for the next launch.
+		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
@@ -5096,6 +5147,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const providerName = this.session.model?.provider ?? "Unknown";
 		this.composer.updateWelcome({ modelName, providerName });
 		this.#persistComposerWelcome(modelName, providerName);
+		this.#persistComposerStatus();
 	}
 
 	#syncConfigWarningHeader(): void {

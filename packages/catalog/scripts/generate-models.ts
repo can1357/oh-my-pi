@@ -296,6 +296,8 @@ function applyGlobalModelsDevFallback(
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
 			maxTokens: model.maxTokens ?? reference.maxTokens,
+			int: model.int ?? reference.int,
+			tps: model.tps ?? reference.tps,
 		};
 	});
 }

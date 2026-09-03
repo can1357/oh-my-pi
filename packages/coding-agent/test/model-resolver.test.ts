@@ -789,6 +789,37 @@ describe("parseModelPattern", () => {
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.model?.id).toBe("openai/gpt-4o:extended");
 		});
+
+		describe("dotted revision spelling", () => {
+			// First-party ids spell revisions with dashes (`claude-fable-5-1`);
+			// aggregators use dots, and their flat id is verbatim the dotted
+			// provider-qualified selector (`anthropic/claude-fable-5.1`).
+			const anthropicFable = createOpusModel("anthropic", "claude-fable-5-1", "Claude Fable 5.1");
+			const openRouterFable = createOpusModel("openrouter", "anthropic/claude-fable-5.1", "Claude Fable 5.1 (OR)");
+
+			test("anthropic/claude-fable-5.1:high resolves to anthropic, not the OpenRouter flat id", () => {
+				const result = parseModelPattern("anthropic/claude-fable-5.1:high", [openRouterFable, anthropicFable]);
+				expect(result.model?.provider).toBe("anthropic");
+				expect(result.model?.id).toBe("claude-fable-5-1");
+				expect(result.thinkingLevel).toBe(Effort.High);
+			});
+
+			test("anthropic/claude-fable-5.1 fails closed when anthropic is unavailable", () => {
+				// Bundled anthropic carries claude-fable-5-1: the dotted spelling is
+				// still provider-locked and must not re-bind to OpenRouter.
+				const result = parseModelPattern("anthropic/claude-fable-5.1", [openRouterFable]);
+				expect(result.model).toBeUndefined();
+			});
+
+			test("openrouter/anthropic/claude-fable-5-1 resolves the dotted OpenRouter id", () => {
+				const result = parseModelPattern("openrouter/anthropic/claude-fable-5-1", [
+					anthropicFable,
+					openRouterFable,
+				]);
+				expect(result.model?.provider).toBe("openrouter");
+				expect(result.model?.id).toBe("anthropic/claude-fable-5.1");
+			});
+		});
 	});
 
 	describe("edge cases", () => {

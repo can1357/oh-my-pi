@@ -4839,7 +4839,9 @@ fn process_dir_walk_request(
 				&mut ret_value,
 			);
 			ret.set(ret_value);
-			if should_quit {
+			if host.sigpipe_hit() {
+				Ok(pi_walker::WalkDecision::Stop)
+			} else if should_quit {
 				local_quit.set(true);
 				Ok(pi_walker::WalkDecision::Stop)
 			} else if should_skip_current_dir {

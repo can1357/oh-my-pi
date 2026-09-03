@@ -10,6 +10,7 @@ export * from "./format";
 export * from "./frontmatter";
 export * from "./fs-error";
 export * from "./glob";
+export * from "./incoming-json";
 export * from "./json";
 export * from "./json-parse";
 export * as logger from "./logger";

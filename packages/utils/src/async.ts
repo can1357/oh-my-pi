@@ -108,3 +108,19 @@ export class AsyncDrain<T> {
 		return this.#promise;
 	}
 }
+
+/**
+ * Runs async operations one at a time in call order. Each `run` starts after
+ * the previous operation settles (success or failure) and returns that
+ * operation's own promise, so a rejected step never poisons the queue. Used by
+ * stateful cursors whose concurrent pulls must not interleave.
+ */
+export class Serial {
+	#tail: Promise<unknown> = Promise.resolve();
+
+	run<T>(op: () => Promise<T>): Promise<T> {
+		const result = this.#tail.then(op, op);
+		this.#tail = result.catch(() => {});
+		return result;
+	}
+}

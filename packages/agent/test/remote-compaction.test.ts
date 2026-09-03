@@ -1198,7 +1198,7 @@ describe("Responses Lite remote compaction", () => {
 		expect(captured?.body.input?.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
 
-	test("V2 compaction reuses the live Codex WebSocket transport when preferred", async () => {
+	test("V2 compaction isolates its Lite WebSocket from the full Responses session", async () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const webSocket = installCodexCompactionWebSocket({
 			respond: (socket, outbound) => {
@@ -1267,13 +1267,21 @@ describe("Responses Lite remote compaction", () => {
 				codexCompaction: TEST_CODEX_COMPACTION,
 			});
 
-			const sentRequest = webSocket.sockets[0]?.sent[1];
-			const sentInput = sentRequest?.input;
+			const liveRequest = webSocket.sockets[0]?.sent[0];
+			const compactionRequest = webSocket.sockets[1]?.sent[0];
+			const compactionInput = compactionRequest?.input;
 			expect(fetchMock).not.toHaveBeenCalled();
-			expect(webSocket.sockets).toHaveLength(1);
-			expect(webSocket.sockets[0]?.sent).toHaveLength(2);
-			expect(sentRequest?.type).toBe("response.create");
-			expect(Array.isArray(sentInput) ? sentInput.at(-1) : undefined).toEqual({ type: "compaction_trigger" });
+			expect(webSocket.sockets).toHaveLength(2);
+			expect(webSocket.sockets[0]?.sent).toHaveLength(1);
+			expect(webSocket.sockets[1]?.sent).toHaveLength(1);
+			expect(liveRequest?.instructions).toBe("You are a helpful assistant.");
+			expect(liveRequest?.parallel_tool_calls).toBeUndefined();
+			expect(compactionRequest?.type).toBe("response.create");
+			expect(compactionRequest?.instructions).toBeUndefined();
+			expect(compactionRequest?.parallel_tool_calls).toBe(false);
+			expect(Array.isArray(compactionInput) ? compactionInput.at(-1) : undefined).toEqual({
+				type: "compaction_trigger",
+			});
 			expect(result.compactionItem).toEqual({ type: "compaction", encrypted_content: "enc-websocket" });
 			expect(
 				getOpenAICodexTransportDetails(model, {

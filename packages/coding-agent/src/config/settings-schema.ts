@@ -211,7 +211,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Collab",
 		"Magic Keywords",
 		"Startup & Updates",
-		"Power (macOS)",
+		"Power",
 		"Agent",
 		"Git",
 	],
@@ -238,6 +238,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 /** Status line segment identifiers */
 export type StatusLineSegmentId =
 	| "pi"
+	| "status"
 	| "model"
 	| "mode"
 	| "path"
@@ -494,17 +495,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// macOS power assertions (caffeinate flags). No-op on other platforms.
+	// Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 	"power.sleepPrevention": {
 		type: "enum",
 		values: ["off", "idle", "display", "system"] as const,
 		default: "idle",
 		ui: {
 			tab: "interaction",
-			group: "Power (macOS)",
+			group: "Power",
 			label: "Sleep Prevention",
 			description:
-				"Prevent macOS sleep during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
+				"Prevent the system sleeping during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
 			options: [
 				{
 					value: "off",
@@ -514,17 +515,18 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "idle",
 					label: "Prevent Idle Sleep",
-					description: "Keep the system awake while a session is open (caffeinate -i)",
+					description: "Keep the system awake while a session is open (macOS `caffeinate -i`)",
 				},
 				{
 					value: "display",
 					label: "Prevent Display Sleep",
-					description: "Also keep the display from idle-sleeping (caffeinate -i -d)",
+					description: "Also keep the display from idle-sleeping (macOS `caffeinate -i -d`)",
 				},
 				{
 					value: "system",
 					label: "Prevent System Sleep",
-					description: "Also block all system sleep on AC and declare the user active (caffeinate -i -d -s -u)",
+					description:
+						"Also block all system sleep on AC and declare the user active (macOS `caffeinate -i -d -s -u`)",
 				},
 			],
 		},
@@ -599,6 +601,8 @@ export const SETTINGS_SCHEMA = {
 	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
+
+	enabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
 
@@ -1205,6 +1209,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.reactions": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Agent Reactions",
+			description: "Invite the agent to react to your message with an emoji badge on its bubble",
+		},
+	},
+
 	"tui.codexResetFireworks": {
 		type: "boolean",
 		default: false,
@@ -1533,6 +1548,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Include Workspace Tree",
 			description:
 				"Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.",
+		},
+	},
+
+	skillful: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "List Skills in Prompt",
+			description:
+				"List available skills in the system prompt; disable to save context and toggle per-session with /skillful",
 		},
 	},
 
@@ -5203,9 +5230,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"skills.enableCodexUser": { type: "boolean", default: true },
+	"skills.enableCodexUser": { type: "boolean", default: false },
 
-	"skills.enableClaudeUser": { type: "boolean", default: true },
+	"skills.enableClaudeUser": { type: "boolean", default: false },
 
 	"skills.enableClaudeProject": { type: "boolean", default: true },
 
@@ -5226,7 +5253,7 @@ export const SETTINGS_SCHEMA = {
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",
@@ -5248,7 +5275,7 @@ export const SETTINGS_SCHEMA = {
 
 	"commands.enableOpencodeUser": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",
@@ -5779,7 +5806,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.fetch": {
 		type: "enum",
-		values: ["auto", "native", "trafilatura", "lynx", "parallel", "jina"] as const,
+		values: ["auto", "native", "trafilatura", "lynx", "parallel", "firecrawl", "jina"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
@@ -5790,12 +5817,13 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "auto",
 					label: "Auto",
-					description: "Priority: native > trafilatura > lynx > parallel > jina",
+					description: "Priority: native > trafilatura > lynx > parallel > firecrawl > jina",
 				},
 				{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
 				{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
 				{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
 				{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
+				{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
 				{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
 			],
 		},

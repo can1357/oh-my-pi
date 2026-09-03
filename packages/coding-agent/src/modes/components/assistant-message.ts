@@ -1,5 +1,15 @@
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
+import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import {
+	type Component,
+	Container,
+	Image,
+	type ImageBudget,
+	ImageProtocol,
+	Markdown,
+	Spacer,
+	TERMINAL,
+	Text,
+} from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
@@ -11,6 +21,7 @@ import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking }
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 import { formatErrorBlock } from "./error-block";
+import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
 
 /**
@@ -247,9 +258,73 @@ export class AssistantMessageComponent extends Container {
 	#thinkingRateLive = false;
 
 	#textColorTransform?: (text: string) => string;
+	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
+	#reactionTarget: ReactionTarget | undefined;
+	/** Reaction lifted from the reply's opening line, once resolved. */
+	#reaction: string | undefined;
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
+	}
+
+	/**
+	 * Choose the block this reply reacts to from the transcript it is about to
+	 * join: the nearest preceding reaction-capable block (the user's bubble),
+	 * looking past turn attachments such as file mentions or injected notices
+	 * but never past an earlier reply — a continuation after tool calls has
+	 * nothing to react to. Call before adding this component. An
+	 * already-resolved reaction is re-applied, and a message rendered verbatim
+	 * for lack of a target is re-rendered with its reaction line stripped.
+	 */
+	pickReactionTarget(transcript: readonly Component[]): void {
+		this.#reactionTarget = undefined;
+		for (let index = transcript.length - 1; index >= 0; index--) {
+			const block = transcript[index]!;
+			if (isReactionTarget(block)) {
+				this.#reactionTarget = block;
+				break;
+			}
+			if (block instanceof AssistantMessageComponent) break;
+		}
+		if (this.#reaction !== undefined) this.#reactionTarget?.setReaction(this.#reaction);
+		if (this.#lastMessage && this.#openingText(this.#lastMessage)?.split.emoji !== undefined) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/** The reply's first non-empty text block with its reaction split, if any. */
+	#openingText(message: AssistantMessage): { index: number; block: TextContent; split: ReactionSplit } | undefined {
+		const index = message.content.findIndex(content => content.type === "text" && content.text.length > 0);
+		const block = message.content[index];
+		if (block?.type !== "text") return undefined;
+		return { index, block, split: splitReaction(block.text) };
+	}
+
+	/**
+	 * Display form of `message` with the reaction line handled: stripped and
+	 * forwarded to the target once resolved, withheld entirely while a streaming
+	 * prefix could still become one, and left verbatim when there is no target.
+	 */
+	#displayMessage(message: AssistantMessage, transient: boolean): AssistantMessage {
+		const opening = this.#openingText(message);
+		if (!opening) return message;
+		const { index, block, split } = opening;
+		let text: string;
+		if (split.emoji !== undefined) {
+			if (this.#reaction !== split.emoji) {
+				this.#reaction = split.emoji;
+				this.#reactionTarget?.setReaction(split.emoji);
+			}
+			if (!this.#reactionTarget) return message;
+			text = split.body;
+		} else if (split.pending && transient) {
+			text = "";
+		} else {
+			return message;
+		}
+		const content = message.content.slice();
+		content[index] = { ...block, text };
+		return { ...message, content };
 	}
 	constructor(
 		message?: AssistantMessage,
@@ -853,6 +928,9 @@ export class AssistantMessageComponent extends Container {
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
+		// Everything below renders the display form; #lastMessage keeps the
+		// verbatim message so re-renders re-derive the reaction deterministically.
+		message = this.#displayMessage(message, this.#lastUpdateTransient);
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
 		// animating hidden-thinking block feeds the shared session tracker. The

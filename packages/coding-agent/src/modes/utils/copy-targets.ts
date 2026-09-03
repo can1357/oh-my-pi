@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
+import { extractMarkdownLinks } from "@oh-my-pi/pi-tui";
 
 /** A fenced code block extracted from assistant markdown. */
 export interface CodeBlock {
@@ -103,6 +104,45 @@ export function extractQuoteBlocks(text: string): QuoteBlock[] {
 	return extractBlocks(text)
 		.filter((b): b is { kind: "quote" } & QuoteBlock => b.kind === "quote")
 		.map(b => ({ text: b.text }));
+}
+
+/** A hyperlink found in assistant markdown: inline `[text](href)`, `<autolink>`, bare URL, or reference link. */
+export interface LinkTarget {
+	/** Visible link text; equals `href` for autolinks and bare URLs. */
+	text: string;
+	/** Absolute http(s) URL as marked resolved it. */
+	href: string;
+}
+
+/**
+ * Hyperlinks the renderer would draw for `text`, in document order and
+ * deduplicated by href. Tokenization is the renderer's own
+ * ({@link extractMarkdownLinks}), so fenced code, code spans, escapes,
+ * reference definitions and GFM autolink rules agree with the screen. Only
+ * http(s) targets qualify: the result feeds both the clipboard and the system
+ * opener, and a `mailto:`/`file:` destination is not something to hand to
+ * either from a transcript.
+ */
+export function extractLinks(text: string): LinkTarget[] {
+	const seen = new Set<string>();
+	const links: LinkTarget[] = [];
+	for (const link of extractMarkdownLinks(text)) {
+		if (!/^https?:\/\//i.test(link.href) || seen.has(link.href)) continue;
+		seen.add(link.href);
+		links.push({ text: link.text, href: link.href });
+	}
+	return links;
+}
+
+/** Walk the transcript backwards for the most recent link in an assistant message. */
+export function extractLastLink(messages: readonly AgentMessage[]): LinkTarget | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const text = assistantText(messages[i]);
+		if (!text) continue;
+		const links = extractLinks(text);
+		if (links.length > 0) return links[links.length - 1];
+	}
+	return undefined;
 }
 
 function extractEvalCode(args: unknown): { code: string; language: string } | undefined {

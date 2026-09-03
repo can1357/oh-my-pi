@@ -1446,11 +1446,10 @@ impl Utility for Head {
 				};
 				// A dead pipe ends the whole invocation; any other I/O error
 				// only fails this operand, and GNU keeps going.
-				let broken_pipe = err.kind() == io::ErrorKind::BrokenPipe;
-				host.error(HeadError::Io { name, err }, 1);
-				if broken_pipe {
-					return 1;
+				if err.kind() == io::ErrorKind::BrokenPipe {
+					return crate::host::SIGPIPE_EXIT_CODE;
 				}
+				host.error(HeadError::Io { name, err }, 1);
 			}
 		}
 		if let Err(err) = out.flush() {

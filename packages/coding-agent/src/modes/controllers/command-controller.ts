@@ -1033,6 +1033,12 @@ export class CommandController {
 			}
 		}
 		if (!(await this.ctx.session.newSession(options))) return;
+		// A focused subagent view keeps its own history: return to the main session
+		// first so the transcript below cannot rebuild from the subagent's surviving
+		// conversation, then drop any turn-scoped anchors (coalescing timers,
+		// in-flight dispatches) the session boundary orphaned.
+		if (this.ctx.focusedAgentId) await this.ctx.unfocusSession();
+		this.ctx.eventController.resetTranscriptAnchors();
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
