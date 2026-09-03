@@ -128,6 +128,59 @@ describe("computeSessionStats", () => {
 		expect(stats.cost_usd).toBe(9.99);
 	});
 
+	test("ended comes from the active branch, not off-branch forks", async () => {
+		// Leaf chain ends at t3; an abandoned fork parented to e2 and written
+		// LATER (t40) must not set `ended` nor leak usage into the totals.
+		const t = (s: number) => `2026-01-01T00:00:${String(s).padStart(2, "0")}.000Z`;
+		const lines = [
+			JSON.stringify({ type: "session", version: 3, id: "fork-tail", timestamp: t(0), cwd: "/tmp" }),
+			JSON.stringify({ type: "model_change", id: "e1", parentId: null, timestamp: t(1), model: "acme/model-a" }),
+			JSON.stringify({
+				type: "message",
+				id: "e2",
+				parentId: "e1",
+				timestamp: t(2),
+				message: { role: "user", content: "hi" },
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "e9",
+				parentId: "e2",
+				timestamp: t(40),
+				message: {
+					role: "assistant",
+					model: "acme/model-a",
+					usage: {
+						input: 1000,
+						output: 1000,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2000,
+						cost: { total: 9.99 },
+					},
+					content: [],
+				},
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "e3",
+				parentId: "e2",
+				timestamp: t(3),
+				message: {
+					role: "assistant",
+					model: "acme/model-a",
+					usage: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 120, cost: { total: 0.25 } },
+					content: [],
+				},
+			}),
+		];
+		const file = await writeSession("project", "2026-01-01T00-00-00-000Z_fork-tail", lines);
+		const stats = await computeSessionStats(file);
+		expect(stats.ended).toBe(t(3)); // leaf e3, not the fork's t(40)
+		expect(stats.cost_usd).toBe(0.25); // fork usage excluded
+		expect(stats.assistant_messages).toBe(1);
+	});
+
 	test("tolerates a torn tail line from a hard kill", async () => {
 		const file = await writeSession("project", "2026-01-01T00-00-00-000Z_torn", fixtureLines());
 		await fs.appendFile(file, '{"type":"message","id":"e9","parentId":"e7",\n');

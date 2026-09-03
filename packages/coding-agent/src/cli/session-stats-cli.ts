@@ -9,8 +9,11 @@
  * `session_exit` entry on quit, kill, and error). A fresh process can
  * therefore report another session's exact totals.
  *
- * Totals cover the active branch (root → last entry) of the session file,
- * matching what the live `session_stats` surface reports.
+ * Totals are the LIFETIME totals for the active branch (root → last entry)
+ * of the session file. This is deliberately broader than the live
+ * `session_stats` surface, which is context-window-scoped (it resets after
+ * compaction): for a compacted session these totals exceed anything the
+ * live surface ever showed.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -38,7 +41,9 @@ export interface SessionStatsResult {
 	total_tokens: number;
 	cost_usd: number;
 	models: string[];
+	/** Timestamp of the session header. */
 	started: string;
+	/** Timestamp of the most recent entry ON the active branch; off-branch forks are excluded. */
 	ended: string;
 	assistant_messages: number;
 	user_messages: number;
@@ -199,9 +204,6 @@ export async function computeSessionStats(sessionFile: string): Promise<SessionS
 			if (typeof record.id !== "string") continue;
 			byId.set(record.id, record);
 			leafId = record.id;
-			if (typeof record.timestamp === "string" && record.timestamp > lastTimestamp) {
-				lastTimestamp = record.timestamp;
-			}
 		}
 	} catch (error) {
 		throw new Error(
@@ -210,7 +212,7 @@ export async function computeSessionStats(sessionFile: string): Promise<SessionS
 	}
 
 	// Walk the active branch: leaf → root.
-	const branch: unknown[] = [];
+	const branch: Record<string, unknown>[] = [];
 	const seen = new Set<string>();
 	let cursor: unknown = leafId !== null ? byId.get(leafId) : undefined;
 	while (isRecord(cursor) && !seen.has(String(cursor.id))) {
@@ -221,10 +223,12 @@ export async function computeSessionStats(sessionFile: string): Promise<SessionS
 		cursor = typeof parentId === "string" ? byId.get(parentId) : undefined;
 	}
 
-	for (const entry of branch) {
-		const record = entry as Record<string, unknown>;
+	for (const record of branch) {
+		if (typeof record.timestamp === "string" && record.timestamp > lastTimestamp) {
+			lastTimestamp = record.timestamp;
+		}
 		if (record.type === "message" && isRecord(record.message)) {
-			const message = record.message as Record<string, unknown>;
+			const message = record.message;
 			if (message.role === "assistant") {
 				assistantMessages++;
 				const usage = projectUsage(message.usage);
@@ -235,7 +239,7 @@ export async function computeSessionStats(sessionFile: string): Promise<SessionS
 			} else if (message.role === "user") {
 				userMessages++;
 			} else if (message.role === "toolResult" && message.toolName === "task" && isRecord(message.details)) {
-				const usage = projectUsage((message.details as Record<string, unknown>).usage);
+				const usage = projectUsage(message.details.usage);
 				if (usage) addUsage(totals, usage);
 			}
 		} else if (record.type === "model_usage") {
@@ -248,7 +252,7 @@ export async function computeSessionStats(sessionFile: string): Promise<SessionS
 				}
 			}
 		} else if (record.type === "custom" && record.customType === "session_exit" && isRecord(record.data)) {
-			const data = record.data as Record<string, unknown>;
+			const data = record.data;
 			if (typeof data.reason === "string") exitReason = data.reason;
 		}
 	}
