@@ -7549,35 +7549,40 @@ export class AgentSession {
 			await manualCompactionCleanup;
 			await this.#drainAutolearnCapture();
 			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
-			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
-			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
-			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
-			this.#resetInFlight();
-			this.#resetSessionStopContinuationState();
-			this.#clearPendingSessionStopContinuations();
-			// Safety net: if the agent loop aborted without producing an assistant
-			// message (e.g. failed before the first stream), the in-flight yield was
-			// never resolved or rejected by the normal message_end path. Reject it now
-			// so any requeue callback still fires and the queue stays consistent.
-			if (this.#toolChoiceQueue.hasInFlight) {
-				this.#toolChoiceQueue.reject("aborted");
-			}
-			// Re-record advisor concerns the interrupt would otherwise strand, as
-			// visible/persisted advice without triggering a turn (the agent is idle
-			// now): cards steered into the queue before the user stopped, plus any
-			// that arrived via enqueueAdvice mid-abort and were parked hidden in
-			// #pendingNextTurnMessages while the turn was still tearing down. Other
-			// deferred next-turn context (non-advisor) stays queued, in order.
-			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
-			if (parkedAdvisorCards.length > 0) {
-				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
-			}
-			for (const card of [...strandedAdvisorCards, ...parkedAdvisorCards]) {
-				this.#preserveAdvisorCard(card);
-			}
 		} finally {
-			this.#abortInProgress = false;
-			this.#drainStrandedQueuedMessages();
+			try {
+				// Always clear prompt-in-flight state after the core agent reaches
+				// idle, even when a later cleanup callback rejects.
+				this.#resetInFlight();
+				this.#resetSessionStopContinuationState();
+				this.#clearPendingSessionStopContinuations();
+				// Safety net: if the agent loop aborted without producing an
+				// assistant message, reject the in-flight yield so its requeue
+				// callback still runs and the queue remains consistent.
+				if (this.#toolChoiceQueue.hasInFlight) {
+					this.#toolChoiceQueue.reject("aborted");
+				}
+				if (userInterrupt) {
+					// Reclaim advisor cards from every queue in the finally-safe path.
+					// Keep #abortInProgress set while preserving: if cleanup rejected
+					// before the agent reached idle, #preserveAdvisorCard parks the card
+					// for the next prompt instead of injecting it into a live stream.
+					const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
+					if (parkedAdvisorCards.length > 0) {
+						this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
+					}
+					const queuedAdvisorCards = [
+						...strandedAdvisorCards,
+						...this.#extractQueuedAdvisorCards(),
+						...this.#advisors.drainQueuedAdvice(),
+						...parkedAdvisorCards,
+					];
+					for (const card of queuedAdvisorCards) this.#preserveAdvisorCard(card);
+				}
+			} finally {
+				this.#abortInProgress = false;
+				this.#drainStrandedQueuedMessages();
+			}
 		}
 	}
 

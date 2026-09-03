@@ -5,7 +5,7 @@
  * queued aside is re-recorded as a visible, persisted advisor card; the aside
  * queue is left empty and no extra model turn runs.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -300,6 +300,26 @@ describe("AgentSession advisor next-step delivery", () => {
 		expect(harness.yieldQueue.has("advisor")).toBe(false);
 		// The parked turn's tail response was never consumed: no resume ran.
 		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("preserves a queued advisor aside when user-interrupt cleanup rejects", async () => {
+		const { session: harness, sessionManager, streamStarted } = await createParkedAdvisorSession();
+		const persisted = capturePersistedAdvisorCards(sessionManager);
+
+		expect(harness.setAdvisorEnabled(true)).toBe(true);
+		const running = harness.prompt("do the thing");
+		await streamStarted;
+		harness.yieldQueue.enqueue("advisor", { note: "cleanup rejection fixture note", severity: "concern" });
+
+		vi.spyOn(harness.goalRuntime, "onTaskAborted").mockRejectedValueOnce(new Error("fixture cleanup rejected"));
+		await expect(harness.abort({ reason: USER_INTERRUPT_LABEL })).rejects.toThrow("fixture cleanup rejected");
+		await harness.waitForIdle();
+		await running.catch(() => {});
+
+		expect(harness.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]).toContain("cleanup rejection fixture note");
+		expect(harness.yieldQueue.has("advisor")).toBe(false);
 	});
 
 	it("delivers a mid-turn advisor concern to the primary at its next model step without aborting the running tool", async () => {
