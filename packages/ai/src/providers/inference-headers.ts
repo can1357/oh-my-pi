@@ -41,8 +41,8 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	if (options.protocol === "anthropic") {
 		setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
 	} else if (options.protocol === "openai" && options.provider === "openai") {
-		setHeader(headers, "session_id", sessionId);
-		setHeader(headers, "x-client-request-id", sessionId);
+		setHeaderIfAbsent(headers, "session_id", sessionId);
+		setHeaderIfAbsent(headers, "x-client-request-id", sessionId);
 	}
 
 	if (isOpenCode) {

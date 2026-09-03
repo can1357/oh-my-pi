@@ -229,7 +229,7 @@ describe("auth-broker wire surface", () => {
 		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 	});
 
-	test("stamps Meta login recency and projects PAYG and Muse keys for legacy clients", async () => {
+	test("stamps Meta login recency and withholds Muse credentials from legacy clients", async () => {
 		let uploadedCredential: Record<string, unknown> | undefined;
 		const fetchImpl: typeof fetch = Object.assign(
 			async (input: string | URL | Request, init?: RequestInit) => {
@@ -290,7 +290,7 @@ describe("auth-broker wire surface", () => {
 		const legacyCredentials = legacyResult.snapshot.credentials
 			.filter(entry => entry.provider === "meta")
 			.map(entry => entry.credential);
-		expect(legacyCredentials.map(credential => credential.type)).toEqual(["api_key", "api_key"]);
+		expect(legacyCredentials.map(credential => credential.type)).toEqual(["api_key"]);
 		expect(
 			legacyCredentials.map(credential => {
 				if (credential.type !== "api_key") throw new Error("expected legacy Meta API-key credential");
@@ -300,10 +300,7 @@ describe("auth-broker wire surface", () => {
 					authorizedAt: credential.authorizedAt,
 				};
 			}),
-		).toEqual([
-			{ key: "meta-payg-key", source: undefined, authorizedAt: undefined },
-			{ key: "LLM|subscription-key", source: "login", authorizedAt: undefined },
-		]);
+		).toEqual([{ key: "meta-payg-key", source: "login", authorizedAt: undefined }]);
 
 		storage!.upsertCredential("meta", {
 			type: "api_key",
@@ -320,13 +317,10 @@ describe("auth-broker wire surface", () => {
 					if (entry.credential.type !== "api_key") throw new Error("expected projected Meta API key");
 					return { key: entry.credential.key, source: entry.credential.source };
 				}),
-		).toEqual([
-			{ key: "meta-payg-key", source: "login" },
-			{ key: "LLM|subscription-key", source: undefined },
-		]);
+		).toEqual([{ key: "meta-payg-key", source: "login" }]);
 	});
 
-	test("translates Meta block provider keys across legacy credential projection", async () => {
+	test("withholds Meta subscription blocks from legacy credential snapshots", async () => {
 		const credential = storage!.upsertCredential("meta", {
 			type: "oauth",
 			access: "meta-access",
@@ -351,19 +345,7 @@ describe("auth-broker wire surface", () => {
 		});
 		const legacyResult = await legacyClient.fetchSnapshot();
 		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
-		expect(
-			credentialBlocks(legacyResult.snapshot, credential.id).map(block => ({
-				providerKey: block.providerKey,
-				blockScope: block.blockScope,
-				blockedUntilMs: block.blockedUntilMs,
-			})),
-		).toEqual([
-			{
-				providerKey: "meta:api_key",
-				blockScope: "",
-				blockedUntilMs: currentBlockedUntilMs,
-			},
-		]);
+		expect(credentialBlocks(legacyResult.snapshot, credential.id)).toEqual([]);
 
 		const legacyBlockedUntilMs = currentBlockedUntilMs + 60_000;
 		await legacyClient.upsertCredentialBlock(credential.id, {

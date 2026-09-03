@@ -7,6 +7,10 @@
 - Renamed `claudeCodeSessionId` to `sessionId` in `AnthropicClientOptionsArgs`
 - Renamed `openAISessionId` to `sessionId` in `OpenAIRequestSetupOptions`
 
+### Added
+
+- Added Muse Code subscriptions as a Meta login option, with subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
+
 ### Changed
 
 - Inference requests now identify as omp by default while preserving explicit provider and OAuth User-Agent fingerprints.
@@ -15,12 +19,12 @@
 
 - Anthropic and OpenRouter 402 credit-exhaustion errors ("would exceed your available credits", "Insufficient credits") now switch to a sibling account instead of stopping the turn with a retry hint.
 - OpenCode Go (and Zen) requests now carry the required `x-opencode-session` header with a stable per-conversation id, so they keep working once the gateway starts rejecting headerless requests.
+- OpenAI Responses requests again preserve explicit session headers and omit generated routing headers when cache retention is disabled.
 
 ## [18.1.5] - 2026-09-03
 
 ### Added
 
-- Added Muse Code subscriptions as a Meta login option, with subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
 - Added `/login abliteration` (API key validated against `/v1/models`) with `ABLITERATION_API_KEY` / `ABLIT_KEY` env fallbacks ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
 - Added `/login abliteration` with API key validation against `/v1/models`, supporting the `ABLITERATION_API_KEY` and `ABLIT_KEY` environment variables.
 

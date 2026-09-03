@@ -405,66 +405,31 @@ function buildCredentialBlockGroups(
 	return byCredentialId;
 }
 
-function buildPreferredInteractiveCredentialTypes(
-	entries: readonly AuthCredentialSnapshotEntry[],
-): Map<string, SnapshotCredential["type"]> {
-	const latestByProvider = new Map<
-		string,
-		{ type: SnapshotCredential["type"]; authorizedAt: number; index: number }
-	>();
-	for (const [index, entry] of entries.entries()) {
-		if (!usesOAuthMintedApiKeyWithDirectApiKey(entry.provider)) continue;
-		const credential = entry.credential;
-		if (credential.type === "api_key" && credential.source !== "login") continue;
-		const authorizedAt = credential.authorizedAt;
-		if (typeof authorizedAt !== "number" || !Number.isFinite(authorizedAt)) continue;
-		const latest = latestByProvider.get(entry.provider);
-		if (
-			!latest ||
-			authorizedAt > latest.authorizedAt ||
-			(authorizedAt === latest.authorizedAt && index > latest.index)
-		) {
-			latestByProvider.set(entry.provider, { type: credential.type, authorizedAt, index });
-		}
-	}
-	return new Map([...latestByProvider].map(([provider, latest]) => [provider, latest.type]));
-}
-
 function projectCredentialForClient(
 	provider: string,
 	credential: SnapshotCredential,
 	clientSupportsMetaApiKeyAuthorizedAt: boolean,
-	preferredInteractiveType: SnapshotCredential["type"] | undefined,
 ): SnapshotCredential | undefined {
 	if (clientSupportsMetaApiKeyAuthorizedAt || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) {
 		return credential;
 	}
-	if (credential.type === "oauth") {
-		if (!credential.apiKey) return undefined;
-		return {
-			type: "api_key",
-			key: credential.apiKey,
-			...(preferredInteractiveType === "oauth" ? { source: "login" as const } : {}),
-		};
-	}
+	if (credential.type === "oauth") return undefined;
 	if (credential.authorizedAt === undefined) return credential;
 	return {
 		type: "api_key",
 		key: credential.key,
-		...(credential.source !== undefined && preferredInteractiveType !== "oauth" ? { source: credential.source } : {}),
+		...(credential.source !== undefined ? { source: credential.source } : {}),
 	};
 }
 
 function projectCredentialEntryForClient(
 	entry: AuthCredentialSnapshotEntry,
 	clientSupportsMetaApiKeyAuthorizedAt: boolean,
-	preferredInteractiveType: SnapshotCredential["type"] | undefined,
 ): AuthCredentialSnapshotEntry | undefined {
 	const credential = projectCredentialForClient(
 		entry.provider,
 		entry.credential,
 		clientSupportsMetaApiKeyAuthorizedAt,
-		preferredInteractiveType,
 	);
 	if (!credential) return undefined;
 	return credential === entry.credential ? entry : { ...entry, credential };
@@ -513,7 +478,6 @@ function buildSnapshot(
 ): SnapshotResponse {
 	const serverNowMs = Date.now();
 	const base = storage.exportSnapshot();
-	const preferredInteractiveTypes = buildPreferredInteractiveCredentialTypes(base.credentials);
 	const { wire, nextSweepAt } = resolveRefresherSchedule(refresher, serverNowMs);
 	const credentialIds = base.credentials.map(entry => entry.id);
 	const blocksByCredentialId = buildCredentialBlockGroups(
@@ -523,11 +487,7 @@ function buildSnapshot(
 	);
 	const credentials: SnapshotEntry[] = [];
 	for (const rawEntry of base.credentials) {
-		const entry = projectCredentialEntryForClient(
-			rawEntry,
-			capabilities.metaApiKeyAuthorizedAt,
-			preferredInteractiveTypes.get(rawEntry.provider),
-		);
+		const entry = projectCredentialEntryForClient(rawEntry, capabilities.metaApiKeyAuthorizedAt);
 		if (!entry) continue;
 		const blocks = projectCredentialBlocksForClient(rawEntry, entry, blocksByCredentialId.get(entry.id));
 		const rotatesInMs = computeRotatesInMs(entry, wire, nextSweepAt, serverNowMs);
@@ -1008,16 +968,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 							? { ...credential, authorizedAt: Date.now() }
 							: credential;
 						const storedEntries = opts.storage.upsertCredential(provider, storedCredential);
-						const preferredInteractiveType =
-							buildPreferredInteractiveCredentialTypes(storedEntries).get(provider);
 						const clientSupportsMetaApiKeyAuthorizedAt = getClientCapabilities(req).metaApiKeyAuthorizedAt;
 						const entries: AuthCredentialSnapshotEntry[] = [];
 						for (const entry of storedEntries) {
-							const projected = projectCredentialEntryForClient(
-								entry,
-								clientSupportsMetaApiKeyAuthorizedAt,
-								preferredInteractiveType,
-							);
+							const projected = projectCredentialEntryForClient(entry, clientSupportsMetaApiKeyAuthorizedAt);
 							if (projected) entries.push(projected);
 						}
 						const identity =

@@ -445,7 +445,7 @@ const streamOpenAIResponsesOnce = (
 				extraHeaders: options?.headers,
 				initiatorOverride: options?.initiatorOverride,
 				messages: context.messages,
-				sessionId: options?.sessionId ?? routingSessionId,
+				sessionId: routingSessionId,
 				promptCacheSessionId,
 			});
 			const premiumRequestsTotal = copilotPremiumRequests;

@@ -4792,14 +4792,21 @@ export class AuthStorage {
 		if (result.switched || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) return result;
 		const fallbackType = credentialType === "oauth" ? "api_key" : "oauth";
 		const fallbackRouting = this.#credentialBlockRouting(provider, fallbackType, options?.modelId);
+		if (
+			fallbackType === "api_key" &&
+			(this.#runtimeOverrides.get(provider) ||
+				this.#configOverrides.get(provider) ||
+				getEnvApiKey(provider) ||
+				this.#fallbackResolver?.(provider))
+		) {
+			return { switched: true };
+		}
 		let crossTypeRetryAtMs: number | undefined;
 		const credentials = this.#getCredentialsForProvider(provider);
 		for (let index = 0; index < credentials.length; index++) {
 			const credential = credentials[index];
-			if (
-				credential?.type !== fallbackType ||
-				(fallbackType === "api_key" && credential.type === "api_key" && credential.source !== "login")
-			) {
+			if (credential?.type !== fallbackType) continue;
+			if (credential.type === "api_key" && !(await this.#configValueResolver(credential.key))) {
 				continue;
 			}
 			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
@@ -5949,15 +5956,17 @@ export class AuthStorage {
 		const storedCredentials = this.#getCredentialsForProvider(provider);
 		const dualInteractiveLogin = usesOAuthMintedApiKeyWithDirectApiKey(provider);
 		const hasOAuthLogin = dualInteractiveLogin && storedCredentials.some(credential => credential.type === "oauth");
-		const hasApiKeyLogin =
+		const hasApiKeyAlternative =
 			dualInteractiveLogin &&
-			storedCredentials.some(credential => credential.type === "api_key" && credential.source === "login");
+			(storedCredentials.some(credential => credential.type === "api_key") ||
+				getEnvApiKey(provider) !== undefined ||
+				this.#fallbackResolver?.(provider) !== undefined);
 		const preferLoginApiKey = this.#preferredInteractiveCredentialType(provider) === "api_key";
 		if (preferLoginApiKey) {
 			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options, !hasOAuthLogin);
 			if (loginApiKey) return loginApiKey;
 		}
-		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options, !hasApiKeyLogin);
+		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options, !hasApiKeyAlternative);
 		if (oauthResolved) {
 			return oauthResolved.apiKey;
 		}
