@@ -246,4 +246,25 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		const config = await readMCPConfigFile(path.join(dir, "missing", "dotfiles", "mcp.json"));
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
+
+	it("walks an alias and .. in a missing leaf path physically, not lexically", async () => {
+		// /base/alias/../mcp.json where `alias -> /other/deep`. The kernel
+		// follows `alias` first and pops its PHYSICAL parent, so the write must
+		// land on /other/mcp.json — path.resolve() would lexically collapse the
+		// spelling onto the unrelated /base/mcp.json sibling and clobber it.
+		const baseDir = path.join(dir, "base");
+		const deepDir = path.join(dir, "other", "deep");
+		await fs.mkdir(baseDir, { recursive: true });
+		await fs.mkdir(deepDir, { recursive: true });
+		await fs.symlink(deepDir, path.join(baseDir, "alias"));
+		const configPath = `${baseDir}${path.sep}alias${path.sep}..${path.sep}mcp.json`;
+
+		await addMCPServer(configPath, "alpha", { type: "stdio", command: "a" });
+
+		const physical = path.join(dir, "other", "mcp.json");
+		const lexicalSibling = path.join(baseDir, "mcp.json");
+		const config = await readMCPConfigFile(physical);
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+		await expect(fs.stat(lexicalSibling)).rejects.toMatchObject({ code: "ENOENT" });
+	});
 });

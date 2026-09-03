@@ -97,7 +97,7 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 					// before this readlink. Land on the deepest hop we resolved
 					// rather than collapsing to the chain head, which would let
 					// the atomic rename replace the first user-managed symlink.
-					return current === filePath ? canonicalizeMissingLeaf(filePath) : current;
+					return current === filePath ? walkOriginalSpelling(filePath) : current;
 				}
 				// Resolve the target one physical segment at a time so an
 				// intermediate directory symlink is followed by the filesystem
@@ -153,25 +153,22 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 	// their referents recreated instead of failing mkdir through the dangling
 	// link. This also canonicalizes every existing component, which collapses
 	// directory aliases onto one physical parent for the missing-leaf case.
-	const absolute = path.resolve(filePath);
-	return walkPhysicalSegments(filePath, path.parse(absolute).root, physicalTargetSegments(absolute));
+	return walkOriginalSpelling(filePath);
 }
 
 /**
- * Canonicalize the deepest existing ancestor of a missing leaf: realpath()
- * already handled the case where every component exists, so reaching this
- * fallback means only the leaf (or its link chain) was missing. Resolving the
- * PARENT collapses directory aliases onto one physical location —
- * `alias-a/mcp.json` and `alias-b/mcp.json` over one real directory must lock
- * and publish on the same target, not race on two lexical paths. If even the
- * parent cannot be resolved, the best-effort absolute path stands.
+ * Walk the ORIGINAL spelling of a missing path without lexical normalization.
+ * `path.resolve()` would collapse `alias/..` onto an unrelated lexical sibling
+ * before the filesystem follows `alias` (`/base/alias/../mcp.json` with
+ * `alias -> /other/deep` really resolves to `/other/mcp.json`); the physical
+ * walker instead follows the link first and pops its REAL parent. A relative
+ * input is anchored onto the cwd by plain concatenation for the same reason —
+ * `path.join`/`path.resolve` would normalize the `..` away.
  */
-async function canonicalizeMissingLeaf(filePath: string): Promise<string> {
-	try {
-		return path.join(await fs.promises.realpath(path.dirname(filePath)), path.basename(filePath));
-	} catch {
-		return path.resolve(filePath);
-	}
+function walkOriginalSpelling(filePath: string): Promise<string> {
+	const cwd = process.cwd();
+	const spelling = path.isAbsolute(filePath) ? filePath : `${cwd}${path.sep}${filePath}`;
+	return walkPhysicalSegments(filePath, path.parse(spelling).root, physicalTargetSegments(spelling));
 }
 
 /**
