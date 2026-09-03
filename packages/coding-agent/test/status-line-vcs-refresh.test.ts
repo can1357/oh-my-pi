@@ -759,6 +759,11 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		// never resolve, so this cold paint cannot fire #onBranchChange itself.
 		component.getTopBorder(80);
 
+		// Let watchFile capture its baseline stat before the first atomic rename.
+		// Under a saturated CI runner the initial poll can otherwise land after
+		// the rename and treat the first branch as the baseline.
+		await Bun.sleep(vcs.HEAD_WATCH_INTERVAL_MS + 100);
+
 		const switchTo = async (branchName: string) => {
 			const gitDir = path.join(repoDir, ".git");
 			const headLock = path.join(gitDir, "HEAD.lock");
