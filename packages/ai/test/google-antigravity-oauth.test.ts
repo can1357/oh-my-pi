@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
+	DEFAULT_FALLBACK_PROJECT_ID,
 	googleAntigravityProjectHook,
 } from "../src/registry/oauth/google-antigravity";
 
@@ -16,7 +17,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-async function discoverAntigravityProject() {
+async function discoverAntigravityProject(onProgress?: (message: string) => void) {
 	return googleAntigravityProjectHook(
 		{ access: "access-token", refresh: "refresh-token", expires: 0 },
 		{
@@ -24,6 +25,7 @@ async function discoverAntigravityProject() {
 			phase: "login",
 			raw: { refresh_token: "refresh-token" },
 			fetch,
+			onProgress,
 		},
 	);
 }
@@ -218,5 +220,50 @@ describe("Antigravity OAuth project discovery", () => {
 
 		await expect(discoverAntigravityProject()).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("falls back to default consumer project when account is ineligible without a validation challenge", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			jsonResponse({
+				ineligibleTiers: [
+					{
+						tierId: "free-tier",
+						reasonMessage: "This account is not eligible for the free tier.",
+					},
+				],
+			}),
+		);
+
+		const progress: string[] = [];
+		const credentials = await discoverAntigravityProject(msg => progress.push(msg));
+		expect(credentials.projectId).toBe(DEFAULT_FALLBACK_PROJECT_ID);
+		expect(progress).toContain(
+			"Account not eligible for free-tier auto-onboarding: This account is not eligible for the free tier. Falling back to default consumer project...",
+		);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls[0]?.[0]).toBe(LOAD_CODE_ASSIST_URL);
+	});
+
+	it("falls back to default consumer project when refreshed loadCodeAssist omits project", async () => {
+		const responses = [
+			{ currentTier: { id: "free-tier" }, paidTier: { id: "standard-tier" } },
+			{ currentTier: { id: "free-tier" }, paidTier: { id: "standard-tier" } },
+		];
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async () => {
+					const payload = responses.shift();
+					if (!payload) throw new Error("Unexpected Cloud Code Assist request");
+					return jsonResponse(payload);
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		);
+
+		const progress: string[] = [];
+		const credentials = await discoverAntigravityProject(msg => progress.push(msg));
+		expect(credentials.projectId).toBe(DEFAULT_FALLBACK_PROJECT_ID);
+		expect(progress).toContain("No companion project returned; falling back to default consumer project...");
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
 	});
 });
