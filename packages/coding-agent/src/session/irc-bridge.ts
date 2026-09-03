@@ -5,7 +5,7 @@ import { IrcBus, type IrcMessage } from "../irc/bus";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
@@ -28,7 +28,8 @@ export class IrcBridge {
 	readonly #host: IrcBridgeHost;
 	#interrupts: CustomMessage[] = [];
 	#asides: CustomMessage[] = [];
-	readonly #autoReplies = new Set<Promise<void>>();
+	/** In-flight replies owed to peers: side-channel auto-replies and wake-turn relays. */
+	readonly #pendingReplies = new Set<Promise<void>>();
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
@@ -44,11 +45,22 @@ export class IrcBridge {
 		return this.#interrupts.length > 0 || this.#asides.length > 0;
 	}
 
-	/** Waits until every side-channel auto-reply started so far has finished. */
-	async waitForAutoReplies(): Promise<void> {
-		while (this.#autoReplies.size > 0) {
-			await Promise.all(this.#autoReplies);
+	/**
+	 * Waits until every reply this session still owes a peer has settled. A
+	 * peer awaiting an answer (`send await:true`) holds its "stopped without
+	 * replying" verdict on this, so a reply produced after the terminal
+	 * `agent_end` still resolves the waiter.
+	 */
+	async waitForReplies(): Promise<void> {
+		while (this.#pendingReplies.size > 0) {
+			await Promise.all(this.#pendingReplies);
 		}
+	}
+
+	/** Registers a reply obligation that {@link waitForReplies} must outlast. */
+	trackReply(pending: Promise<void>): void {
+		this.#pendingReplies.add(pending);
+		void pending.finally(() => this.#pendingReplies.delete(pending));
 	}
 
 	/** Takes every queued IRC record in interrupt-before-aside order. */
@@ -122,6 +134,10 @@ export class IrcBridge {
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const autoReply =
 			(opts?.expectsReply ?? false) && ((streaming && !this.#host.settings.get("async.enabled")) || planModeIdle);
+		// An idle subagent runs a monitored wake turn whose output is relayed
+		// back to the sender (task executor `relayWakeTurnOutput`); the main
+		// agent and mid-turn asides have no such relay.
+		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:incoming",
@@ -131,6 +147,7 @@ export class IrcBridge {
 				replyTo: msg.replyTo ?? "",
 				autoReplied: autoReply,
 				interrupting: streaming,
+				relayOnStop,
 			}),
 			display: true,
 			details: { id: msg.id, from: msg.from, message: msg.body, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
@@ -184,9 +201,7 @@ export class IrcBridge {
 	}
 
 	#startAutoReply(msg: IrcMessage): void {
-		const running = this.#runAutoReply(msg);
-		this.#autoReplies.add(running);
-		void running.finally(() => this.#autoReplies.delete(running));
+		this.trackReply(this.#runAutoReply(msg));
 	}
 
 	async #runAutoReply(msg: IrcMessage): Promise<void> {

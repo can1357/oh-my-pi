@@ -196,13 +196,21 @@ impl OpenFile {
 	}
 
 	/// Checks if the open file is associated with a terminal.
+	///
+	/// A custom stream that wraps a real descriptor (a guard around a terminal
+	/// fd, say) reports what that descriptor is; streams without one are never
+	/// terminals.
 	pub fn is_terminal(&self) -> bool {
 		match self {
 			Self::Stdin(f) => f.is_terminal(),
 			Self::Stdout(f) => f.is_terminal(),
 			Self::Stderr(f) => f.is_terminal(),
 			Self::File(f) => f.is_terminal(),
-			Self::PipeReader(_) | Self::PipeWriter(_) | Self::Stream(_) => false,
+			Self::PipeReader(_) | Self::PipeWriter(_) => false,
+			#[cfg(unix)]
+			Self::Stream(s) => s.try_borrow_as_fd().is_ok_and(|fd| fd.is_terminal()),
+			#[cfg(not(unix))]
+			Self::Stream(_) => false,
 		}
 	}
 }
