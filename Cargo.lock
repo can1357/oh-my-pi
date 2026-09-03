@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6169,8 +6169,6 @@ dependencies = [
  "rustix 1.1.4",
  "self_cell",
  "serde_json",
- "sha2 0.10.9",
- "sha3",
  "similar 3.2.0",
  "smallvec",
  "strum",
@@ -6189,11 +6187,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.1.6"
+version = "18.1.7"
 
 [[package]]
 name = "pi-edit"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6212,7 +6210,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "async-trait",
  "libc",
@@ -6224,7 +6222,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6306,7 +6304,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6334,7 +6332,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "gix",
  "gix-utils",
@@ -6349,7 +6347,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6364,7 +6362,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.6"
+version = "18.1.7"
 dependencies = [
  "dashmap",
  "globset",
@@ -7418,7 +7416,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
- "sha2-asm",
 ]
 
 [[package]]
@@ -7430,15 +7427,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "digest 0.11.3",
-]
-
-[[package]]
-name = "sha2-asm"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
-dependencies = [
- "cc",
 ]
 
 [[package]]

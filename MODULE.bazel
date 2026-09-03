@@ -205,20 +205,6 @@ crate.annotation(
     crate = "pcre2-sys",
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
 )
-# sha2-asm's build script compiles SHA-256 assembly with cc-rs flags zig cc
-# rejects (the launcher appends its glibc suffix to the rust-style --target
-# triple; -march values parse as zig's cpu+feature syntax). The shim rewrites
-# both and execs the real $CC. Scoped to the zig-built linux aarch64 triples,
-# so apple (host Xcode) builds never see it.
-crate.annotation(
-    crate = "sha2-asm",
-    build_script_data = ["@@//bazel/toolchains:sha2-asm-cc.sh"],
-    build_script_env = {
-        "CC_aarch64_unknown_linux_gnu": "$${pwd}/bazel/toolchains/sha2-asm-cc.sh",
-        "CC_aarch64_unknown_linux_musl": "$${pwd}/bazel/toolchains/sha2-asm-cc.sh",
-    },
-)
-
 # tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
 # default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
 crate.annotation(

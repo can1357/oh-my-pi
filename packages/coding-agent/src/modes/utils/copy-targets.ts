@@ -23,7 +23,7 @@ export type MessageBlock = ({ kind: "code" } & CodeBlock) | ({ kind: "quote" } &
 export interface LastCommand {
 	kind: "bash" | "eval";
 	code: string;
-	/** Highlight language: "bash" for bash, or the resolved eval language ("python"/"javascript"/"ruby"/"julia"). */
+	/** Highlight language: "bash" for bash, or the resolved eval language ("python"/"javascript"). */
 	language: string;
 }
 
@@ -165,7 +165,7 @@ function extractEvalCode(args: unknown): { code: string; language: string } | un
 		codeBlocks.push(code);
 		if (!languageResolved) {
 			const lang = (cell as { language?: unknown }).language;
-			language = lang === "js" ? "javascript" : lang === "rb" ? "ruby" : lang === "jl" ? "julia" : "python";
+			language = lang === "js" ? "javascript" : "python";
 			languageResolved = true;
 		}
 	}

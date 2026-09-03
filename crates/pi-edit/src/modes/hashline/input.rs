@@ -12,12 +12,18 @@ use regex::Regex;
 use super::{
 	clipboard::has_clipboard_edit,
 	format::{HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH},
-	messages::{CLIPBOARD_INTERLEAVED_SECTIONS, json_quote},
+	messages::{
+		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
+		json_quote,
+	},
 	parser::parse_patch,
-	tokenizer::{Token, Tokenizer},
+	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
 use crate::error::EditError;
+
+/// Envelope and abort sentinels recognized when nested inside a header row.
+const ENVELOPE_MARKERS: [&str; 3] = [BEGIN_PATCH_MARKER, END_PATCH_MARKER, ABORT_MARKER];
 
 static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(
@@ -238,7 +244,7 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 }
 
 fn parse_header_line(line: &str, cwd: Option<&Path>) -> Result<Option<RawSection>, EditError> {
-	let trimmed = line.trim_end();
+	let trimmed = unbracket_envelope_markers(line.trim_end());
 	if !trimmed.starts_with('[') {
 		return Ok(None);
 	}
@@ -272,7 +278,7 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	} else {
 		(body.trim_end(), None)
 	};
-	if path_text.contains('#') {
+	if path_text.contains('#') || header_path_has_orphan_bracket(path_text) {
 		return None;
 	}
 	let path = normalize_hashline_path(path_text, cwd);
@@ -284,12 +290,44 @@ fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	})
 }
 
+/// Unwrap leading bracketed `apply_patch` envelope markers from a row.
+///
+/// Models that mix `apply_patch` framing into hashline nest the sentinel in the
+/// section header (`[*** Begin Patch] [src/a.ts#1A2B]`, or unclosed as
+/// `[*** Begin Patch [src/a.ts#1A2B]`) or put it alone on a bracketed row
+/// (`[*** End Patch]`). Bare sentinel rows are already consumed by the
+/// tokenizer, so unwrapping the bracketed shape routes it down the same path —
+/// otherwise the whole row parses as one header and the edit targets a file
+/// called `Begin Patch] [src/a.ts`. A row carrying no such group comes back
+/// unchanged; a row that is nothing but one comes back as the bare marker for
+/// the tokenizer to classify.
+fn unbracket_envelope_markers(line: &str) -> &str {
+	let mut rest = line;
+	loop {
+		let Some(inner) = rest.strip_prefix('[').map(str::trim_start) else {
+			return rest;
+		};
+		let Some(marker) = ENVELOPE_MARKERS
+			.iter()
+			.find(|marker| inner.starts_with(**marker))
+		else {
+			return rest;
+		};
+		let tail = inner[marker.len()..].trim_start();
+		let tail = tail.strip_prefix(']').unwrap_or(tail).trim_start();
+		if tail.is_empty() {
+			return marker;
+		}
+		rest = tail;
+	}
+}
+
 fn strip_leading_blanks(input: &str) -> String {
 	let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 	let tokenizer = Tokenizer::new();
 	let mut lines: Vec<&str> = input.split('\n').collect();
 	while lines.first().is_some_and(|line| {
-		let clean = line.trim_end_matches('\r');
+		let clean = unbracket_envelope_markers(line.trim_end_matches('\r'));
 		clean.trim().is_empty() || matches!(tokenizer.tokenize(clean, 0), Token::EnvelopeBegin { .. })
 	}) {
 		lines.remove(0);
@@ -328,13 +366,14 @@ fn split_raw_sections(
 	let mut current: Option<RawSection> = None;
 	let mut body = Vec::new();
 	for line in lines {
-		match tokenizer.tokenize(line, 0) {
+		let clean = unbracket_envelope_markers(line.trim_end());
+		match tokenizer.tokenize(clean, 0) {
 			Token::EnvelopeEnd { .. } | Token::Abort { .. } => break,
 			Token::EnvelopeBegin { .. } => continue,
 			_ => {},
 		}
-		if line.trim_end().starts_with('[')
-			&& let Some(header) = parse_header_line(line, options.cwd)?
+		if clean.starts_with('[')
+			&& let Some(header) = parse_header_line(clean, options.cwd)?
 		{
 			flush_section(&mut sections, &mut current, &mut body);
 			current = Some(header);
