@@ -66,7 +66,18 @@ export function resolvePinnedModeSkills(names: readonly string[], skills: readon
 	return resolved;
 }
 
-/** Render the system-reminder block for one pinned mode skill. */
+/**
+ * Defuse literal `<system-reminder>` / `</system-reminder>` tags (any casing,
+ * any repetition) in reminder text so untrusted reminder content cannot close
+ * the enclosing block early: the leading `<` becomes `&lt;`, so no case
+ * variant survives as a real tag.
+ */
+function neutralizeReminderTags(reminder: string): string {
+	return reminder.replace(/<\/?system-reminder\s*>/gi, match => "&lt;" + match.slice(1));
+}
+
+/** Render the system-reminder block for one pinned mode skill, with reminder tags neutralised. */
 export function renderSkillModeReminder(skill: Pick<Skill, "name" | "reminder">): string {
-	return prompt.render(skillModeReminderTemplate, { name: skill.name, reminder: skill.reminder ?? "" }).trim();
+	const reminder = neutralizeReminderTags(skill.reminder ?? "");
+	return prompt.render(skillModeReminderTemplate, { name: skill.name, reminder }).trim();
 }
