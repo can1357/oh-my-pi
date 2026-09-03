@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { OPENZOO_LOCAL_TOKEN } from "@oh-my-pi/pi-ai/registry/openzoo";
 import { isDiscoveryBearerApiKey, kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
+
+// The literal, not an import: the provider is described entirely by
+// rules/auth/openzoo.kdl now, and this test exists to catch that file drifting
+// from the sentinel set below.
+const OPENZOO_LOCAL_TOKEN = "openzoo-local";
 
 describe("isDiscoveryBearerApiKey", () => {
 	it("rejects every local-provider placeholder, including the openzoo registry's own sentinel", () => {
