@@ -2,9 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Abliteration provider to `/login` and `ABLITERATION_API_KEY` to `--help` ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
+
+### Changed
+
+- Removed incorrect retry instructions from unsupported model error messages
+- Refreshed the built-in `smol`/`slow` model priority chains: `slow` now prefers Codex GPT-5.6 Sol, then Claude Fable 5.1/5, Kimi K3, GLM-5.3, Opus 5; `smol` prefers the newest Gemini Flash, then gpt-oss-120b, Cerebras GLM, Haiku 4.5, GPT-5.6 Luna. Older generations (Opus 4.1–4.7, GPT-5.1–5.4) dropped from the chains.
+
+### Removed
+
+- Removed the bundled `designer` subagent and the `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
+
 ### Fixed
 
 - Fixed sessions with skills disabled still advertising unavailable `skill://` resources ([#10215](https://github.com/can1357/oh-my-pi/issues/10215)).
+- Provider errors in the transcript and the pinned error banner now wrap to the terminal width instead of being cut at a fixed column with no way to read the rest; long bodies keep a bounded number of rows and end with the `Ctrl+O to expand` hint.
+- Gemini `MALFORMED_FUNCTION_CALL` turns where the model wrote the call as text (`call:default_api:read{…}`) no longer stop on a pinned error: the session keeps the turn, tells the model the call was rejected, and continues (bounded to three attempts per prompt).
+- Auto-compaction recovery no longer loops indefinitely when a model repeatedly returns an empty `response.incomplete` (`length`) turn: the length-stop recovery path is now bounded and surfaces an actionable error after a few failed attempts instead of scheduling `shake-retry` forever and persisting hundreds of empty assistant turns ([#10594](https://github.com/can1357/oh-my-pi/issues/10594)).
+- MCP servers now retry after transient startup handshake timeouts instead of remaining disconnected for the session ([#10478](https://github.com/can1357/oh-my-pi/issues/10478)).
+- Programs supervised by `hub start` no longer hang waiting for terminal replies: the broker answers cursor-position, device-attribute, and color queries on their PTY.
+- A large paste followed by Enter in the same input burst now submits with the paste attached instead of leaving the composer idle behind the large-paste menu ([#10576](https://github.com/can1357/oh-my-pi/issues/10576)).
 
 ## [18.1.3] - 2026-09-02
 

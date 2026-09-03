@@ -1087,14 +1087,13 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-6", "zai/glm-5.2:high"]);
 	});
 
-	test("uses default for unconfigured smol, slow, and designer agent roles before priority defaults", () => {
+	test("uses default for unconfigured smol and slow agent roles before priority defaults", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "local/llama" },
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
-		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toEqual(["local/llama"]);
 	});
 
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
@@ -1103,22 +1102,6 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	test("prefers configured designer role override over priority defaults", () => {
-		const settings = Settings.isolated({
-			modelRoles: {
-				default: "anthropic/claude-sonnet-4-5",
-				designer: "openai/gpt-4o",
-			},
-		});
-
-		const result = resolveAgentModelPatterns({
-			agentModel: "@designer",
-			settings,
-		});
-
-		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {

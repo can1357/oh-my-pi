@@ -1090,56 +1090,31 @@ For the current API-key onboarding flows, the library covers Together, Moonshot,
 
 ### Programmatic OAuth
 
-The library provides login and token refresh functions. Credential storage is the caller's responsibility.
+Provider login and refresh behavior is exposed through the registry. Credential storage is the caller's responsibility.
 
 ```typescript
 import {
-	// Login functions (return credentials, do not store)
-	loginAnthropic,
-	loginOpenAICodex,
-	loginGitHubCopilot,
-	loginGeminiCli,
-	loginAntigravity,
-	loginCloudflareAiGateway,
-	loginHuggingface,
-	loginLiteLLM,
-	loginMoonshot,
-	loginNvidia,
-	loginNanoGPT,
-	loginQianfan,
-	loginQwenPortal,
-	loginTogether,
-	loginVenice,
-	loginVllm,
-	loginXiaomi,
-
-	// Token management
+	getProviderDefinition,
 	refreshOAuthToken, // (provider, credentials) => new credentials
 	getOAuthApiKey, // (provider, credentialsMap) => { newCredentials, apiKey } | null
-
-	// Types
-	type OAuthProvider, // includes 'anthropic', 'openai-codex', 'github-copilot', 'google-gemini-cli', 'google-antigravity', 'together', 'moonshot', 'qianfan', 'nvidia', 'nanogpt', 'novita', 'huggingface', 'venice', 'xiaomi', 'vllm', 'litellm', 'cloudflare-ai-gateway', 'qwen-portal', ...
+	type OAuthProvider,
 	type OAuthCredentials,
 } from "@oh-my-pi/pi-ai";
-```
 
-`loginOpenAICodex` accepts an optional `originator` value used in the OAuth flow:
-
-```typescript
-await loginOpenAICodex({
+const provider = getProviderDefinition("openai-codex");
+const credentials = await provider?.login?.({
 	onAuth: ({ url }) => console.log(url),
-	originator: "my-cli",
 });
 ```
 
 ### Login Flow Example
 
 ```typescript
-import { loginGitHubCopilot } from "@oh-my-pi/pi-ai";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs";
 
-const credentials = await loginGitHubCopilot({
-	onAuth: (url, instructions) => {
+const credentials = await getProviderDefinition("github-copilot")?.login?.({
+	onAuth: ({ url, instructions }) => {
 		console.log(`Open: ${url}`);
 		if (instructions) console.log(instructions);
 	},

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { ZaiOAuthFlow } from "@oh-my-pi/pi-ai/registry/oauth/zai";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import type { OAuthCredentials, OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 
 const CLIENT_ID = "client_P8X5CMWmlaRO9gyO-KSqtg";
 const AUTHORIZE_URL = "https://chat.z.ai/api/oauth/authorize";
@@ -31,6 +33,20 @@ function bizEnvelope(data: unknown): Response {
 		status: 200,
 		headers: { "Content-Type": "application/json" },
 	});
+}
+
+async function loginZai(fetchImpl: FetchImpl, code = "auth-code"): Promise<OAuthCredentials> {
+	let authUrl = "";
+	const callbacks: OAuthController = {
+		onAuth: info => {
+			authUrl = info.url;
+		},
+		onManualCodeInput: async () => `${code}#${new URL(authUrl).searchParams.get("state")}`,
+		fetch: fetchImpl,
+	};
+	const credentials = await getProviderDefinition("zai-coding-plan")?.login?.(callbacks);
+	if (!credentials || typeof credentials === "string") throw new Error("expected structured credentials");
+	return credentials;
 }
 
 /**
@@ -104,15 +120,25 @@ afterEach(() => {
 
 describe("zai oauth flow", () => {
 	it("generates a no-PKCE authorization URL with the ZCode client id", async () => {
-		const flow = new ZaiOAuthFlow({});
-		const { url } = await flow.generateAuthUrl("state-abc", REDIRECT_URI);
+		vi.spyOn(Bun, "serve").mockReturnValue({ port: 9999, stop: () => {} } as unknown as Bun.Server<unknown>);
+		const controller = new AbortController();
+		let url = "";
+		const login = getProviderDefinition("zai-coding-plan")?.login;
+		if (!login) throw new Error("zai-coding-plan login is unavailable");
+		await login({
+			signal: controller.signal,
+			onAuth: info => {
+				url = info.url;
+				controller.abort();
+			},
+		}).catch(() => undefined);
 		const authUrl = new URL(url);
 
 		expect(authUrl.origin + authUrl.pathname).toBe(AUTHORIZE_URL);
 		expect(authUrl.searchParams.get("client_id")).toBe(CLIENT_ID);
 		expect(authUrl.searchParams.get("response_type")).toBe("code");
 		expect(authUrl.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
-		expect(authUrl.searchParams.get("state")).toBe("state-abc");
+		expect(authUrl.searchParams.get("state")).not.toBeNull();
 		expect(authUrl.searchParams.get("code_challenge")).toBeNull();
 		expect(authUrl.searchParams.get("code_challenge_method")).toBeNull();
 	});
@@ -123,16 +149,16 @@ describe("zai oauth flow", () => {
 			.mockReturnValue({ port: 9999, stop: () => {} } as unknown as Bun.Server<unknown>);
 		const controller = new AbortController();
 		const captured: { redirect: string | null } = { redirect: null };
-		const flow = new ZaiOAuthFlow({
+		const login = getProviderDefinition("zai-coding-plan")?.login;
+		if (!login) throw new Error("zai-coding-plan login is unavailable");
+		const error = await login({
 			signal: controller.signal,
 			onAuth: ({ url }) => {
 				captured.redirect = new URL(url).searchParams.get("redirect_uri");
 				// Stop before waiting on a callback that never arrives in the test.
 				controller.abort();
 			},
-		});
-
-		const error = await flow.login().catch((caught: unknown) => caught);
+		}).catch((caught: unknown) => caught);
 
 		// Z.AI's allowlist only registers this exact CLI redirect for the reused
 		// ZCode client id; anything else is rejected before the login page.
@@ -149,9 +175,9 @@ describe("zai oauth flow", () => {
 			throw Object.assign(new Error("EADDRINUSE"), { code: "EADDRINUSE" });
 		});
 		const onAuth = vi.fn();
-		const flow = new ZaiOAuthFlow({ onAuth });
-
-		const error = await flow.login().catch((caught: unknown) => caught);
+		const login = getProviderDefinition("zai-coding-plan")?.login;
+		if (!login) throw new Error("zai-coding-plan login is unavailable");
+		const error = await login({ onAuth }).catch((caught: unknown) => caught);
 
 		expect(error).toBeInstanceOf(AIError.ConfigurationError);
 		if (!(error instanceof AIError.ConfigurationError)) throw error;
@@ -164,9 +190,8 @@ describe("zai oauth flow", () => {
 
 	it("exchanges the code, does business-login, then mints an id.secret key (create path)", async () => {
 		const { fetchMock, requests } = makeBizFetch();
-		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });
 
-		const creds = await flow.exchangeToken("auth-code", "state-abc", REDIRECT_URI);
+		const creds = await loginZai(fetchMock as unknown as FetchImpl);
 
 		// Durable minted key: apiKey.secret, with the secret from COPY (not the inline create value).
 		expect(creds.access).toBe("created-key.real-secret");
@@ -190,7 +215,7 @@ describe("zai oauth flow", () => {
 			provider: "zai",
 			code: "auth-code",
 			redirect_uri: REDIRECT_URI,
-			state: "state-abc",
+			state: expect.any(String),
 		});
 		// Business login exchanges the OAuth access token for a biz token.
 		expect(requests[1]?.body).toEqual({ token: "oauth-access-token" });
@@ -209,9 +234,8 @@ describe("zai oauth flow", () => {
 				{ name: "oh-my-pi", apiKey: "existing-key", secretKey: "*****pz5Y" },
 			],
 		});
-		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });
 
-		const creds = await flow.exchangeToken("auth-code", "state-abc", REDIRECT_URI);
+		const creds = await loginZai(fetchMock as unknown as FetchImpl);
 
 		// Must use the copy secret ("real-secret"), NOT the masked list secret ("*****pz5Y").
 		expect(creds.access).toBe("existing-key.real-secret");
@@ -236,8 +260,7 @@ describe("zai oauth flow", () => {
 			}),
 		});
 		// Re-point KEYS_URL routing for the default org/project this test expects.
-		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });
-		const creds = await flow.exchangeToken("auth-code", "state-abc", REDIRECT_URI).catch((e: unknown) => e);
+		const creds = await loginZai(fetchMock as unknown as FetchImpl).catch((e: unknown) => e);
 
 		// The keys URL must target org-default/proj-default (the isDefault entries).
 		const customerIdx = requests.findIndex(r => r.url.endsWith("getCustomerInfo"));
@@ -256,9 +279,8 @@ describe("zai oauth flow", () => {
 				headers: { "Content-Type": "application/json" },
 			}),
 		});
-		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });
 
-		const error = await flow.exchangeToken("auth-code", "state-abc", REDIRECT_URI).catch((e: unknown) => e);
+		const error = await loginZai(fetchMock as unknown as FetchImpl).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(AIError.OAuthError);
 		expect((error as AIError.OAuthError).message).toContain("nope");
 	});
@@ -273,18 +295,16 @@ describe("zai oauth flow", () => {
 				},
 			),
 		});
-		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });
 
-		const error = await flow.exchangeToken("auth-code", "state-abc", REDIRECT_URI).catch((e: unknown) => e);
+		const error = await loginZai(fetchMock as unknown as FetchImpl).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(AIError.OAuthError);
 		expect((error as AIError.OAuthError).message).toContain("business login failed");
 	});
 
 	it("throws OAuthError when the token response omits the access token", async () => {
 		const { fetchMock } = makeBizFetch({ tokenResponse: tokenEnvelope({ token: "zcode-jwt", user: {} }) });
-		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });
 
-		const error = await flow.exchangeToken("auth-code", "state-abc", REDIRECT_URI).catch((e: unknown) => e);
+		const error = await loginZai(fetchMock as unknown as FetchImpl).catch((e: unknown) => e);
 		expect(error).toBeInstanceOf(AIError.OAuthError);
 		expect((error as AIError.OAuthError).message).toContain("missing access token");
 	});
