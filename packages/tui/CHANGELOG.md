@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a held bare Escape fusing with a following keypress (e.g. Escape then Space parsed as alt+space) under the Kitty keyboard protocol.
+
 ## [18.1.6] - 2026-09-03
 
 ### Fixed

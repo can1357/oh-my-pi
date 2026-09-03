@@ -67,6 +67,19 @@ const STRING_DISCARD_MAX_BYTES = 2 * MAX_STRING_SEQ_BYTES;
 const STRING_DISCARD_INACTIVITY_MS = 1000;
 // Partial that can only be the head of an OSC/DCS/APC string sequence.
 const STRING_SEQ_PARTIAL = /^\x1b[\]P_]/;
+// Bytes that can extend an escape sequence begun by a lone ESC: the CSI/SS3
+// introducers, string-sequence heads (OSC/DCS/APC/PM/SOS), and a second ESC.
+const ESCAPE_CONTINUATION_START: Record<string, true> = {
+	"\x1b": true,
+	"[": true,
+	O: true,
+	P: true,
+	"]": true,
+	_: true,
+	"^": true,
+	X: true,
+	V: true,
+};
 
 // SGR mouse report bodies live between `<` and the terminating `M`/`m`.
 // Matched only when the trailing byte is a valid terminator, so the regex
@@ -504,6 +517,17 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 				this.#armRawPasteTimer();
 			}
 			return;
+		}
+
+		if (isKittyProtocolActive() && this.#buffer === ESC && str.length > 0 && !ESCAPE_CONTINUATION_START[str[0]!]) {
+			// Kitty flag 1 disambiguates alt chords into CSI-u, so ESC followed by
+			// a non-continuation byte is a real Escape keypress and the next key —
+			// not a legacy Alt chord. Deliver the held Escape first so the two
+			// keystrokes stay distinct instead of fusing into e.g. alt+space.
+			this.#buffer = "";
+			this.#escapeSearchOffset = 0;
+			this.#partialHoldStartMs = 0;
+			this.#emitDataSequence(ESC);
 		}
 
 		this.#buffer += str;

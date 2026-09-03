@@ -180,6 +180,20 @@ describe("StdinBuffer", () => {
 			}
 		});
 
+		it("should deliver a held Escape separately from a following key under kitty", () => {
+			setKittyProtocolActive(true);
+			try {
+				// Kitty flag 1 reports alt chords as CSI-u, so ESC + printable is
+				// two distinct keypresses, not alt+space. Pre-fix, the held ESC
+				// fused with the space into a single `\x1b ` event.
+				processInput("\x1b");
+				processInput(" ");
+				expect(emittedSequences).toEqual(["\x1b", " "]);
+			} finally {
+				setKittyProtocolActive(false);
+			}
+		});
+
 		it("should flush a lone ESC after timeout when the kitty protocol is inactive", async () => {
 			// Legacy terminals: a bare ESC is a real keypress and must not lag
 			// behind the flush timeout by more than the deferral.
