@@ -71,7 +71,7 @@ describe("strict credential probes", () => {
 
 			expect(result.ok).toBe(true);
 			expect(authorization).toBe("Bearer LLM|subscription-key");
-			expect(requestedModel).toBe("muse-spark-1.1");
+			expect(requestedModel).toBe("muse-spark-1.3");
 		} finally {
 			fetchSpy.mockRestore();
 		}

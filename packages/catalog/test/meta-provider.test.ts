@@ -104,8 +104,9 @@ describe("Meta Model API provider", () => {
 	test("prefers Meta's documented key name while accepting the provider-specific alias", () => {
 		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "meta");
 		expect(descriptor).toMatchObject({
-			defaultModel: "muse-spark-1.1",
+			defaultModel: "muse-spark-1.3",
 			envVars: ["MODEL_API_KEY", "META_API_KEY"],
+			dynamicModelsAuthoritative: true,
 			catalogDiscovery: { label: "Meta Model API" },
 		});
 	});
