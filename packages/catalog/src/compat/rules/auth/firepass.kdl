@@ -1,0 +1,14 @@
+auth "firepass" {
+	name "Fire Pass (Fireworks Kimi K2.6 Turbo subscription)"
+	login "api-key" {
+		// Fire Pass is a Fireworks subscription product whose dedicated `fpk_…` API
+		// keys are scoped to the `accounts/fireworks/routers/kimi-k2p6-turbo` router
+		// (Kimi K2.6 Turbo). The key does NOT authorize `/v1/models`, so validation
+		// pings the chat completions endpoint with the router id directly.
+		// See https://docs.fireworks.ai/firepass.
+		auth-url "https://app.fireworks.ai/settings/users/api-keys"
+		instructions "Create a dedicated Fire Pass API key in the Fireworks dashboard"
+		prompt "Paste your Fire Pass API key" placeholder="fpk_..."
+		validate "chat-completions" label="Fire Pass" base-url="https://api.fireworks.ai/inference/v1" model="accounts/fireworks/routers/kimi-k2p6-turbo"
+	}
+}

@@ -2,14 +2,25 @@
 
 ## [Unreleased]
 
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added `/login abliteration` with API key validation against `/v1/models`, supporting the `ABLITERATION_API_KEY` and `ABLIT_KEY` environment variables.
+
+### Changed
+
+- Modernized provider authentication and token refresh across the catalog, with shared support for API-key, authorization-code, and device-code sign-in flows and clearer sign-in progress messages for OpenRouter, Kimi, and xAI.
+
 ### Fixed
 
-- GitHub Copilot `HTTP 400 model_not_supported` now fails immediately with GitHub's own response instead of being retried eight times per request, re-run by the turn-level retry, and replaced with a hardcoded "only part of its fleet" message ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
-- GitHub Copilot requests and new sign-ins now use the official Copilot CLI identity and OAuth app, restoring access to client-gated models while keeping existing credentials valid
-- Improved account recovery when Google rate limits are lifted before the reported reset time
-- Resolved an issue where unmetered autocomplete models surfaced as exhausted when quota is limited
-- Fixed Gemini 3 cross-model sessions on Cloud Code Assist failing with `400 INVALID_ARGUMENT` when the first replayed tool call has no thought signature ([#10602](https://github.com/can1357/oh-my-pi/issues/10602)).
-- Fixed Cursor models behind auth-gateway retrying client-declared tool calls after the gateway incorrectly reported them as missing.
+- GitHub Copilot now uses the official Copilot CLI identity and OAuth application for requests and new sign-ins, restoring access to client-gated models while preserving existing credentials.
+- GitHub Copilot now reports `model_not_supported` responses immediately instead of repeatedly retrying unsupported models.
+- Improved account recovery after Google rate limits are lifted earlier than the reported reset time.
+- Fixed unmetered autocomplete models being reported as exhausted when quota is limited.
+- Fixed Gemini 3 cross-model sessions in Cloud Code Assist when replaying tool calls without a thought signature.
+- Fixed Cursor models behind an authentication gateway incorrectly retrying valid client-declared tool calls.
+- Fixed reasoning from models that prefill `<think>` (including DeepSeek-R1 and hosted Qwen3-Thinking) being shown in the response instead of as a separate thinking block.
 
 ## [18.1.3] - 2026-09-02
 

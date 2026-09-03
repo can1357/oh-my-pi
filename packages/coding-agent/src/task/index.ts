@@ -588,7 +588,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
+		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.enabled");
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
 			isolationEnabled,
@@ -606,12 +606,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationMode = this.session.settings.get("task.isolation.mode");
+		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
 		return renderDescription({
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
-			isolationEnabled: !planMode && isolationMode !== "none",
+			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),

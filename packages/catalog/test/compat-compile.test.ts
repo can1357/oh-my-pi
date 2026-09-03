@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
-import { compileCompatRules } from "../scripts/compat-compiler";
+import { compileCompatRules, renderAuthIds } from "../scripts/compat-compiler";
+import { compileAuth } from "../scripts/compat-compiler/compile-auth";
 import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
 import committed from "../src/compat/rules.json";
+
+const AUTH_IDS_PATH = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
 
 const RULES_DIR = path.join(import.meta.dir, "../src/compat/rules");
 
@@ -139,9 +142,91 @@ describe("compat compiler grammar", () => {
 	});
 });
 
+describe("auth grammar", () => {
+	const order = (...ids: string[]) => ({
+		file: "auth/_order.kdl",
+		text: `login-order ${ids.map(id => JSON.stringify(id)).join(" ")}`,
+	});
+
+	test("oauth-code login without a refresh declaration is rejected", () => {
+		expect(() =>
+			compileAuth([
+				{
+					file: "auth/x.kdl",
+					text: 'auth "x" {\n\tname "X"\n\tlogin "oauth-code" {\n\t\tauthorize-url "https://a"\n\t\tcallback port=1\n\t\ttoken url="https://t"\n\t}\n}',
+				},
+				order("x"),
+			]),
+		).toThrow(/auth\/x\.kdl:1.*no `refresh`/);
+	});
+
+	test("unknown login kind and unknown auth directive are rejected with file:line", () => {
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tlogin "magic" {\n\t}\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3.*`login`/);
+		expect(() => compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tcolour "red"\n}' }])).toThrow(
+			/auth\/x\.kdl:3.*unexpected node `colour`/,
+		);
+	});
+
+	test("loginable providers must appear in login-order; non-login providers sort after it", () => {
+		const login = 'auth "b" {\n\tname "B"\n\tlogin "api-key" {\n\t\tprompt "Paste"\n\t}\n}';
+		const plain = 'auth "a" {\n\tname "A"\n}';
+		expect(() =>
+			compileAuth([{ file: "auth/b.kdl", text: login }, { file: "auth/a.kdl", text: plain }, order()]),
+		).toThrow(/loginable provider "b" is missing from login-order/);
+		const compiled = compileAuth([
+			{ file: "auth/a.kdl", text: plain },
+			{ file: "auth/b.kdl", text: login },
+			order("b"),
+		]);
+		expect(compiled.providers.map(p => p.id)).toEqual(["b", "a"]);
+		expect(renderAuthIds(compiled)).toContain('export type LoginProviderId = "b";');
+		expect(renderAuthIds(compiled)).toContain('export type AuthProviderId = "a" | "b";');
+	});
+
+	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: [
+					'auth "x" {',
+					'\tname "X"',
+					'\tlogin "oauth-code" {',
+					'\t\tclient-id "aWQ=" encoding="base64" env="X_CLIENT_ID"',
+					'\t\tauthorize-url "https://a"',
+					"\t\tpkce #true",
+					'\t\tcallback port=4242 path="/cb"',
+					'\t\ttoken url="https://t" body="json" { params { state "{state}" } }',
+					'\t\tcredential { expires "seconds" from="created_at" skew-ms=0 }',
+					"\t}",
+					'\trefresh { require "projectId" }',
+					"}",
+				].join("\n"),
+			},
+			order("x"),
+		]);
+		const [x] = compiled.providers;
+		expect(x.callbackPort).toBe(4242);
+		expect(x.pasteCode).toBe(true);
+		expect(x.login).toMatchObject({
+			kind: "oauth-code",
+			clientId: { value: "aWQ=", encoding: "base64", env: ["X_CLIENT_ID"] },
+			credential: { expires: { mode: "seconds", path: "expires_in", fromPath: "created_at", skewMs: 0 } },
+		});
+		expect(x.refresh).toMatchObject({
+			kind: "request",
+			require: ["projectId"],
+			token: { url: { value: "https://t" }, body: "json", standard: true, params: {} },
+			credential: { expires: { fromPath: "created_at" } },
+		});
+	});
+});
+
 describe("committed rules.json", () => {
 	test("matches a fresh compile of rules/ (run `bun run gen:compat` after editing KDL)", async () => {
 		const fresh = await compileCompatRules(RULES_DIR);
 		expect(fresh).toEqual(committed);
+		expect(await Bun.file(AUTH_IDS_PATH).text()).toBe(renderAuthIds(fresh.auth));
 	});
 });

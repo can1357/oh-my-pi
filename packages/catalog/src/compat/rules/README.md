@@ -8,6 +8,7 @@ There are three ownership strata:
 - `classes/*.kdl` defines model-lineage truths: behavior inherent to a model line, optionally scoped to the providers where the census established it.
 - `providers/*.kdl` defines deployment contracts: behavior imposed by a host, plus documented per-model residue that taxonomy cannot express exactly.
 - `runtime/behavior.kdl` defines heuristics used before or outside exact model lookup: responses routing, API routes, quota tiers, plan requirements, model limits, roster exclusions, hosted defaults, pricing peers.
+- `auth/<provider>.kdl` defines the provider's auth contract: display name, env-var fallback, credential storage/format, and the declarative login / refresh flow that `@oh-my-pi/pi-ai`'s registry engines interpret (see [Auth grammar](#auth-grammar)).
 
 Do not move a statistically common provider behavior into a class file, or a lineage truth into a provider file. Absence is not evidence that a capability is stripped. Preserve comments that record census provenance, reviewed exceptions, and why a `models` residue remains.
 
@@ -253,6 +254,61 @@ behavior {
 ```
 
 Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+
+## Auth grammar
+
+Every provider has exactly one `auth "<id>" { … }` node under `auth/`; `auth/_order.kdl` holds a single `login-order "id" …` node pinning the `/login` roster order (every provider with a `login` and `show-in-login-list` unset/true must appear; providers without a login sort alphabetically after it). Runtime accessors live in `src/compat/auth.ts`; the id unions in the generated `src/compat/auth-ids.ts`. Every provider in `provider-models/descriptors.ts` needs an auth node (`@oh-my-pi/pi-ai` type-checks this).
+
+```kdl
+auth "anthropic" {
+    name "Anthropic (Claude Pro/Max)"
+    env hook="anthropic-foundry"                 // or: env "ANTHROPIC_OAUTH_TOKEN" "ANTHROPIC_API_KEY"
+    login "oauth-code" {
+        client-id "OWQxYzI1…" encoding="base64"  // env="VAR" adds an override; child `env "A" "B"` an ordered list
+        authorize-url "https://claude.ai/oauth/authorize"
+        scopes "org:create_api_key" "user:profile"      // separator=" " default
+        pkce #true
+        state "hex"                              // hex | uuid | none
+        authorize-params { code "true" }         // standard=#false drops client_id/response_type/redirect_uri/scope/PKCE/state
+        instructions "Complete login in your browser…"
+        callback port=54545 path="/callback" hostname="localhost" redirect-uri="…" redirect-uri-env="VAR" port-fallback=#true manual-only=#false
+        token url="https://api.anthropic.com/v1/oauth/token" body="json" { params { state "{state}" } headers { X "y" } }
+        credential {
+            access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
+            refresh "refresh_token"
+            expires "seconds" path="expires_in" from="created_at" skew-ms=300000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
+            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
+        }
+        userinfo url="https://…/userinfo" email="email" account-id="sub"
+        after-exchange hook="anthropic-identity"
+        paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
+    }
+    refresh {                                   // or `refresh "none"` / `refresh hook="name"`
+        token url="…" body="json" { headers { anthropic-beta "oauth-2025-04-20" } }   // defaults to the login token request
+        require "projectId"
+        credential { … }                        // defaults to the login map
+        after-refresh hook="…"
+    }
+    store-as "openai-codex"                      // persist under another provider id
+    callback-port 54545                          // defaults to the oauth-code callback port
+    paste-code #true                             // defaults to #true for oauth-code logins
+    api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
+    expiry "jwt-or-never"                        // session-JWT expiry policy
+    result "api-key"                             // OAuth login persists only credentials.access as a plain API key
+    allows-missing-api-key #true
+    available #false
+    show-in-login-list #false
+}
+```
+
+Login kinds:
+
+- `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= headers-hook=`; all accept `label=` (error-message label, defaults to `name`) and `optional=#true` (only auth failures reject).
+- `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
+- `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
+- `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
+
+Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registry/hooks` by that package's `auth-hooks-registry` test. Values marked `encoding="base64"` are public OAuth client ids stored obfuscated to keep secret scanners quiet; they are decoded at runtime.
 
 ## Vendoring provenance
 

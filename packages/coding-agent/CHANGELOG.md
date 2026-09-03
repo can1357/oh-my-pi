@@ -5,16 +5,34 @@
 ### Added
 
 - Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added Abliteration provider support to `/login`, including `ABLITERATION_API_KEY` configuration and help text.
+- Added clone-first Git worktree support that carries over ignored build artifacts when creating worktrees, with a configurable `worktree.clone` setting and fallback to a standard checkout. This is supported by `github pr_checkout`, `omp worktree add`, and `git worktree add` commands entered through the Bash tool.
+- Added the `omp worktree add` command with Git-compatible branch, detach, path, and commit options.
+- Added `/wt` (alias `/worktree`) to create a linked worktree with uncommitted changes and move the current session into it while leaving the original checkout untouched.
+
 ### Changed
 
-- Removed incorrect retry instructions from unsupported model error messages
+- Split subagent isolation configuration into `task.isolation.enabled` and `isolation.backend`; existing `task.isolation.mode` settings are migrated automatically.
+- Updated the built-in `smol` and `slow` model priority chains to favor newer recommended models and remove older model generations.
+- Improved unsupported-model error messages by removing retry guidance that does not apply.
 
 ### Fixed
 
-- Provider errors in the transcript and the pinned error banner now wrap to the terminal width instead of being cut at a fixed column with no way to read the rest; long bodies keep a bounded number of rows and end with the `Ctrl+O to expand` hint.
-- Gemini `MALFORMED_FUNCTION_CALL` turns where the model wrote the call as text (`call:default_api:read{…}`) no longer stop on a pinned error: the session keeps the turn, tells the model the call was rejected, and continues (bounded to three attempts per prompt).
-- Auto-compaction recovery no longer loops indefinitely when a model repeatedly returns an empty `response.incomplete` (`length`) turn: the length-stop recovery path is now bounded and surfaces an actionable error after a few failed attempts instead of scheduling `shake-retry` forever and persisting hundreds of empty assistant turns ([#10594](https://github.com/can1357/oh-my-pi/issues/10594)).
-- MCP servers now retry after transient startup handshake timeouts instead of remaining disconnected for the session ([#10478](https://github.com/can1357/oh-my-pi/issues/10478)).
+- Fixed automatic title generation so `--no-title` also prevents todo-initialization title refreshes, while automatic titles retain the selected OAuth account without sharing foreground request identity.
+- Fixed provider errors so they wrap to the terminal width and remain readable in the transcript and pinned error banner, with long messages available through the expansion hint.
+- Fixed Gemini malformed function-call turns so textual tool-call output is rejected conversationally and the session can continue instead of stopping with a pinned error.
+- Fixed auto-compaction recovery getting stuck in repeated retries when models return empty length-limited responses; it now stops with an actionable error.
+- Fixed MCP servers failing to reconnect after transient startup handshake timeouts.
+- Fixed programs supervised by `hub start` hanging when querying terminal capabilities.
+- Fixed large pastes followed immediately by Enter so the input is submitted with the pasted content instead of being left in the large-paste menu.
+
+### Removed
+
+- Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
 
 ## [18.1.3] - 2026-09-02
 

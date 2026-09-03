@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added `TerminalQueryResponder` to `@oh-my-pi/pi-utils/vterm`, enabling headless PTY consumers to answer common terminal queries for cursor position, device status and attributes, and foreground/background colors without maintaining a screen buffer.
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed

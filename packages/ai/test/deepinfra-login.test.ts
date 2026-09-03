@@ -1,7 +1,10 @@
 import { describe, expect, test, vi } from "bun:test";
-import { loginDeepinfra } from "../src/registry/deepinfra";
 import { getOAuthProviders } from "../src/registry/oauth";
+import { getProviderDefinition } from "../src/registry/registry";
 import type { FetchImpl } from "../src/types";
+
+const loginDeepinfra = getProviderDefinition("deepinfra")?.login;
+if (!loginDeepinfra) throw new Error("DeepInfra login is not registered");
 
 describe("DeepInfra login", () => {
 	test("registers DeepInfra as an available API-key provider", () => {
