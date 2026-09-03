@@ -624,6 +624,21 @@ describe("sloppy v8", () => {
 		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
 	});
 
+	test("rejects a missing-separator split when the matching prefix is at EOF", () => {
+		// Regression (review P1 round 3 on #10527): a two-line file with a
+		// marker-less desired block that appends similarly shaped declarations
+		// — the prefix matches uniquely and both halves score above the
+		// similarity threshold, but the file has no continuation lines after
+		// the match, so the continuation gate was skipped and the split
+		// replaced the matched prefix with the appended declarations. Now the
+		// insufficient continuation triggers a higher similarity bar (0.85)
+		// that the append does not meet, so the split is rejected and the
+		// payload fails closed instead of silently corrupting the file.
+		const content = "const item1 = oldA;\nconst item2 = oldB;\n";
+		const input = "<SM:EDIT>\nconst item1 = oldA;\nconst item2 = oldB;\nconst item3 = newC;\nconst item4 = newD;";
+		expect(() => applySloppy(content, input, { path: "c.ts", notes: [] })).toThrow(/has <SM:FIND> but no <SM:PUT>/);
+	});
+
 	test("keeps the fail-closed error when no block resembles the stated text", () => {
 		const content = "const a = 1;\nkeep();\n";
 

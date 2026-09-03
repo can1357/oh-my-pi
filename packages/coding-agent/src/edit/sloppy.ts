@@ -612,21 +612,26 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 /**
  * Minimum normalized similarity between a recovered MATCH prefix and its
  * recovered REWRITE remainder for the missing-separator split to be trusted,
- * and the maximum normalized length either side may occupy before the
- * quadratic Levenshtein computation is skipped. A real "forgot the »
+ * the maximum normalized length either side may occupy before the
+ * quadratic Levenshtein computation is skipped, and the higher similarity bar
+ * required when the matching prefix is at or near EOF (insufficient
+ * continuation to disambiguate). A real "forgot the »
  * separator" payload replaces the matched text with a same-shape rewrite
  * (same line count, high similarity, and the rewrite resembles the matched
  * text more than the file's continuation after it). A marker-less
  * desired-state block whose first lines happen to exist in the file pairs a
  * stray prefix with the block's remaining lines — the remainder edits the
  * continuation, not the matched text, so its similarity to the continuation
- * meets or exceeds its similarity to the match. The split is only accepted
- * when all three gates agree; anything else falls through to the gated
+ * meets or exceeds its similarity to the match. When the prefix is at EOF
+ * and no continuation exists, a higher similarity bar (0.75) distinguishes a
+ * genuine same-shape rewrite from a desired-state append. The split is only
+ * accepted when all gates agree; anything else falls through to the gated
  * closest-block path (or the fail-closed error) instead of silently
  * replacing a prefix line.
  */
 const RECOVER_MISSING_SEPARATOR_MIN_SIMILARITY = 0.65;
 const RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH = 1000;
+const RECOVER_MISSING_SEPARATOR_EOF_MIN_SIMILARITY = 0.75;
 
 function recoverMissingSeparator(
 	lines: string[],
@@ -685,7 +690,14 @@ function recoverMissingSeparator(
 		// the file immediately after the match. When the rewrite resembles the
 		// continuation at least as much as it resembles the matched text, the
 		// remainder is a desired-state edit of the following lines, not a
-		// rewrite of the match — reject the split.
+		// rewrite of the match — reject the split. When the file has fewer
+		// non-blank lines after the match than the rewrite has (the prefix is
+		// at or near EOF), the continuation cannot disambiguate a desired-state
+		// append from a genuine same-shape rewrite. Require a higher similarity
+		// bar in that case: a real forgotten-» rewrite of the last lines of a
+		// file is nearly identical to the matched text (≥ 0.75), while a
+		// desired-state append that merely shares declaration shape scores
+		// lower and is rejected.
 		const matchEnd = matches[0].end;
 		const fileLinesAfter = content.slice(matchEnd).split("\n");
 		const continuationLines: string[] = [];
@@ -694,7 +706,13 @@ function recoverMissingSeparator(
 			continuationLines.push(line);
 			if (continuationLines.length >= rewriteLines.length) break;
 		}
-		if (continuationLines.length === rewriteLines.length) {
+		if (continuationLines.length < rewriteLines.length) {
+			// Insufficient continuation (EOF): require a high similarity bar
+			// to distinguish a genuine rewrite from a desired-state append.
+			if (similarity(patternNormalized, rewriteNormalized) < RECOVER_MISSING_SEPARATOR_EOF_MIN_SIMILARITY) {
+				continue;
+			}
+		} else {
 			const continuationNormalized = normalizeText(continuationLines.join("\n")).text;
 			if (
 				continuationNormalized.length <= RECOVER_MISSING_SEPARATOR_MAX_NORMALIZED_LENGTH &&
