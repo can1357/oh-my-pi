@@ -39,6 +39,7 @@
 		"auth/litellm.kdl",
 		"auth/llama.cpp.kdl",
 		"auth/lm-studio.kdl",
+		"auth/meta-oauth.kdl",
 		"auth/meta.kdl",
 		"auth/minimax-code-cn.kdl",
 		"auth/minimax-code.kdl",
@@ -16301,6 +16302,68 @@
 						"kind": "models-endpoint",
 						"url": "https://api.meta.ai/v1/models"
 					}
+				}
+			},
+			{
+				"id": "meta-oauth",
+				"apiKeyFormat": "bearer",
+				"name": "Meta Muse (Muse Spark subscription)",
+				"login": {
+					"kind": "device-code",
+					"scopes": [],
+					"scopeSeparator": " ",
+					"clientId": {
+						"value": "1031625952748946"
+					},
+					"device": {
+						"url": {
+							"value": "https://auth.meta.com/oidc/device/authorization/"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"Accept": "application/json"
+						},
+						"timeoutMs": 30000
+					},
+					"token": {
+						"url": {
+							"value": "https://auth.meta.com/oidc/device/token/"
+						},
+						"body": "form",
+						"standard": true,
+						"params": {},
+						"headers": {
+							"Accept": "application/json"
+						},
+						"timeoutMs": 30000
+					},
+					"response": {
+						"userCode": "user_code",
+						"deviceCode": "device_code",
+						"verificationUri": "verification_uri",
+						"verificationUriComplete": "verification_uri_complete",
+						"interval": "interval",
+						"expiresIn": "expires_in"
+					},
+					"instructions": "Enter code: {user_code}",
+					"afterExchange": "meta-mint-key",
+					"credential": {
+						"access": {
+							"path": "access_token"
+						},
+						"refresh": {
+							"path": "refresh_token"
+						},
+						"expires": {
+							"mode": "never"
+						}
+					}
+				},
+				"storeAs": "meta",
+				"refresh": {
+					"kind": "none"
 				}
 			},
 			{

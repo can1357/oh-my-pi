@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Meta Muse OAuth login (`/login meta-oauth`): Meta account device flow that mints a Model API key for Muse Spark models.
+
 ## [18.1.7] - 2026-09-03
 
 ### Fixed
