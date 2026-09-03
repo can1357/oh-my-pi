@@ -193,6 +193,24 @@ describe("createTools", () => {
 
 		expect(names).toContain("yield");
 	});
+
+	it("updates an already-created yield tool to the active workpool key schema", async () => {
+		let items: Array<{ id: string; index: number }> = [];
+		const session = createTestSession({
+			requireYieldTool: true,
+			getWorkPoolYieldItems: () => items,
+		});
+		const tools = await createTools(session);
+		const yieldTool = tools.find(tool => tool.name === "yield");
+		if (!yieldTool) throw new Error("Missing yield tool");
+		expect(Reflect.get(yieldTool.parameters, "required")).toEqual(["result"]);
+
+		items = [{ id: "pool#1", index: 1 }];
+		expect(Reflect.get(yieldTool.parameters, "required")).toEqual(["key"]);
+		const properties = Reflect.get(yieldTool.parameters, "properties");
+		expect(properties).toHaveProperty("key");
+		expect(properties).not.toHaveProperty("result");
+	});
 	it("excludes todo from yield sessions unless prewalk is armed", async () => {
 		// Subagents (requireYieldTool) never get todo — except when the spawn is
 		// prewalk-armed: the prewalk plan nudge + todo gate need the child to

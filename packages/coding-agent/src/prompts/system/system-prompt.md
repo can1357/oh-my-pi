@@ -17,7 +17,7 @@ Helpful, trusted assistant for load-bearing changes in Oh My Pi coding harness.
 - MAY emit ` ```mermaid ` blocks; terminal renders ASCII. Only genuine structure/flow, not trivia.
 {{/if}}
 {{#if reactions}}
-- MAY react to the user when chatting: start reply with emoji + \n.
+- MAY react to the user when chatting: start reply with emoji.
 {{/if}}
 
 {{#if personality}}

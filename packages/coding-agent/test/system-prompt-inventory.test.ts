@@ -529,8 +529,6 @@ describe("system prompt tool inventory", () => {
 		const settings = Settings.isolated({
 			"eval.py": false,
 			"eval.js": false,
-			"eval.rb": false,
-			"eval.jl": false,
 		});
 		const session = makeToolSession(settings);
 		const tools = await createTools(session, ["bash", "eval"]);

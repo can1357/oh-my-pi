@@ -3992,25 +3992,27 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"eval.rb": {
+	"eval.tools.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
-			label: "Ruby Eval Backend",
-			description: "Allow the eval tool to dispatch Ruby cells to the persistent Ruby kernel",
+			label: "Eval-Defined Tools",
+			description:
+				"Let eval cells define tools (@tool in Python, tool(fn) in JS) that task, agent(), and workpool() subagents can call",
 		},
 	},
 
-	"eval.jl": {
+	"eval.workpool.freshAgents": {
 		type: "boolean",
 		default: false,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
-			label: "Julia Eval Backend",
-			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
+			label: "Fresh Workpool Agents",
+			description:
+				"Spawn a new subagent for every workpool item instead of reusing workers or batching queued items",
 		},
 	},
 
@@ -4051,28 +4053,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Python Interpreter",
 			description:
 				"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
-		},
-	},
-	"ruby.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Ruby Interpreter",
-			description:
-				"Optional path to an exact Ruby executable. When set, automatic Ruby runtime discovery is skipped.",
-		},
-	},
-	"julia.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Julia Interpreter",
-			description:
-				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
 		},
 	},
 
@@ -5573,7 +5553,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Tiny Model",
 			label: "Tiny Model Device",
 			description:
-				"ONNX execution provider for local tiny models (titles + memory). Default uses CPU-only inference. The PI_TINY_DEVICE env var overrides this.",
+				"Inference backend for local tiny models (titles + memory): an ONNX execution provider, or `mlx` to download MLX weights and run them through mlx-lm on Apple silicon. Default uses CPU-only ONNX. The PI_TINY_DEVICE env var overrides this.",
 			options: TINY_MODEL_DEVICE_SETTING_OPTIONS,
 		},
 	},
@@ -5586,7 +5566,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Tiny Model",
 			label: "Tiny Model Precision",
 			description:
-				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. The PI_TINY_DTYPE env var overrides this.",
+				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.",
 			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
 		},
 	},

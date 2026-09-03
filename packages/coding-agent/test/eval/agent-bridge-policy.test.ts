@@ -2,9 +2,11 @@ import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
-import { runEvalAgent } from "../../src/eval/agent-bridge";
+import { runEvalAgent, type EvalAgentBridgeOptions, type EvalAgentResult } from "../../src/eval/agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
+import { runEvalWait } from "../../src/eval/handle-bridge";
 import { IdleTimeout } from "../../src/eval/idle-timeout";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
@@ -39,6 +41,33 @@ const reviewerAgent = {
 	model: ["@smol"],
 } satisfies AgentDefinition;
 
+const jobManagers = new Set<AsyncJobManager>();
+
+function isEvalAgentResult(value: unknown): value is EvalAgentResult {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"details" in value &&
+		"text" in value &&
+		typeof value.text === "string" &&
+		value.details !== null &&
+		typeof value.details === "object"
+	);
+}
+
+async function runEvalAgentAndWait(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
+	const handle = await runEvalAgent(args, options);
+	const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, options);
+	const snapshot = waited.items[0];
+	if (!snapshot || snapshot.status === "running") throw new Error(`Agent handle ${handle.id} did not settle`);
+	if (snapshot.status === "failed" || snapshot.status === "cancelled") {
+		throw new Error(snapshot.error || `Agent handle ${handle.id} failed`);
+	}
+	const result = options.session.asyncJobManager?.getJob(handle.id)?.latestDetails?.evalResult;
+	if (!isEvalAgentResult(result)) throw new Error(`Agent handle ${handle.id} returned no eval result`);
+	return result;
+}
+
 interface SessionOptions {
 	cwd?: string;
 	sessionFile?: string | null;
@@ -63,10 +92,13 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 			"task.enableLsp": true,
 		});
 	const artifactsDir = options.artifactsDir ?? null;
+	const asyncJobManager = new AsyncJobManager({});
+	jobManagers.add(asyncJobManager);
 	return {
 		cwd: options.cwd ?? process.cwd(),
 		hasUI: false,
 		settings,
+		asyncJobManager,
 		taskDepth: options.depth ?? 0,
 		enableLsp: options.enableLsp ?? true,
 		agentOutputManager: options.outputManager,
@@ -90,6 +122,24 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 
 function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): void {
 	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+}
+
+function spyOverlapBarrier(count: number): { maxInFlight: () => number } {
+	let inFlight = 0;
+	let maxInFlight = 0;
+	const saturated = Promise.withResolvers<void>();
+	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		inFlight++;
+		maxInFlight = Math.max(maxInFlight, inFlight);
+		if (inFlight === count) saturated.resolve();
+		try {
+			await saturated.promise;
+			return singleResult(options, { output: options.assignment ?? "" });
+		} finally {
+			inFlight--;
+		}
+	});
+	return { maxInFlight: () => maxInFlight };
 }
 
 function singleResult(options: ExecutorOptions, overrides: Partial<SingleResult> = {}): SingleResult {
@@ -129,39 +179,13 @@ function makeEvalSession(
 	return { session, sessionFile, sessionId: `${prefix}:${crypto.randomUUID()}` };
 }
 
-/**
- * Spy `runSubprocess` so a `parallel()` fan-out overlaps deterministically: every
- * bridge call parks until the pool saturates at `limit` concurrent calls in flight,
- * then all proceed. Proves the pool reaches its ceiling without a wall-clock sleep —
- * the pool itself caps how many run at once, so an unbounded pool would drive
- * `maxInFlight` past `limit` and fail the bound.
- */
-function spyConcurrencyBarrier(limit: number): { maxInFlight: () => number } {
-	let inFlight = 0;
-	let max = 0;
-	let saturate: (() => void) | undefined;
-	const saturated = new Promise<void>(resolve => {
-		saturate = resolve;
-	});
-	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
-		inFlight++;
-		max = Math.max(max, inFlight);
-		if (inFlight >= limit) saturate?.();
-		try {
-			await saturated;
-			return singleResult(options, { output: options.assignment ?? "" });
-		} finally {
-			inFlight--;
-		}
-	});
-	return { maxInFlight: () => max };
-}
-
 describe("runEvalAgent", () => {
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();
 		resetRegisteredArtifactDirsForTests();
+		await Promise.all([...jobManagers].map(manager => manager.dispose()));
+		jobManagers.clear();
 	});
 
 	it("resolves the default task agent and agent overrides", async () => {
@@ -173,8 +197,8 @@ describe("runEvalAgent", () => {
 		);
 		const session = makeSession();
 
-		const defaultResult = await runEvalAgent({ prompt: "hello" }, { session });
-		const overrideResult = await runEvalAgent({ prompt: "hello", agent: "reviewer" }, { session });
+		const defaultResult = await runEvalAgentAndWait({ prompt: "hello" }, { session });
+		const overrideResult = await runEvalAgentAndWait({ prompt: "hello", agent: "reviewer" }, { session });
 
 		expect(defaultResult.text).toBe("task");
 		expect(overrideResult.text).toBe("reviewer");
@@ -186,20 +210,20 @@ describe("runEvalAgent", () => {
 		mockAgents([taskAgent]);
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		await expect(runEvalAgent({ prompt: "hello", agent: "missing" }, { session: makeSession() })).rejects.toThrow(
-			'Unknown agent "missing"',
-		);
+		await expect(
+			runEvalAgentAndWait({ prompt: "hello", agent: "missing" }, { session: makeSession() }),
+		).rejects.toThrow('Unknown agent "missing"');
 	});
 
 	it("enforces shared spawn restrictions", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		await expect(runEvalAgent({ prompt: "hello" }, { session: makeSession({ spawns: "" }) })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "hello" }, { session: makeSession({ spawns: "" }) })).rejects.toThrow(
 			"spawns disabled",
 		);
 		await expect(
-			runEvalAgent({ prompt: "hello", agent: "task" }, { session: makeSession({ spawns: "reviewer" }) }),
+			runEvalAgentAndWait({ prompt: "hello", agent: "task" }, { session: makeSession({ spawns: "reviewer" }) }),
 		).rejects.toThrow("Allowed: reviewer");
 		expect(runSpy).not.toHaveBeenCalled();
 	});
@@ -212,7 +236,10 @@ describe("runEvalAgent", () => {
 			}),
 		);
 
-		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession({ spawns: "reviewer,task" }) });
+		const result = await runEvalAgentAndWait(
+			{ prompt: "hello" },
+			{ session: makeSession({ spawns: "reviewer,task" }) },
+		);
 
 		expect(result.text).toBe("reviewer");
 		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("reviewer");
@@ -223,7 +250,7 @@ describe("runEvalAgent", () => {
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await expect(
-			runEvalAgent(
+			runEvalAgentAndWait(
 				{ prompt: "hello" },
 				{
 					session: makeSession({
@@ -237,7 +264,7 @@ describe("runEvalAgent", () => {
 			),
 		).rejects.toThrow("maximum depth is 0");
 
-		await runEvalAgent(
+		await runEvalAgentAndWait(
 			{ prompt: "hello" },
 			{
 				session: makeSession({
@@ -258,7 +285,7 @@ describe("runEvalAgent", () => {
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await expect(
-			runEvalAgent({ prompt: "hello" }, { session: makeSession({ planMode: true }) }),
+			runEvalAgentAndWait({ prompt: "hello" }, { session: makeSession({ planMode: true }) }),
 		).resolves.toMatchObject({
 			text: "ok",
 		});
@@ -266,7 +293,7 @@ describe("runEvalAgent", () => {
 		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
 		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
 		await expect(
-			runEvalAgent({ prompt: "unsafe", isolated: true }, { session: makeSession({ planMode: true }) }),
+			runEvalAgentAndWait({ prompt: "unsafe", isolated: true }, { session: makeSession({ planMode: true }) }),
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
@@ -290,14 +317,18 @@ describe("runEvalAgent", () => {
 			}),
 		});
 
-		await runEvalAgent({ prompt: " hello ", label: "My Agent", schema }, { session, signal: abortController.signal });
-		await runEvalAgent({ prompt: "plain" }, { session });
+		await runEvalAgentAndWait(
+			{ prompt: " hello ", label: "My Agent", schema },
+			{ session, signal: abortController.signal },
+		);
+		await runEvalAgentAndWait({ prompt: "plain" }, { session });
 
 		const firstOptions = runSpy.mock.calls[0]?.[0];
 		const secondOptions = runSpy.mock.calls[1]?.[0];
 		if (!firstOptions || !secondOptions) throw new Error("runSubprocess was not called");
 		expect(firstOptions.taskDepth).toBe(2);
-		expect(firstOptions.signal).toBe(abortController.signal);
+		expect(firstOptions.signal).not.toBe(abortController.signal);
+		expect(firstOptions.signal?.aborted).toBe(false);
 		expect(firstOptions.parentActiveModelPattern).toBe("p/current");
 		expect(firstOptions.outputSchema).toBe(schema);
 		expect(firstOptions.outputSchemaOverridesAgent).toBe(true);
@@ -316,8 +347,8 @@ describe("runEvalAgent", () => {
 		// The schema strips unknown keys; a legacy `model` argument is silently
 		// discarded so resolution is identical to omitting it — the agent's own
 		// frontmatter model applies (issue #6438).
-		await runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgent({ prompt: "work" }, { session: makeSession() });
+		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
+		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
 
 		const withModel = runSpy.mock.calls[0]?.[0];
 		const withoutModel = runSpy.mock.calls[1]?.[0];
@@ -344,15 +375,15 @@ describe("runEvalAgent", () => {
 			return singleResult(options, { output: "not JSON", structuredOutput });
 		});
 
-		const caller = await runEvalAgent(
+		const caller = await runEvalAgentAndWait(
 			{ prompt: "caller", schema: callerSchema, schemaMode: "strict" },
 			{ session: makeSession({ outputSchema: sessionSchema }) },
 		);
-		const frontmatter = await runEvalAgent(
+		const frontmatter = await runEvalAgentAndWait(
 			{ prompt: "agent", agent: "structured" },
 			{ session: makeSession({ outputSchema: sessionSchema }) },
 		);
-		const inherited = await runEvalAgent(
+		const inherited = await runEvalAgentAndWait(
 			{ prompt: "session" },
 			{ session: makeSession({ outputSchema: sessionSchema }) },
 		);
@@ -374,13 +405,13 @@ describe("runEvalAgent", () => {
 		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
 		const session = makeSession();
 
-		await runEvalAgent({ prompt: "hello" }, { session });
+		await runEvalAgentAndWait({ prompt: "hello" }, { session });
 
 		const options = runSpy.mock.calls[0]?.[0];
 		if (!options) throw new Error("runSubprocess was not called");
 		expect(options.enableLsp).toBe(true);
 		expect(options.enableIrc).toBe(true);
-		expect(options.keepAlive).toBe(false);
+		expect(options.keepAlive).toBe(true);
 		expect(options.parentEvalSessionId).toBeUndefined();
 	});
 
@@ -393,13 +424,13 @@ describe("runEvalAgent", () => {
 			return singleResult(options, { output: "recoverable output" });
 		});
 
-		const result = await runEvalAgent({ prompt: "hello", handle: true }, { session: makeSession() });
+		const result = await runEvalAgentAndWait({ prompt: "hello", handle: true }, { session: makeSession() });
 		const resource = await new AgentProtocolHandler().resolve(new URL(`agent://${result.details.id}`) as never);
 
 		expect(resource.content).toBe("recoverable output");
 	});
 
-	it("unregisters eval subagents through the bridge cleanup path", async () => {
+	it("retains eval subagents for handle follow-up", async () => {
 		AgentRegistry.resetGlobalForTests();
 		mockAgents();
 		const order: string[] = [];
@@ -437,18 +468,16 @@ describe("runEvalAgent", () => {
 			return singleResult(options);
 		});
 
-		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
+		await runEvalAgentAndWait({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
 
-		expect(disposed).toBe(true);
-		// The advisor's final-turn review is drained before the runtime is torn
-		// down (#9505): a graceful subagent finish must not abandon the yield.
-		expect(order).toEqual(["prepare", "catchup", "dispose"]);
-		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
+		expect(disposed).toBe(false);
+		expect(order).toEqual([]);
+		expect(AgentRegistry.global().get("Cleanup")?.status).toBe("idle");
 		expect(
 			AgentRegistry.global()
 				.listVisibleTo("Main")
 				.map(ref => ref.id),
-		).not.toContain("Cleanup");
+		).toContain("Cleanup");
 	});
 
 	it("maps successful and failed subagent results", async () => {
@@ -470,12 +499,12 @@ describe("runEvalAgent", () => {
 			}),
 		);
 
-		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession() });
+		const result = await runEvalAgentAndWait({ prompt: "hello" }, { session: makeSession() });
 		expect(result).toEqual({
 			text: "done",
 			details: { agent: "task", id: "0-EvalAgent", model: "p/model", structured: false },
 		});
-		await expect(runEvalAgent({ prompt: "fail" }, { session: makeSession() })).rejects.toThrow("boom");
+		await expect(runEvalAgentAndWait({ prompt: "fail" }, { session: makeSession() })).rejects.toThrow("boom");
 	});
 
 	// Regression: a runtime-limit abort returns exitCode=1, stderr="", error=undefined,
@@ -515,16 +544,16 @@ describe("runEvalAgent", () => {
 			}),
 		);
 
-		await expect(runEvalAgent({ prompt: "slow" }, { session: makeSession() })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "slow" }, { session: makeSession() })).rejects.toThrow(
 			"Subagent runtime limit exceeded (task.maxRuntimeMs=900000)",
 		);
 		// Whitespace-only stderr/error must not mask abortReason either.
-		await expect(runEvalAgent({ prompt: "cancelled" }, { session: makeSession() })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "cancelled" }, { session: makeSession() })).rejects.toThrow(
 			"Cancelled by caller",
 		);
 		// Last resort: still produce a non-empty message even when nothing useful is set,
 		// so Python never falls back to `bridge call '__agent__' failed`.
-		await expect(runEvalAgent({ prompt: "blank" }, { session: makeSession() })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "blank" }, { session: makeSession() })).rejects.toThrow(
 			"agent() subagent 'task' failed.",
 		);
 	});
@@ -570,7 +599,13 @@ describe("agent() through eval runtimes", () => {
 		);
 
 		const result = await executeJs(
-			'const text = await agent("hi"); const data = await agent("json", { schema: { type: "object" } }); const node = await agent("handle", { schema: { type: "object" }, handle: true }); return JSON.stringify({ text, data, node });',
+			[
+				'const textHandle = await agent("hi");',
+				'const dataHandle = await agent("json", { schema: { type: "object" } });',
+				'const node = await agent("handle", { schema: { type: "object" } });',
+				"const [text, data, nodeData] = await wait([textHandle, dataHandle, node]);",
+				"return JSON.stringify({ text, data, node: { data: nodeData, handle: node.handle, id: node.id } });",
+			].join("\n"),
 			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
 		);
 
@@ -582,32 +617,25 @@ describe("agent() through eval runtimes", () => {
 		expect(output.node.handle).toBe(`agent://${output.node.id}`);
 	});
 
-	it("bounds JavaScript parallel() by the task.maxConcurrency setting while preserving order", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-agent-js-parallel-");
-		const settings = Settings.isolated({
-			"async.enabled": false,
-			"task.isolation.enabled": false,
-			"task.enableLsp": true,
-			"task.maxConcurrency": 2,
-		});
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-parallel", settings);
+	it("runs JavaScript agent handles concurrently and returns results in input order", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-js-handles-");
+		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-handles");
 		mockAgents();
-		const barrier = spyConcurrencyBarrier(2);
+		const overlap = spyOverlapBarrier(4);
 
 		const result = await executeJs(
-			'const values = await parallel(["a", "b", "c", "d"].map(name => () => agent(name))); return JSON.stringify(values);',
+			'const hs = ["a", "b", "c", "d"].map(name => agent(name)); return JSON.stringify(await wait(hs));',
 			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
 		);
 
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.output.trim())).toEqual(["a", "b", "c", "d"]);
-		expect(barrier.maxInFlight()).toBeGreaterThan(1);
-		expect(barrier.maxInFlight()).toBeLessThanOrEqual(2);
+		expect(overlap.maxInFlight()).toBe(4);
 	});
 
-	it("propagates JavaScript parallel() rejections", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-agent-js-reject-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-reject");
+	it("propagates handle failures or returns them in place when requested", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-js-handle-errors-");
+		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-handle-errors");
 		mockAgents();
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			if (options.assignment === "bad") {
@@ -616,15 +644,22 @@ describe("agent() through eval runtimes", () => {
 			return singleResult(options, { output: options.assignment ?? "" });
 		});
 
-		const result = await executeJs('await parallel([() => agent("ok"), () => agent("bad")]);', {
-			cwd: tempDir.path(),
-			sessionId: sharedJsSessionId,
-			session,
-			sessionFile,
-		});
+		const result = await executeJs(
+			[
+				'const first = [agent("ok"), agent("bad")];',
+				"let raised;",
+				"try { await wait(first); } catch (error) { raised = error.message; }",
+				'const second = await wait([agent("ok"), agent("bad")], { raiseErrors: false });',
+				"return JSON.stringify({ raised, values: [second[0], second[1].message] });",
+			].join("\n"),
+			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+		);
 
-		expect(result.exitCode).toBe(1);
-		expect(result.output).toContain("boom");
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output.trim())).toEqual({
+			raised: "boom",
+			values: ["ok", "boom"],
+		});
 	});
 
 	it("exposes agent() in the Python runtime", async () => {
@@ -648,7 +683,7 @@ describe("agent() through eval runtimes", () => {
 		);
 
 		const result = await executePython(
-			'import json\nprint(agent("hi"))\nprint(json.dumps(agent("structured", schema={"type": "object"})))\nnode = agent("handle", schema={"type": "object"}, handle=True)\nprint(json.dumps({"data": node["data"], "handle": node["handle"], "id": node["id"]}))',
+			'import json\nplain = agent("hi")\nstructured = agent("structured", schema={"type": "object"})\nnode = agent("handle", schema={"type": "object"})\ntext, data, node_data = wait([plain, structured, node])\nprint(text)\nprint(json.dumps(data))\nprint(json.dumps({"data": node_data, "handle": node.handle, "id": node.id}))',
 			{
 				cwd: tempDir.path(),
 				sessionId,
@@ -671,134 +706,26 @@ describe("agent() through eval runtimes", () => {
 		expect(node.handle).toBe(`agent://${node.id}`);
 	});
 
-	it("bounds Python parallel() by the task.maxConcurrency setting while preserving order", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-agent-py-parallel-");
-		const settings = Settings.isolated({
-			"async.enabled": false,
-			"task.isolation.enabled": false,
-			"task.enableLsp": true,
-			"task.maxConcurrency": 2,
-		});
-		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent-parallel", settings);
+	it("runs Python agent handles concurrently and returns results in input order", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-py-handles-");
+		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent-handles");
 		mockAgents();
-		const barrier = spyConcurrencyBarrier(2);
+		const overlap = spyOverlapBarrier(4);
 
 		const result = await executePython(
-			'import json\nprint(json.dumps(parallel([lambda n=n: agent(n) for n in ["a", "b", "c", "d"]])))',
+			'import json\nhs = [agent(n) for n in ["a", "b", "c", "d"]]\nprint(json.dumps(wait(hs)))',
 			{ cwd: tempDir.path(), sessionId, sessionFile, kernelMode: "per-call", toolSession: session },
 		);
 		if (result.exitCode === undefined && result.cancelled) {
 			expect(result.output).toBe("");
-			return; // kernel unavailable in this environment
+			return;
 		}
-
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.output.trim())).toEqual(["a", "b", "c", "d"]);
-		expect(barrier.maxInFlight()).toBeGreaterThan(1);
-		expect(barrier.maxInFlight()).toBeLessThanOrEqual(2);
+		expect(overlap.maxInFlight()).toBe(4);
 	});
 
-	it("interrupting a Python parallel() fan-out aborts in-flight subagents and preserves session state", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-agent-py-interrupt-");
-		const settings = Settings.isolated({
-			"async.enabled": false,
-			"task.isolation.enabled": false,
-			"task.enableLsp": true,
-			"task.maxConcurrency": 6,
-		});
-		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent-interrupt", settings);
-		mockAgents();
-		// Each kernel worker thread blocks in a synchronous `urllib` bridge call,
-		// joined by `parallel()`'s ThreadPoolExecutor exit. A turn cancel must
-		// reach the subagents those calls started — the bridge is handed the real
-		// signal, not the executor's kernel shield — while the kernel itself is
-		// still interrupted cleanly before `parallel()` launches another wave.
-		let inFlight = 0;
-		let completed = 0;
-		let abortedSubagents = 0;
-		let markSaturated: (() => void) | undefined;
-		const saturated = new Promise<void>(resolve => {
-			markSaturated = resolve;
-		});
-		// Mirrors the real executor: park until the run finishes *or* the caller's
-		// signal aborts. Nothing releases these agents, so the only way the cell
-		// can settle is the abort actually reaching them.
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
-			// task.maxConcurrency=6 → six bridge calls block at once; signal then.
-			if (++inFlight >= 6) markSaturated?.();
-			const aborted = Promise.withResolvers<never>();
-			const onAbort = () => aborted.reject(new Error("subagent aborted"));
-			options.signal?.addEventListener("abort", onAbort, { once: true });
-			try {
-				await aborted.promise;
-			} catch {
-				abortedSubagents++;
-				return singleResult(options, { output: "", aborted: true, abortReason: "aborted by user" });
-			} finally {
-				options.signal?.removeEventListener("abort", onAbort);
-			}
-			completed++;
-			return singleResult(options, { output: options.assignment ?? "" });
-		});
-
-		// Seed persistent session state and confirm the kernel is reusable.
-		const seed = await executePython("PREP_MARKER = 4242", {
-			cwd: tempDir.path(),
-			sessionId,
-			sessionFile,
-			kernelMode: "session",
-			toolSession: session,
-		});
-		if (seed.exitCode === undefined && seed.cancelled) {
-			expect(seed.output).toBe("");
-			return; // kernel unavailable in this environment
-		}
-		expect(seed.exitCode).toBe(0);
-
-		const ac = new AbortController();
-		// Abort the instant all six worker threads are confirmed blocked in their
-		// bridge calls (condition-driven) instead of waiting a fixed wall second.
-		void saturated.then(() => ac.abort(new Error("external interrupt")));
-
-		const resultPromise = executePython(
-			"import json\nprint(json.dumps(parallel([lambda n=n: agent(str(n)) for n in range(12)])))",
-			{
-				cwd: tempDir.path(),
-				sessionId,
-				sessionFile,
-				kernelMode: "session",
-				toolSession: session,
-				idleTimeoutMs: 60_000,
-				signal: ac.signal,
-			},
-		);
-		await saturated;
-		await Promise.resolve();
-		expect(completed).toBe(0);
-		const result = await resultPromise;
-
-		// The interrupt reached every in-flight subagent: nothing here released
-		// them, so the cell could only settle because the abort propagated.
-		expect(abortedSubagents).toBe(6);
-		expect(completed).toBe(0);
-		// Cancelled, but cleanly: no hard-kill, and no second fan-out wave started.
-		expect(result.cancelled).toBe(true);
-		expect(result.output).not.toContain("Python kernel shutdown");
-		expect(runSpy).toHaveBeenCalledTimes(6);
-
-		// The persistent kernel survived the interrupt: prior state is intact.
-		const after = await executePython("print(PREP_MARKER)", {
-			cwd: tempDir.path(),
-			sessionId,
-			sessionFile,
-			kernelMode: "session",
-			toolSession: session,
-		});
-		expect(after.exitCode).toBe(0);
-		expect(after.output.trim()).toBe("4242");
-	}, 30_000);
-
-	it("streams enriched agent progress through onStatus before the cell finishes", async () => {
+	it("streams the latest enriched agent progress through onStatus before the cell finishes", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-progress");
 		mockAgents();
@@ -852,42 +779,35 @@ describe("agent() through eval runtimes", () => {
 		});
 
 		const events: Array<{ op: string; [key: string]: unknown }> = [];
-		const result = await executeJs('await agent("investigate", { label: "Scout" });', {
-			cwd: tempDir.path(),
-			sessionId: sharedJsSessionId,
-			session,
-			sessionFile,
-			onStatus: event => events.push(event),
-		});
+		const result = await executeJs(
+			'const handle = await agent("investigate", { label: "Scout" }); await handle.wait();',
+			{
+				cwd: tempDir.path(),
+				sessionId: sharedJsSessionId,
+				session,
+				sessionFile,
+				onStatus: event => events.push(event),
+			},
+		);
 
 		expect(result.exitCode).toBe(0);
 
 		const agentEvents = events.filter(event => event.op === "agent");
-		// Both throttled ticks were delivered live (the cell awaited agent() and
-		// the executor collected them as displayOutputs too).
-		expect(agentEvents.length).toBe(2);
+		expect(agentEvents).toHaveLength(1);
 
-		const running = agentEvents[0];
-		expect(running.status).toBe("running");
-		expect(running.currentTool).toBe("read");
-		expect(running.lastIntent).toBe("Reading config");
-		expect(running.contextTokens).toBe(5000);
-		expect(running.taskPreview).toBe("investigate");
-		expect(typeof running.id).toBe("string");
-
-		// The final completion event keeps the rich stats — no sparse event
-		// coalesces over it and drops toolCount/cost.
-		const completed = agentEvents[1];
+		const completed = agentEvents[0];
 		expect(completed.status).toBe("completed");
 		expect(completed.toolCount).toBe(7);
 		expect(completed.cost).toBeCloseTo(0.06);
-		expect(completed.id).toBe(running.id);
+		expect(completed.contextTokens).toBe(8000);
+		expect(completed.taskPreview).toBe("investigate");
+		expect(typeof completed.id).toBe("string");
 
-		// Same events are still present in the executor's returned displayOutputs.
+		// The same final snapshot is retained in the executor's display outputs.
 		const displayAgentEvents = result.displayOutputs.filter(
 			(output): output is Extract<typeof output, { type: "status" }> => output.type === "status",
 		);
-		expect(displayAgentEvents.length).toBe(2);
+		expect(displayAgentEvents).toHaveLength(1);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
@@ -923,7 +843,7 @@ describe("agent() through eval runtimes", () => {
 		const ops: string[] = [];
 		vi.useFakeTimers();
 		using idle = new IdleTimeout(20);
-		const resultPromise = runEvalAgent(
+		const resultPromise = runEvalAgentAndWait(
 			{ prompt: "investigate" },
 			{
 				session,
@@ -1005,7 +925,7 @@ describe("agent() through eval runtimes", () => {
 		const ops: string[] = [];
 		vi.useFakeTimers();
 		using idle = new IdleTimeout(250);
-		const resultPromise = runEvalAgent(
+		const resultPromise = runEvalAgentAndWait(
 			{ prompt: "investigate" },
 			{
 				session,
@@ -1049,6 +969,7 @@ describe("agent() through eval runtimes", () => {
 
 		const order: string[] = [];
 		const inFlight = Promise.withResolvers<void>();
+		const waiting = Promise.withResolvers<void>();
 		const sawAbort = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		// Stands in for the isolation merge: notices the abort, then keeps going.
@@ -1068,17 +989,24 @@ describe("agent() through eval runtimes", () => {
 		});
 
 		const ac = new AbortController();
-		const cell = executeJs('return await agent("merge");', {
+		const cell = executeJs('const handle = await agent("merge"); return await handle.wait();', {
 			cwd: tempDir.path(),
 			sessionId: "agent-bridge-js-interrupt",
 			session,
 			sessionFile,
 			signal: ac.signal,
+			onStatus: event => {
+				if (event.op === EVAL_TIMEOUT_PAUSE_OP) waiting.resolve();
+			},
 		}).finally(() => {
 			order.push("cell-settled");
 		});
 
+		// Abort only once the cell is parked in `handle.wait()`: an abort landing
+		// before the wait reaches the host kills the cell while the background
+		// job keeps running, which is the unwaited-handle contract, not this one.
 		await inFlight.promise;
+		await waiting.promise;
 		ac.abort(new Error("external interrupt"));
 		// Delegated work is notified immediately, before anything is released.
 		await sawAbort.promise;
@@ -1130,7 +1058,7 @@ describe("runEvalAgent isolation", () => {
 
 		const session = makeSession();
 
-		await expect(runEvalAgent({ prompt: "do work", isolated: true }, { session })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "do work", isolated: true }, { session })).rejects.toThrow(
 			"task.isolation.enabled; it is currently false",
 		);
 		expect(prepSpy).not.toHaveBeenCalled();
@@ -1154,7 +1082,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		// Default (no isolated arg) — stays non-isolated even when settings allow it.
-		const defaultResult = await runEvalAgent({ prompt: "default" }, { session: isolatedSession() });
+		const defaultResult = await runEvalAgentAndWait({ prompt: "default" }, { session: isolatedSession() });
 		expect(plainSpy).toHaveBeenCalledTimes(1);
 		expect(isolatedSpy).not.toHaveBeenCalled();
 		expect(defaultResult.details.isolated).toBeUndefined();
@@ -1162,7 +1090,7 @@ describe("runEvalAgent isolation", () => {
 		expect(mergeSpy).not.toHaveBeenCalled();
 
 		// Explicit isolated=true — opt-in turns it on and surfaces merge details.
-		const explicitOn = await runEvalAgent({ prompt: "on", isolated: true }, { session: isolatedSession() });
+		const explicitOn = await runEvalAgentAndWait({ prompt: "on", isolated: true }, { session: isolatedSession() });
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
 		expect(plainSpy).toHaveBeenCalledTimes(1);
 		expect(explicitOn.details.isolated).toBe(true);
@@ -1174,7 +1102,7 @@ describe("runEvalAgent isolation", () => {
 		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
-		await runEvalAgent({ prompt: "plain handle", handle: true }, { session: makeSession() });
+		await runEvalAgentAndWait({ prompt: "plain handle", handle: true }, { session: makeSession() });
 
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
@@ -1200,7 +1128,7 @@ describe("runEvalAgent isolation", () => {
 
 		// Branch is the configured merge mode, but `merge: false` must demote to patch.
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgent({ prompt: "migration", isolated: true, merge: false }, { session });
+		const result = await runEvalAgentAndWait({ prompt: "migration", isolated: true, merge: false }, { session });
 
 		expect(isolatedSpy).toHaveBeenCalledTimes(1);
 		const isolatedCall = isolatedSpy.mock.calls[0]?.[0];
@@ -1230,7 +1158,7 @@ describe("runEvalAgent isolation", () => {
 			};
 		});
 
-		await runEvalAgent(
+		await runEvalAgentAndWait(
 			{ prompt: "migration", isolated: true },
 			{
 				session: isolatedSession(),
@@ -1279,7 +1207,7 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		await runEvalAgent(
+		await runEvalAgentAndWait(
 			{ prompt: "scout", isolated: true },
 			{
 				session: isolatedSession(),
@@ -1314,7 +1242,7 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		const result = await runEvalAgent(
+		const result = await runEvalAgentAndWait(
 			{
 				prompt: "structured",
 				isolated: true,
@@ -1350,7 +1278,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		await expect(
-			runEvalAgent(
+			runEvalAgentAndWait(
 				{
 					prompt: "structured",
 					isolated: true,
@@ -1378,7 +1306,7 @@ describe("runEvalAgent isolation", () => {
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		await expect(runEvalAgent({ prompt: "scout", isolated: true }, { session })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session })).rejects.toThrow(
 			/Merge failed.*garbage at end of loose object.*Captured patch preserved at \/artifacts\//s,
 		);
 		expect(mergeSpy).not.toHaveBeenCalled();
@@ -1401,7 +1329,7 @@ describe("runEvalAgent isolation", () => {
 		});
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		await expect(runEvalAgent({ prompt: "scout", isolated: true }, { session })).rejects.toThrow(
+		await expect(runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session })).rejects.toThrow(
 			/isolated apply failed.*Branch merge failed.*Captured branch preserved as omp\/task\//s,
 		);
 	});
@@ -1426,7 +1354,7 @@ describe("runEvalAgent isolation", () => {
 
 		let caught: Error | undefined;
 		try {
-			await runEvalAgent({ prompt: "scout", isolated: true }, { session: isolatedSession() });
+			await runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session: isolatedSession() });
 		} catch (err) {
 			caught = err as Error;
 		}
@@ -1462,7 +1390,7 @@ describe("runEvalAgent isolation", () => {
 		);
 
 		await expect(
-			runEvalAgent(
+			runEvalAgentAndWait(
 				{
 					prompt: "structured",
 					isolated: true,
@@ -1490,7 +1418,7 @@ describe("runEvalAgent isolation", () => {
 		);
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
-		const result = await runEvalAgent(
+		const result = await runEvalAgentAndWait(
 			{ prompt: "scout", isolated: true, apply: false },
 			{ session: isolatedSession() },
 		);
@@ -1515,7 +1443,7 @@ describe("runEvalAgent isolation", () => {
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgent({ prompt: "scout", isolated: true, apply: false }, { session });
+		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
 
 		expect(mergeSpy).not.toHaveBeenCalled();
 		expect(result.details.branchName).toMatch(/^omp\/task\//);
@@ -1535,7 +1463,7 @@ describe("runEvalAgent isolation", () => {
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
-		const result = await runEvalAgent({ prompt: "scout", isolated: true, apply: false }, { session });
+		const result = await runEvalAgentAndWait({ prompt: "scout", isolated: true, apply: false }, { session });
 
 		expect(mergeSpy).not.toHaveBeenCalled();
 		expect(result.details.branchName).toBeUndefined();
@@ -1553,7 +1481,7 @@ describe("runEvalAgent isolation", () => {
 			singleResult(opts.baseOptions, { output: "captured", patchPath: `/artifacts/${opts.agentId}.patch` }),
 		);
 
-		const result = await runEvalAgent(
+		const result = await runEvalAgentAndWait(
 			{ prompt: "scout", isolated: true, apply: false },
 			{ session: isolatedSession() },
 		);
@@ -1565,7 +1493,7 @@ describe("runEvalAgent isolation", () => {
 		expect(removedArtifactsDir).toBe(false);
 	});
 
-	it("still cleans the temp artifacts dir when apply succeeds", async () => {
+	it("preserves the temp artifacts dir after apply for handle output", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
@@ -1579,29 +1507,7 @@ describe("runEvalAgent isolation", () => {
 			mergedBranchForNestedPatches: false,
 		});
 
-		await runEvalAgent({ prompt: "scout", isolated: true }, { session: isolatedSession() });
-
-		const removedArtifactsDir = rmSpy.mock.calls.some(
-			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
-		);
-		expect(removedArtifactsDir).toBe(true);
-	});
-
-	it("preserves the temp artifacts dir after a successful apply when handle is requested", async () => {
-		mockAgents();
-		mockIsolationContext();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
-			singleResult(opts.baseOptions, { output: "captured", patchPath: `/artifacts/${opts.agentId}.patch` }),
-		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
-			summary: "\n\nApplied",
-			changesApplied: true,
-			hadAnyChanges: true,
-			mergedBranchForNestedPatches: false,
-		});
-
-		await runEvalAgent({ prompt: "scout", isolated: true, handle: true }, { session: isolatedSession() });
+		await runEvalAgentAndWait({ prompt: "scout", isolated: true }, { session: isolatedSession() });
 
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),

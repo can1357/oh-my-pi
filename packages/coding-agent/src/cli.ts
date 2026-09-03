@@ -335,16 +335,16 @@ async function runIpcSubprocessWorker<In, Out>(
 }
 
 /**
- * Hidden subcommand that boots the tiny-model worker inside this process over
- * the parent's IPC channel. The agent's main process spawns the same binary
- * with this flag so `onnxruntime-node` (loaded transitively by
- * `@huggingface/transformers`) lives in a child address space. The parent
- * `SIGKILL`s the child on shutdown so the NAPI finalizer never runs in either
- * process — that finalizer segfaults Bun on Windows (issue #1606).
+ * Hidden subcommand that boots the ONNX tiny-model worker for one model: a
+ * detached process owning that model's socket (`OMP_TINY_WORKER_SOCKET`),
+ * shared by every omp process on the machine and exiting on its own when
+ * idle. It exists so `onnxruntime-node` (loaded transitively by
+ * `@huggingface/transformers`) never runs in an omp address space — its NAPI
+ * finalizer segfaults Bun on Windows (issue #1606).
  */
 async function runTinyWorker(): Promise<void> {
-	const { startTinyTitleWorker } = await import("./tiny/worker");
-	await runIpcSubprocessWorker(startTinyTitleWorker);
+	const { startTinyWorkerFromEnvironment } = await import("./tiny/worker");
+	await startTinyWorkerFromEnvironment();
 }
 
 /** Run the CLI with the given argv (no `process.argv` prefix). */

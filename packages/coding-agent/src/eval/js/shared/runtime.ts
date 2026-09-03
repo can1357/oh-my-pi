@@ -80,6 +80,7 @@ const DECIMAL_CSV_RE = /^\d{1,3}(?:,\d{1,3})*$/;
 
 const PRELUDE_GLOBAL_KEYS = [
 	"__omp_js_prelude_loaded__",
+	"__omp_tools__",
 	"console",
 	"print",
 	"display",
@@ -87,12 +88,14 @@ const PRELUDE_GLOBAL_KEYS = [
 	"completion",
 	"output",
 	"agent",
-	"parallel",
-	"pipeline",
+	"wait",
+	"AgentHandle",
+	"CompletionHandle",
+	"workpool",
+	"WorkPool",
 	"log",
 	"phase",
 	"budget",
-	"__pool",
 	"read",
 	"write",
 	"env",
@@ -237,6 +240,30 @@ export class JsRuntime {
 	setRunScope(scope: Record<string, unknown>): void {
 		this.#activateGlobals("set run scope");
 		Object.assign(globalThis, scope);
+	}
+
+	/** Read a prelude-owned global from this runtime's active global set. */
+	getGlobal(name: string): unknown {
+		this.#activateGlobals("read runtime global");
+		return Reflect.get(globalThis, name);
+	}
+
+	/** Invoke a callback inside this runtime's async run context. */
+	async runCallback<T>(runId: string, hooks: RuntimeHooks, callback: () => T | Promise<T>): Promise<T> {
+		this.#activateGlobals("run callback");
+		const leaveRun = enterGlobalRun(this.#globalOwner, "run callback");
+		const context: RunContext = {
+			runId,
+			hooks,
+			cwd: this.#cwd,
+			finalExpressionSet: false,
+			finalExpressionValue: undefined,
+		};
+		try {
+			return await this.#als.run(context, callback);
+		} finally {
+			leaveRun();
+		}
 	}
 
 	async run(
