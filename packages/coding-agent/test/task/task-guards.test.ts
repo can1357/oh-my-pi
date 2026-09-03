@@ -24,6 +24,8 @@ import { createSessionDefaults } from "../helpers/session-defaults";
  * 3. A cancelled/aborted child that produced no completed output salvages its
  *    last assistant text into a `[cancelled after N req, …]` summary instead
  *    of the parent seeing "(no output)" and redoing the work.
+ * 4. A data-less terminal yield resolves the preceding non-empty assistant
+ *    message when the yield tool call lands in a separate turn.
  */
 
 interface SteerCall {
@@ -68,6 +70,19 @@ function yieldToolEnd(): AgentSessionEvent {
 		},
 		isError: false,
 	} as AgentSessionEvent;
+}
+
+function dataLessYieldToolEnd(): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId: "tool-yield",
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", type: "result", useLastTurn: true },
+		},
+		isError: false,
+	} as unknown as AgentSessionEvent;
 }
 
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
@@ -276,6 +291,25 @@ describe("runSubprocess request guards", () => {
 		expect(result.abortReason).toContain("request budget exceeded");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(handle.steerCalls.length).toBe(1);
+	});
+
+	it("uses the preceding assistant report when a data-less yield is a separate message", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const report = "# Inventory\n\nComplete report.";
+		const handle = createFakeSession({
+			events: [assistantMessageEnd(report), assistantMessageEnd(""), dataLessYieldToolEnd()],
+			lastAssistantMessage: {
+				role: "assistant",
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tool-yield", name: "yield", arguments: {} }],
+			},
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-data-less-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(report);
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {

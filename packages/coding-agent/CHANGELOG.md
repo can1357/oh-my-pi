@@ -332,6 +332,7 @@
 - Fixed messages typed while an edit or write tool was streaming from discarding the completed tool call and triggering unnecessary regeneration.
 - Fixed self-hosted Firecrawl URLs with origin-only base URLs from gaining an extra slash.
 - Fixed omp commit auto-staging from including macOS Unicode-normalization duplicates or files ignored by nested .gitignore rules.
+- Fixed data-less subagent yields discarding a report when the report and yield tool call arrive in separate assistant messages ([#10635](https://github.com/can1357/oh-my-pi/issues/10635)).
 
 ## [18.1.5] - 2026-09-03
 
