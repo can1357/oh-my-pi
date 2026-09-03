@@ -791,6 +791,7 @@
 ### Fixed
 
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
+- Fixed `omp update` falsely warning "could not verify updated version" on mise installs: verification now runs the exact version's install dir resolved through mise instead of the update process's stale PATH entry, and recovery hints point at `mise install --force` instead of the curl installer.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
 - Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.
 - Fixed external editor spawning (Ctrl+G, plan review, `/todo edit`) failing to attach to visible terminals for editors like `emacsclient`.
