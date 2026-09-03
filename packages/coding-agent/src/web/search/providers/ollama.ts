@@ -6,8 +6,8 @@
  * Endpoint: POST https://ollama.com/api/web_search
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
-import { SearchProviderError } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
+import { SearchProviderError } from "../types";
 import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
@@ -32,29 +32,37 @@ interface OllamaSearchResponse {
 	results?: unknown;
 }
 
-/** Read response body up to a byte cap, truncating if the limit is exceeded. */
-async function readLimitedText(response: Response, maxBytes: number): Promise<string> {
-	const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
-	if (!reader) {
-		const text = await response.text();
-		return text.length > maxBytes ? text.slice(0, maxBytes) : text;
-	}
+/** Read response body up to a byte cap, truncating or throwing if the limit is exceeded. */
+async function readLimitedText(response: Response, maxBytes: number, truncate = false): Promise<string> {
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	let buffer = new Uint8Array(Math.min(maxBytes, 64 * 1024));
+	let bytes = 0;
 
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	for (;;) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		if (total + value.byteLength > maxBytes) {
-			const remaining = maxBytes - total;
-			if (remaining > 0) chunks.push(value.slice(0, remaining));
-			break;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const accepted = Math.min(value.byteLength, maxBytes - bytes);
+			const nextBytes = bytes + accepted;
+			if (nextBytes > buffer.byteLength) {
+				const grown = new Uint8Array(Math.min(maxBytes, Math.max(nextBytes, buffer.byteLength * 2)));
+				grown.set(buffer.subarray(0, bytes));
+				buffer = grown;
+			}
+			buffer.set(value.subarray(0, accepted), bytes);
+			bytes = nextBytes;
+			if (accepted < value.byteLength) {
+				await reader.cancel().catch(() => undefined);
+				if (!truncate) throw new SearchProviderError("ollama", "Ollama API response exceeded 2 MiB", 500);
+				break;
+			}
 		}
-		chunks.push(value);
-		total += value.byteLength;
+	} finally {
+		reader.releaseLock();
 	}
 
-	return new TextDecoder().decode(chunks.length === 0 ? new Uint8Array() : await new Blob(chunks).arrayBuffer());
+	return new TextDecoder().decode(buffer.subarray(0, bytes));
 }
 
 /** Extract a string field from a loosely-typed result object. */
@@ -82,13 +90,13 @@ async function callOllamaSearch(
 	});
 
 	if (!response.ok) {
-		const errorText = await readLimitedText(response, MAX_ERROR_BYTES);
+		const errorText = await readLimitedText(response, MAX_ERROR_BYTES, true);
 		const classified = classifyProviderHttpError("ollama", response.status, errorText);
 		if (classified) throw classified;
 		throw new SearchProviderError("ollama", `Ollama API error (${response.status}): ${errorText}`, response.status);
 	}
 
-	const raw = await readLimitedText(response, MAX_RESPONSE_BYTES);
+	const raw = await readLimitedText(response, MAX_RESPONSE_BYTES, false);
 	try {
 		return JSON.parse(raw) as OllamaSearchResponse;
 	} catch {
@@ -152,15 +160,6 @@ export class OllamaProvider extends SearchProvider {
 
 	isAvailable(authStorage: AuthStorage): boolean {
 		return authStorage.hasAuth("ollama-cloud") || !!getEnvApiKey("ollama-cloud");
-	}
-
-	/**
-	 * Ollama's hosted search requires an API key, but explicit selection should
-	 * always route through the adapter (surfacing a clear auth error) rather
-	 * than silently falling back to another provider.
-	 */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
-		return true;
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {

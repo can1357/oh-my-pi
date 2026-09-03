@@ -112,14 +112,15 @@ function parseOllamaUrl(url: string): { modelRef: string; baseRef: string; pageU
 			return { modelRef, baseRef, pageUrl };
 		}
 
-		if (parts.length === 1 && !RESERVED_ROOTS.has(parts[0])) {
+		const baseRoot = parts[0].split(":")[0];
+		if (parts.length === 1 && !RESERVED_ROOTS.has(baseRoot)) {
 			const modelRef = decodeURIComponent(parts[0]);
 			const baseRef = modelRef.split(":")[0] ?? modelRef;
 			const pageUrl = `${parsed.origin}/${buildModelPath(["library", baseRef])}`;
 			return { modelRef, baseRef, pageUrl };
 		}
 
-		if (parts.length >= 2 && !RESERVED_ROOTS.has(parts[0])) {
+		if (parts.length >= 2 && !RESERVED_ROOTS.has(baseRoot)) {
 			const namespace = decodeURIComponent(parts[0]);
 			const model = decodeURIComponent(parts[1]);
 			const modelBase = model.split(":")[0] ?? model;

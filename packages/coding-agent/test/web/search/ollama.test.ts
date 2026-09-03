@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { OllamaProvider, searchOllama } from "@oh-my-pi/pi-coding-agent/web/search/providers/ollama";
@@ -152,7 +152,7 @@ describe("Ollama searchOllama request shape", () => {
 		expect(capturedBody?.max_results).toBe(10);
 	});
 
-	it("clamps max_results to minimum 1 for zero/negative values", async () => {
+	it("falls back to default 5 when numSearchResults is 0", async () => {
 		let capturedBody: Record<string, unknown> | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
 			capturedBody = JSON.parse(init?.body as string);
@@ -165,6 +165,21 @@ describe("Ollama searchOllama request shape", () => {
 		await searchOllama({ ...makeParams("test"), numSearchResults: 0, fetch: fetchMock });
 
 		expect(capturedBody?.max_results).toBe(5);
+	});
+
+	it("clamps max_results to minimum 1 for negative values", async () => {
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedBody = JSON.parse(init?.body as string);
+			return new Response(JSON.stringify({ results: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchOllama({ ...makeParams("test"), numSearchResults: -1, fetch: fetchMock });
+
+		expect(capturedBody?.max_results).toBe(1);
 	});
 
 	it("prefers numSearchResults over limit when both are set", async () => {
@@ -418,6 +433,33 @@ describe("Ollama searchOllama error handling", () => {
 		expect(error.provider).toBe("ollama");
 		expect(error.message).toMatch(/invalid JSON/i);
 	});
+
+	it("throws SearchProviderError when response body exceeds 2 MiB", async () => {
+		const chunk = new Uint8Array(1024 * 1024);
+		let sentChunks = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (sentChunks < 3) {
+					controller.enqueue(chunk);
+					sentChunks++;
+				} else {
+					controller.close();
+				}
+			},
+		});
+		const fetchMock: FetchImpl = async () =>
+			new Response(stream, {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		const promise = searchOllama({ ...makeParams("test"), fetch: fetchMock });
+
+		const error = await promise.catch(e => e);
+		expect(error.provider).toBe("ollama");
+		expect(error.status).toBe(500);
+		expect(error.message).toContain("exceeded 2 MiB");
+	});
 });
 
 describe("Ollama searchOllama auth resolution", () => {
@@ -460,22 +502,42 @@ describe("Ollama searchOllama auth resolution", () => {
 });
 
 describe("OllamaProvider", () => {
+	const originalKey = process.env.OLLAMA_CLOUD_API_KEY;
+
+	beforeEach(() => {
+		delete process.env.OLLAMA_CLOUD_API_KEY;
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (originalKey !== undefined) {
+			process.env.OLLAMA_CLOUD_API_KEY = originalKey;
+		} else {
+			delete process.env.OLLAMA_CLOUD_API_KEY;
+		}
+	});
+
 	const availableStorage = makeAuthStorage("test-key");
 	const unavailableStorage = makeAuthStorage(undefined);
 
-	it("is available when a credential exists", () => {
+	it("is available when a credential exists in storage", () => {
 		const hasAuthMock = vi.fn((provider: string) => provider === "ollama-cloud");
 		const authStorage = { hasAuth: hasAuthMock } as unknown as AuthStorage;
 		expect(new OllamaProvider().isAvailable(authStorage)).toBe(true);
 		expect(hasAuthMock).toHaveBeenCalledWith("ollama-cloud");
 	});
 
+	it("is available when OLLAMA_CLOUD_API_KEY is set in environment", () => {
+		process.env.OLLAMA_CLOUD_API_KEY = "env-key";
+		expect(new OllamaProvider().isAvailable(unavailableStorage)).toBe(true);
+	});
+
 	it("is not available when no credential exists", () => {
 		expect(new OllamaProvider().isAvailable(unavailableStorage)).toBe(false);
 	});
 
-	it("is explicitly available regardless of credentials", () => {
+	it("delegates isExplicitlyAvailable to isAvailable", () => {
 		expect(new OllamaProvider().isExplicitlyAvailable(availableStorage)).toBe(true);
-		expect(new OllamaProvider().isExplicitlyAvailable(unavailableStorage)).toBe(true);
+		expect(new OllamaProvider().isExplicitlyAvailable(unavailableStorage)).toBe(false);
 	});
 });

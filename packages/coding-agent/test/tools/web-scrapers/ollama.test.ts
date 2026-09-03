@@ -17,8 +17,11 @@ describe("handleOllama URL parsing & route rejection", () => {
 		expect(await handleOllama("https://ollama.com", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/library", 5000)).toBeNull();
+		expect(await handleOllama("https://ollama.com/library:latest", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/models", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/blog", 5000)).toBeNull();
+		expect(await handleOllama("https://ollama.com/blog:post", 5000)).toBeNull();
+		expect(await handleOllama("https://ollama.com/blog/some-post", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/docs", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/download", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/search", 5000)).toBeNull();
