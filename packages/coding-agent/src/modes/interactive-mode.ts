@@ -133,6 +133,7 @@ import {
 	shortModelLabel,
 } from "../task/render";
 import type { AgentProgress } from "../task/types";
+import { getSubagentDurationHistory } from "../task/run-history";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
@@ -522,14 +523,14 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
  * the inline task rows use (muted task preview when no description was given),
- * each followed by one dim line: a progress bar (elapsed over the peer-derived
- * total — median runtime of finished agents of the same type this session — or
- * an indeterminate sweep while no peer has finished), elapsed and eta, what the
- * agent is doing right now (`tool: intent`), then resolved model, requests,
- * prompt/output volume, cache hit rate, output rate, context gauge, and cost.
- * Stats appear as soon as the first assistant turn settles. With
- * `spinnerFrame` the row leads with the shared spinner glyph and the sweep
- * advances on `nowMs`; without it (no ticker) the row is static.
+ * each followed by one dim line: a progress bar with percentage (elapsed over
+ * the estimated total — median runtime of finished agents of the same type
+ * this session, else the cross-session history for that type; empty until any
+ * such run exists), elapsed and eta, what the agent is doing right now
+ * (`tool: intent`), then resolved model, requests, prompt/output volume, cache
+ * hit rate, output rate, context gauge, and cost. Stats appear as soon as the
+ * first assistant turn settles. With `spinnerFrame` the row leads with the
+ * shared spinner glyph; without it (no ticker) the row is static.
  * Layout mirrors the Todos HUD exactly: unindented header, then
  * `renderTreeList` rows (dim connectors) shifted right by one space.
  * Only detached background spawns are listed: a sync task call blocks the
@@ -590,15 +591,10 @@ export function renderSubagentHudLines(
 				const progress = session.progress;
 				if (!progress) return line;
 				const elapsedMs = agentElapsedMs(progress, nowMs);
-				const etaMs = estimateAgentEtaMs(progress, peers, elapsedMs);
+				const etaMs = estimateAgentEtaMs(progress, peers, elapsedMs, getSubagentDurationHistory(progress.agent));
 				// Liveness first, so a narrow viewport truncates the accounting, not
 				// the motion: bar, elapsed/eta, current tool, then usage.
-				const stats: string[] = [
-					formatAgentProgressBar(
-						{ elapsedMs, etaMs, nowMs: spinnerFrame === undefined ? undefined : nowMs },
-						theme,
-					),
-				];
+				const stats: string[] = [formatAgentProgressBar({ elapsedMs, etaMs }, theme)];
 				if (elapsedMs > 0) stats.push(theme.fg("dim", formatElapsedDuration(elapsedMs)));
 				const eta = formatEta(etaMs);
 				if (eta) stats.push(theme.fg(etaMs !== undefined && etaMs < 0 ? "warning" : "dim", eta));
@@ -629,7 +625,7 @@ export function renderSubagentHudLines(
 
 /**
  * Live HUD component. Registered with the shared tool spinner ticker while any
- * detached subagent runs, so the spinner glyph, sweep bar, elapsed, and
+ * detached subagent runs, so the spinner glyph, bar, elapsed, and
  * current-tool fragment advance every glyph step even though detached spawns
  * leave no live tool block behind to drive repaints. Ticks are
  * component-scoped so the transcript subtree is reused per frame.

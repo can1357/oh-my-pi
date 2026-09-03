@@ -148,6 +148,8 @@ export class AgentStorage {
 	#listModelPerfStmt: Statement;
 	#upsertCommandUsageStmt: Statement;
 	#listCommandUsageStmt: Statement;
+	#insertSubagentRunStmt: Statement;
+	#listSubagentRunsStmt: Statement;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
@@ -207,6 +209,12 @@ ON CONFLICT(model_key) DO UPDATE SET
 ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
 		this.#listCommandUsageStmt = this.#db.prepare("SELECT name, count FROM command_usage");
+		this.#insertSubagentRunStmt = this.#db.prepare(
+			"INSERT INTO subagent_runs (agent, duration_ms, requests) VALUES (?, ?, ?)",
+		);
+		this.#listSubagentRunsStmt = this.#db.prepare(
+			"SELECT agent, duration_ms FROM subagent_runs ORDER BY id DESC LIMIT ?",
+		);
 	}
 
 	/**
@@ -245,6 +253,15 @@ CREATE TABLE IF NOT EXISTS command_usage (
 	count INTEGER NOT NULL DEFAULT 0,
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
+
+CREATE TABLE IF NOT EXISTS subagent_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	agent TEXT NOT NULL,
+	duration_ms INTEGER NOT NULL,
+	requests INTEGER NOT NULL DEFAULT 0,
+	finished_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+CREATE INDEX IF NOT EXISTS subagent_runs_agent_id ON subagent_runs (agent, id);
 
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
@@ -440,6 +457,8 @@ FROM model_usage_legacy
 		this.#listModelPerfStmt.finalize();
 		this.#upsertCommandUsageStmt.finalize();
 		this.#listCommandUsageStmt.finalize();
+		this.#insertSubagentRunStmt.finalize();
+		this.#listSubagentRunsStmt.finalize();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
 		// closes the shared #db handle — must run after our statements finalize.
 		this.#authStore.close();
@@ -524,6 +543,32 @@ FROM model_usage_legacy
 			return counts;
 		} catch (error) {
 			logger.warn("AgentStorage failed to list command usage", { error: String(error) });
+			return {};
+		}
+	}
+
+	/** Record one finished subagent run so later sessions can estimate runtime for that agent type. */
+	recordSubagentRun(agent: string, durationMs: number, requests: number): void {
+		try {
+			this.#insertSubagentRunStmt.run(agent, Math.max(0, Math.round(durationMs)), Math.max(0, requests));
+		} catch (error) {
+			logger.warn("AgentStorage failed to record subagent run", { agent, error: String(error) });
+		}
+	}
+
+	/**
+	 * Durations of the most recent finished runs, newest first, grouped by agent
+	 * type. Reads the latest `limit` rows overall, so a busy agent type does not
+	 * starve a rare one of samples beyond that window.
+	 */
+	listRecentSubagentRuns(limit = 400): Record<string, number[]> {
+		try {
+			const rows = this.#listSubagentRunsStmt.all(limit) as Array<{ agent: string; duration_ms: number }>;
+			const byAgent: Record<string, number[]> = {};
+			for (const row of rows) (byAgent[row.agent] ??= []).push(row.duration_ms);
+			return byAgent;
+		} catch (error) {
+			logger.warn("AgentStorage failed to list subagent runs", { error: String(error) });
 			return {};
 		}
 	}

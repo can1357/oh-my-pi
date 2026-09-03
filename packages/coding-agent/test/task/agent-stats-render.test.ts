@@ -104,6 +104,14 @@ describe("agent stat formatters", () => {
 		expect(estimateAgentEtaMs({ ...me, durationMs: 90_000 }, peers)).toBe(-10_000);
 	});
 
+	it("falls back to cross-session history only when no peer of the type has finished", () => {
+		const me = progress({ id: "Me", agent: "scout", durationMs: 30_000 });
+		const peer = progress({ id: "A", agent: "scout", status: "completed", durationMs: 60_000 });
+		expect(estimateAgentEtaMs(me, [me], 30_000, [200_000, 100_000, 150_000])).toBe(120_000);
+		expect(estimateAgentEtaMs(me, [me, peer], 30_000, [200_000, 100_000, 150_000])).toBe(30_000);
+		expect(estimateAgentEtaMs(me, [me], 30_000, [0, -5])).toBeUndefined();
+	});
+
 	it("formats the eta as a countdown or an overrun, never fabricating one", () => {
 		expect(formatEta(undefined)).toBeUndefined();
 		expect(formatEta(50_000)).toBe("eta ~50.0s");

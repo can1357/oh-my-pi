@@ -19,6 +19,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { __resetSubagentRunHistoryForTests, recordSubagentRun } from "@oh-my-pi/pi-coding-agent/task/run-history";
 import {
 	type AgentProgress,
 	type SubagentLifecyclePayload,
@@ -96,6 +97,8 @@ describe("subagent HUD lines", () => {
 	beforeAll(async () => {
 		await initTheme();
 	});
+	// Module-global history: runs finished by other test files in this process would leak in.
+	beforeEach(() => __resetSubagentRunHistoryForTests());
 
 	it("renders running subagents as Id: description under a Subagents header", () => {
 		const out = render([
@@ -421,7 +424,7 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("└ 5.0s");
 	});
 
-	it("leads the stats line with a bar: determinate against the peer median, sweeping without one", () => {
+	it("leads the stats line with a percent bar against the peer median, empty with no estimate", () => {
 		const finished = makeSession({
 			id: "DoneScout",
 			agent: "scout",
@@ -435,7 +438,7 @@ describe("subagent HUD lines", () => {
 			progress: makeProgress({ id: "LiveScout", agent: "scout", description: "halfway", durationMs: 50_000 }),
 		});
 		const half = Bun.stripANSI(renderSubagentHudLines([finished, live], 160).join("\n"));
-		expect(half).toContain("└ ━━━━━─────");
+		expect(half).toContain("└ ━━━━━───── 50%");
 		expect(half).toContain("eta ~50.0s");
 
 		const over = Bun.stripANSI(
@@ -444,17 +447,48 @@ describe("subagent HUD lines", () => {
 				160,
 			).join("\n"),
 		);
-		expect(over).toContain("└ ━━━━━━━━━━");
+		expect(over).toContain("└ ━━━━━━━━━━ 100%");
 		expect(over).toContain("30.0s over");
 
-		// No finished peer: static empty bar when unanimated, a moving 3-cell
-		// sweep (position from the clock) once a spinner frame is supplied.
-		const still = Bun.stripANSI(renderSubagentHudLines([live], 160).join("\n"));
-		expect(still).toContain("└ ──────────");
-		const sweepA = Bun.stripANSI(renderSubagentHudLines([live], 160, 0, 0).join("\n"));
-		const sweepB = Bun.stripANSI(renderSubagentHudLines([live], 160, 160, 2).join("\n"));
-		expect(sweepA).toContain("└ ━━━───────");
-		expect(sweepB).toContain("└ ──━━━─────");
+		// No finished peer and no history: an empty, unlabelled bar — nothing sweeps or is invented.
+		const bare = Bun.stripANSI(renderSubagentHudLines([live], 160).join("\n"));
+		expect(bare).toContain("└ ────────── · 50.0s");
+		expect(bare).not.toContain("%");
+	});
+
+	it("estimates from cross-session history for the agent type when no peer has finished", () => {
+		recordSubagentRun("scout", 200_000, 12);
+		recordSubagentRun("scout", 100_000, 9);
+		recordSubagentRun("task", 900_000, 40);
+		try {
+			const live = makeSession({
+				id: "FirstScout",
+				agent: "scout",
+				description: "first of its batch",
+				progress: makeProgress({
+					id: "FirstScout",
+					agent: "scout",
+					description: "first of its batch",
+					durationMs: 30_000,
+				}),
+			});
+			// Median of the scout history is 150s; the task run is a different type.
+			const out = Bun.stripANSI(renderSubagentHudLines([live], 160).join("\n"));
+			expect(out).toContain("└ ━━──────── 20%");
+			expect(out).toContain("eta ~2m");
+
+			// A finished peer in this session outranks history.
+			const peer = makeSession({
+				id: "DoneScout",
+				agent: "scout",
+				status: "completed",
+				progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 60_000 }),
+			});
+			const withPeer = Bun.stripANSI(renderSubagentHudLines([peer, live], 160).join("\n"));
+			expect(withPeer).toContain("└ ━━━━━───── 50%");
+		} finally {
+			__resetSubagentRunHistoryForTests();
+		}
 	});
 
 	it("swaps the dot for the spinner glyph when a frame is supplied", () => {

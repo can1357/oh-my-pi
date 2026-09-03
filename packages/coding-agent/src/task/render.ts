@@ -37,6 +37,7 @@ import {
 import { framedBlock, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { getSubagentDurationHistory } from "./run-history";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails, YieldItem } from "./types";
 import { assembleYieldResult } from "./yield-assembly";
 
@@ -152,22 +153,25 @@ export function agentElapsedMs(
 
 /**
  * Remaining-time estimate for a live agent: median runtime of already-finished
- * peers of the same agent type minus this agent's elapsed time. The only
- * ground truth for "how long does a scout take" is other scouts in this
- * session, so with no finished peer there is no estimate (undefined).
- * Negative means the agent has outlived the peer median by that much.
+ * peers of the same agent type this session (same batch, same load) minus
+ * this agent's elapsed time; with no finished peer, the median of the
+ * cross-session {@link getSubagentDurationHistory} samples for that type.
+ * Undefined only when neither exists — never a fabricated countdown.
+ * Negative means the agent has outlived the median by that much.
  */
 export function estimateAgentEtaMs(
 	progress: Pick<AgentProgress, "id" | "agent" | "durationMs">,
 	peers: Iterable<Pick<AgentProgress, "id" | "agent" | "status" | "durationMs">>,
 	elapsedMs: number = progress.durationMs,
+	history: readonly number[] = [],
 ): number | undefined {
-	const durations: number[] = [];
+	let durations: number[] = [];
 	for (const peer of peers) {
 		if (peer.id === progress.id || peer.agent !== progress.agent) continue;
 		if (peer.status !== "completed" || !(peer.durationMs > 0)) continue;
 		durations.push(peer.durationMs);
 	}
+	if (durations.length === 0) durations = history.filter(ms => ms > 0);
 	if (durations.length === 0) return undefined;
 	durations.sort((a, b) => a - b);
 	const mid = durations.length >> 1;
@@ -183,39 +187,33 @@ export function shortModelLabel(selector: string): string {
 
 /** Cells in the HUD progress bar. */
 export const AGENT_PROGRESS_BAR_WIDTH = 10;
-const AGENT_PROGRESS_SWEEP_WIDTH = 3;
-/** Matches the shared spinner cadence so the sweep advances one cell per repaint. */
-const AGENT_PROGRESS_SWEEP_STEP_MS = 80;
 /** A single tool call past this reads as stuck; the activity fragment shows its elapsed. */
 const AGENT_SLOW_TOOL_MS = 5000;
 
 /**
- * Progress bar for a live agent. Determinate — elapsed over the peer-derived
- * total, full and warning-colored once over — when an eta exists. Without one
- * there is nothing honest to fill against, so the bar is an indeterminate
- * sweep driven by `nowMs`: it reads as motion only while a ticker repaints the
- * row. `nowMs` undefined (frozen row) renders the static empty bar.
+ * Progress bar for a live agent: elapsed over the estimated total (elapsed +
+ * eta, from finished peers this session or cross-session history for the
+ * agent type), with the percentage after it; full and warning-colored once
+ * over. With no estimate at all — the first ever run of an agent type on this
+ * machine — the bar stays empty and unlabelled rather than sweep or invent a
+ * number.
  */
 export function formatAgentProgressBar(
-	opts: { elapsedMs: number; etaMs?: number; nowMs?: number },
+	opts: { elapsedMs: number; etaMs?: number },
 	theme: Theme,
 	width = AGENT_PROGRESS_BAR_WIDTH,
 ): string {
 	const { filled, empty } = theme.progress;
-	if (opts.etaMs !== undefined && Number.isFinite(opts.etaMs)) {
-		const over = opts.etaMs < 0;
-		const total = opts.elapsedMs + opts.etaMs;
-		const cells = over || total <= 0 ? width : Math.min(width, Math.round((opts.elapsedMs / total) * width));
-		return theme.fg(over ? "warning" : "accent", filled.repeat(cells)) + theme.fg("dim", empty.repeat(width - cells));
-	}
-	if (opts.nowMs === undefined) return theme.fg("dim", empty.repeat(width));
-	const span = width - AGENT_PROGRESS_SWEEP_WIDTH;
-	const tick = Math.floor(opts.nowMs / AGENT_PROGRESS_SWEEP_STEP_MS) % (span * 2);
-	const start = tick <= span ? tick : span * 2 - tick;
+	if (opts.etaMs === undefined || !Number.isFinite(opts.etaMs)) return theme.fg("dim", empty.repeat(width));
+	const over = opts.etaMs < 0;
+	const total = opts.elapsedMs + opts.etaMs;
+	const ratio = over || total <= 0 ? 1 : opts.elapsedMs / total;
+	const cells = Math.min(width, Math.round(ratio * width));
+	const color = over ? "warning" : "accent";
 	return (
-		theme.fg("dim", empty.repeat(start)) +
-		theme.fg("accent", filled.repeat(AGENT_PROGRESS_SWEEP_WIDTH)) +
-		theme.fg("dim", empty.repeat(span - start))
+		theme.fg(color, filled.repeat(cells)) +
+		theme.fg("dim", empty.repeat(width - cells)) +
+		` ${theme.fg(color, `${Math.round(ratio * 100)}%`)}`
 	);
 }
 
@@ -1132,7 +1130,14 @@ function renderAgentProgress(
 			const taskPreview = previewLine(sanitizeText(progress.assignment ?? progress.task), 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
-		const etaMs = peers ? estimateAgentEtaMs(progress, peers, agentElapsedMs(progress, nowMs)) : undefined;
+		const etaMs = peers
+			? estimateAgentEtaMs(
+					progress,
+					peers,
+					agentElapsedMs(progress, nowMs),
+					getSubagentDurationHistory(progress.agent),
+				)
+			: undefined;
 		statusLine = appendAgentStats(statusLine, { ...progress, etaMs, showResolvedModelBadge: showBadge }, theme);
 	} else if (progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);

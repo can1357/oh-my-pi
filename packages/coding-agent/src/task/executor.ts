@@ -71,6 +71,7 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import { recordSubagentRun } from "./run-history";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -2327,6 +2328,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
+	// Completed runs (not follow-up turns on a revived agent) feed the
+	// cross-session runtime history behind the HUD progress bar.
+	if (progress.status === "completed" && !args.followUpTurn) {
+		recordSubagentRun(agent.name, Date.now() - args.startTime, progress.requests);
+	}
 
 	// Emit lifecycle end event after finalization so yield status is reflected
 	const settledPayload = {

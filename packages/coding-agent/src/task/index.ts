@@ -51,6 +51,7 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
+import { loadSubagentRunHistory } from "./run-history";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -674,6 +675,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		// Opens agent.db once per process so finished runs persist and the HUD's
+		// runtime estimate has cross-session samples from the first spawn.
+		void loadSubagentRunHistory();
 		const params = repairTaskParams(rawParams as TaskParams);
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
