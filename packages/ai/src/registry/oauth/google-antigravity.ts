@@ -122,7 +122,7 @@ function getFreeTierIneligibility(
 	};
 }
 
-function assertFreeTierEligible(payload: LoadCodeAssistResponse): void {
+function assertFreeTierEligible(payload: LoadCodeAssistResponse, onProgress?: (message: string) => void): void {
 	if (isFreeTierAllowed(payload)) return;
 	const ineligibility = getFreeTierIneligibility(payload);
 	if (!ineligibility) return;
@@ -133,6 +133,10 @@ function assertFreeTierEligible(payload: LoadCodeAssistResponse): void {
 			provider: PROVIDER,
 		});
 	}
+	const reason = ineligibility.reasonMessage.replace(/\.+$/, "");
+	onProgress?.(
+		`Account not eligible for free-tier auto-onboarding: ${reason}. Falling back to default consumer project...`,
+	);
 }
 
 async function requestCloudCodeAssist({
@@ -276,10 +280,9 @@ async function discoverProject(
 	onProgress?.("Checking Cloud Code Assist account status...");
 	try {
 		const initial = await loadCodeAssist(context);
-		assertFreeTierEligible(initial);
+		assertFreeTierEligible(initial, onProgress);
 		if (!hasMessageField(initial, "currentTier")) {
 			if (!isFreeTierAllowed(initial) && getFreeTierIneligibility(initial)) {
-				onProgress?.("Using default Antigravity consumer project...");
 				return DEFAULT_FALLBACK_PROJECT_ID;
 			}
 			onProgress?.("Provisioning the Antigravity free tier...");
@@ -291,7 +294,7 @@ async function discoverProject(
 		const projectId = extractProjectId(refreshed);
 		if (projectId) return projectId;
 
-		onProgress?.("Using default Antigravity consumer project...");
+		onProgress?.("No companion project returned; falling back to default consumer project...");
 		return DEFAULT_FALLBACK_PROJECT_ID;
 	} catch (error) {
 		throwIfLoginCancelled(signal);

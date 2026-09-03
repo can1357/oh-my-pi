@@ -17,7 +17,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-async function discoverAntigravityProject() {
+async function discoverAntigravityProject(onProgress?: (message: string) => void) {
 	return googleAntigravityProjectHook(
 		{ access: "access-token", refresh: "refresh-token", expires: 0 },
 		{
@@ -25,6 +25,7 @@ async function discoverAntigravityProject() {
 			phase: "login",
 			raw: { refresh_token: "refresh-token" },
 			fetch,
+			onProgress,
 		},
 	);
 }
@@ -233,8 +234,12 @@ describe("Antigravity OAuth project discovery", () => {
 			}),
 		);
 
-		const credentials = await discoverAntigravityProject();
+		const progress: string[] = [];
+		const credentials = await discoverAntigravityProject(msg => progress.push(msg));
 		expect(credentials.projectId).toBe(DEFAULT_FALLBACK_PROJECT_ID);
+		expect(progress).toContain(
+			"Account not eligible for free-tier auto-onboarding: This account is not eligible for the free tier. Falling back to default consumer project...",
+		);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(fetchSpy.mock.calls[0]?.[0]).toBe(LOAD_CODE_ASSIST_URL);
 	});
@@ -255,8 +260,10 @@ describe("Antigravity OAuth project discovery", () => {
 			),
 		);
 
-		const credentials = await discoverAntigravityProject();
+		const progress: string[] = [];
+		const credentials = await discoverAntigravityProject(msg => progress.push(msg));
 		expect(credentials.projectId).toBe(DEFAULT_FALLBACK_PROJECT_ID);
+		expect(progress).toContain("No companion project returned; falling back to default consumer project...");
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
 	});
 });
