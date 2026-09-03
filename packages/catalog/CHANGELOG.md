@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.5] - 2026-09-03
+
 ### Added
 
 - Added Muse Spark 1.3 Standard and Contributor models with account-aware Meta catalog refresh.
@@ -9,20 +11,24 @@
 - Added GLM 5.3 Promo 50 model
 - Added support for computer-use capabilities in model configurations
 - Added the Abliteration (abliteration.ai) provider with its documented `abliterated-model*` catalog and live `/v1/models` discovery ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
+- Added the Abliteration (abliteration.ai) provider, including its documented abliterated-model catalog and live model discovery.
+- Added the GLM 5.3 Promo 50 model.
+- Added computer-use capability metadata to model configurations.
+- Added declarative provider authentication policies covering login, refresh, environment-key, and credential behavior, with generated compatibility data and typed accessors.
 
 ### Changed
 
-- Gemini 3.8 Flash now supports reasoning modes and image inputs
-- Updated GitHub Copilot API version to 2026-08-01
-- Reduced input cost for minimax/minimax-m2 model
-- Meta Model API contributor SKUs are named `Muse Spark 1.x (C)`.
+- Gemini 3.8 Flash now supports reasoning modes and image inputs.
+- Updated the GitHub Copilot API version to 2026-08-01.
+- Reduced input pricing for the minimax/minimax-m2 model.
+- Renamed Meta Model API contributor SKUs to use the Muse Spark 1.x (C) naming.
 
 ### Fixed
 
-- GitHub Copilot discovery now uses the Copilot CLI identity so account-eligible enterprise and experimental models are returned
-- Discovered Bedrock-style `mistral.mixtral-*` models no longer abort startup with an ambiguous family classification ([#10598](https://github.com/can1357/oh-my-pi/issues/10598)).
-- `opencode-go/muse-spark-1.3-contributor` and `opencode-zen/muse-spark-1.3-contributor-free` now route over the Responses API like their 1.2 siblings, instead of 500ing on every request because they fell through to chat completions ([#10610](https://github.com/can1357/oh-my-pi/issues/10610)).
-- `meta/muse-spark-1.3` and `meta/muse-spark-1.3-contributor` now carry their 1M context window, thinking levels, image input, and pricing instead of surfacing as a text-only model with an unknown context window and "Current model does not support thinking"; Meta's roster no longer lists the `muse-image-*` / `muse-voice-*` media SKUs as chat models. Future Muse Spark revisions Meta or the OpenCode gateways ship before the catalog lists them inherit the lineage's context window, thinking levels, pricing tier, Responses route, and `Muse Spark <rev>` naming.
+- GitHub Copilot model discovery now respects the Copilot CLI identity, ensuring eligible enterprise and experimental models are available.
+- Fixed startup failures when discovering Bedrock-style Mistral Mixtral models.
+- Fixed Muse Spark 1.3 contributor models on OpenCode gateways so they use the correct Responses API route.
+- Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
 
 ## [18.1.4] - 2026-09-02
 

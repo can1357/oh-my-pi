@@ -49,7 +49,7 @@ interface SessionOptions {
 }
 
 function makeSession(opts: SessionOptions = {}): ToolSession {
-	const settings = Settings.isolated({ "async.enabled": false, "task.isolation.mode": "none" });
+	const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
 	const roles = opts.roles ?? { smol: "p/smol", slow: "p/slow" };
 	for (const role in roles) {
 		const value = roles[role as keyof typeof roles];
@@ -131,7 +131,7 @@ const SMOL = {
 	contextWindow: 128000,
 	maxTokens: 4096,
 };
-const settings = Settings.isolated({ "async.enabled": false, "task.isolation.mode": "none" });
+const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
 settings.setModelRole("smol", "p/smol");
 settings.setModelRole("slow", "p/slow");
 const session = {

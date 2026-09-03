@@ -12,6 +12,12 @@ import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
+import {
+	createSessionWorktree,
+	defaultSessionWorktreeBranch,
+	formatSessionWorktreeSummary,
+	type SessionWorktree,
+} from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
@@ -59,6 +65,83 @@ async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Pro
 	await runtime.output(text);
 	await runtime.session.dispose();
 	return commandConsumed();
+}
+
+/**
+ * Relocate the headless session to `resolvedPath` (an existing directory):
+ * flush settings, move the session file, re-scope the process, rolling back
+ * on failure. Returns a result when the move did not complete; `undefined`
+ * on success so the caller can report its own confirmation.
+ */
+async function relocateHeadlessSession(
+	runtime: SlashCommandRuntime,
+	resolvedPath: string,
+): Promise<SlashCommandResult | undefined> {
+	try {
+		await runtime.settings.flush();
+	} catch (err) {
+		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
+	}
+	const previousState = runtime.sessionManager.captureState();
+	try {
+		await runtime.session.moveSession(resolvedPath);
+	} catch (err) {
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		setProjectDir(resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+		} catch (rollbackError) {
+			const actual = runtime.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				await rescopeHeadlessToCwd(runtime, actual);
+				realigned = true;
+			} catch {}
+			if (!realigned) {
+				return fatalMoveFailure(
+					`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+					runtime,
+				);
+			}
+			return usage(
+				`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+				runtime,
+			);
+		}
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		await rescopeHeadlessToCwd(runtime, resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+			await rescopeHeadlessToCwd(runtime, previousState.cwd);
+		} catch (rollbackError) {
+			const actual = runtime.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				await rescopeHeadlessToCwd(runtime, actual);
+				realigned = true;
+			} catch {}
+			if (!realigned) {
+				return fatalMoveFailure(
+					`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+					runtime,
+				);
+			}
+			return usage(
+				`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+				runtime,
+			);
+		}
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	await runtime.notifyConfigChanged?.();
+	await runtime.notifyTitleChanged?.();
+	return undefined;
 }
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -588,70 +671,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			} catch {
 				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
 			}
-			try {
-				await runtime.settings.flush();
-			} catch (err) {
-				return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
-			}
-			const previousState = runtime.sessionManager.captureState();
-			try {
-				await runtime.session.moveSession(resolvedPath);
-			} catch (err) {
-				return usage(`Move failed: ${errorMessage(err)}`, runtime);
-			}
-			try {
-				setProjectDir(resolvedPath);
-			} catch (err) {
-				try {
-					await runtime.sessionManager.rollbackMove(previousState);
-				} catch (rollbackError) {
-					const actual = runtime.sessionManager.getCwd();
-					let realigned = false;
-					try {
-						await rescopeHeadlessToCwd(runtime, actual);
-						realigned = true;
-					} catch {}
-					if (!realigned) {
-						return fatalMoveFailure(
-							`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
-							runtime,
-						);
-					}
-					return usage(
-						`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
-						runtime,
-					);
-				}
-				return usage(`Move failed: ${errorMessage(err)}`, runtime);
-			}
-			try {
-				await rescopeHeadlessToCwd(runtime, resolvedPath);
-			} catch (err) {
-				try {
-					await runtime.sessionManager.rollbackMove(previousState);
-					await rescopeHeadlessToCwd(runtime, previousState.cwd);
-				} catch (rollbackError) {
-					const actual = runtime.sessionManager.getCwd();
-					let realigned = false;
-					try {
-						await rescopeHeadlessToCwd(runtime, actual);
-						realigned = true;
-					} catch {}
-					if (!realigned) {
-						return fatalMoveFailure(
-							`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
-							runtime,
-						);
-					}
-					return usage(
-						`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
-						runtime,
-					);
-				}
-				return usage(`Move failed: ${errorMessage(err)}`, runtime);
-			}
-			await runtime.notifyConfigChanged?.();
-			await runtime.notifyTitleChanged?.();
+			const failure = await relocateHeadlessSession(runtime, resolvedPath);
+			if (failure) return failure;
 			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
 			return commandConsumed();
 		},
@@ -659,6 +680,34 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
+		},
+	},
+	{
+		name: "wt",
+		aliases: ["worktree"],
+		icon: "folderMove",
+		description: "Move this session into a new worktree, changes included",
+		acpDescription: "Move this session into a new worktree, changes included",
+		inlineHint: "[<branch>]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) return usage("Cannot create a worktree while streaming.", runtime);
+			const branch = command.args.trim() || defaultSessionWorktreeBranch();
+			let worktree: SessionWorktree;
+			try {
+				worktree = await createSessionWorktree(runtime.sessionManager.getCwd(), runtime.settings, branch);
+			} catch (err) {
+				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
+			}
+			const failure = await relocateHeadlessSession(runtime, worktree.path);
+			if (failure) return failure;
+			await runtime.output(formatSessionWorktreeSummary(worktree));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.addToHistory(command.text);
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleWorktreeCommand(command.args || undefined);
 		},
 	},
 	{
