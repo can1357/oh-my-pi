@@ -276,8 +276,8 @@ function extractStats(
 		sessionFile,
 		entryId: entry.id,
 		folder,
-		model: msg.model,
-		provider: msg.provider,
+		model: msg.upstreamModel ?? msg.model,
+		provider: msg.upstreamProvider ?? msg.provider,
 		api: msg.api,
 		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		duration: msg.duration ?? null,
@@ -620,7 +620,9 @@ export async function parseSessionFile(
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {
 				const msg = entry.message as AssistantMessage;
-				if (msg.model && msg.provider) {
+				const effectiveModel = msg.upstreamModel ?? msg.model;
+				const effectiveProvider = msg.upstreamProvider ?? msg.provider;
+				if (effectiveModel && effectiveProvider) {
 					// Emit unconditionally. The aggregator's UPDATE is guarded by
 					// `model IS NULL` so this is idempotent: a no-op for already
 					// linked rows, a fix-up for fresh inserts (which start NULL
@@ -630,8 +632,8 @@ export async function parseSessionFile(
 					userLinks.push({
 						sessionFile: sessionPath,
 						entryId: parentId,
-						model: msg.model,
-						provider: msg.provider,
+						model: effectiveModel,
+						provider: effectiveProvider,
 					});
 				}
 			}
