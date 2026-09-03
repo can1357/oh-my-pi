@@ -6,6 +6,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import {
 	BINARY_SNIFF_BYTES,
 	formatBytes,
@@ -15,10 +16,18 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import { loadImageAttachmentInput, webpExclusionForModel } from "../utils/image-loading";
 import type { ToolSession } from ".";
-import { buildTextResult, normalizeOptionalString, requireNonEmpty, resolveGitHubRepo } from "./gh-common";
+import {
+	buildTextResult,
+	defaultGhHost,
+	ghApiHostArgs,
+	normalizeOptionalString,
+	parseRepoRef,
+	requireNonEmpty,
+	resolveGitHubRepo,
+} from "./gh-common";
 import { executePrCheckout, executePrCreate, executePrPush } from "./gh-pr-checkout";
 import { executeRunWatch } from "./gh-run-watch";
 import {
@@ -33,7 +42,7 @@ import type { OutputMeta } from "./output-meta";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-export { parsePositiveDecimalInt, resolveDefaultRepoMemoized } from "./gh-common";
+export { formatRepoRef, parsePositiveDecimalInt, resolveDefaultRepoMemoized } from "./gh-common";
 export {
 	getOrFetchPrDiff,
 	type PrDiffFile,
@@ -146,6 +155,7 @@ export interface GhPrCheckoutSummary {
 	remote: string;
 	remoteBranch: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }
 
 export interface GhRunWatchJobDetails {
@@ -208,7 +218,7 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): GithubTool | null {
-		if (!git.github.available()) return null;
+		if (!github.available()) return null;
 		return new GithubTool(session);
 	}
 
@@ -263,9 +273,11 @@ async function executeFileRead(
 		.split("/")
 		.map(segment => encodeURIComponent(segment))
 		.join("/");
+	const ref = parseRepoRef(repo);
 	const args = [
 		"api",
-		`/repos/${repo}/contents/${endpointPath}`,
+		...ghApiHostArgs(ref),
+		`/repos/${ref.slug}/contents/${endpointPath}`,
 		"--method",
 		"GET",
 		"-H",
@@ -276,7 +288,7 @@ async function executeFileRead(
 	if (branch) {
 		args.push("-f", `ref=${branch}`);
 	}
-	const response = await git.github.json<GitHubContentsResponse>(session.cwd, args, signal, {
+	const response = await github.json<GitHubContentsResponse>(session.cwd, args, signal, {
 		repoProvided: true,
 		trimOutput: false,
 	});
@@ -284,7 +296,9 @@ async function executeFileRead(
 		throw new ToolError(`GitHub path '${filePath}' is not a file.`);
 	}
 
-	const fallbackSourceUrl = `https://github.com/${repo}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
+	// A host-less ref went to gh's default host, so the link has to match it.
+	const fallbackHost = ref.host ?? defaultGhHost();
+	const fallbackSourceUrl = `https://${fallbackHost}/${ref.slug}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	const sourceUrl = response.html_url || fallbackSourceUrl;
 	if (response.encoding !== "base64" || typeof response.content !== "string") {
 		const size =

@@ -1,0 +1,18 @@
+class "deepseek" {
+    namespace "deepseek" bounded=#true
+    bounded "deepseek"
+
+    family "r1" glob="*deepseek-r1*"
+    family "reasoner" glob="*deepseek-reasoner*"
+    family "flash" glob="*deepseek*v4*flash*"
+    family "pro" glob="*deepseek*v4*pro*"
+    // Bare V4 chat/reasoner ids without a flash/pro segment.
+    family "v4" glob="*deepseek-v4*"
+    family "v3" glob="*deepseek-v3*"
+
+    override id="vercel-deepseek-v3-2-thinking-product" provider="vercel-ai-gateway" model="deepseek-v3.2-thinking" logical="deepseek/deepseek-v3.2-thinking" class="deepseek" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="opencode-zen-big-pickle-family" provider="opencode-zen" model="big-pickle" class="deepseek" rationale="OpenCode Zen's big-pickle is a DeepSeek reasoning alias whose upstream 400s require exact reasoning_content replay" provenance="models.json census"
+    override id="umans-deepseek-v4-flash-family" provider="umans" model="umans-deepseek-v4-flash-0731" logical="umans-deepseek-v4-flash-0731" class="deepseek" rationale="The opaque Umans product identifier is backed by the reviewed DeepSeek V4 Flash family" provenance="fixtures/llm-oracle/catalog-policy/compat-profiles.json:compat-04"
+    override id="umans-deepseek-v4-flash-lab-family" provider="umans" model="umans-deepseek-v4-flash-0731-lab" logical="umans-deepseek-v4-flash-0731-lab" class="deepseek" rationale="The opaque Umans lab product identifier is backed by the reviewed DeepSeek V4 Flash family" provenance="fixtures/llm-oracle/catalog-policy/compat-profiles.json:compat-04"
+    override id="venice-e2ee-deepseek-family" provider="venice" model="e2ee-deepseek-v4-flash" logical="e2ee-deepseek-v4-flash" class="deepseek" rationale="The opaque Venice E2EE deployment is backed by the reviewed DeepSeek family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+}

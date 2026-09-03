@@ -1,6 +1,5 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
@@ -154,18 +153,26 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 	return expandDefaultRetryFallbackChains(configuredChains, Object.keys(settings.getModelRoles()));
 }
 
-/** Validates configured fallback chains and reports each warning. */
+/**
+ * Validates configured fallback chains and reports each warning via `warn`.
+ *
+ * `options.isDiscoveryPending` suppresses "unknown model" warnings for
+ * selectors whose config-declared discovery provider has not yet populated the
+ * registry (a cold discovery cache after `omp update` bumps the cache
+ * namespace, #10048). Such selectors are re-checked once background discovery
+ * settles. Logging is the caller's responsibility so a post-discovery re-run
+ * does not double-log persistent warnings.
+ */
 export function validateRetryFallbackChains(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
 	warn: (message: string) => void,
+	options: { isDiscoveryPending?: (provider: string) => boolean } = {},
 ): void {
 	const configuredChains = settings.get("retry.fallbackChains");
 	if (configuredChains === undefined) return;
-	const report = (message: string) => {
-		logger.warn(message);
-		warn(message);
-	};
+	const report = warn;
+	const isDiscoveryPending = options.isDiscoveryPending ?? (() => false);
 	if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
 		report("retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.");
 		return;
@@ -186,7 +193,10 @@ export function validateRetryFallbackChains(
 				const parsedKey = parseRetryFallbackSelector(key, modelRegistry);
 				if (!parsedKey) {
 					report(`Invalid model selector key in retry.fallbackChains: ${key}`);
-				} else if (!modelRegistry.find(parsedKey.provider, parsedKey.id)) {
+				} else if (
+					!modelRegistry.find(parsedKey.provider, parsedKey.id) &&
+					!isDiscoveryPending(parsedKey.provider)
+				) {
 					report(`retry.fallbackChains key references unknown model: ${key}`);
 				}
 			}
@@ -214,7 +224,7 @@ export function validateRetryFallbackChains(
 				report(`Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`);
 				continue;
 			}
-			if (!modelRegistry.find(parsed.provider, parsed.id)) {
+			if (!modelRegistry.find(parsed.provider, parsed.id) && !isDiscoveryPending(parsed.provider)) {
 				report(`Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`);
 			}
 		}
@@ -432,13 +442,17 @@ function getRetryFallbackEffectiveChain(
 	return chain;
 }
 
-/** Return the candidates after the current selector in an effective chain. */
+/**
+ * Return candidates after the current selector in an effective chain.
+ * `wrapAround` additionally appends entries before the current selector,
+ * without returning the current selector itself.
+ */
 export function findRetryFallbackCandidates(
 	context: RetryFallbackResolutionContext,
 	chainKey: string,
 	currentSelector: string,
 	currentModel?: Model | null,
-	options?: { allowMissingPrimary?: boolean },
+	options?: { allowMissingPrimary?: boolean; wrapAround?: boolean },
 ): RetryFallbackSelector[] {
 	const chain = getRetryFallbackEffectiveChain(
 		context,
@@ -464,13 +478,19 @@ export function findRetryFallbackCandidates(
 	const exactIndex = chain.findIndex(
 		selector => selector.raw === currentSelector || selector.raw === currentPlainSelector,
 	);
-	if (exactIndex >= 0) return chain.slice(exactIndex + 1);
+	if (exactIndex >= 0) {
+		const candidatesAfter = chain.slice(exactIndex + 1);
+		return options?.wrapAround ? [...candidatesAfter, ...chain.slice(0, exactIndex)] : candidatesAfter;
+	}
 	const baseIndex = currentBaseSelector
 		? chain.findIndex(selector => {
 				const selectorBase = formatRetryFallbackBaseSelector(selector);
 				return selectorBase === currentBaseSelector || selectorBase === currentPlainBaseSelector;
 			})
 		: -1;
-	if (baseIndex >= 0) return chain.slice(baseIndex + 1);
+	if (baseIndex >= 0) {
+		const candidatesAfter = chain.slice(baseIndex + 1);
+		return options?.wrapAround ? [...candidatesAfter, ...chain.slice(0, baseIndex)] : candidatesAfter;
+	}
 	return chain.slice(1);
 }

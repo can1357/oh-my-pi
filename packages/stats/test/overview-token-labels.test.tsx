@@ -16,6 +16,7 @@ const stats: AggregatedStats = {
 	cacheRate: 0.75,
 	cacheSavings: 0.695,
 	totalCost: 0,
+	unpricedRequests: 0,
 	totalPremiumRequests: 0,
 	avgDuration: 1000,
 	avgTtft: 100,

@@ -36,7 +36,7 @@ describe("AgentStorage SQLite compatibility", () => {
 	let tempDir: TempDir;
 
 	afterEach(async () => {
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		if (tempDir) {
 			try {
 				await tempDir.remove();

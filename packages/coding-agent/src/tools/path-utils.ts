@@ -3,26 +3,41 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
-import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	hasFsCode,
+	isEnoent,
+	isEnotdir,
+	isWsl,
+	stripWindowsExtendedLengthPathPrefix,
+	windowsPathToWslMount,
+} from "@oh-my-pi/pi-utils";
+import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** POSIX absolute, Windows drive, or UNC (`\\server\share` / `//server/share`). */
+export function isFilesystemSourcePath(value: string): boolean {
+	return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
+}
 // A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
 // accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
 // (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to
 // `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
 const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
 const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
+// A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
+const TAIL_CHUNK_SRC = String.raw`-\d+`;
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
-// plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
+// plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
 // selector chain off before dispatching to a protocol handler.
 const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
-	String.raw`^(?:raw|conflicts|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
+	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
 // Schemes whose host grammar is identifier-shaped, so any trailing
@@ -192,9 +207,24 @@ function windowsDriveAliasPath(filePath: string): string | undefined {
 	return tail ? `${drive}:\\${tail}` : `${drive}:\\`;
 }
 
-export function normalizeWindowsDriveAliasPath(filePath: string, platform: NodeJS.Platform = process.platform): string {
-	if (platform !== "win32") return filePath;
-	return windowsDriveAliasPath(filePath) ?? filePath;
+/**
+ * Reconcile a drive-alias path with the current host so filesystem reads land
+ * on the same bytes the user meant, in either translation direction:
+ *
+ * - On native Windows (`win32`), MSYS/WSL mount roots (`/c/...`, `/mnt/c/...`)
+ *   map to native drive paths (`C:\...`).
+ * - Under WSL, pasted Windows drive paths (`C:\...`, `C:/...`) map to their
+ *   `/mnt/<drive>/...` mount so the file resolves on the Linux side instead of
+ *   being `path.resolve`d into a nonexistent path under cwd (issue #10426).
+ */
+export function normalizeWindowsDriveAliasPath(
+	filePath: string,
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+): string {
+	if (platform === "win32") return windowsDriveAliasPath(filePath) ?? filePath;
+	if (isWsl(platform, env)) return windowsPathToWslMount(filePath) ?? filePath;
+	return filePath;
 }
 
 /**
@@ -271,6 +301,20 @@ export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null
 	return merged as [LineRange, ...LineRange[]];
 }
 
+const TAIL_SELECTOR_RE = /^-(\d+)$/;
+
+/**
+ * Parse a `-N` tail selector into its line count (`:-60` → 60 last lines).
+ * Returns `null` when `sel` is not tail-shaped; throws {@link ToolError} for `-0`.
+ */
+export function parseTailCount(sel: string): number | null {
+	const match = TAIL_SELECTOR_RE.exec(sel);
+	if (!match) return null;
+	const count = Number.parseInt(match[1]!, 10);
+	if (count < 1) throw new ToolError("Tail selector -0 is invalid; use :-N with N >= 1 to read the last N lines.");
+	return count;
+}
+
 /**
  * Extract the line-range component from a read-tool selector that may also
  * carry a verbatim/index display mode (`raw`, `conflicts`) — alone or compounded
@@ -311,8 +355,9 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
 	let basePath = rawPath.slice(0, colon);
 	let sel = candidate;
 
-	// Allow a compound trailing selector: `path:1-50:raw` or `path:raw:1-50`.
-	// The two chunks must be one line-range plus one `raw`, in either order.
+	// Allow a compound trailing selector: `path:1-50:raw`, `path:raw:1-50`, or
+	// `path:raw:-60`. The two chunks must be one line-range (or tail) plus one
+	// `raw`, in either order.
 	const innerColon = basePath.lastIndexOf(":");
 	if (innerColon > 0) {
 		const innerCandidate = basePath.slice(innerColon + 1);
@@ -377,6 +422,36 @@ export async function splitPathAndSelPreferringLiteral(
 }
 
 /**
+ * Synchronous sibling of {@link probeLiteralPathExists}. Some callers resolve
+ * paths on a synchronous hot path (the ACP event mapper builds tool-call
+ * notifications synchronously), so the async `lstat` probe is unavailable. The
+ * error-code handling matches the async version exactly.
+ */
+export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exists" | "missing" | "unknown" {
+	const resolved = resolveReadPath(filePath, cwd);
+	try {
+		fs.lstatSync(resolved);
+		return "exists";
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err) || hasFsCode(err, "ENAMETOOLONG")) return "missing";
+		return "unknown";
+	}
+}
+
+/**
+ * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. Identical
+ * literal-path precedence — a real file named `report:1-20` keeps its colon —
+ * for callers that cannot await, such as the ACP event mapper's location
+ * builder.
+ */
+export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: string): { path: string; sel?: string } {
+	const strict = splitPathAndSel(rawPath);
+	if (strict.sel === undefined) return strict;
+	const probe = probeLiteralPathExistsSync(rawPath, cwd);
+	return probe === "missing" ? strict : { path: rawPath };
+}
+
+/**
  * Variant of {@link splitPathAndSel} for internal URLs (`scheme://...`).
  *
  * The filesystem-path splitter is intentionally conservative: it refuses to
@@ -384,10 +459,10 @@ export async function splitPathAndSelPreferringLiteral(
  * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
  * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
  * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100`).
+ * `artifact://3:raw:-100-5`).
  *
  * This function iteratively peels selector-shaped chunks (well-formed plus
- * common malformed shapes like `:-N`) so the rest of the read tool can pass a
+ * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
  * clean URL to the protocol handler and surface selector errors via parseSel
  * instead of as misleading "host invalid" errors from the handler. Schemes
  * whose resource URIs may legitimately contain colons (`mcp://`) are skipped.
@@ -470,6 +545,19 @@ export function isInternalUrlPath(filePath: string): boolean {
 		if (expandedAndNormalized.startsWith(prefix)) return true;
 	}
 	return false;
+}
+
+/**
+ * Approval tier for a path that will be written through the file/internal-URL
+ * routing layer. Internal resources are read-tier only when their handler is
+ * read-only; writable handlers such as vault:// must retain write approval.
+ */
+export function resolveFileWriteApprovalTier(filePath: string): "read" | "write" {
+	const normalized = normalizeLocalScheme(expandPath(normalizeLocalScheme(filePath)));
+	if (!TOP_LEVEL_INTERNAL_URL_PREFIXES.some(prefix => normalized.startsWith(prefix))) return "write";
+	const scheme = INTERNAL_URL_SCHEME_RE.exec(normalized)?.[1]?.toLowerCase();
+	const handler = scheme ? InternalUrlRouter.instance().getHandler(scheme) : undefined;
+	return handler?.write ? "write" : "read";
 }
 
 /**
@@ -1326,14 +1414,11 @@ function escapeGlobMetachars(value: string): string {
 	return value.replace(/[*?[{]/g, "[$&]");
 }
 
-/**
- * Find a unique workspace entry whose trailing path matches a missing authored path.
- * Returns `null` for no match, ambiguity, timeout, or scan failure.
- */
-export async function findUniqueWorkspaceSuffix(
+async function findUniqueWorkspaceSuffixWithGlob(
 	rawPath: string,
 	cwd: string,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	globImpl: typeof glob,
 ): Promise<{ absolutePath: string; displayPath: string } | null> {
 	const normalized = rawPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 	if (!normalized) return null;
@@ -1343,19 +1428,17 @@ export async function findUniqueWorkspaceSuffix(
 
 	let matches: string[];
 	try {
-		const result = await untilAborted(combinedSignal, () =>
-			glob({
-				pattern: `**/${escapeGlobMetachars(normalized)}`,
-				path: cwd,
-				hidden: true,
-			}),
-		);
+		const result = await globImpl({
+			pattern: `**/${escapeGlobMetachars(normalized)}`,
+			path: cwd,
+			hidden: true,
+			signal: combinedSignal,
+			timeoutMs: WORKSPACE_SUFFIX_TIMEOUT_MS,
+		});
+		if (signal?.aborted) throw new ToolAbortError();
 		matches = result.matches.map(match => match.path);
-	} catch (error) {
-		if (error instanceof Error && error.name === "AbortError") {
-			if (!signal?.aborted) return null;
-			throw new ToolAbortError();
-		}
+	} catch {
+		if (signal?.aborted) throw new ToolAbortError();
 		return null;
 	}
 
@@ -1364,6 +1447,28 @@ export async function findUniqueWorkspaceSuffix(
 		absolutePath: path.resolve(cwd, matches[0]),
 		displayPath: matches[0],
 	};
+}
+
+/**
+ * Find a unique workspace entry whose trailing path matches a missing authored path.
+ * Returns `null` for no match, ambiguity, timeout, or scan failure.
+ */
+export async function findUniqueWorkspaceSuffix(
+	rawPath: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, glob);
+}
+
+/** Exercise the post-native cancellation boundary without a real filesystem walk. */
+export async function findUniqueWorkspaceSuffixWithGlobForTest(
+	rawPath: string,
+	cwd: string,
+	signal: AbortSignal | undefined,
+	globImpl: typeof glob,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, globImpl);
 }
 
 // =============================================================================
@@ -1401,6 +1506,10 @@ export interface ToolScopeOptions {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills — lets skill:// resolve without process-global state. */
 	skills?: readonly Skill[];
+	/** Calling session's agent-scoped applicable rules — lets rule:// resolve without process-global state. */
+	rules?: readonly Rule[];
+	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
+	sessionFile?: string;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1488,8 +1597,10 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			cwd,
 			settings: opts.settings,
 			signal: opts.signal,
+			sessionFile: opts.sessionFile,
 			localProtocolOptions: opts.localProtocolOptions,
 			skills: opts.skills,
+			rules: opts.rules,
 			// Tool-scope resolution only needs `sourcePath`; skip content
 			// materialization so large artifacts (or any handler that separates
 			// path from content) stay searchable without OOM risk.

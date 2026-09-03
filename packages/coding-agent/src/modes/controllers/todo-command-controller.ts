@@ -18,6 +18,8 @@ const USAGE = [
 	"  /todo                              Show current todos",
 	"  /todo edit                         Open todos in $EDITOR",
 	"  /todo copy                         Copy todos as Markdown to clipboard",
+	"  /todo expand                       Show every phase and task in the HUD",
+	"  /todo collapse                     Restore the bounded HUD preview",
 	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
 	"  /todo import [<path>]              Replace todos from file (default: TODO.md)",
 	"  /todo append [<phase>] <task...>   Append a task; phase fuzzy-matched or auto-created",
@@ -155,6 +157,12 @@ export class TodoCommandController {
 		const rest = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
 
 		switch (verb) {
+			case "expand":
+				if (!this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				return;
+			case "collapse":
+				if (this.ctx.todoExpanded) this.ctx.toggleTodoExpansion();
+				return;
 			case "edit":
 				await this.#editInExternalEditor();
 				return;

@@ -1,0 +1,26 @@
+auth "google-gemini-cli" {
+	name "Google Cloud Code Assist (Gemini CLI)"
+	login "oauth-code" {
+		client-id "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t" encoding="base64"
+		client-secret "R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=" encoding="base64"
+		authorize-url "https://accounts.google.com/o/oauth2/v2/auth"
+		scopes "https://www.googleapis.com/auth/cloud-platform" "https://www.googleapis.com/auth/userinfo.email" \
+			"https://www.googleapis.com/auth/userinfo.profile"
+		authorize-params { access_type "offline"; prompt "consent" }
+		instructions "Complete the sign-in in your browser."
+		callback port=8085 path="/oauth2callback" hostname="127.0.0.1"
+		token url="https://oauth2.googleapis.com/token" body="form"
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=300000
+		}
+		userinfo url="https://www.googleapis.com/oauth2/v1/userinfo?alt=json" email="email"
+		after-exchange hook="google-gemini-cli-project"
+	}
+	refresh {
+		require "projectId"
+		after-refresh hook="google-gemini-cli-project"
+	}
+	api-key-format "structured"
+}

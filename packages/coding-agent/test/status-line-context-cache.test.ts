@@ -47,6 +47,8 @@ function makeSession(opts: {
 	contextWindow?: number;
 	usage?: ContextUsage | undefined;
 	settings?: AgentSession["settings"];
+	/** Session title; `null` models a fresh, not-yet-titled session. */
+	sessionName?: string | null;
 	/** Model input modalities; gates snapcompact availability in boundary math. */
 	modelInput?: string[];
 }): Fake {
@@ -79,7 +81,7 @@ function makeSession(opts: {
 				premiumRequests: 0,
 				cost: 0,
 			}),
-			getSessionName: () => "test",
+			getSessionName: () => (opts.sessionName === null ? undefined : (opts.sessionName ?? "test")),
 		},
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		isFastModeActive: () => false,
@@ -364,6 +366,79 @@ describe("StatusLineComponent context breakdown", () => {
 			settings.clearOverride("statusLine.preset");
 		}
 	});
+	it("keeps embedded context on the gauge while the session is unnamed", () => {
+		// Regression: a fresh session has no title, so `session_name` is
+		// invisible and the right group is empty. The gauge must still bridge to
+		// the border edge and absorb the context segment — not fall back to a
+		// context chip that vanishes once the session gets auto-titled.
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 80_000, contextWindow: 1_000_000, percent: 8 },
+			sessionName: null,
+		});
+		settings.override("statusLine.preset", "custom");
+		settings.override("statusLine.leftSegments", ["pi", "context_pct"]);
+		settings.override("statusLine.rightSegments", ["session_name"]);
+		settings.override("statusLine.contextLine", "embedded");
+
+		try {
+			const comp = new StatusLineComponent(session);
+			const border = comp.getTopBorder(120);
+			const plain = border.content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+			expect(border.width).toBe(120);
+			expect(plain).not.toContain("8.0%/1M");
+			expect(plain).toContain("8%");
+			expect(plain).toContain("1M");
+		} finally {
+			settings.clearOverride("statusLine.contextLine");
+			settings.clearOverride("statusLine.rightSegments");
+			settings.clearOverride("statusLine.leftSegments");
+			settings.clearOverride("statusLine.preset");
+		}
+	});
+
+	it("reserves embedded context labels when a long session title consumes the status line", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
+			sessionName: "28大学生AI赋能司法行政创新挑战 law agent",
+		});
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "model", "path", "context_pct"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+			contextLine: "embedded",
+		});
+
+		const border = comp.getTopBorder(48);
+		const plain = border.content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(border.width).toBe(48);
+		expect(plain).toContain("25%");
+		expect(plain).toContain("200K");
+	});
+
+	it("preserves a status segment when embedded context labels cannot fit", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
+		});
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "context_pct"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			contextLine: "embedded",
+		});
+
+		const border = comp.getTopBorder(8);
+		expect(border.content).not.toBe("");
+		expect(border.width).toBe(8);
+	});
+
 	it("embedded overflow (>100%) breaks the raw percent past the window label in error color", () => {
 		const { session } = makeSession({
 			messages: [userMessage("hi"), assistantMessage("done")],
@@ -488,7 +563,7 @@ describe("StatusLineComponent context breakdown", () => {
 		const comp = new StatusLineComponent(session);
 		expect(comp.render(80)).toHaveLength(0); // box mode: main status lives in the editor border
 
-		comp.setComposerStyle({ bottomBar: "full", bottomBarGap: false });
+		comp.setComposerStyle({ statusAttachment: "none", bottomBar: "full", bottomBarGap: false });
 		const lines = comp.render(80);
 		expect(lines).toHaveLength(1);
 		// Plain bar: transparent background, no powerline caps or bg fill.
@@ -497,7 +572,7 @@ describe("StatusLineComponent context breakdown", () => {
 
 		// Styles without bottom chrome (rule/field/rail) request a spacer row so
 		// the bar doesn't sit flush against the last input row.
-		comp.setComposerStyle({ bottomBar: "full", bottomBarGap: true });
+		comp.setComposerStyle({ statusAttachment: "none", bottomBar: "full", bottomBarGap: true });
 		const gapped = comp.render(80);
 		expect(gapped).toHaveLength(2);
 		expect(gapped[0]).toBe("");
@@ -510,7 +585,7 @@ describe("StatusLineComponent context breakdown", () => {
 			usage: { tokens: 1000, contextWindow: 100_000, percent: 1 },
 		});
 		const comp = new StatusLineComponent(session);
-		comp.setComposerStyle({ bottomBar: "full", bottomBarGap: true });
+		comp.setComposerStyle({ statusAttachment: "none", bottomBar: "full", bottomBarGap: true });
 		let menuOpen = true;
 		comp.setAutocompleteActiveProbe(() => menuOpen);
 		expect(comp.render(80)).toHaveLength(0);
@@ -531,7 +606,7 @@ describe("StatusLineComponent context breakdown", () => {
 			separator: "none",
 			sessionAccent: false,
 		});
-		comp.setComposerStyle({ bottomBar: "left", bottomBarGap: false });
+		comp.setComposerStyle({ statusAttachment: "top-rule-chip", bottomBar: "left", bottomBarGap: false });
 
 		const bottom = comp.render(80);
 		expect(bottom).toHaveLength(1);

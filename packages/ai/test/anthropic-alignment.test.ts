@@ -15,6 +15,7 @@ import {
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
 	mapStainlessArch,
+	mapStainlessOs,
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
@@ -155,7 +156,13 @@ function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionI
 withOfficialAnthropicEndpoint();
 
 describe("Anthropic request fingerprint alignment", () => {
-	it("maps Stainless arch values from explicit inputs", () => {
+	it("maps Stainless OS and arch values from explicit inputs", () => {
+		expect(mapStainlessOs("darwin")).toBe("MacOS");
+		expect(mapStainlessOs("windows")).toBe("Windows");
+		expect(mapStainlessOs("linux")).toBe("Linux");
+		expect(mapStainlessOs("freebsd")).toBe("FreeBSD");
+		expect(mapStainlessOs("solaris")).toBe("Other::solaris");
+
 		expect(mapStainlessArch("x64")).toBe("x64");
 		expect(mapStainlessArch("amd64")).toBe("x64");
 		expect(mapStainlessArch("arm64")).toBe("arm64");
@@ -164,20 +171,25 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(mapStainlessArch("sparc64")).toBe("other::sparc64");
 	});
 
-	it("matches Cowork OAuth header defaults", () => {
+	it("matches Claude Code OAuth header defaults", () => {
 		const sessionId = "167ec5b4-e711-4169-879f-84fa52679d9c";
-		const headers = buildAnthropicHeaders({
+		const { defaultHeaders: headers } = buildAnthropicClientOptions({
+			model: ANTHROPIC_MODEL,
 			apiKey: "sk-ant-oat-test",
 			isOAuth: true,
 			stream: true,
-			claudeCodeSessionId: sessionId,
+			hasTools: true,
+			thinkingEnabled: true,
+			sessionId,
 		});
 
 		expect(headers.Accept).toBe("application/json");
-		expect(headers["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
-		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
+		// Pinned literally (not via the imported constant) so a wrong version bump is caught
+		// on an observable wire header: this is the exact User-Agent the upstream expects.
+		expect(headers["User-Agent"]).toBe("claude-cli/2.1.257 (external, cli)");
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
-		expect(headers["X-Stainless-OS"]).toBe("Linux");
+		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
+		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
 		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
 		expect(headers["X-Stainless-Timeout"]).toBe("600");
 		expect(headers["anthropic-client-platform"]).toBeUndefined();
@@ -200,17 +212,17 @@ describe("Anthropic request fingerprint alignment", () => {
 			"anthropic-version",
 			"Authorization",
 			"x-app",
-			"x-client-request-id",
 			"Connection",
 			"Accept-Encoding",
 		]);
+		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["anthropic-beta"]).toBe(
-			"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
-		expect(headers["x-client-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+		expect(headers["x-client-request-id"]).toBeUndefined();
 	});
 
-	it("omits the legacy redact-thinking beta from Cowork requests", () => {
+	it("omits the legacy redact-thinking beta from Claude Code requests", () => {
 		const baseArgs = {
 			model: ANTHROPIC_MODEL,
 			apiKey: "sk-ant-oat-test",
@@ -233,6 +245,11 @@ describe("Anthropic request fingerprint alignment", () => {
 			thinkingDisplay: "omitted",
 		});
 		expect(hiddenUtility.defaultHeaders["anthropic-beta"]).not.toContain("redact-thinking-2026-02-12");
+		// Drift guard: the no-tools/no-thinking utility branch is a distinct code path
+		// (buildClaudeCodeBetas utility defaults) from the agent branch asserted above. Its
+		// OAuth beta must be present verbatim — dropping `oauth-2025-04-20` there silently
+		// reintroduces the upstream 403 with no other test failing.
+		expect(hiddenUtility.defaultHeaders["anthropic-beta"]).toContain("oauth-2025-04-20");
 	});
 
 	it("never advertises context-1m on OAuth requests for million-token models (#7238)", () => {
@@ -255,7 +272,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(
-			"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});
@@ -271,8 +288,9 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(payload.system?.[0]?.text).toStartWith("x-anthropic-billing-header:");
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
+		expect(claudeCodeSystemInstruction).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
-		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
 		expect(payload.system?.[2]?.cache_control).toBeUndefined();
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content)).toBe(true);
@@ -281,7 +299,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("never caches OAuth cloak blocks when no caller system prompt exists", async () => {
+	it("caches the Claude Code identity when no caller system prompt exists", async () => {
 		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
 			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
 		})) as {
@@ -293,7 +311,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[0]?.text).toStartWith("x-anthropic-billing-header:");
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
-		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
@@ -337,7 +355,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			messages?: Array<{ content?: Array<{ type?: string; cache_control?: unknown }> | string }>;
 		};
 
-		expect(payload.system?.some(block => block.cache_control != null)).toBe(false);
+		expect(payload.system?.filter(block => block.cache_control != null)).toHaveLength(1);
 		const messages = payload.messages ?? [];
 		expect(messages[0]?.content).toBe("Use the tool");
 		const assistantContent = messages.at(-2)?.content;
@@ -457,7 +475,9 @@ describe("Anthropic request fingerprint alignment", () => {
 			messages?: Array<{ role: string; content: string | Array<{ cache_control?: unknown }> }>;
 		};
 
-		expect(payload.system?.some(block => block.cache_control != null)).toBe(false);
+		// Only the last system block is anchored (stable head); earlier blocks stay uncached.
+		expect(payload.system?.slice(0, -1).some(block => block.cache_control != null)).toBe(false);
+		expect(payload.system?.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
 		const userContent = payload.messages?.[0]?.content;
 		expect(Array.isArray(userContent) ? userContent[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
@@ -470,7 +490,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(pad?.content).toBe("Continue.");
 	});
 
-	it("adds effort and mid-conversation betas to API-key requests that use those features", async () => {
+	it("adds only the betas API-key requests still require", async () => {
 		let capturedBeta: string | undefined;
 		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
 			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
@@ -495,11 +515,10 @@ describe("Anthropic request fingerprint alignment", () => {
 			{ apiKey: "sk-ant-api-test", thinkingEnabled: false, fetch: fetchMock },
 		).result();
 
-		// thinking-off on an adaptive-only model still pins output_config.effort,
-		// and the converter may emit mid-conversation system turns on Opus 4.8 —
-		// both fields need their betas on API-key requests too.
+		// Thinking-off on an adaptive-only model still pins output_config.effort.
+		// Mid-conversation system messages are stable and require no beta header.
 		expect(capturedBeta).toContain("effort-2025-11-24");
-		expect(capturedBeta).toContain("mid-conversation-system-2026-04-07");
+		expect(capturedBeta).not.toContain("mid-conversation-system-2026-04-07");
 	});
 
 	it("adds the effort beta when a direct forced tool choice creates an adaptive effort pin", async () => {
@@ -756,16 +775,18 @@ describe("Anthropic request fingerprint alignment", () => {
 		const billingUserOnly = payloadUserOnly.system?.[0].text ?? "";
 		const billingWithDev = payloadWithDev.system?.[0].text ?? "";
 
-		// Both payloads must carry a billing header.
+		// Both payloads must carry the CLI billing signature.
 		expect(billingUserOnly).toStartWith("x-anthropic-billing-header:");
 		expect(billingWithDev).toStartWith("x-anthropic-billing-header:");
+		expect(billingUserOnly).toContain("cc_entrypoint=cli;");
+		expect(billingWithDev).toContain("cc_entrypoint=cli;");
 
 		// The cc_version suffix (fingerprint) must be identical — developer message must not affect it.
 		const extractSuffix = (header: string) => header.match(/cc_version=[^.]+\.([a-f0-9]{3})/)?.[1];
 		expect(extractSuffix(billingWithDev)).toBe(extractSuffix(billingUserOnly));
 	});
 
-	it("leaves system blocks uncached on API-key requests", async () => {
+	it("anchors the last system block on API-key requests", async () => {
 		const payload = (await captureAnthropicPayload(
 			ANTHROPIC_MODEL,
 			{
@@ -775,10 +796,14 @@ describe("Anthropic request fingerprint alignment", () => {
 			{ isOAuth: false },
 		)) as { system?: Array<{ type: string; text?: string; cache_control?: unknown }> };
 
-		expect(payload.system).toEqual([
-			{ type: "text", text: "stable system" },
-			{ type: "text", text: "stable durable context" },
-		]);
+		// The general API-key path now anchors the stable head: the last system
+		// block carries the breakpoint, earlier blocks stay uncached.
+		expect(payload.system?.[0]).toEqual({ type: "text", text: "stable system" });
+		expect(payload.system?.[1]).toEqual({
+			type: "text",
+			text: "stable durable context",
+			cache_control: { type: "ephemeral" },
+		});
 	});
 
 	it("uses Bearer auth for non-Anthropic API bases with api-key credentials", () => {
@@ -947,7 +972,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("forwards only prefix-matching Cowork User-Agent values", () => {
+	it("forwards only prefix-matching Claude Code User-Agent values", () => {
 		const forwardedHeaders = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
 			isOAuth: true,
@@ -971,7 +996,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "curl/8.7.1" },
 		});
-		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
+		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
 
 		const embeddedClaudeCliHeaders = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
@@ -979,7 +1004,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "my-client claude-cli/2.1.63" },
 		});
-		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
+		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
 	});
 
 	it("forwards model-supplied User-Agent on API-key requests", () => {
@@ -2046,7 +2071,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
 	});
 
-	it("applies Cowork's TLS profile for direct Anthropic transport", () => {
+	it("applies Claude Code's TLS profile for direct Anthropic transport", () => {
 		const options = buildAnthropicClientOptions({
 			model: ANTHROPIC_MODEL,
 			apiKey: "sk-ant-oat-test",

@@ -2,6 +2,71 @@
 
 ## [Unreleased]
 
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added support for streaming tool argument updates, providing more responsive tool-call progress.
+
+### Changed
+
+- Improved steering behavior so queued steering commands preserve already-emitted non-interruptible tool calls while aborting or skipping only interruptible waits.
+
+## [18.1.2] - 2026-09-01
+
+### Fixed
+
+- Fixed preservation of Claude thinking/reasoning context when conversations are compacted or tool results are pruned.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed agent startup and context compaction failures for models with unrecognized tokenizer encodings.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added support for continuing interrupted agent runs with pending tool calls, allowing those calls to be retried before requesting the next model response.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed `/shake elide` handling of mixed tool results so images are preserved and token savings are reported accurately.
+
+## [18.0.7] - 2026-08-26
+
+### Fixed
+
+- Fixed Codex remote compaction to preserve images returned by image-reading tools, preventing them from being replayed as incorrect synthetic user messages.
+
+## [18.0.5] - 2026-08-25
+
+### Fixed
+
+- Corrected remote compaction summaries so they accurately report the number of input tokens processed.
+
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Improved performance in append-only context mode by memoizing message serialization, keeping per-call sync overhead flat as conversations grow.
+
+### Fixed
+
+- Fixed an issue where `onTurnEnd` was skipped for turns ended by a terminal tool result (such as a subagent's final `yield`).
+
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed Anthropic Claude tool calls containing provider-visible private-use icon glyphs by reversibly tokenizing glyphs at the wire boundary and rejecting model-invented or unresolved glyph tokens before execution.
+- Fixed agent identity confusion after session handoffs by clarifying context framing and ensuring successor instances seamlessly resume existing execution plans.
+
+## [17.4.1] - 2026-08-21
+
 ### Fixed
 
 - Fixed Codex remote compaction requests failing for region-pinned enterprise ChatGPT workspaces when requests egress from a different region.

@@ -53,6 +53,7 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
 		flushPendingCommandOutput: vi.fn(),
+		syncRetryHintRow: vi.fn(),
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map<string, unknown>(),
 		hideThinkingBlock: false,
@@ -196,6 +197,34 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await controller.handleEvent(AGENT_START);
 		expect(ctx.loadingAnimation).toBeDefined();
 		expect(statusContainer.children).toContain(ctx.loadingAnimation);
+	});
+
+	it("ticks the auto-retry countdown down on spinner ticks instead of freezing", async () => {
+		const { ctx, streamState } = createContext();
+		const controller = new EventController(ctx);
+		const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+		streamState.isStreaming = true;
+		await controller.handleEvent(RETRY_START);
+		expect(ctx.retryLoader).toBeDefined();
+
+		// Initial paint shows the full delay: RETRY_START carries delayMs 1000.
+		const first = visible(ctx.retryLoader!.render(80).join("\n"));
+		expect(first).toContain("Retrying (1/3) in 1.0s");
+
+		// 400ms of spinner ticks re-evaluate the closure: 600ms remain. A
+		// static label (the pre-fix banner) would still read "1.0s" here.
+		vi.advanceTimersByTime(400);
+		const second = visible(ctx.retryLoader!.render(80).join("\n"));
+		expect(second).toContain("in 600ms");
+		expect(second).not.toContain("in 1.0s");
+
+		// Past the deadline the remaining wait clamps at zero.
+		vi.advanceTimersByTime(2_000);
+		const third = visible(ctx.retryLoader!.render(80).join("\n"));
+		expect(third).toContain("in 0ms");
+
+		ctx.retryLoader!.stop();
 	});
 
 	it("re-shows the Working… loader after a subagent task completes while the session keeps streaming", async () => {

@@ -81,10 +81,11 @@ export interface CleanseAgentOutcome {
 	resolvedModel?: string;
 }
 
-/** Final state after one bounded repair wave and verification pass. */
+/** Final state after streamed repair dispatch and the verification pass. */
 export interface CleanseLoopResult {
 	status: "clean" | "stalled" | "cancelled";
-	waves: number;
+	/** Total repair subagents dispatched during the run. */
+	workers: number;
 	report: CleanseDiagnosticReport;
 	outcomes: CleanseAgentOutcome[];
 }

@@ -6,7 +6,8 @@ import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { GreenCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/ci-green";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -30,7 +31,9 @@ function createApi(): CustomCommandAPI {
 
 describe("GreenCommand", () => {
 	it("includes tag instructions when HEAD has a tag", async () => {
-		vi.spyOn(git.ref, "tags").mockResolvedValue(["v0.1.0-alpha2"]);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			tagsAt: async () => ["v0.1.0-alpha2"],
+		} as unknown as VcsGitRepo);
 		const command = new GreenCommand(createApi());
 
 		const result = await command.execute([], {} as HookCommandContext);
@@ -40,7 +43,9 @@ describe("GreenCommand", () => {
 	});
 
 	it("omits tag instructions when HEAD is not tagged", async () => {
-		vi.spyOn(git.ref, "tags").mockResolvedValue([]);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			tagsAt: async () => [],
+		} as unknown as VcsGitRepo);
 		const command = new GreenCommand(createApi());
 
 		const result = await command.execute([], {} as HookCommandContext);

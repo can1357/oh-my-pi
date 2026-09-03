@@ -16,6 +16,7 @@ import {
 } from "../modes/utils/context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
 import { getLatestCompactionEntry } from "./session-context";
+import type { ModelUsageEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 interface PendingContextSnapshot {
@@ -43,6 +44,32 @@ export interface SessionStatsTrackerHost {
 function correctedPromptTokens(assistant: AssistantMessage): number {
 	const providerPromptTokens = assistant.contextSnapshot?.promptTokens ?? calculatePromptTokens(assistant.usage);
 	return Math.max(0, providerPromptTokens - (assistant.contextSnapshot?.historyRewriteTokensRemoved ?? 0));
+}
+
+function isUsageWindowBoundary(entry: SessionEntry): boolean {
+	return (
+		entry.type === "message" ||
+		entry.type === "custom_message" ||
+		entry.type === "branch_summary" ||
+		entry.type === "compaction" ||
+		entry.type === "reset_boundary"
+	);
+}
+
+/** Model calls belonging to the same active transcript window as `agent.state.messages`. */
+function activeModelUsageEntries(branch: SessionEntry[]): ModelUsageEntry[] {
+	const latestCompaction = getLatestCompactionEntry(branch);
+	const compactionIndex = latestCompaction ? branch.lastIndexOf(latestCompaction) : -1;
+	const resetIndex = branch.reduce((latest, entry, index) => (entry.type === "reset_boundary" ? index : latest), -1);
+	let startIndex = 0;
+	if (resetIndex > compactionIndex) {
+		startIndex = resetIndex + 1;
+	} else if (latestCompaction) {
+		const firstKeptIndex = branch.findIndex(entry => entry.id === latestCompaction.firstKeptEntryId);
+		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex + 1;
+		while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
+	}
+	return branch.slice(startIndex).filter((entry): entry is ModelUsageEntry => entry.type === "model_usage");
 }
 
 /** Computes session totals and tracks the in-flight context estimate. */
@@ -95,32 +122,47 @@ export class SessionStatsTracker {
 		let totalTokens = 0;
 		let totalCost = 0;
 		let totalPremiumRequests = 0;
+		let creditCost = 0;
+		let committedCreditCost = 0;
+		let committedAcuCost = 0;
+		let hasCredits = false;
+		const routedModels: Record<string, number> = {};
+		const addUsage = (usage: Usage): void => {
+			totalInput += usage.input;
+			totalOutput += usage.output;
+			totalReasoning += usage.reasoningTokens ?? 0;
+			totalCacheRead += usage.cacheRead;
+			totalCacheWrite += usage.cacheWrite;
+			totalTokens += usage.totalTokens;
+			totalPremiumRequests += usage.premiumRequests ?? 0;
+			totalCost += usage.cost.total;
+			const credits = usage.credits;
+			if (credits !== undefined) {
+				hasCredits = true;
+				creditCost += credits.cost ?? 0;
+				committedCreditCost += credits.committedCost ?? 0;
+				committedAcuCost += credits.acuCost ?? 0;
+			}
+		};
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistant = message;
 				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				totalInput += assistant.usage.input;
-				totalOutput += assistant.usage.output;
-				totalReasoning += assistant.usage.reasoningTokens ?? 0;
-				totalCacheRead += assistant.usage.cacheRead;
-				totalCacheWrite += assistant.usage.cacheWrite;
-				totalTokens += assistant.usage.totalTokens;
-				totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
-				totalCost += assistant.usage.cost.total;
+				// Persisted and imported transcripts can predate usage metadata despite the current message type.
+				const usage = assistant.usage;
+				if (!usage) continue;
+				addUsage(usage);
+				if (assistant.upstreamModel !== undefined) {
+					routedModels[assistant.upstreamModel] = (routedModels[assistant.upstreamModel] ?? 0) + 1;
+				}
 			}
 			if (message.role === "toolResult" && message.toolName === "task") {
 				const usage = taskToolUsage(message.details);
 				if (!usage) continue;
-				totalInput += usage.input;
-				totalOutput += usage.output;
-				totalReasoning += usage.reasoningTokens ?? 0;
-				totalCacheRead += usage.cacheRead;
-				totalCacheWrite += usage.cacheWrite;
-				totalTokens += usage.totalTokens;
-				totalPremiumRequests += usage.premiumRequests ?? 0;
-				totalCost += usage.cost.total;
+				addUsage(usage);
 			}
 		}
+		for (const entry of activeModelUsageEntries(this.#host.sessionManager.getBranch())) addUsage(entry.usage);
 		return {
 			sessionFile: this.#host.sessionManager.getSessionFile(),
 			sessionId: this.#host.sessionId(),
@@ -139,6 +181,16 @@ export class SessionStatsTracker {
 			},
 			cost: totalCost,
 			premiumRequests: totalPremiumRequests,
+			...(hasCredits
+				? {
+						credits: {
+							cost: creditCost,
+							committedCost: committedCreditCost,
+							acuCost: committedAcuCost,
+						},
+					}
+				: undefined),
+			...(Object.keys(routedModels).length > 0 ? { routedModels } : undefined),
 			contextUsage: this.getContextUsage(),
 		};
 	}

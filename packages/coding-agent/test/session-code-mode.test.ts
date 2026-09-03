@@ -9,13 +9,30 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
+import { EVAL_AGENT_BRIDGE_NAME } from "../src/eval/agent-bridge";
+import { EVAL_BUDGET_BRIDGE_NAME } from "../src/eval/budget-bridge";
+import { EVAL_COMPLETION_BRIDGE_NAME } from "../src/eval/completion-bridge";
+import { EVAL_CONCURRENCY_BRIDGE_NAME } from "../src/eval/concurrency-bridge";
 import { createAgentSession } from "../src/sdk";
 import { AgentSession } from "../src/session/agent-session";
 import type { ToolNamespacesInfo } from "../src/session/code-mode";
 import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mode";
 import { SessionManager } from "../src/session/session-manager";
+import { generateCodeModeDeclarations } from "../src/tools/eval-format/code-mode-declarations";
 
-const ENABLED = ["eval", "ask", "todo", "yield", "think", "read", "bash", "edit", "mcp__gmail__search"];
+const ENABLED = [
+	"eval",
+	"ask",
+	"todo",
+	"yield",
+	"think",
+	"checkpoint",
+	"rewind",
+	"read",
+	"bash",
+	"edit",
+	"mcp__gmail__search",
+];
 
 describe("resolveCodeMode", () => {
 	test("off: inactive regardless of catalog flag", () => {
@@ -38,7 +55,7 @@ describe("resolveCodeMode", () => {
 			evalTransportAvailable: true,
 		});
 		expect(r.active).toBe(true);
-		expect([...r.directToolNames].sort()).toEqual(["ask", "eval", "think", "todo", "yield"]);
+		expect([...r.directToolNames].sort()).toEqual(["ask", "checkpoint", "eval", "rewind", "think", "todo", "yield"]);
 	});
 	test("auto without flag: inactive", () => {
 		expect(
@@ -114,6 +131,34 @@ describe("resolveCodeMode", () => {
 		});
 		expect([...r.directToolNames]).toEqual(["eval"]);
 	});
+	test("prototype-named tools do not bypass the keep-set", () => {
+		const r = resolveCodeMode({
+			provider: "openai-codex",
+			toolMode: "code_mode_only",
+			setting: "auto",
+			enabledToolNames: ["eval", "toString", "__proto__"],
+			evalTransportAvailable: true,
+		});
+		expect([...r.directToolNames]).toEqual(["eval"]);
+	});
+	test("reserved eval bridge names stay direct", () => {
+		// `callSessionTool` consumes these before the registry, so demoting a tool
+		// that shares one of those names would make it unreachable.
+		const reserved = [
+			EVAL_AGENT_BRIDGE_NAME,
+			EVAL_BUDGET_BRIDGE_NAME,
+			EVAL_COMPLETION_BRIDGE_NAME,
+			EVAL_CONCURRENCY_BRIDGE_NAME,
+		];
+		const r = resolveCodeMode({
+			provider: "openai-codex",
+			toolMode: "code_mode_only",
+			setting: "auto",
+			enabledToolNames: ["eval", "read", ...reserved],
+			evalTransportAvailable: true,
+		});
+		expect([...r.directToolNames]).toEqual(["eval", ...reserved]);
+	});
 });
 
 describe("buildToolNamespacesInfo", () => {
@@ -159,6 +204,61 @@ describe("buildToolNamespacesInfo", () => {
 			source: { kind: "harness" },
 		});
 		expect(info.functions.functions.edit).toBeUndefined();
+	});
+	test("a direct wire alias wins its name regardless of registry order", () => {
+		const tools = [{ name: "edit", customWireName: "apply_patch" }, { name: "apply_patch" }];
+		const direct = new Set(["edit"]);
+		const forward = buildToolNamespacesInfo({ tools, directToolNames: direct });
+		const reversed = buildToolNamespacesInfo({ tools: [...tools].reverse(), directToolNames: direct });
+
+		for (const info of [forward, reversed]) {
+			expect(info.functions.functions.apply_patch).toEqual({
+				name: "apply_patch",
+				direct: true,
+				code_mode_name: "edit",
+				deferred: false,
+				source: { kind: "harness" },
+			});
+		}
+	});
+
+	test("an exact direct name wins over a colliding direct alias", () => {
+		const tools = [{ name: "edit", customWireName: "apply_patch" }, { name: "apply_patch" }];
+		const direct = new Set(["edit", "apply_patch"]);
+
+		for (const ordered of [tools, [...tools].reverse()]) {
+			const info = buildToolNamespacesInfo({ tools: ordered, directToolNames: direct });
+			expect(info.functions.functions.apply_patch?.code_mode_name).toBe("apply_patch");
+		}
+	});
+
+	test("a tool losing its wire name stays reachable through the bridge", () => {
+		// The metadata advertises one callable per wire name, so the loser is
+		// unadvertised there - but the bridge resolves by real tool name, and the
+		// eval declarations are generated from the bridge names, so it stays
+		// callable as `tool.apply_patch()`.
+		const info = buildToolNamespacesInfo({
+			tools: [{ name: "edit", customWireName: "apply_patch" }, { name: "apply_patch" }],
+			directToolNames: new Set(["edit"]),
+		});
+		expect(Object.keys(info.functions.functions)).toEqual(["apply_patch"]);
+
+		const declarations = generateCodeModeDeclarations([{ name: "apply_patch", parameters: undefined }]);
+		expect(declarations).toContain("apply_patch(args: unknown): Promise<unknown>;");
+	});
+
+	test("prototype-named tools land as own entries", () => {
+		const info = buildToolNamespacesInfo({
+			tools: [{ name: "toString" }, { name: "__proto__" }],
+			directToolNames: new Set<string>(),
+		});
+
+		const wire = new Map<string, { code_mode_name: string }>(
+			Object.entries(JSON.parse(JSON.stringify(info)).functions.functions),
+		);
+		expect([...wire.keys()].sort()).toEqual(["__proto__", "toString"]);
+		expect(wire.get("toString")?.code_mode_name).toBe("toString");
+		expect(wire.get("__proto__")?.code_mode_name).toBe("__proto__");
 	});
 });
 
@@ -263,6 +363,28 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
 	});
 
+	test("a caller slate without eval keeps Code Mode inactive", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
+
+		await session.setActiveToolsByName(["read"]);
+
+		expect(session.getEnabledToolNames()).toEqual(["read"]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.codeModeNamespacesInfo).toBeUndefined();
+	});
+
+	test("startup reconcile survives a transiently narrow live tool set", async () => {
+		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
+		// Before the first apply, a startup-time mutation can shrink the live
+		// agent tools. A reconcile landing in that window must reapply the
+		// construction slate, not commit the shrunken set as sticky.
+		session.agent.setTools([]);
+		await session.initializeCodeMode();
+
+		expect(session.getEnabledToolNames()).toEqual(["eval", "read"]);
+		expect(session.getActiveToolNames()).toEqual(["eval"]);
+	});
+
 	test("an eval replacement that cannot state transport support keeps the direct surface", async () => {
 		const { session } = createSession(
 			Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
@@ -333,30 +455,6 @@ describe("Code Mode session reconciliation", () => {
 		settings.set("eval.js", true);
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.getActiveToolNames()).toEqual(["eval"]);
-	});
-
-	test("reduced tool sets retain eval as the Code Mode transport", async () => {
-		const { session } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
-
-		await session.setActiveToolsByName(["read"]);
-
-		expect(session.getActiveToolNames()).toEqual(["eval"]);
-		expect(session.getEnabledToolNames()).toEqual(["read", "eval"]);
-		expect(session.getToolForEvalBridge("read")?.name).toBe("read");
-	});
-
-	test("Code Mode deactivation removes transport-injected eval", async () => {
-		const settings = Settings.isolated();
-		settings.set("providers.openai-codex.codeMode", "auto");
-		const { session } = createSession(settings);
-		await session.setActiveToolsByName(["read"]);
-		expect(session.getEnabledToolNames()).toEqual(["read", "eval"]);
-
-		settings.set("providers.openai-codex.codeMode", "off");
-		await session.runToolRegistryMutation(async () => undefined);
-
-		expect(session.getActiveToolNames()).toEqual(["read"]);
-		expect(session.getEnabledToolNames()).toEqual(["read"]);
 	});
 
 	test("Vibe teardown preserves bridge-enabled Code Mode tools", async () => {
@@ -450,6 +548,34 @@ describe("Code Mode session reconciliation", () => {
 
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 		expect(session.getActiveToolNames()).toEqual(["eval", "read"]);
+	});
+
+	test("plan guidance keeps task delegation after Code Mode demotes the tool", async () => {
+		async function planPrompt(codeMode: "on" | "off", extraTools: AgentTool[], names: string[]): Promise<string> {
+			const { session } = createSession(
+				Settings.isolated({ "providers.openai-codex.codeMode": codeMode }),
+				undefined,
+				undefined,
+				extraTools,
+			);
+			await session.setActiveToolsByName(names);
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.sendPlanModeContext();
+			const planMessage = session.state.messages.find(
+				message => (message as { customType?: string }).customType === "plan-mode-context",
+			);
+			return String((planMessage as { content?: string })?.content);
+		}
+
+		// The contract is invariance: demoting `task` off the direct surface is a
+		// transport change, so the guidance must match a session where `task` is
+		// directly callable, and must differ from one that cannot delegate at all.
+		const demoted = await planPrompt("on", [tool("task")], ["eval", "task"]);
+		const direct = await planPrompt("off", [tool("task")], ["eval", "task"]);
+		const unavailable = await planPrompt("on", [], ["eval"]);
+
+		expect(demoted).toBe(direct);
+		expect(demoted).not.toBe(unavailable);
 	});
 });
 

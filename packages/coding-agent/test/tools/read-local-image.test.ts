@@ -22,8 +22,10 @@ const TINY_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
 	"base64",
 );
+const TINY_SVG =
+	'<svg xmlns="http://www.w3.org/2000/svg" width="12" height="7"><rect width="12" height="7" fill="red"/></svg>';
 
-function makeSession(testDir: string): ToolSession {
+function makeSession(testDir: string, inspectImageActive = false): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
 	const artifactsDir = sessionFile.slice(0, -6);
 	return {
@@ -34,7 +36,7 @@ function makeSession(testDir: string): ToolSession {
 		getSessionSpawns: () => null,
 		// A restricted slate without inspect_image (and no xdev mount) must keep
 		// inlining images — metadata-only guidance would point at an absent tool.
-		isToolActive: () => false,
+		isToolActive: (name: string) => inspectImageActive && name === "inspect_image",
 		settings: Settings.isolated({ "images.autoResize": false }),
 	} as unknown as ToolSession;
 }
@@ -82,6 +84,37 @@ describe("read local:// images", () => {
 		// the replacement char; the fixed path must never emit it as text.
 		expect(joinText(result.content)).not.toContain("\uFFFDPNG");
 	});
+	it("rasterizes a local SVG into a PNG attachment when :img is selected", async () => {
+		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: `${path.join(localRoot, "diagram.svg")}:img` });
+
+		const image = result.content.find(content => content.type === "image");
+		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
+		const png = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
+		expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+		expect(joinText(result.content)).toContain("Read SVG file [image/png]");
+	});
+	it("directs a selected SVG through inspect_image when native vision is unavailable", async () => {
+		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
+		const tool = new ReadTool(makeSession(testDir, true));
+
+		const result = await tool.execute("call", { path: "local://diagram.svg:img" });
+
+		expect(result.content.some(content => content.type === "image")).toBe(false);
+		expect(joinText(result.content)).toContain('diagram.svg:img"');
+	});
+
+	it("keeps a local SVG as text without :img", async () => {
+		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: "local://diagram.svg" });
+
+		expect(result.content.some(content => content.type === "image")).toBe(false);
+		expect(joinText(result.content)).toContain("<svg");
+	});
 
 	it("still reads a local:// text file as text (fast path falls through)", async () => {
 		await Bun.write(path.join(localRoot, "notes.txt"), "hello world");
@@ -93,33 +126,30 @@ describe("read local:// images", () => {
 		expect(joinText(result.content)).toContain("hello world");
 	});
 
-	it("rejects a local:// non-image binary without emitting decoded bytes", async () => {
+	it("surfaces a corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
 		await Bun.write(path.join(localRoot, "clip.mp4"), new Uint8Array([0, 1, 2, 3, 4, 5]));
 		const tool = new ReadTool(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://clip.mp4" });
-		const text = joinText(result.content);
+		const error = await tool.execute("call", { path: "local://clip.mp4" }).catch(e => e);
+		const text = String(error?.message ?? error);
 
-		expect(text).toContain("Cannot read binary file");
+		expect(text).toContain("Could not probe video");
 		expect(text).toContain("clip.mp4");
 		expect(text).not.toContain("\u0000");
 	});
 
-	it("rejects a large local:// binary whose first line exceeds the streaming byte budget", async () => {
-		// The streaming reader's byte budget is `max(DEFAULT_MAX_BYTES, defaultLimit*512)` —
-		// 150 KiB under default settings. A NUL-filled blob larger than that with no 0x0A
-		// byte forces streamLinesFromFile into the firstLineExceedsLimit path: collectedLines
-		// stays empty, so the NUL check that walks collectedLines never sees these bytes.
-		// Without the firstLinePreview guard, the preview would be decoded as UTF-8 and
-		// emitted as text (the reviewer's video/archive case).
+	it("surfaces a large corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
+		// A NUL-filled blob wearing a video extension must fail in ffprobe, not in
+		// the text pipeline: the video reader owns every video path before the
+		// binary sniff, so no byte budget or line scan ever sees these bytes.
 		const blob = new Uint8Array(256 * 1024);
 		await Bun.write(path.join(localRoot, "video.mp4"), blob);
 		const tool = new ReadTool(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://video.mp4" });
-		const text = joinText(result.content);
+		const error = await tool.execute("call", { path: "local://video.mp4" }).catch(e => e);
+		const text = String(error?.message ?? error);
 
-		expect(text).toContain("Cannot read binary file");
+		expect(text).toContain("Could not probe video");
 		expect(text).toContain("video.mp4");
 		expect(text).not.toContain("\u0000");
 	});

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
@@ -30,6 +30,7 @@ import {
 	PROTOCOL_VERSION,
 	type PromptRequest,
 	type PromptResponse,
+	RequestError,
 	type ResumeSessionRequest,
 	type ResumeSessionResponse,
 	type SessionConfigOption,
@@ -274,14 +275,12 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 			speechVoiceSetting: "speech.voice",
 			defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
 			defaultVoice: DEFAULT_TTS_VOICE,
-			models: TTS_LOCAL_MODELS.map(
-				({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				}),
-			),
+			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
+				value: key,
+				label,
+				description,
+				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
+			})),
 			voices,
 		},
 	};
@@ -869,8 +868,21 @@ export class AcpAgent implements Agent {
 				this.#trackPromptEvent(record, event);
 			});
 
+			// Autonomous turns stream without an owning promptTurn, so the implicit-cancel
+			// guard above cannot fire and a client prompt lands on AgentSession's busy
+			// guard. Type that failure for the wire instead of letting transport.ts wrap
+			// it as a generic -32603 internal error.
 			this.#runPromptOrCommand(record, converted.text, converted.images).catch((error: unknown) => {
-				this.#finishPrompt(record, undefined, error);
+				this.#finishPrompt(
+					record,
+					undefined,
+					error instanceof AgentBusyError
+						? RequestError.sessionBusy(error.message, {
+								reason: "session_busy",
+								hint: "steer|followUp|wait",
+							})
+						: error,
+				);
 			});
 
 			return await pendingPrompt.promise;
@@ -986,7 +998,18 @@ export class AcpAgent implements Agent {
 		});
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
-				await record.session.prompt(builtinResult.prompt, { images });
+				const residualBaseline = new Set(record.extensionUserMessageTasks);
+				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images });
+				// A residual prompt can itself resolve locally (extension command,
+				// custom-TS command, file prompt template). No agent turn means no
+				// `agent_end`, so the prompt turn must be settled here — same pairing
+				// as the plain-prompt `!agentInvoked` path below — or the ACP
+				// `session/prompt` request never resolves (#9206).
+				if (!residualAgentInvoked) {
+					await this.#waitForExtensionUserMessages(record, residualBaseline);
+					await this.#waitForPromptEventHandlers(record);
+					this.#finishPrompt(record, { stopReason: "end_turn" });
+				}
 				return;
 			}
 			const promptTurn = record.promptTurn;
@@ -1496,7 +1519,7 @@ export class AcpAgent implements Agent {
 	/**
 	 * Surface a turn-fatal provider error that never reached the client. A
 	 * request that fails before streaming any assistant events — e.g. GitHub
-	 * Copilot's `HTTP 400 model_not_supported` after retries — emits only
+	 * Copilot's `HTTP 400 model_not_supported` — emits only
 	 * `agent_end` with an empty assistant message carrying `errorMessage`
 	 * (`Agent#runLoop`'s catch), so no `message_update`/`message_end` ever maps
 	 * to a session update and the client sees the turn end silently. Errors
@@ -2106,10 +2129,13 @@ export class AcpAgent implements Agent {
 		const cwd = record.session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await refreshAgentDiscovery(cwd);
+		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
 		resetCapabilities();
 		await record.session.refreshSkills();
-		const fileCommands = await loadSlashCommands({ cwd });
+		const fileCommands = await loadSlashCommands({
+			cwd,
+			extensionRoots: record.session.effectiveExtensionRoots,
+		});
 		record.session.setSlashCommands(fileCommands);
 		await this.#emitAvailableCommandsUpdate(record);
 	}

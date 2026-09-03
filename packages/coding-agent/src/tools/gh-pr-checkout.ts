@@ -2,8 +2,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
+import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { github } from "../utils/github";
+import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { withRepoLock } from "../utils/repo-lock";
 import type { ToolSession } from ".";
 import type { GhPrCheckoutSummary, GhToolDetails } from "./gh";
 import {
@@ -11,10 +15,12 @@ import {
 	buildTextResult,
 	formatAuthor,
 	formatLabels,
+	formatRepoRef,
 	normalizeOptionalString,
 	normalizePrIdentifierList,
 	normalizeText,
 	parsePullRequestUrl,
+	parseRepoRef,
 	pushLine,
 	requireCurrentGitBranch,
 	requireNonEmpty,
@@ -38,6 +44,7 @@ export const GH_PR_CHECKOUT_FIELDS = [
 	"title",
 	"url",
 ];
+const PR_FETCH_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function sanitizeRemoteName(value: string): string {
 	const sanitized = value
@@ -56,7 +63,8 @@ export function toLocalBranchRef(value: string): string {
 }
 
 export async function requireGitRepoRoot(cwd: string, signal?: AbortSignal): Promise<string> {
-	const repoRoot = await git.repo.root(cwd, signal);
+	signal?.throwIfAborted();
+	const repoRoot = vcs.git(cwd)?.info().repoRoot;
 	if (!repoRoot) {
 		throw new ToolError("Current git repository is unavailable.");
 	}
@@ -65,7 +73,8 @@ export async function requireGitRepoRoot(cwd: string, signal?: AbortSignal): Pro
 }
 
 export async function requirePrimaryGitRepoRoot(cwd: string, signal?: AbortSignal): Promise<string> {
-	const primaryRepoRoot = await git.repo.primaryRoot(cwd, signal);
+	signal?.throwIfAborted();
+	const primaryRepoRoot = vcs.git(cwd)?.primaryRoot();
 	if (!primaryRepoRoot) {
 		throw new ToolError("Current git repository is unavailable.");
 	}
@@ -86,7 +95,7 @@ export async function requirePrimaryGitRepoRoot(cwd: string, signal?: AbortSigna
  */
 export async function resolveAvailableWorktreePath(
 	basePath: string,
-	existingWorktrees: git.GitWorktreeEntry[],
+	existingWorktrees: VcsWorktreeEntry[],
 ): Promise<string> {
 	const registered = new Set(existingWorktrees.map(entry => path.resolve(entry.path)));
 	for (let attempt = 0; attempt < WORKTREE_PATH_MAX_SUFFIX; attempt += 1) {
@@ -116,13 +125,12 @@ export function selectPrCloneUrl(originUrl: string | undefined, repo: Pick<GhRep
 }
 
 export async function getRemoteUrls(repoRoot: string, signal?: AbortSignal): Promise<Map<string, string>> {
-	const remotes = await git.remote.list(repoRoot, signal);
+	const repo = vcs.requireGit(repoRoot);
+	const remotes = await repo.remoteList(signal);
 	const urls = new Map<string, string>();
 	for (const remoteName of remotes) {
-		const remoteUrl = await git.remote.url(repoRoot, remoteName, signal);
-		if (remoteUrl) {
-			urls.set(remoteName, remoteUrl);
-		}
+		const remoteUrl = await repo.remoteUrl(remoteName, signal);
+		if (remoteUrl) urls.set(remoteName, remoteUrl);
 	}
 	return urls;
 }
@@ -132,8 +140,17 @@ export async function ensurePrRemote(
 	data: GhPrViewData,
 	signal?: AbortSignal,
 ): Promise<{ name: string; url: string }> {
+	return ensurePrRemoteWithRepo(repoRoot, data, vcs.requireGit(repoRoot), signal);
+}
+
+async function ensurePrRemoteWithRepo(
+	repoRoot: string,
+	data: GhPrViewData,
+	repository: VcsGitRepo,
+	signal?: AbortSignal,
+): Promise<{ name: string; url: string }> {
 	if (!data.isCrossRepository) {
-		const originUrl = await git.remote.url(repoRoot, "origin", signal);
+		const originUrl = await repository.remoteUrl("origin", signal);
 		if (!originUrl) {
 			throw new ToolError("origin remote is unavailable for this repository.");
 		}
@@ -145,19 +162,25 @@ export async function ensurePrRemote(
 	}
 
 	const headRepository = requireNonEmpty(data.headRepository?.nameWithOwner, "head repository");
-	const repoSummary = await git.github.json<GhRepoViewData>(
+	const pullRepo = parsePullRequestUrl(data.url).repo;
+	const pullHost = pullRepo ? parseRepoRef(pullRepo).host : undefined;
+	const repoSummary = await github.json<GhRepoViewData>(
 		repoRoot,
-		["repo", "view", headRepository, "--json", GH_REPO_CLONE_FIELDS.join(",")],
+		["repo", "view", formatRepoRef(pullHost, headRepository), "--json", GH_REPO_CLONE_FIELDS.join(",")],
 		signal,
 		{ repoProvided: true },
 	);
-	const originUrl = await git.remote.url(repoRoot, "origin", signal);
-	const remoteUrl = selectPrCloneUrl(originUrl, repoSummary);
+	const originUrl = await repository.remoteUrl("origin", signal);
+	const remoteUrl = selectPrCloneUrl(originUrl ?? undefined, repoSummary);
 	if (!remoteUrl) {
 		throw new ToolError(`Could not determine a clone URL for ${headRepository}.`);
 	}
 
-	const remotes = await getRemoteUrls(repoRoot, signal);
+	const remotes = new Map<string, string>();
+	for (const remoteName of await repository.remoteList(signal)) {
+		const url = await repository.remoteUrl(remoteName, signal);
+		if (url) remotes.set(remoteName, url);
+	}
 	for (const [remoteName, url] of remotes) {
 		if (url === remoteUrl) {
 			return { name: remoteName, url };
@@ -174,7 +197,7 @@ export async function ensurePrRemote(
 		suffix += 1;
 	}
 
-	await git.remote.add(repoRoot, remoteName, remoteUrl, signal);
+	await repository.remoteAdd(remoteName, remoteUrl, signal);
 
 	return {
 		name: remoteName,
@@ -194,21 +217,19 @@ export async function resolvePrBranchPushTarget(
 	maintainerCanModify?: boolean;
 	isCrossRepository: boolean;
 }> {
-	const headRef = await git.config.getBranch(repoRoot, localBranch, "ompPrHeadRef", signal);
+	const repository = vcs.requireGit(repoRoot);
+	const configPrefix = `branch.${localBranch}.`;
+	const [headRef, pushRemote, remote, prUrl, maintainerCanModifyValue, isCrossRepositoryValue] = await Promise.all([
+		repository.configGet(`${configPrefix}ompPrHeadRef`, signal),
+		repository.configGet(`${configPrefix}pushRemote`, signal),
+		repository.configGet(`${configPrefix}remote`, signal),
+		repository.configGet(`${configPrefix}ompPrUrl`, signal),
+		repository.configGet(`${configPrefix}ompPrMaintainerCanModify`, signal),
+		repository.configGet(`${configPrefix}ompPrIsCrossRepository`, signal),
+	]);
 	if (!headRef) {
 		throw new ToolError(`branch ${localBranch} has no PR push metadata; check it out via op: pr_checkout first`);
 	}
-
-	const pushRemote = await git.config.getBranch(repoRoot, localBranch, "pushRemote", signal);
-	const remote = await git.config.getBranch(repoRoot, localBranch, "remote", signal);
-	const prUrl = await git.config.getBranch(repoRoot, localBranch, "ompPrUrl", signal);
-	const maintainerCanModifyValue = await git.config.getBranch(
-		repoRoot,
-		localBranch,
-		"ompPrMaintainerCanModify",
-		signal,
-	);
-	const isCrossRepositoryValue = await git.config.getBranch(repoRoot, localBranch, "ompPrIsCrossRepository", signal);
 
 	const remoteName = pushRemote ?? remote;
 	if (!remoteName) {
@@ -218,10 +239,10 @@ export async function resolvePrBranchPushTarget(
 	return {
 		remoteName,
 		remoteBranch: headRef,
-		remoteUrl: await git.remote.url(repoRoot, remoteName, signal),
-		prUrl,
+		remoteUrl: (await repository.remoteUrl(remoteName, signal)) ?? undefined,
+		prUrl: prUrl ?? undefined,
 		maintainerCanModify:
-			maintainerCanModifyValue === undefined
+			maintainerCanModifyValue == null
 				? undefined
 				: ["1", "true", "yes", "on"].includes(maintainerCanModifyValue.toLowerCase()),
 		isCrossRepository: ["1", "true", "yes", "on"].includes((isCrossRepositoryValue ?? "").toLowerCase()),
@@ -235,8 +256,9 @@ export function formatPrCheckoutResult(options: {
 	remoteName: string;
 	remoteUrl: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }): string {
-	const { data, localBranch, worktreePath, remoteName, remoteUrl, reused } = options;
+	const { data, localBranch, worktreePath, remoteName, remoteUrl, reused, clonedWith } = options;
 	const lines: string[] = [
 		reused ? `# Pull Request #${data.number ?? "?"} Worktree` : `# Checked Out Pull Request #${data.number ?? "?"}`,
 		"",
@@ -246,7 +268,11 @@ export function formatPrCheckoutResult(options: {
 	pushLine(lines, "Base", data.baseRefName);
 	pushLine(lines, "Head", data.headRefName);
 	pushLine(lines, "Local branch", localBranch);
-	pushLine(lines, "Worktree", worktreePath);
+	pushLine(
+		lines,
+		"Worktree",
+		clonedWith != null ? `${worktreePath} (cloned via ${formatIsolationBackend(clonedWith)})` : worktreePath,
+	);
 	pushLine(lines, "Remote", remoteName);
 	pushLine(lines, "Remote URL", remoteUrl);
 	pushLine(lines, "Cross repository", data.isCrossRepository);
@@ -366,6 +392,7 @@ export interface PrCheckoutOutcome {
 	remoteUrl: string;
 	headRefName: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }
 
 export async function checkoutPullRequest(
@@ -382,7 +409,7 @@ export async function checkoutPullRequest(
 	appendRepoFlag(args, repo, prRef);
 	args.push("--json", GH_PR_CHECKOUT_FIELDS.join(","));
 
-	const data = await git.github.json<GhPrViewData>(session.cwd, args, signal, {
+	const data = await github.json<GhPrViewData>(session.cwd, args, signal, {
 		repoProvided: Boolean(repo),
 	});
 	const prNumber = data.number;
@@ -405,26 +432,27 @@ export async function checkoutPullRequest(
 	// races and surface "could not lock config file" / "Another git process
 	// seems to be running" errors. The gh API call above stays outside the
 	// lock so multiple checkouts can fetch PR metadata in parallel.
-	return git.withRepoLock(
+	return withRepoLock(
 		repoRoot,
 		async () => {
-			const existingWorktrees = await git.worktree.list(repoRoot, signal);
+			const repository = vcs.requireGit(repoRoot);
+			const existingWorktrees = await repository.worktrees(signal);
 			const existingWorktree = existingWorktrees.find(entry => entry.branch === toLocalBranchRef(localBranch));
 
-			const remote = await ensurePrRemote(repoRoot, data, signal);
-			await git.fetch(
-				repoRoot,
+			const remote = await ensurePrRemoteWithRepo(repoRoot, data, repository, signal);
+			await repository.fetch(
 				remote.name,
 				`refs/heads/${headRefName}`,
 				`refs/remotes/${remote.name}/${headRefName}`,
-				{ signal },
+				PR_FETCH_TIMEOUT_MS,
+				signal,
 			);
 
 			if (!existingWorktree) {
 				const localBranchRef = toLocalBranchRef(localBranch);
-				const localBranchExists = await git.ref.exists(repoRoot, localBranchRef, signal);
+				const localBranchExists = await repository.refExists(localBranchRef, signal);
 				if (localBranchExists) {
-					const existingOid = await git.ref.resolve(repoRoot, localBranchRef, signal);
+					const existingOid = await repository.resolveRef(localBranchRef, signal);
 					if (existingOid !== headRefOid) {
 						if (!force) {
 							throw new ToolError(
@@ -432,38 +460,57 @@ export async function checkoutPullRequest(
 							);
 						}
 
-						await git.branch.force(repoRoot, localBranch, `refs/remotes/${remote.name}/${headRefName}`, signal);
+						await repository.createBranch(
+							localBranch,
+							`refs/remotes/${remote.name}/${headRefName}`,
+							true,
+							signal,
+						);
 					}
 				} else {
-					await git.branch.create(repoRoot, localBranch, `refs/remotes/${remote.name}/${headRefName}`, signal);
+					await repository.createBranch(localBranch, `refs/remotes/${remote.name}/${headRefName}`, false, signal);
 				}
 			}
 
-			await git.config.setBranch(repoRoot, localBranch, "remote", remote.name, signal);
-			await git.config.setBranch(repoRoot, localBranch, "merge", `refs/heads/${headRefName}`, signal);
-			await git.config.setBranch(repoRoot, localBranch, "pushRemote", remote.name, signal);
-			await git.config.setBranch(repoRoot, localBranch, "ompPrHeadRef", headRefName, signal);
-			await git.config.setBranch(repoRoot, localBranch, "ompPrUrl", data.url ?? "", signal);
-			await git.config.setBranch(
-				repoRoot,
-				localBranch,
-				"ompPrIsCrossRepository",
+			const configPrefix = `branch.${localBranch}.`;
+			await repository.configSet(`${configPrefix}remote`, remote.name, signal);
+			await repository.configSet(`${configPrefix}merge`, `refs/heads/${headRefName}`, signal);
+			await repository.configSet(`${configPrefix}pushRemote`, remote.name, signal);
+			await repository.configSet(`${configPrefix}ompPrHeadRef`, headRefName, signal);
+			await repository.configSet(`${configPrefix}ompPrUrl`, data.url ?? "", signal);
+			await repository.configSet(
+				`${configPrefix}ompPrIsCrossRepository`,
 				String(Boolean(data.isCrossRepository)),
 				signal,
 			);
-			await git.config.setBranch(
-				repoRoot,
-				localBranch,
-				"ompPrMaintainerCanModify",
+			await repository.configSet(
+				`${configPrefix}ompPrMaintainerCanModify`,
 				String(Boolean(data.maintainerCanModify)),
 				signal,
 			);
 
 			let finalWorktreePath = existingWorktree?.path ?? worktreePath;
+			let clonedWith: IsoBackendKind | undefined;
 			if (!existingWorktree) {
 				finalWorktreePath = await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
 				await fs.mkdir(path.dirname(finalWorktreePath), { recursive: true });
-				await git.worktree.add(repoRoot, finalWorktreePath, localBranch, { signal });
+				const result = await repository.worktreeAdd(
+					finalWorktreePath,
+					localBranch,
+					{
+						detach: false,
+						clone: session.settings.get("worktree.clone"),
+						backend: parseIsolationBackend(session.settings.get("isolation.backend")),
+					},
+					signal,
+				);
+				clonedWith = result.clonedWith ?? undefined;
+				if (result.cloneError) {
+					logger.warn("worktree clone fell back to plain checkout", {
+						path: finalWorktreePath,
+						error: result.cloneError,
+					});
+				}
 			}
 			const resolvedWorktreePath = await fs.realpath(finalWorktreePath);
 
@@ -475,6 +522,7 @@ export async function checkoutPullRequest(
 				remoteUrl: remote.url,
 				headRefName,
 				reused: Boolean(existingWorktree),
+				clonedWith,
 			};
 		},
 		signal,
@@ -490,6 +538,7 @@ export function outcomeToSummary(outcome: PrCheckoutOutcome): GhPrCheckoutSummar
 		remote: outcome.remoteName,
 		remoteBranch: outcome.headRefName,
 		reused: outcome.reused,
+		clonedWith: outcome.clonedWith,
 	};
 }
 
@@ -499,22 +548,25 @@ export async function executePrPush(
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
 	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
+	const repository = vcs.requireGit(repoRoot);
 	const localBranch = normalizeOptionalString(params.branch) ?? (await requireCurrentGitBranch(repoRoot, signal));
-	const refExists = await git.ref.exists(repoRoot, toLocalBranchRef(localBranch), signal);
+	const refExists = await repository.refExists(toLocalBranchRef(localBranch), signal);
 	if (!refExists) {
 		throw new ToolError(`local branch ${localBranch} does not exist`);
 	}
 
 	const target = await resolvePrBranchPushTarget(repoRoot, localBranch, signal);
-	const currentBranch = await git.branch.current(repoRoot, signal);
+	const currentBranch = await repository.currentBranch(signal);
 	const sourceRef = currentBranch === localBranch ? "HEAD" : toLocalBranchRef(localBranch);
 	const refspec = `${sourceRef}:refs/heads/${target.remoteBranch}`;
-	await git.push(repoRoot, {
-		forceWithLease: params.forceWithLease,
-		refspec,
-		remote: target.remoteName,
+	await repository.push(
+		{
+			forceWithLease: params.forceWithLease,
+			refspec,
+			remote: target.remoteName,
+		},
 		signal,
-	});
+	);
 
 	// A successful push changes what `pr://N` and `pr://N/diff` should show;
 	// drop the cached rows so the canonical "push → re-read diff" flow sees
@@ -592,21 +644,21 @@ export async function executePrCreate(
 			}
 		}
 
-		const output = await git.github.text(session.cwd, args, signal, {
+		const output = await github.text(session.cwd, args, signal, {
 			repoProvided: Boolean(repo),
 		});
 		const url =
 			output
 				.split("\n")
 				.map(line => line.trim())
-				.find(line => line.startsWith("https://github.com/")) ?? output.trim();
+				.find(line => line.startsWith("https://")) ?? output.trim();
 		const parsed = parsePullRequestUrl(url);
 		const resolvedRepo = repo ?? parsed.repo;
 
 		let prView: GhPrViewData | undefined;
 		if (resolvedRepo && parsed.prNumber !== undefined) {
 			try {
-				prView = await git.github.json<GhPrViewData>(
+				prView = await github.json<GhPrViewData>(
 					session.cwd,
 					[
 						"pr",

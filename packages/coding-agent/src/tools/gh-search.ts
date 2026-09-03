@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
 import {
@@ -8,8 +8,8 @@ import {
 	formatLabels,
 	normalizeOptionalString,
 	normalizeText,
+	parseRepoRef,
 	pushLine,
-	REPO_API_URL_PREFIX,
 	requireNonEmpty,
 	tryResolveCurrentRepo,
 } from "./gh-common";
@@ -158,18 +158,22 @@ export function buildGhApiSearchArgs(
 	endpoint: "issues" | "code" | "commits" | "repositories",
 	query: string,
 	limit: number,
-	extraHeaders?: ReadonlyArray<string>,
+	options?: { host?: string; extraHeaders?: ReadonlyArray<string> },
 ): string[] {
-	const args = ["api", "-X", "GET", `/search/${endpoint}`, "-f", `q=${query}`, "-F", `per_page=${limit}`];
-	for (const header of extraHeaders ?? []) {
+	const args = ["api"];
+	if (options?.host) args.push("--hostname", options.host);
+	args.push("-X", "GET", `/search/${endpoint}`, "-f", `q=${query}`, "-F", `per_page=${limit}`);
+	for (const header of options?.extraHeaders ?? []) {
 		args.push("-H", header);
 	}
 	return args;
 }
 
+/** Enterprise API roots prefix the path with `/api/v3`, so match the tail. */
+const REPOSITORY_API_URL_PATTERN = /\/repos\/([^/]+\/[^/]+)$/;
+
 export function repoFromRepositoryUrl(value: string | undefined): string | undefined {
-	if (!value?.startsWith(REPO_API_URL_PREFIX)) return undefined;
-	return value.slice(REPO_API_URL_PREFIX.length);
+	return value ? (REPOSITORY_API_URL_PATTERN.exec(value)?.[1] ?? undefined) : undefined;
 }
 
 export function apiUserToGhUser(user: GhApiUser | null | undefined): GhUser | undefined {
@@ -273,6 +277,17 @@ export async function resolveSearchRepoScope(
 	if (repo) return repo;
 	if (query && REPO_SCOPE_QUALIFIER_PATTERN.test(query)) return undefined;
 	return tryResolveCurrentRepo(cwd, signal);
+}
+
+/**
+ * Split a resolved scope into the `repo:` qualifier and the host to search.
+ * GitHub's search qualifiers take a bare `owner/repo`, so an enterprise host
+ * has to travel as a separate `--hostname` instead of inside the query.
+ */
+function searchScope(repo: string | undefined): { qualifier?: string; host?: string } {
+	if (!repo) return {};
+	const ref = parseRepoRef(repo);
+	return { qualifier: `repo:${ref.slug}`, host: ref.host };
 }
 
 export function formatSearchResults(
@@ -408,10 +423,11 @@ export async function executeSearchIssues(
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
-	const apiQuery = composeSearchQuery([displayQuery, repo ? `repo:${repo}` : undefined, "is:issue"]);
-	const args = buildGhApiSearchArgs("issues", apiQuery, limit);
+	const scope = searchScope(repo);
+	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier, "is:issue"]);
+	const args = buildGhApiSearchArgs("issues", apiQuery, limit, { host: scope.host });
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiIssueToSearchResult);
 	return buildTextResult(formatSearchResults("issues", displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -428,10 +444,11 @@ export async function executeSearchPrs(
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
-	const apiQuery = composeSearchQuery([displayQuery, repo ? `repo:${repo}` : undefined, "is:pr"]);
-	const args = buildGhApiSearchArgs("issues", apiQuery, limit);
+	const scope = searchScope(repo);
+	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier, "is:pr"]);
+	const args = buildGhApiSearchArgs("issues", apiQuery, limit, { host: scope.host });
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiIssueToSearchResult);
 	return buildTextResult(formatSearchResults("pull requests", displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -451,10 +468,14 @@ export async function executeSearchCode(
 	}
 	const limit = resolveSearchLimit(params.limit);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), query, signal);
-	const apiQuery = composeSearchQuery([query, repo ? `repo:${repo}` : undefined]);
-	const args = buildGhApiSearchArgs("code", apiQuery, limit, ["Accept: application/vnd.github.text-match+json"]);
+	const scope = searchScope(repo);
+	const apiQuery = composeSearchQuery([query, scope.qualifier]);
+	const args = buildGhApiSearchArgs("code", apiQuery, limit, {
+		host: scope.host,
+		extraHeaders: ["Accept: application/vnd.github.text-match+json"],
+	});
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCodeItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchCodeItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiCodeToSearchResult);
 	return buildTextResult(formatSearchCodeResults(query, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -471,10 +492,11 @@ export async function executeSearchCommits(
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
-	const apiQuery = composeSearchQuery([displayQuery, repo ? `repo:${repo}` : undefined]);
-	const args = buildGhApiSearchArgs("commits", apiQuery, limit);
+	const scope = searchScope(repo);
+	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier]);
+	const args = buildGhApiSearchArgs("commits", apiQuery, limit, { host: scope.host });
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCommitItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchCommitItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiCommitToSearchResult);
 	return buildTextResult(formatSearchCommitsResults(displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -492,7 +514,7 @@ export async function executeSearchRepos(
 	const query = composeSearchQuery([params.query, dateQualifier]);
 	const args = buildGhApiSearchArgs("repositories", query, limit);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchRepoItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchRepoItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiRepoToSearchResult);
 	return buildTextResult(formatSearchReposResults(query, items), undefined, undefined, {
 		useless: items.length === 0,

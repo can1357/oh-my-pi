@@ -61,7 +61,6 @@ export interface GenericKernel<TEnv> {
 			env?: TEnv;
 			id: string;
 			signal?: AbortSignal;
-			timeoutMs?: number;
 			onChunk: (text: string) => Promise<void> | void;
 			onDisplay: (output: KernelDisplayOutput) => Promise<void> | void;
 		},
@@ -455,8 +454,24 @@ export async function executeWithKernelBase<
 
 	const displayOutputs: KernelDisplayOutput[] = [];
 	const deadlineMs = (resolveDeadlineMs ?? getExecutionDeadlineMs)(options);
-	let executionTimeoutMs: number | undefined;
-	const abortShield = createBridgeAbortShield(options?.signal);
+	const remainingMs = getRemainingTimeoutMs(deadlineMs);
+	const executionTimeoutMs = remainingMs !== undefined && remainingMs > 0 ? remainingMs : undefined;
+	// The wall-clock timeout must abort through the same shield the bridge
+	// watches. A kernel-internal timer SIGINTs the runner but leaves in-flight
+	// bridge calls (parallel() fan-outs of agent()/completion()/tool.*) blocked
+	// in urllib worker threads; the runner then wedges in the pool's
+	// shutdown(wait=True), never emits `done`, and the SIGINT escalation kills
+	// the kernel — losing every variable. Expiring via the shield rejects those
+	// bridge calls, so the workers unwind and the cell settles as a clean
+	// KeyboardInterrupt. It also inherits critical-phase deferral: a timeout
+	// landing mid-merge waits for the resume instead of settling the cell on
+	// top of a half-applied git operation.
+	const timeoutSignal = executionTimeoutMs !== undefined ? AbortSignal.timeout(executionTimeoutMs) : undefined;
+	const abortSource =
+		options?.signal && timeoutSignal
+			? AbortSignal.any([options.signal, timeoutSignal])
+			: (timeoutSignal ?? options?.signal);
+	const abortShield = createBridgeAbortShield(abortSource);
 
 	const collectDisplay = (output: KernelDisplayOutput): void => {
 		if (output.type === "status") {
@@ -493,12 +508,8 @@ export async function executeWithKernelBase<
 			: null;
 
 	try {
-		const remainingMs = getRemainingTimeoutMs(deadlineMs);
-		if (remainingMs !== undefined) {
-			if (remainingMs <= 0) {
-				throw new cancelledErrorClass(true);
-			}
-			executionTimeoutMs = remainingMs;
+		if (remainingMs !== undefined && remainingMs <= 0) {
+			throw new cancelledErrorClass(true);
 		}
 
 		const result = await kernel.execute(code, {
@@ -506,7 +517,6 @@ export async function executeWithKernelBase<
 			env: buildKernelEnvPatch(options ?? ({} as TOptions)),
 			id: runId,
 			signal: abortShield.signal,
-			timeoutMs: executionTimeoutMs,
 			onChunk: text => sink.push(text),
 			onDisplay: output => collectDisplay(output),
 		});

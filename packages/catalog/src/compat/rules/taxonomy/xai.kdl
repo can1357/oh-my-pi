@@ -1,0 +1,12 @@
+class "xai" {
+	// Cursor serves per-tier Grok siblings under a `cursor-` wrapper.
+	prefix "cursor-grok-"
+	bounded "grok"
+	namespace "x-ai"
+	namespace "xai"
+
+	family "grok" glob="*grok*"
+
+	revision prefix="cursor-grok-"
+	revision prefix="grok-"
+}

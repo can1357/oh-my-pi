@@ -224,7 +224,7 @@ export class LspMuxServer {
 	async #performShutdown(): Promise<void> {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
-		for (const session of [...this.#sessions]) session.socket.destroy();
+		for (const session of Array.from(this.#sessions)) session.socket.destroy();
 		await Promise.all([...this.#servers].map(server => this.#stopServer(server)));
 		const listener = this.#netServer;
 		this.#netServer = undefined;
@@ -319,7 +319,7 @@ export class LspMuxServer {
 				this.#sendSession(session, rpcError(message.id, -32602, "invalid mux connect params"));
 				return;
 			}
-			const key = muxServerKey(params.command, params.cwd);
+			const key = muxServerKey(params);
 			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
 			if (server && server.proc.exitCode !== null) {
 				this.#serverExited(server);
@@ -674,7 +674,7 @@ export class LspMuxServer {
 		this.#servers.delete(server);
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		server.pending.clear();
-		for (const session of [...server.sessions]) session.socket.destroy();
+		for (const session of Array.from(server.sessions)) session.socket.destroy();
 		server.sessions.clear();
 	}
 

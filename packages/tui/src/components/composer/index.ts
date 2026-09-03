@@ -1,3 +1,4 @@
+export * from "./band";
 export * from "./borderless";
 export * from "./box";
 export * from "./claude";

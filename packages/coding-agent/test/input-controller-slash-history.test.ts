@@ -24,6 +24,10 @@ function makeCtx(isStreaming = false) {
 		setText: (t: string) => {
 			text = t;
 		},
+		setCollapsedText: (t: string) => {
+			text = t;
+		},
+		composerChips: () => [],
 		addToHistory,
 		pendingImages: [] as ImageContent[],
 		pendingImageLinks: [] as (string | undefined)[],
@@ -43,6 +47,8 @@ function makeCtx(isStreaming = false) {
 			isCompacting: false,
 			queuedMessageCount: 0,
 			extensionRunner: undefined,
+			customCommands: [],
+			promptTemplates: [],
 			followUp,
 			steer,
 			prompt,
@@ -63,6 +69,8 @@ function makeCtx(isStreaming = false) {
 		}) => ({ ...input, cancelled: false, started: false }),
 		ui: { requestRender: vi.fn() },
 		compactionQueuedMessages: [],
+		skillCommands: new Map(),
+		fileSlashCommands: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		showWarning: vi.fn(),
@@ -133,10 +141,10 @@ describe("input controller — slash command history (#3148)", () => {
 		editor.pendingImageLinks = ["file:///draft.png"];
 		controllerFor(ctx);
 
-		await editor.onSubmit?.("/id");
+		await editor.onSubmit?.("/id [Image #1]");
 
-		expect(prompt).toHaveBeenCalledWith("/id", { images: [image] });
-		expect(addToHistory).toHaveBeenCalledWith("/id");
+		expect(prompt).toHaveBeenCalledWith("/id [Image #1]", { images: [image] });
+		expect(addToHistory).toHaveBeenCalledWith("/id [Image #1]");
 		expect(onInputCallback).not.toHaveBeenCalled();
 		expect(editor.pendingImages).toEqual([]);
 		expect(editor.pendingImageLinks).toEqual([]);

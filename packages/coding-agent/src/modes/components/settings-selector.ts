@@ -798,12 +798,13 @@ export class SettingsSelectorComponent implements Component {
 			return true;
 		}
 		if (overContent && list) {
-			const id = list.hitTest(contentLine, innerCol);
+			const itemId = list.hoverTest(contentLine, innerCol);
+			const id = itemId ?? list.hitTest(contentLine, innerCol);
 			if (id !== undefined) {
 				const wasSelected = list.getSelectedItem()?.id === id;
 				list.selectItem(id);
-				// Click-again activates: toggle booleans, open submenus.
-				if (wasSelected) list.handleInput("\n");
+				// Only repeated setting-row clicks activate. Sidebar section clicks navigate.
+				if (wasSelected && itemId !== undefined) list.handleInput("\n");
 			}
 		}
 		return true;
@@ -1139,7 +1140,7 @@ export class SettingsSelectorComponent implements Component {
 			onPreview = value => shapePreview.setValue(value);
 			footer = shapePreview;
 		} else if (def.path === "composer.shape") {
-			const shapePreview = new ComposerShapePreview(String(currentValue ?? "box"), {
+			const shapePreview = new ComposerShapePreview(String(currentValue ?? "band"), {
 				requestRender: this.context.requestRender,
 				status: this.context.composerPreviewStatus,
 			});

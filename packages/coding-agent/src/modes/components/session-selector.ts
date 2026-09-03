@@ -281,6 +281,7 @@ class SessionList implements Component {
 
 	#allSessions: SessionInfo[];
 	#showCwd: boolean;
+	#pinnedIds: ReadonlySet<string>;
 	readonly #historyMatcher?: SessionHistoryMatcher;
 	#historyMergeTimer: NodeJS.Timeout | undefined;
 	/** Re-render hook for async list updates (fuzzy scan chunks, history merge). */
@@ -311,10 +312,12 @@ class SessionList implements Component {
 		showCwd = false,
 		historyMatcher?: SessionHistoryMatcher,
 		getTerminalRows: () => number = () => 24,
+		pinnedIds: ReadonlySet<string> = new Set(),
 	) {
 		this.#getTerminalRows = getTerminalRows;
 		this.#allSessions = sessions;
 		this.#showCwd = showCwd;
+		this.#pinnedIds = pinnedIds;
 		this.#historyMatcher = historyMatcher;
 		this.#filteredSessions = sessions;
 		this.#searchInput = new Input();
@@ -352,9 +355,10 @@ class SessionList implements Component {
 	}
 
 	/** Replace the visible dataset, e.g. when toggling folder/all-projects scope. */
-	setSessions(sessions: SessionInfo[], showCwd: boolean): void {
+	setSessions(sessions: SessionInfo[], showCwd: boolean, pinnedIds?: ReadonlySet<string>): void {
 		this.#allSessions = sessions;
 		this.#showCwd = showCwd;
+		if (pinnedIds !== undefined) this.#pinnedIds = pinnedIds;
 		this.#selectedIndex = 0;
 		this.#filterSessions(this.#searchInput.getValue());
 	}
@@ -598,16 +602,21 @@ class SessionList implements Component {
 			// Normalize first message to single line
 			const normalizedMessage = session.firstMessage.replace(/\n/g, " ").trim();
 
-			// First line: cursor + title (or first message if no title)
+			// First line: cursor + optional pin icon + title (or first message if no title)
 			const cursorSymbol = `${theme.nav.cursor} `;
 			const cursorWidth = visibleWidth(cursorSymbol);
 			const cursor = isSelected ? theme.fg("accent", cursorSymbol) : padding(cursorWidth);
 			const maxWidth = rowWidth - cursorWidth; // Account for cursor width
 
+			const isPinned = this.#pinnedIds.has(session.id);
+			const pinPrefix = isPinned ? `${theme.fg("accent", theme.icon.pin)} ` : "";
+			const pinPrefixWidth = isPinned ? visibleWidth(`${theme.icon.pin} `) : 0;
+			const maxTextWidth = Math.max(0, maxWidth - pinPrefixWidth);
+
 			if (session.title) {
 				// Has title: show title on first line, dimmed first message on second line
-				const truncatedTitle = truncateToWidth(session.title, maxWidth);
-				const titleLine = cursor + (isSelected ? theme.bold(truncatedTitle) : truncatedTitle);
+				const truncatedTitle = truncateToWidth(session.title, maxTextWidth);
+				const titleLine = `${cursor}${pinPrefix}${isSelected ? theme.bold(truncatedTitle) : truncatedTitle}`;
 				sessionLines.push(titleLine);
 
 				// Second line: dimmed first message preview
@@ -615,8 +624,8 @@ class SessionList implements Component {
 				sessionLines.push(`  ${theme.fg("dim", truncatedPreview)}`);
 			} else {
 				// No title: show first message as main line
-				const truncatedMsg = truncateToWidth(normalizedMessage, maxWidth);
-				const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
+				const truncatedMsg = truncateToWidth(normalizedMessage, maxTextWidth);
+				const messageLine = `${cursor}${pinPrefix}${isSelected ? theme.bold(truncatedMsg) : truncatedMsg}`;
 				sessionLines.push(messageLine);
 			}
 
@@ -771,6 +780,8 @@ export interface SessionSelectorOptions {
 	 * in-editor selector leaves it off and renders compactly.
 	 */
 	fillHeight?: boolean;
+	/** Set of pinned session ids to display with a pin indicator. */
+	pinnedIds?: ReadonlySet<string>;
 }
 
 /**
@@ -840,6 +851,7 @@ export class SessionSelectorComponent extends OverlayPanel {
 			options.showCwd ?? false,
 			options.historyMatcher,
 			options.getTerminalRows,
+			options.pinnedIds,
 		);
 		// Every exit path cancels the list's pending history merge, so a stale
 		// debounce timer can never run its SQLite lookup after the picker closed.

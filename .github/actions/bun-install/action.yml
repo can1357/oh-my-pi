@@ -13,14 +13,26 @@ runs:
         id: env
         shell: bash
         run: |
-           # bun is baked into the omp-kata runner image — only fetch it when the
-           # runner doesn't already provide it (GitHub-hosted), so we don't
-           # re-download bun from GitHub releases on every job.
+           # bun is baked into the omp-kata runner image — reuse it only when it
+           # matches the repo pin (package.json "packageManager"). A lagging
+           # preloaded bun skews version-sensitive codegen (gen:tool-views) and
+           # test-runner behavior, so a mismatch fetches the pinned build instead.
+           want="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
+           if [ -z "$want" ]; then
+             echo "::error::could not read pinned bun version from package.json packageManager"
+             exit 1
+           fi
+           echo "bun_version=$want" >> "$GITHUB_OUTPUT"
+           have=""
            if command -v bun >/dev/null 2>&1; then
+             have="$(bun --version)"
+           fi
+           if [ "$have" = "$want" ]; then
              echo "setup_bun=false" >> "$GITHUB_OUTPUT"
-             echo "bun present: $(bun --version) (preloaded image)"
+             echo "bun present: $have (matches pin)"
            else
              echo "setup_bun=true" >> "$GITHUB_OUTPUT"
+             echo "bun on runner: ${have:-none}; installing pinned $want"
            fi
            # The repo keys "are we on can.internal infra?" off $BAZEL_REMOTE_USER
            # (the bazel-remote-ci secret is envFrom-injected into every omp-kata
@@ -34,12 +46,12 @@ runs:
              echo "cache=gha" >> "$GITHUB_OUTPUT"
              echo "bun cache backend: GitHub Actions cache"
            fi
-      - name: Install bun when absent
+      - name: Install pinned bun when missing or mismatched
         if: steps.env.outputs.setup_bun == 'true'
         shell: bash
         run: |
            export BUN_INSTALL="${HOME}/.bun"
-           curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
+           curl -fsSL https://bun.sh/install | bash -s "bun-v${{ steps.env.outputs.bun_version }}"
            echo "${BUN_INSTALL}/bin" >> "$GITHUB_PATH"
 
       # Off-infra (GitHub-hosted): actions/cache for the bun store, split into

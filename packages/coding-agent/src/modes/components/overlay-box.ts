@@ -7,7 +7,7 @@
  * colors so all outlined overlays read identically.
  */
 import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { theme } from "../theme/theme";
+import { type ThemeColor, theme } from "../theme/theme";
 
 /** Pad or truncate a (possibly ANSI-styled) string to exactly `width` columns. */
 export function fit(text: string, width: number): string {
@@ -20,21 +20,21 @@ export function fit(text: string, width: number): string {
 	return cw < width ? cut + padding(width - cw) : cut;
 }
 
-function paint(s: string): string {
-	return theme.fg("border", s);
+function paint(s: string, color: ThemeColor = "border"): string {
+	return theme.fg(color, s);
 }
 
-/** Top border with an optional accent-colored title inset into the rule. */
-export function topBorder(width: number, title: string): string {
+/** Top border with an optional title inset into the rule. `color` recolors border and title (default border/accent). */
+export function topBorder(width: number, title: string, color?: ThemeColor): string {
 	const box = theme.boxRound;
 	const inner = Math.max(0, width - 2);
-	if (!title) return paint(box.topLeft + box.horizontal.repeat(inner) + box.topRight);
+	if (!title) return paint(box.topLeft + box.horizontal.repeat(inner) + box.topRight, color);
 	const shown = truncateToWidth(` ${title} `, Math.max(0, inner - 2));
 	const fillWidth = Math.max(0, inner - 1 - visibleWidth(shown));
 	return (
-		paint(box.topLeft + box.horizontal) +
-		theme.bold(theme.fg("accent", shown)) +
-		paint(box.horizontal.repeat(fillWidth) + box.topRight)
+		paint(box.topLeft + box.horizontal, color) +
+		theme.bold(theme.fg(color ?? "accent", shown)) +
+		paint(box.horizontal.repeat(fillWidth) + box.topRight, color)
 	);
 }
 
@@ -44,15 +44,15 @@ export function divider(width: number): string {
 	return paint(box.teeRight + box.horizontal.repeat(Math.max(0, width - 2)) + box.teeLeft);
 }
 
-export function bottomBorder(width: number): string {
+export function bottomBorder(width: number, color?: ThemeColor): string {
 	const box = theme.boxRound;
-	return paint(box.bottomLeft + box.horizontal.repeat(Math.max(0, width - 2)) + box.bottomRight);
+	return paint(box.bottomLeft + box.horizontal.repeat(Math.max(0, width - 2)) + box.bottomRight, color);
 }
 
 /** Wrap pre-styled content in vertical borders with single-column insets. */
-export function row(content: string, width: number): string {
+export function row(content: string, width: number, color?: ThemeColor): string {
 	const box = theme.boxRound;
-	return `${paint(box.vertical)} ${fit(content, Math.max(0, width - 4))} ${paint(box.vertical)}`;
+	return `${paint(box.vertical, color)} ${fit(content, Math.max(0, width - 4))} ${paint(box.vertical, color)}`;
 }
 
 /**

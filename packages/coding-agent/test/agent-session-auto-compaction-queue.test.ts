@@ -695,7 +695,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("compaction.thresholdPercent", -1);
 		session.settings.set("compaction.autoContinue", true);
 		session.settings.set("contextPromotion.enabled", false);
-		session.settings.set("features.unexpectedStopDetection", true);
+		session.settings.set("features.unexpectedStopDetection", "smart");
 		session.settings.set("providers.unexpectedStopModel", "online");
 
 		vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
@@ -729,12 +729,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(getRuntimeSignals()).toContain("compaction:start:threshold");
 	});
 
-	it("resolves a pending retry before active-goal compaction continuation returns", async () => {
-		// Codex review on #3175: a retry can succeed with a non-empty text stop
-		// that is already over the active-goal compaction threshold. If the
-		// compaction pre-empt schedules its own continuation before the normal
-		// bottom-of-handler `#resolveRetry()` call runs, the session stays
-		// `isRetrying` and later prompt/idle gates remain blocked.
+	it("settles a successful retry before active-goal compaction continuation starts", async () => {
+		// A retry can succeed with a non-empty text stop that is already over the
+		// active-goal compaction threshold. The successful message itself must
+		// close the retry lifecycle before agent_end routes into compaction, so
+		// early terminal routes cannot leave prompt/idle gates blocked.
 		vi.useRealTimers();
 		const now = Date.now();
 		session.setGoalModeState({
@@ -819,7 +818,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: recoveredOverThreshold });
 		await withTimeout(retryEnded, 1000, "Retry end timed out");
-		expect(session.isRetrying).toBe(true);
+		expect(session.isRetrying).toBe(false);
 
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [recoveredOverThreshold] });
 

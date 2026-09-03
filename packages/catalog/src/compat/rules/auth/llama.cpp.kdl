@@ -1,0 +1,10 @@
+auth "llama.cpp" {
+	name "llama.cpp (Local OpenAI-compatible)"
+	env "LLAMA_CPP_API_KEY"
+	login "api-key" {
+		auth-url "https://github.com/ggml-org/llama.cpp#quick-start"
+		instructions "Paste your llama.cpp API key if your server requires auth. Leave empty for local no-auth mode (default base URL: http://127.0.0.1:8080; set LLAMA_CPP_BASE_URL to customize)."
+		prompt "Paste your llama.cpp API key (optional for local no-auth)" placeholder="llama-cpp-local"
+		empty-fallback "llama-cpp-local"
+	}
+}

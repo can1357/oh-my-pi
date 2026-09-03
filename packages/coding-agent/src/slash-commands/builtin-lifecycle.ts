@@ -1,13 +1,25 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { reset as resetCapabilities } from "../capability";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { loadSlashCommands } from "../extensibility/slash-commands";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
+import { toggleSessionPin } from "../session/session-pins";
+import {
+	createSessionWorktree,
+	defaultSessionWorktreeBranch,
+	formatSessionWorktreeSummary,
+	type SessionWorktree,
+} from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -38,7 +50,8 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	const verb = args.trim().toLowerCase();
 	if (verb === "" || verb === "elide") return "elide";
 	if (verb === "images") return "images";
-	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
+	if (verb === "thinking") return "thinking";
+	return { error: `Unknown /shake mode "${verb}". Use elide, images, or thinking.` };
 }
 
 /** Format the session's workspace directories (cwd + additional) for display. */
@@ -48,10 +61,93 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
+async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	await runtime.output(text);
+	await runtime.session.dispose();
+	return commandConsumed();
+}
+
+/**
+ * Relocate the headless session to `resolvedPath` (an existing directory):
+ * flush settings, move the session file, re-scope the process, rolling back
+ * on failure. Returns a result when the move did not complete; `undefined`
+ * on success so the caller can report its own confirmation.
+ */
+async function relocateHeadlessSession(
+	runtime: SlashCommandRuntime,
+	resolvedPath: string,
+): Promise<SlashCommandResult | undefined> {
+	try {
+		await runtime.settings.flush();
+	} catch (err) {
+		return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
+	}
+	const previousState = runtime.sessionManager.captureState();
+	try {
+		await runtime.session.moveSession(resolvedPath);
+	} catch (err) {
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		setProjectDir(resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+		} catch (rollbackError) {
+			const actual = runtime.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				await rescopeHeadlessToCwd(runtime, actual);
+				realigned = true;
+			} catch {}
+			if (!realigned) {
+				return fatalMoveFailure(
+					`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+					runtime,
+				);
+			}
+			return usage(
+				`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+				runtime,
+			);
+		}
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	try {
+		await rescopeHeadlessToCwd(runtime, resolvedPath);
+	} catch (err) {
+		try {
+			await runtime.sessionManager.rollbackMove(previousState);
+			await rescopeHeadlessToCwd(runtime, previousState.cwd);
+		} catch (rollbackError) {
+			const actual = runtime.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				await rescopeHeadlessToCwd(runtime, actual);
+				realigned = true;
+			} catch {}
+			if (!realigned) {
+				return fatalMoveFailure(
+					`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+					runtime,
+				);
+			}
+			return usage(
+				`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+				runtime,
+			);
+		}
+		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+	}
+	await runtime.notifyConfigChanged?.();
+	await runtime.notifyTitleChanged?.();
+	return undefined;
+}
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ssh",
+		icon: "host",
 		description: "Manage SSH hosts (add, list, remove)",
 		acpDescription: "Manage SSH connections",
 		inlineHint: "<subcommand>",
@@ -74,6 +170,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "new",
+		icon: "plus",
 		description: "Start a new session",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
@@ -82,6 +179,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "fresh",
+		icon: "restart",
 		description: "Reset provider stream state without changing the local transcript",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Fresh: unavailable while streaming" : "Fresh: ready",
@@ -103,6 +201,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "clear",
+		icon: "eraser",
 		description: "Clear the conversation context in place, keeping the session",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.session.isStreaming ? "Clear: unavailable while streaming" : "Clear: drop context, keep session",
@@ -113,6 +212,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "drop",
+		icon: "trash",
 		description: "Delete the current session and start a new one",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
@@ -121,6 +221,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "compact",
+		icon: "compress",
 		description: "Manually compact the session context",
 		acpDescription: "Compact the conversation",
 		subcommands: COMPACT_MODES.map(mode => ({
@@ -137,24 +238,41 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
 			if ("error" in parsed) return usage(parsed.error, runtime);
-			const before = runtime.session.getContextUsage?.();
-			const beforeTokens = before?.tokens;
-			try {
-				await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
-			} catch (err) {
-				// Compaction precondition failures (no model, already compacted, too
-				// small) and provider errors propagate as plain Errors; surface them
-				// via runtime.output so they don't fail the ACP prompt turn.
-				return usage(`Compaction failed: ${errorMessage(err)}`, runtime);
+			const runCompact = async (): Promise<void> => {
+				const before = runtime.session.getContextUsage?.();
+				const beforeTokens = before?.tokens;
+				try {
+					await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
+				} catch (err) {
+					// RPC `abort` and ACP `session/cancel` propagate their explicit
+					// USER_INTERRUPT_LABEL through the compaction abort signal. The client
+					// already saw the interrupt it sent; emitting anything here would
+					// append an out-of-turn chunk. Other cancellations (including an
+					// extension veto) remain visible.
+					if (err instanceof CompactionCancelledError && err.cause === USER_INTERRUPT_LABEL) return;
+					// Compaction precondition failures (no model, already compacted, too
+					// small) and provider errors propagate as plain Errors; surface them
+					// via runtime.output so they don't fail the ACP prompt turn.
+					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
+					return;
+				}
+				const after = runtime.session.getContextUsage?.();
+				const afterTokens = after?.tokens;
+				if (beforeTokens != null && afterTokens != null) {
+					const saved = beforeTokens - afterTokens;
+					await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
+				} else {
+					await runtime.output("Compaction complete.");
+				}
+			};
+			// Provider-backed: background-dispatch under RPC so the serialized command
+			// queue stays free for `abort` (SlashCommandRuntime.runCommandInBackground).
+			// ACP/TUI have no such hook and keep the inline await.
+			if (runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(runCompact);
+				return commandConsumed();
 			}
-			const after = runtime.session.getContextUsage?.();
-			const afterTokens = after?.tokens;
-			if (beforeTokens != null && afterTokens != null) {
-				const saved = beforeTokens - afterTokens;
-				await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
-			} else {
-				await runtime.output("Compaction complete.");
-			}
+			await runCompact();
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
@@ -169,13 +287,15 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "shake",
+		icon: "vibrate",
 		description: "Drop heavy content from context (tool results, large blocks)",
 		acpDescription: "Shake heavy content out of the conversation context",
 		subcommands: [
 			{ name: "elide", description: "Strip tool results + large blocks (default)" },
 			{ name: "images", description: "Strip image blocks" },
+			{ name: "thinking", description: "Drop all thinking blocks" },
 		],
-		acpInputHint: "[elide|images]",
+		acpInputHint: "[elide|images|thinking]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const mode = parseShakeMode(command.args);
@@ -196,6 +316,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "handoff",
+		icon: "handoff",
 		description: "Hand off session context to a new session",
 		acpDescription: "Summarize the session into a handoff document and compact in place",
 		inlineHint: "[focus instructions]",
@@ -262,6 +383,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "resume",
+		icon: "history",
 		description: "Resume a different session",
 		inlineHint: "[session id|@claude|@codex]",
 		allowArgs: true,
@@ -291,7 +413,39 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "pin",
+		icon: "pin",
+		description: "Pin or unpin a session at the top of the resume list",
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sessionArg = command.args.trim();
+			let sessionId: string | undefined;
+			if (sessionArg) {
+				const match = await resolveResumableSession(
+					sessionArg,
+					runtime.cwd,
+					runtime.sessionManager.getSessionDir(),
+					{ allowGlobalFallback: true },
+				);
+				if (!match) {
+					return usage(`Session "${sessionArg}" not found.`, runtime);
+				}
+				sessionId = match.session.id;
+			} else {
+				sessionId = runtime.sessionManager.getSessionId();
+				if (!sessionId) {
+					return usage("No active session to pin.", runtime);
+				}
+			}
+			const pinned = await toggleSessionPin(sessionId);
+			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			return commandConsumed();
+		},
+	},
+	{
 		name: "btw",
+		icon: "question",
 		description: "Ask an ephemeral side question using the current session context",
 		inlineHint: "<question>",
 		allowArgs: true,
@@ -303,6 +457,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "tan",
+		icon: "rocket",
 		description: "Run a full background agent on tangential work",
 		inlineHint: "<work>",
 		allowArgs: true,
@@ -314,6 +469,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "omfg",
+		icon: "rule",
 		description: "Forge a TTSR rule from a complaint to stop a recurring behavior",
 		inlineHint: "<complaint>",
 		allowArgs: true,
@@ -325,6 +481,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "cleanse",
+		icon: "stethoscope",
 		description: "Detect and fix project diagnostics with weighted parallel subagents",
 		inlineHint: "[request] [--all]",
 		allowArgs: true,
@@ -336,6 +493,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "retry",
+		icon: "redo",
 		description: "Retry the last failed agent turn",
 		handle: async (_command, runtime) => {
 			if (runtime.session.isStreaming) {
@@ -397,6 +555,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "debug",
+		icon: "bug",
 		description: "Open debug tools selector",
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.showDebugSelector();
@@ -405,6 +564,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "memory",
+		icon: "memory",
 		description: "Inspect and operate memory maintenance",
 		acpDescription: "Manage memory",
 		acpInputHint: "<subcommand>",
@@ -412,6 +572,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			{ name: "view", description: "Show current memory injection payload" },
 			{ name: "stats", description: "Show memory backend statistics" },
 			{ name: "diagnose", description: "Run memory backend diagnostics" },
+			{ name: "queue", description: "Show pending memory deltas awaiting consolidation" },
+			{ name: "sync", description: "Run memory consolidation now" },
 			{ name: "clear", description: "Clear persisted memory data and artifacts" },
 			{ name: "reset", description: "Alias for clear" },
 			{ name: "enqueue", description: "Enqueue memory consolidation maintenance" },
@@ -454,6 +616,20 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					await runtime.output("Memory consolidation enqueued.");
 					return commandConsumed();
 				}
+				case "queue": {
+					const payload = await backend.queuePreview?.({
+						agentDir: runtime.settings.getAgentDir(),
+						cwd: runtime.cwd,
+						session: runtime.session,
+					});
+					await runtime.output(payload ?? `Memory queue is not available for the ${backend.id} backend.`);
+					return commandConsumed();
+				}
+				case "sync": {
+					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await runtime.output("Memory consolidation ran.");
+					return commandConsumed();
+				}
 				case "stats":
 				case "diagnose": {
 					const hook = verb === "stats" ? backend.stats : backend.diagnose;
@@ -467,7 +643,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 						runtime,
 					);
 				default:
-					return usage("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild>", runtime);
+					return usage("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync>", runtime);
 			}
 		},
 		handleTui: async (command, runtime) => {
@@ -477,6 +653,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "rename",
+		icon: "pencil",
 		description: "Rename the current session",
 		inlineHint: "<title>",
 		allowArgs: true,
@@ -494,7 +671,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (command, runtime) => {
 			const title = command.args.trim();
 			if (!title) {
-				runtime.ctx.showError("Usage: /rename <title>");
+				runtime.ctx.showStatus("Usage: /rename <title>");
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -504,6 +681,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "move",
+		icon: "folderMove",
 		description: "Move the current session to a different directory",
 		acpDescription: "Move the current session to a different directory",
 		inlineHint: "[<path>]",
@@ -520,24 +698,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			} catch {
 				return usage(`Directory does not exist: ${resolvedPath}`, runtime);
 			}
-			try {
-				await runtime.settings.flush();
-			} catch (err) {
-				return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
-			}
-			try {
-				await runtime.session.moveSession(resolvedPath);
-			} catch (err) {
-				return usage(`Move failed: ${errorMessage(err)}`, runtime);
-			}
-			setProjectDir(resolvedPath);
-			await runtime.settings.reloadForCwd(resolvedPath);
-			applyProviderGlobalsFromSettings(runtime.settings);
-			// Reload plugin/capability caches so the next prompt sees commands and
-			// capabilities scoped to the new cwd.
-			await runtime.reloadPlugins();
-			await runtime.notifyConfigChanged?.();
-			await runtime.notifyTitleChanged?.();
+			const failure = await relocateHeadlessSession(runtime, resolvedPath);
+			if (failure) return failure;
 			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);
 			return commandConsumed();
 		},
@@ -548,7 +710,36 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "wt",
+		aliases: ["worktree"],
+		icon: "folderMove",
+		description: "Move this session into a new worktree, changes included",
+		acpDescription: "Move this session into a new worktree, changes included",
+		inlineHint: "[<branch>]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) return usage("Cannot create a worktree while streaming.", runtime);
+			const branch = command.args.trim() || defaultSessionWorktreeBranch();
+			let worktree: SessionWorktree;
+			try {
+				worktree = await createSessionWorktree(runtime.sessionManager.getCwd(), runtime.settings, branch);
+			} catch (err) {
+				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
+			}
+			const failure = await relocateHeadlessSession(runtime, worktree.path);
+			if (failure) return failure;
+			await runtime.output(formatSessionWorktreeSummary(worktree));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.addToHistory(command.text);
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleWorktreeCommand(command.args || undefined);
+		},
+	},
+	{
 		name: "add-dir",
+		icon: "folderPlus",
 		description: "Add a workspace directory to this session (multi-root)",
 		acpDescription: "Add a workspace directory to this session",
 		inlineHint: "<path>",
@@ -580,6 +771,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "remove-dir",
+		icon: "folderMinus",
 		description: "Remove a workspace directory from this session",
 		acpDescription: "Remove a workspace directory from this session",
 		inlineHint: "<path>",
@@ -620,4 +812,31 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
 	},
+	{
+		name: "restart",
+		icon: "restart",
+		description: "Restart omp with the same launch flags, resuming this session",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.restart();
+		},
+	},
 ];
+async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
+	setProjectDir(cwd);
+	await runtime.settings.reloadForCwd(cwd);
+	applyProviderGlobalsFromSettings(runtime.settings);
+	clearClaudePluginRootsCache();
+	const src = discoverTitleSystemPromptFile(cwd);
+	const p = await resolvePromptInput(src, "title system prompt");
+	runtime.session.setTitleSystemPrompt(p);
+	resetCapabilities();
+	await runtime.session.refreshSkills();
+	const cmds = await loadSlashCommands({
+		cwd,
+		extensionRoots: runtime.session.effectiveExtensionRoots,
+	});
+	runtime.session.setSlashCommands(cmds);
+	await runtime.refreshCommands?.();
+	await runtime.reloadPlugins();
+}

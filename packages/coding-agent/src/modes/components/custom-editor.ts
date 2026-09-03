@@ -4,7 +4,9 @@ import {
 	addKeyAliases,
 	canonicalKeyId,
 	Editor,
+	type EditorTextDecorationContext,
 	type EditorTheme,
+	getKeybindings,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -12,8 +14,15 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
-import { isSettingsInitialized, settings } from "../../config/settings";
-import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
+import { isVideoPath, videoPreviewSource } from "../../utils/video";
+import {
+	attachmentSgr,
+	COMPOSER_TOKEN_REGEX,
+	chipLabel,
+	collapseImageMarkers,
+	renderPlaceholders,
+} from "../composer-attachments";
+import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
 import { fgOrPlain, theme } from "../theme/theme";
@@ -57,7 +66,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
-	"app.retry": ["alt+r"],
+	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
@@ -85,7 +94,6 @@ const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
 const URI_SCHEME_REGEX = /^[a-z][a-z0-9+.-]*:/i;
 const FILE_URI_REGEX = /^file:\/\//i;
-const WINDOWS_DRIVE_PATH_REGEX = /^[a-z]:[\\/]/i;
 /**
  * Alternation of the filesystem prefixes that make a path unambiguously
  * absolute (POSIX root, home, `file://`, UNC, Windows drive). Shared by
@@ -96,7 +104,7 @@ const WINDOWS_DRIVE_PATH_REGEX = /^[a-z]:[\\/]/i;
 const ABSOLUTE_PATH_PREFIX_SOURCE = String.raw`(?:\/|~\/|file:\/\/|\\\\|[A-Za-z]:[\\/])`;
 /**
  * Whole-string anchor for paths that are unambiguously absolute. Restricts the
- * "treat the entire text as one path" pass of {@link extractWholeTextImagePath}
+ * "treat the entire text as one path" pass of {@link extractWholeTextAttachmentPath}
  * to inputs that start with a clearly-anchored filesystem prefix, so prose
  * containing a path-shaped fragment (e.g. "see /tmp/x.png") never hijacks the
  * smart fallback.
@@ -172,13 +180,14 @@ function normalizePastedPath(path: string): string {
 }
 
 function isExplicitPastedPath(path: string): boolean {
-	if (WINDOWS_DRIVE_PATH_REGEX.test(path) || FILE_URI_REGEX.test(path)) return true;
+	if (ABSOLUTE_PATH_PREFIX_REGEX.test(path) || /^\.\.?[\\/]/.test(path)) return true;
 	if (URI_SCHEME_REGEX.test(path)) return false;
-	return path.includes("/") || path.includes("\\");
+	return path.includes("\\");
 }
 
-function isImagePath(path: string): boolean {
-	return BRACKETED_IMAGE_PATH_REGEX.test(path);
+/** A pasted local image or video can become a vision-ready image attachment. */
+function isPreviewableAttachmentPath(path: string): boolean {
+	return BRACKETED_IMAGE_PATH_REGEX.test(path) || isVideoPath(path);
 }
 
 function splitPastedPathSegments(payload: string): string[] | undefined {
@@ -227,9 +236,9 @@ function splitPastedPathSegments(payload: string): string[] | undefined {
 /**
  * Extract whitespace/quoted-separated path-like segments from `payload`.
  * Shared backend of {@link extractBracketedPastePaths} and {@link extractPastePathsFromText}.
- * Returns the segments only when EVERY segment looks like an explicit path
- * (`/`, `\`, drive letter, or `file://`); otherwise undefined so the caller
- * falls back to a plain text paste.
+ * Returns the segments only when EVERY segment looks like an anchored local
+ * path or uses Windows separators; otherwise undefined so ambiguous relative
+ * URL/path text falls back to a plain text paste.
  */
 function extractExplicitPathSegments(payload: string): string[] | undefined {
 	const pasted = payload.trim();
@@ -261,7 +270,7 @@ export function extractPastePathsFromText(text: string): string[] | undefined {
  * Whole-text-as-path pass shared by {@link extractImagePastePathsFromText}
  * and {@link extractImagePathFromText}: treat the entire text as one path
  * when it is anchored by {@link ABSOLUTE_PATH_PREFIX_REGEX}, contains no
- * newlines, and points at a supported image extension. Recovers single paths
+ * newlines, and points at a vision-previewable image or video extension. Recovers single paths
  * whose unescaped spaces defeat the segment splitter (macOS screenshot names).
  *
  * Refuses payloads carrying a second {@link INTERIOR_PATH_ANCHOR_REGEX} anchor.
@@ -273,30 +282,32 @@ export function extractPastePathsFromText(text: string): string[] | undefined {
  * directory whose name ends in a space, as in `/tmp/odd dir /sub/x.png`); a
  * plain text paste is the losing-nothing outcome, so ambiguity resolves that way.
  */
-function extractWholeTextImagePath(text: string): string | undefined {
+function extractWholeTextAttachmentPath(text: string): string | undefined {
 	const trimmed = text.trim();
 	if (!trimmed || /[\r\n]/.test(trimmed) || !ABSOLUTE_PATH_PREFIX_REGEX.test(trimmed)) return undefined;
 	if (INTERIOR_PATH_ANCHOR_REGEX.test(trimmed)) return undefined;
 	const wholePath = normalizePastedPath(trimmed);
-	return wholePath && isExplicitPastedPath(wholePath) && isImagePath(wholePath) ? wholePath : undefined;
+	return wholePath && isExplicitPastedPath(wholePath) && isPreviewableAttachmentPath(wholePath)
+		? wholePath
+		: undefined;
 }
 
 /**
  * Same shape as {@link extractBracketedImagePastePaths} but operates on a
  * payload that has already been stripped of the `\x1b[200~` / `\x1b[201~`
  * markers — used by the assembled-paste router in {@link CustomEditor.handleInput}
- * so split bracketed pastes get the same image-path detection as single-chunk ones.
+ * so split bracketed pastes get the same attachment-path detection as single-chunk ones.
  *
  * When the segment splitter fails (an unescaped space in a real path breaks
  * its every-segment-is-a-path invariant), falls back to
- * {@link extractWholeTextImagePath}, so a dropped macOS screenshot
+ * {@link extractWholeTextAttachmentPath}, so a dropped macOS screenshot
  * (`Screenshot 2026-06-25 at 1.23.45 PM.png`) attaches as an image instead of
  * degrading to literal text (#6578).
  */
 export function extractImagePastePathsFromText(text: string): string[] | undefined {
 	const paths = extractPastePathsFromText(text);
-	if (paths !== undefined) return paths.every(isImagePath) ? paths : undefined;
-	const wholePath = extractWholeTextImagePath(text);
+	if (paths !== undefined) return paths.every(isPreviewableAttachmentPath) ? paths : undefined;
+	const wholePath = extractWholeTextAttachmentPath(text);
 	return wholePath ? [wholePath] : undefined;
 }
 
@@ -323,9 +334,9 @@ export function extractBracketedImagePastePath(data: string): string | undefined
 }
 
 /**
- * Return a single image file path when `text` is exactly one explicit path
- * pointing at a supported image extension (`.png`, `.jpg`/`.jpeg`, `.gif`,
- * `.webp`). Used by the keybind-driven clipboard image paste path so a
+ * Return a single previewable file path when `text` is exactly one explicit
+ * image (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) or video path. Used by the
+ * keybind-driven clipboard image paste path so a
  * clipboard whose only payload is an image file (e.g. Finder `Cmd+C` on
  * macOS) attaches the image instead of pasting the path as literal text.
  *
@@ -333,12 +344,12 @@ export function extractBracketedImagePastePath(data: string): string | undefined
  *
  * 1. Splitter pass (shared with the bracketed-paste handler) — handles
  *    quoted paths, shell-escaped spaces, and unambiguous single tokens.
- *    Returns the single image path when it parses cleanly; explicitly
+ *    Returns the single previewable path when it parses cleanly; explicitly
  *    returns `undefined` when the splitter found multiple segments (so
  *    ambiguous multi-path clipboard text like `/tmp/a.png /tmp/b.png`
  *    still falls through to the text fallback instead of being mis-loaded
  *    as one giant path).
- * 2. {@link extractWholeTextImagePath} — only reached when the splitter
+ * 2. {@link extractWholeTextAttachmentPath} — only reached when the splitter
  *    failed (every segment must look like an explicit path; an unescaped
  *    space in a real path breaks that). This is what recovers macOS
  *    screenshot filenames like
@@ -346,9 +357,9 @@ export function extractBracketedImagePastePath(data: string): string | undefined
  */
 export function extractImagePathFromText(text: string): string | undefined {
 	const paths = extractPastePathsFromText(text);
-	if (paths?.length === 1 && isImagePath(paths[0])) return paths[0];
+	if (paths?.length === 1 && isPreviewableAttachmentPath(paths[0])) return paths[0];
 	if (paths !== undefined) return undefined;
-	return extractWholeTextImagePath(text);
+	return extractWholeTextAttachmentPath(text);
 }
 
 /**
@@ -376,10 +387,27 @@ function isEditorTheme(value: unknown): value is EditorTheme {
 	);
 }
 
+/** A large text paste staged as a composer chip. `content` feeds the band card's snippet and
+ *  captions; the submit-time expansion (verbatim content or a wrapped block) lives in the
+ *  editor's atom table under `label`. */
+export interface TextAttachment {
+	n: number;
+	label: string;
+	content: string;
+	lineCount: number;
+	charCount: number;
+}
+
+/** One visible composer attachment, in band order (vision attachments first, then text pastes). */
+export type ComposerChipDescriptor =
+	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
+	| { kind: "paste"; n: number; text: TextAttachment };
+
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
+	#spelling = new MacOSSpellingProvider();
 	imageLinks?: readonly (string | undefined)[];
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
@@ -388,6 +416,14 @@ export class CustomEditor extends Editor {
 	/** Per-image source links (file:// targets) parallel to {@link pendingImages};
 	 *  `undefined` entries are images without a backing reference yet. */
 	pendingImageLinks: (string | undefined)[] = [];
+	/** Large text pastes staged as compact chip tokens; expansion lives in the atom table.
+	 *  Numbered by a per-draft monotonic counter so a deleted chip never recycles its number
+	 *  (labels key the atom table). */
+	pendingTexts: TextAttachment[] = [];
+	#textAttachmentCounter = 0;
+	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
+	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
+	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
 
 	/**
 	 * The host {@link TUI}, captured when a plugin constructs this editor through
@@ -413,7 +449,19 @@ export class CustomEditor extends Editor {
 	 */
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
+		const requestTextAssistRepaint = (): void => {
+			this.invalidate();
+			this.#requestShimmerRepaint?.();
+		};
+		this.#spelling.onUpdate = requestTextAssistRepaint;
+		this.onTextAssistApplied = requestTextAssistRepaint;
+		this.setTextAssistProvider(this.#spelling);
 		if (args[0] instanceof TUI) this.tui = args[0];
+	}
+
+	/** Independently configure typo detection, word autocomplete, and autocorrect. */
+	setSpellingFeatures(features: SpellingFeatures): void {
+		this.#spelling.setFeatures(features);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -422,25 +470,98 @@ export class CustomEditor extends Editor {
 	clearDraft(historyText?: string): void {
 		if (historyText !== undefined) this.addToHistory(historyText);
 		this.setText("");
+		this.clearAtoms();
 		this.imageLinks = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
+		this.pendingTexts = [];
+		this.#textAttachmentCounter = 0;
 	}
 
-	/** Replace the composer draft with a restored historical prompt: sets the text and
-	 *  re-attaches the message's images so positional `[Image #N]` markers resolve on
-	 *  resubmit instead of degrading to literal text (esc-esc branch, `/tree`). Source
-	 *  links are unknown for restored drafts, so every link slot is `undefined`. */
+	/** Replace the composer draft with a restored historical prompt: re-attaches the message's
+	 *  images, collapses stored `[Image #N, WxH]` markers back into compact chip tokens (so the
+	 *  chips band and atomic deletion return), and re-materializes `file://` links so the tokens
+	 *  are clickable again instead of degrading to dead text (esc-esc branch, `/tree`). */
 	setDraft(text: string, images?: readonly ImageContent[]): void {
-		this.setText(text);
+		this.clearAtoms();
+		this.pendingTexts = [];
+		this.#textAttachmentCounter = 0;
 		this.imageLinks = undefined;
 		this.pendingImages = images ? [...images] : [];
 		this.pendingImageLinks = images ? images.map(() => undefined) : [];
+		this.setCollapsedText(text);
+		void this.#materializeDraftLinks();
 	}
 
-	/** Treat image/paste markers as indivisible: a stray backspace deletes the whole token
-	 *  instead of corrupting `[Paste #1, +30 lines]` into plain text. */
-	override atomicTokenPattern = PLACEHOLDER_REGEX;
+	/** Set the buffer text with bracketed `[Image #N]` markers collapsed into chip tokens and
+	 *  registered in the atom table (queued-message dequeue, failed-submit restore). Leaves the
+	 *  pending image/text state untouched — callers own that. */
+	setCollapsedText(text: string): void {
+		this.setText(
+			collapseImageMarkers(text, this.pendingImages.length, (label, expansion) =>
+				this.registerAtom(label, expansion),
+			),
+		);
+	}
+
+	/** Stage `content` as a text-attachment chip: inserts the compact token at the cursor and
+	 *  registers `expansion` (default: the content itself) in the atom table for submit. */
+	insertTextAttachment(content: string, expansion: string = content): void {
+		this.#textAttachmentCounter++;
+		const n = this.#textAttachmentCounter;
+		const label = chipLabel("paste", n);
+		this.pendingTexts.push({
+			n,
+			label,
+			content,
+			lineCount: content.split("\n").length,
+			charCount: content.length,
+		});
+		this.insertAtom(label, expansion);
+	}
+
+	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
+	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
+	composerChips(): ComposerChipDescriptor[] {
+		const text = this.getText();
+		const chips: ComposerChipDescriptor[] = [];
+		for (let i = 0; i < this.pendingImages.length; i++) {
+			const n = i + 1;
+			const video =
+				text.includes(chipLabel("video", n)) || text.includes(`[Video #${n}]`) || text.includes(`[Video #${n},`);
+			const image =
+				text.includes(chipLabel("image", n)) || text.includes(`[Image #${n}]`) || text.includes(`[Image #${n},`);
+			if (!video && !image) continue;
+			chips.push({
+				kind: video ? "video" : "image",
+				n,
+				image: this.pendingImages[i],
+				link: this.pendingImageLinks[i],
+			});
+		}
+		for (const entry of this.pendingTexts) {
+			if (!text.includes(entry.label)) continue;
+			chips.push({ kind: "paste", n: entry.n, text: entry });
+		}
+		return chips;
+	}
+
+	/** Resolve draft-image links off the render path and repaint when they land; guarded against
+	 *  the draft being replaced while the blob writes were in flight. */
+	async #materializeDraftLinks(): Promise<void> {
+		const materialize = this.draftImageLinkMaterializer;
+		const images = this.pendingImages;
+		if (!materialize || images.length === 0) return;
+		const links = await materialize(images);
+		if (!links || this.pendingImages !== images) return;
+		this.pendingImageLinks = images.map((image, index) => videoPreviewSource(image) ?? links[index]);
+		this.imageLinks = this.pendingImageLinks;
+		this.#requestShimmerRepaint?.();
+	}
+
+	/** Treat image/paste references — compact chip tokens and bracketed markers alike — as
+	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
+	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
 
 	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
 	 *  a keyword is on screen and the prompt is focused. ~14 frames/s is smooth
@@ -458,26 +579,45 @@ export class CustomEditor extends Editor {
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
 	#queueDecorationText: string | undefined;
+	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
 	#queueListActive = false;
 
 	/** Decorate magic keywords, attachments, and the queue-composer header/list markers.
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
-	override decorateText = (text: string): string => {
+	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		const editorText = this.getText();
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		if (this.#queueDecorationText !== editorText) {
 			this.#queueDecorationText = editorText;
+			this.#decorationLines = this.getLines();
 			const queueBody = parseQueueShorthand(editorText);
 			this.#queueShorthandActive = queueBody !== undefined;
 			this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
 		}
+		let sourceSearchOffset = 0;
+		const locateSource = (value: string): number => {
+			const offset = text.indexOf(value, sourceSearchOffset);
+			if (offset === -1) return sourceSearchOffset;
+			sourceSearchOffset = offset + value.length;
+			return offset;
+		};
 		return renderPlaceholders(text, {
 			renderText: value => {
-				const highlighted = highlightMagicKeywords(value, undefined, phase);
+				const sourceOffset = locateSource(value);
+				const highlighted = this.#spelling.decorateTypos(
+					value,
+					{
+						editorText,
+						lines: this.#decorationLines,
+						line: context.line,
+						startCol: context.startCol + sourceOffset,
+					},
+					span => highlightMagicKeywords(span, undefined, phase),
+				);
 				if (this.#queueShorthandActive && (value.startsWith("->") || value.startsWith("=>"))) {
 					const icon = typeof theme === "undefined" ? "➤" : theme.nav.selected;
 					return `${fgOrPlain("dim", `Queueing ${icon}`)}${highlighted.slice(2)}`;
@@ -492,31 +632,46 @@ export class CustomEditor extends Editor {
 				}
 				return highlighted;
 			},
-			renderReference: (value, kind, index) =>
-				kind === "image"
-					? imageReferenceHyperlink(value, index, this.imageLinks, label =>
+			renderReference: (value, kind, index, form) => {
+				locateSource(value);
+				if (form === "chip") {
+					// Chip tokens carry their attachment identity color (matches the band card).
+					const styled = `${attachmentSgr(kind, index)}\x1b[1m${value}\x1b[22m\x1b[39m`;
+					return kind === "image" || kind === "video"
+						? this.imageReferenceHyperlink(value, index, this.imageLinks, () => styled)
+						: styled;
+				}
+				return kind === "image" || kind === "video"
+					? this.imageReferenceHyperlink(value, index, this.imageLinks, label =>
 							fgOrPlain("accent", label, `\x1b[1m\x1b[4m${label}\x1b[24m\x1b[22m`),
 						)
-					: fgOrPlain("accent", value, `\x1b[1m${value}\x1b[22m`),
+					: fgOrPlain("accent", value, `\x1b[1m${value}\x1b[22m`);
+			},
 		});
 	};
 
-	/** Optional test/host override for the magic-keyword shimmer gate. When
-	 *  defined, takes precedence over the global `magicKeywords.enabled` setting,
-	 *  letting tests assert the gating behaviour without mutating the
-	 *  process-wide Settings singleton (which races with parallel test files —
-	 *  see issue #2582). Production wires this through the host's Settings
-	 *  reader and updates it on the relevant setting change. */
+	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;
 
-	/** Whether the shimmer should advance this frame. Defaults to "on" before
-	 *  settings have initialised (tests, early boot) so the animation does not
-	 *  silently disappear during a race; settings disabling the feature wins
-	 *  once they are loaded. An explicit `magicKeywordsEnabledOverride` overrides
-	 *  both paths. */
+	/**
+	 * Host-owned setting reader. Startup defaults to enabled without loading the
+	 * settings graph; InteractiveMode replaces this with the live session setting.
+	 */
+	magicKeywordsEnabled: () => boolean = () => true;
+
+	/**
+	 * Late-bound OSC hyperlink renderer. Startup stays plain until the full
+	 * interactive graph supplies the settings-aware implementation.
+	 */
+	imageReferenceHyperlink: (
+		label: string,
+		index: number,
+		imageLinks: readonly (string | undefined)[] | undefined,
+		renderLabel: (text: string) => string,
+	) => string = (label, _index, _imageLinks, renderLabel) => renderLabel(label);
+
 	#shimmerEnabled(): boolean {
-		if (this.magicKeywordsEnabledOverride !== undefined) return this.magicKeywordsEnabledOverride;
-		return isSettingsInitialized() ? settings.get("magicKeywords.enabled") : true;
+		return this.magicKeywordsEnabledOverride ?? this.magicKeywordsEnabled();
 	}
 
 	/** Bind the host's render request callback. Idempotent — the host wires this
@@ -559,7 +714,7 @@ export class CustomEditor extends Editor {
 	onCopyPrompt?: () => void;
 	/** Called when the configured image-paste shortcut is pressed. */
 	onPasteImage?: () => Promise<boolean>;
-	/** Called when a bracketed paste contains one or more image-file paths. */
+	/** Called when a bracketed paste contains one or more image or video file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
@@ -641,6 +796,13 @@ export class CustomEditor extends Editor {
 
 	#matchesAction(canonical: string | undefined, action: ConfigurableEditorAction): boolean {
 		return canonical !== undefined && (this.#actionMatchKeys.get(action)?.has(canonical) ?? false);
+	}
+
+	/** Whether `data` is exactly one keypress the base editor would treat as submit. */
+	#isSubmitKey(data: string): boolean {
+		if (data === "\n") return true;
+		const key = parseKey(data);
+		return key !== undefined && getKeybindings().matchesCanonical(canonicalKeyId(key), "tui.input.submit");
 	}
 
 	/**
@@ -814,16 +976,20 @@ export class CustomEditor extends Editor {
 				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
 				return;
 			}
-			const imagePaths = extractImagePastePathsFromText(content);
-			if (imagePaths && this.onPasteImagePath) {
+			const attachmentPaths = extractImagePastePathsFromText(content);
+			if (attachmentPaths && this.onPasteImagePath) {
 				this.#trackAsyncPaste(
 					(async () => {
-						for (const p of imagePaths) await this.onPasteImagePath?.(p);
+						for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
 					})(),
 				);
 				return;
 			}
-			this.pasteText(content);
+			// A submit key that shared the read (see `StdinBuffer`'s paste event) is
+			// about to be drained below, so a large-paste host must stage the paste
+			// synchronously instead of opening a menu the submit would land in.
+			if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
+			else this.pasteText(content);
 			// No async paste was started; drain the queued trailing bytes ourselves.
 			const drained = this.#pendingInput.splice(0);
 			for (const chunk of drained) this.handleInput(chunk);

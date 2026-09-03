@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import type { CompactOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { CompactMode } from "@oh-my-pi/pi-coding-agent/session/compact-modes";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import {
 	ACP_BUILTIN_SLASH_COMMANDS,
 	executeAcpBuiltinSlashCommand,
@@ -64,6 +66,67 @@ describe("/compact dispatch (ACP)", () => {
 		expect(h.compact).not.toHaveBeenCalled();
 		expect(result).toEqual({ consumed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("snapcompact");
+	});
+
+	it("leaves the RPC command queue free while compaction runs", async () => {
+		const compactStarted = Promise.withResolvers<void>();
+		const compactFinished = Promise.withResolvers<void>();
+		const h = acpRuntime();
+		h.compact.mockImplementation(async () => {
+			compactStarted.resolve();
+			await compactFinished.promise;
+		});
+		const backgroundTasks: Promise<void>[] = [];
+		h.runtime.runCommandInBackground = task => {
+			backgroundTasks.push(task());
+		};
+
+		// The dispatcher must resolve before compaction finishes so the RPC
+		// serialized queue can dequeue a follow-up abort.
+		const result = await executeAcpBuiltinSlashCommand("/compact", h.runtime);
+		await compactStarted.promise;
+		expect(result).toEqual({ consumed: true });
+		expect(h.output).not.toHaveBeenCalled();
+
+		compactFinished.resolve();
+		await Promise.all(backgroundTasks);
+		expect(h.output).toHaveBeenCalledWith("Compaction complete.");
+	});
+
+	it("stays silent when compaction is cancelled by a user interrupt", async () => {
+		const h = acpRuntime();
+		h.compact.mockImplementation(async () => {
+			throw new CompactionCancelledError(undefined, { cause: USER_INTERRUPT_LABEL });
+		});
+		const backgroundTasks: Promise<void>[] = [];
+		h.runtime.runCommandInBackground = task => {
+			backgroundTasks.push(task());
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/compact", h.runtime);
+		expect(result).toEqual({ consumed: true });
+		await Promise.all(backgroundTasks);
+		expect(h.output).not.toHaveBeenCalled();
+	});
+
+	it("surfaces extension cancellation instead of treating it as a user interrupt", async () => {
+		const h = acpRuntime();
+		h.compact.mockImplementation(async () => {
+			throw new CompactionCancelledError();
+		});
+
+		await executeAcpBuiltinSlashCommand("/compact", h.runtime);
+		expect(h.output).toHaveBeenCalledWith("Compaction failed: Compaction cancelled");
+	});
+
+	it("surfaces other failures behind the Compaction failed prefix", async () => {
+		const h = acpRuntime();
+		h.compact.mockImplementation(async () => {
+			throw new Error("no model selected");
+		});
+
+		await executeAcpBuiltinSlashCommand("/compact", h.runtime);
+		expect(h.output).toHaveBeenCalledWith("Compaction failed: no model selected");
 	});
 
 	it("advertises the mode subcommands and input hint to ACP clients", () => {

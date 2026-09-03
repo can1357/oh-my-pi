@@ -90,7 +90,7 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 
 	afterEach(async () => {
 		mode?.stop();
-		HistoryStorage.resetInstance();
+		HistoryStorage.close();
 		vi.restoreAllMocks();
 		await session?.dispose();
 		authStorage?.close();

@@ -6,9 +6,12 @@
 members = [
    "crates/pi-ast",
    "crates/pi-builtins",
+   "crates/pi-diff",
+   "crates/pi-edit",
    "crates/pi-iso",
    "crates/pi-natives",
    "crates/pi-shell",
+   "crates/pi-vcs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
@@ -16,7 +19,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "17.4.0"
+version = "18.1.6"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -50,6 +53,8 @@ lto = "thin"
 codegen-units = 16
 debug = false
 strip = "symbols"
+# Safe here only because `debug = false` leaves no debuginfo to lose. Never
+# copy this line into a profile that sets `debug` — see [profile.dev] below.
 split-debuginfo = "off"
 
 [profile.local]
@@ -58,6 +63,14 @@ lto = "thin"
 codegen-units = 16
 incremental = true
 strip = false
+# `release` codegen with symbols kept for `perf`/`samply`/Instruments. Full
+# opt-level so timings match production; only the binary size differs.
+# `cargo build --profile profiling`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+strip = false
 
 [profile.dev]
 opt-level = 0
@@ -65,6 +78,12 @@ lto = false
 codegen-units = 256
 incremental = true
 debug = "line-tables-only"
+# Mach-O keeps DWARF in the .o files and points at them from the executable's
+# debug map (N_OSO); `unpacked` is what retains those .o files. Setting this to
+# "off" silently strips file:line from backtrace frames in our own crates,
+# because ld64 never merges DWARF into the binary. The `panicked at foo.rs:3`
+# header survives via #[track_caller] and hides the loss. Linux: split DWARF
+# (.dwo) rather than debuginfo packed into every rlib. Windows: no-op (PDB).
 split-debuginfo = "unpacked"
 
 # Deps compile optimized once and cache; your own crates stay fast.
@@ -168,6 +187,10 @@ verbose_bit_mask = "allow"   # Explicit bit patterns can be clearer than hex
 # ──────────────────────────────────────────────────────────────────────────────
 default_trait_access = "allow"        # Default::default() sometimes clearer
 significant_drop_tightening = "allow" # We pay attention to this already
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests & Assertions
+# ──────────────────────────────────────────────────────────────────────────────
+assert_is_empty = "allow" # `is_empty()` states intent without brittle type annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Documentation
@@ -187,10 +210,13 @@ too_many_lines = "allow"     # Arbitrary limits don't account for necessary comp
 # Internal Libraries
 # ──────────────────────────────────────────────────────────────────────────────
 pi-ast = { path = "crates/pi-ast" }
+pi-diff = { path = "crates/pi-diff" }
+pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
+pi-vcs = { path = "crates/pi-vcs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 
@@ -218,6 +244,7 @@ toml = "1.1"
 # Error Handling
 # ──────────────────────────────────────────────────────────────────────────────
 anyhow = "1.0"
+thiserror = "2"
 bytes = "1"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -248,7 +275,7 @@ smallvec = { version = "1.15.1", features = [
 # ──────────────────────────────────────────────────────────────────────────────
 # Hashing
 # ──────────────────────────────────────────────────────────────────────────────
-xxhash-rust = { version = "0.8", features = ["xxh64"] }
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
@@ -311,6 +338,7 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
+resvg = "0.48"
 # Not used directly: activates zune-jpeg's non-default `log` feature so image's
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.
@@ -341,6 +369,29 @@ tiktoken-rs = "0.11"
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
 brush-parser = "0.3"
+# ──────────────────────────────────────────────────────────────────────────────
+# Version Control (in-process git + jujutsu)
+# ──────────────────────────────────────────────────────────────────────────────
+# gix is pinned to the minor jj-lib depends on so both VCS backends share one
+# gitoxide stack in the binary. No transport/credential features: network ops
+# (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
+gix = { version = "0.85", default-features = false, features = [
+   "attributes",
+   "blob-diff",
+   "dirwalk",
+   "excludes",
+   "index",
+   "max-performance-safe",
+   "merge",
+   "revision",
+   "sha1",
+   "sha256",
+   "status",
+   "tree-editor",
+   "worktree-mutation",
+   "zlib-rs",
+] }
+jj-lib = { version = "0.44", default-features = false, features = ["git"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AST & Tree-Sitter

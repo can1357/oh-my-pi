@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
+### Changed
+
+- Provider, tool, and project `<select>` dropdowns are now styled to match the dashboard design, with dark and light theme support.
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added API for daily activity tracking, including cost, requests, and token usage aggregates
+- Added a Traces dashboard for detailed session analysis, including an interactive timeline, searchable and filterable transcripts, token and cost summaries, and aggregate tool-usage and timing insights.
+
+### Fixed
+
+- Fixed `omp stats` omitting usage from online auto-thinking classifier calls.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed inconsistent model colors between the Model Preference chart and Model Statistics table.
+
+## [18.0.4] - 2026-08-24
+
+### Fixed
+
+- Fixed SuperGrok usage appearing as free by applying matching public xAI API pricing (including 200K-token rates), labeling costs as API-equivalent estimates, backfilling existing usage records, and displaying subscription-only models as N/A ([#9512](https://github.com/can1357/oh-my-pi/issues/9512)).
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Projects dashboard folder endpoint running unrelated dashboard aggregations when loading folder statistics.
+- Fixed stats sync crashing with a NOT NULL constraint error when legacy session files carry a partially-populated usage cost.
+
 ## [17.4.0] - 2026-08-20
 
 ### Changed

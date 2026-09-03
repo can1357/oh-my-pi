@@ -110,6 +110,21 @@ describe("read tool large artifact handling", () => {
 		expect(result.details?.totalLines).toBe(400);
 	});
 
+	it("tails an artifact with :-N by counting lines first, then streaming only that window", async () => {
+		const output = getTextOutput(await tool.execute("call-tail", { path: "artifact://0:-3" }));
+
+		// One leading context line joins the requested 398-400 window.
+		expect(output).not.toContain("line-396");
+		expect(output).toContain("line-397");
+		expect(output).toContain("line-398");
+		expect(output).toContain("line-400");
+
+		const raw = getTextOutput(await tool.execute("call-raw-tail-n", { path: "artifact://0:raw:-2" }));
+		expect(raw).toStartWith("line-399");
+		expect(raw).not.toContain("line-398");
+		expect(raw).toContain("line-400");
+	});
+
 	it("shortens artifact paths under the user's home dir instead of leaking the absolute path", async () => {
 		const homeSpy = spyOn(os, "homedir").mockReturnValue(testDir);
 		try {

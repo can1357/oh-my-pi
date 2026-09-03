@@ -109,7 +109,7 @@ export function readTerminalRows(terminal: XtermTerminal, startRow: number, rowC
 
 		const cells: Array<{ chars: string; style: string }> = [];
 		let lastContent = -1;
-		for (let column = 0; column < line.length; ) {
+		for (let column = 0; column < line.length;) {
 			const cell = line.getCell(column, reusableCell);
 			if (!cell) break;
 			const chars = cell.getChars();

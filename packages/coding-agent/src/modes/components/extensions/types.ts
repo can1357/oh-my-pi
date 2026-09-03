@@ -26,7 +26,7 @@ export type ExtensionState = "active" | "disabled" | "shadowed";
 /**
  * Reason why an extension is disabled.
  */
-export type DisabledReason = "provider-disabled" | "item-disabled" | "shadowed";
+export type DisabledReason = "provider-disabled" | "user-opt-in" | "item-disabled" | "shadowed";
 
 /**
  * Unified extension representation for the dashboard.
@@ -59,8 +59,23 @@ export interface Extension {
 	disabledReason?: DisabledReason;
 	/** If shadowed, what shadows it */
 	shadowedBy?: string;
-	/** Raw item data for inspector */
+	/**
+	 * Raw item data for inspector. For `kind: "mcp"` this remains the discovered
+	 * `MCPServer` config — live connection state is joined at render time via
+	 * {@link snapshotMcpRuntime}, not stuffed into this bag.
+	 */
 	raw: unknown;
+}
+
+/**
+ * True when this row is a lower-precedence copy of another same-name item.
+ * Disablement takes display precedence (`state === "disabled"`), but the
+ * discovery `_shadowed` flag (and `shadowedBy`) still mark the row as a
+ * loser — it must not be toggleable and must not join the winner's live state.
+ */
+export function isShadowedExtension(ext: Extension): boolean {
+	if (ext.state === "shadowed" || ext.shadowedBy) return true;
+	return Boolean((ext.raw as { _shadowed?: boolean } | null | undefined)?._shadowed);
 }
 
 /**

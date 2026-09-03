@@ -43,8 +43,8 @@ function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 		return true;
 	}
 	// RFC1918 private IPv4 ranges.
-	if (/^10\./.test(hostname)) return true;
-	if (/^192\.168\./.test(hostname)) return true;
+	if (hostname.startsWith("10.")) return true;
+	if (hostname.startsWith("192.168.")) return true;
 	if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) return true;
 	// Common ".local" mDNS hostnames used for home-LAN llama.cpp boxes.
 	if (hostname.endsWith(".local")) return true;

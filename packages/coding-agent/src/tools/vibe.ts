@@ -26,8 +26,8 @@ import vibeSpawnDescription from "../prompts/tools/vibe-spawn.md" with { type: "
 import vibeWaitDescription from "../prompts/tools/vibe-wait.md" with { type: "text" };
 import { oneLineLabel } from "../task/types";
 import { renderStatusLine } from "../tui";
+import type { VibeCli } from "../vibe/lifecycle";
 import {
-	type VibeCli,
 	type VibeKillOutcome,
 	type VibeScreenSnapshot,
 	type VibeSendOutcome,

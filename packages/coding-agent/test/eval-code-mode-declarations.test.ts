@@ -39,6 +39,19 @@ describe("generateCodeModeDeclarations", () => {
 		]);
 		expect(out).toContain('op: "init" | "done"');
 	});
+	test("union item types are parenthesized inside arrays", () => {
+		const out = generateCodeModeDeclarations([
+			{
+				name: "chmod",
+				parameters: {
+					type: "object",
+					properties: { modes: { type: "array", items: { enum: ["read", "write"] } } },
+					required: ["modes"],
+				},
+			},
+		]);
+		expect(out).toContain('modes: ("read" | "write")[]');
+	});
 	test("non-identifier property keys stay quoted", () => {
 		const out = generateCodeModeDeclarations([
 			{
@@ -72,6 +85,7 @@ test("EvalTool advertises only tools authorized for its bridge", () => {
 			["write", write],
 		]),
 		getEvalBridgeToolNames: () => ["eval", "read"],
+		getCodeModeDirectToolNames: () => ["eval"],
 	} as unknown as ToolSession;
 
 	const description = new EvalTool(session).description;
@@ -80,49 +94,64 @@ test("EvalTool advertises only tools authorized for its bridge", () => {
 	expect(description).not.toContain("write(args:");
 });
 
-test("EvalTool description renders the Code Mode guidance and declarations block only when active", () => {
+test("EvalTool omits tools the model can still call directly", () => {
+	// Plan mode keeps `write` direct as the xd://propose transport; advertising it
+	// as bridged would nest plan approval inside an eval result.
+	const read = { name: "read", parameters: type({ path: "string" }) };
+	const write = { name: "write", parameters: type({ path: "string", content: "string" }) };
+	const session = {
+		cwd: "/tmp",
+		hasUI: false,
+		getSessionFile: () => null,
+		settings: Settings.isolated(),
+		toolRegistry: new Map<string, typeof read | typeof write>([
+			["read", read],
+			["write", write],
+		]),
+		getEvalBridgeToolNames: () => ["eval", "read", "write"],
+		getCodeModeDirectToolNames: () => ["eval", "write"],
+	} as unknown as ToolSession;
+
+	const description = new EvalTool(session).description;
+
+	expect(description).toContain("read(args:");
+	expect(description).not.toContain("write(args:");
+});
+
+test("EvalTool advertises bridged tool declarations only while Code Mode is active", () => {
 	const read = { name: "read", parameters: type({ path: "string" }) };
 	const baseSession = {
 		cwd: "/tmp",
 		hasUI: false,
 		getSessionFile: () => null,
-		getActiveModel: () => ({ provider: "openai-codex" }),
+		settings: Settings.isolated(),
 		toolRegistry: new Map([["read", read]]),
 		getEvalBridgeToolNames: () => ["eval", "read"],
 	};
 	const active = new EvalTool({
 		...baseSession,
-		settings: Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
+		getCodeModeDirectToolNames: () => ["eval"],
 	} as unknown as ToolSession).description;
-	expect(active).toContain("Codex Code Mode is active");
-	expect(active).toContain("exec tool declarations:");
 	expect(active).toContain("declare const tool: {");
-	expect(active).toContain("  read(args:");
-	expect(active).toContain("parallel([() => tool.");
+	expect(active).toContain("read(args:");
 
 	const inactive = new EvalTool({
 		...baseSession,
-		settings: Settings.isolated({ "providers.openai-codex.codeMode": "off" }),
+		getCodeModeDirectToolNames: () => undefined,
 	} as unknown as ToolSession).description;
-	expect(inactive).not.toContain("Codex Code Mode is active");
-	expect(inactive).not.toContain("exec tool declarations:");
+	expect(inactive).not.toContain("declare const tool");
+	expect(inactive).not.toContain("read(args:");
 });
 
-test("EvalTool omits JavaScript Code Mode guidance when the JS backend is disabled", () => {
-	const read = { name: "read", parameters: type({ path: "string" }) };
+test("EvalTool withholds Code Mode transport support when the JS backend is disabled", () => {
 	const session = {
 		cwd: "/tmp",
 		hasUI: false,
 		getSessionFile: () => null,
-		settings: Settings.isolated({
-			"eval.js": false,
-			"eval.py": true,
-			"providers.openai-codex.codeMode": "on",
-		}),
-		getActiveModel: () => ({ provider: "openai-codex" }),
-		toolRegistry: new Map([["read", read]]),
-		getEvalBridgeToolNames: () => ["eval", "read"],
+		settings: Settings.isolated({ "eval.js": false, "eval.py": true }),
+		toolRegistry: new Map(),
+		getEvalBridgeToolNames: () => ["eval"],
 	} as unknown as ToolSession;
 
-	expect(new EvalTool(session).description).not.toContain("Codex Code Mode is active");
+	expect(new EvalTool(session).supportsCodeModeTransport()).toBe(false);
 });

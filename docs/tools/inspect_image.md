@@ -16,7 +16,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | Yes | Local image path (resolved relative to `session.cwd`), current-turn `Image #N` label, or `attachment://N` / `image://N` URI. Attachment indexes are 1-based. |
+| `path` | `string` | Yes | Local image path (resolved relative to `session.cwd`), local `.svg`/`.svgz` path with an explicit `:img` selector, current-turn `Image #N` label, or `attachment://N` / `image://N` URI. Attachment indexes are 1-based. |
 | `question` | `string` | Yes | User prompt sent as a text content block alongside the image. |
 
 ## Outputs
@@ -27,6 +27,7 @@ The tool returns a single `AgentToolResult`:
   - `model`: `<provider>/<id>` of the selected model.
   - `imagePath`: resolved filesystem path for a file input, or the canonical attachment URI for an attachment input.
   - `mimeType`: MIME type actually sent to the model after optional resize/re-encode.
+  - `usage`: token usage from the model response.
 
 Model-visible output is single-shot, not streamed by this tool.
 
@@ -40,30 +41,33 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 ## Flow
 1. `InspectImageTool.execute(...)` rejects immediately if `images.blockImages` is enabled in session settings.
 2. It reads `session.modelRegistry`; missing registry, empty registry, missing API key, or unresolved model each raise `ToolError` from `packages/coding-agent/src/tools/inspect-image.ts`.
-3. Model selection tries, in order, `@vision`, `@default`, the active model string from the session, then `availableModels[0]`. `expandRoleAlias(...)` and `resolveModelFromString(...)` handle each lookup.
-4. The chosen model must advertise `input.includes("image")`; otherwise execution fails before reading the file.
-5. The tool interprets exact `Image #N` labels (including bracketed labels), `attachment://N`, and `image://N` as 1-based references into the current turn's image attachments. Other values are loaded as files: `loadImageInput(...)` resolves the path with `resolveReadPath(...)`, detects MIME type with `readImageMetadata(...)`, and rejects files larger than `MAX_IMAGE_INPUT_BYTES` (`20 * 1024 * 1024`, 20 MiB). Attachment bytes have the same 20 MiB cap.
-6. File metadata is detected from headers. Attachment inputs use their supplied image MIME type. Supported MIME types are `image/png`, `image/jpeg`, `image/gif`, and `image/webp`.
-7. The loader uses `excludeWebP: webpExclusionForModel(model)` (`true` only for models that cannot decode WebP, such as the Ollama family). It calls `resizeImage(...)` when `images.autoResize` is true, or when WebP must be re-encoded for the selected model. Resize failures are swallowed and the original bytes are kept.
-8. If the file header or attachment MIME type is unsupported, `execute(...)` throws `ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.")`.
-9. The tool calls `instrumentedCompleteSimple(...)` with one user message containing two content parts in order:
+3. Model selection tries, in order, `@vision`, `@default`, the active model string from the session — each must resolve to a model advertising image input — then the first image-capable model sharing the active model's provider, then the first image-capable model overall. `expandRoleAlias(...)` and `resolveModelFromString(...)` handle each lookup.
+4. If no image-capable model is found, execution fails before reading the file.
+5. `parseImageAttachmentReference(...)` interprets exact `Image #N` labels (optionally bracketed), `attachment://N`, and `image://N` (case-insensitive) as 1-based references into the turn's image attachments (`session.getImageAttachments()` loaded via `loadImageAttachmentInput(...)`). A reference with no attachments or an out-of-range index raises a `ToolError` listing the available attachments. Other values are loaded as files: `loadImageInput(...)` resolves the path with `resolveReadPath(...)`, detects MIME type with `readImageMetadata(...)`, and rejects files larger than `MAX_IMAGE_INPUT_BYTES` (`20 * 1024 * 1024`, 20 MiB). Attachment bytes have the same 20 MiB cap.
+6. A path ending in `:img` selects SVG loading: `splitPathAndSelPreferringLiteral(...)` splits the selector and `loadSvgImageInput(...)` rasterizes `.svg`/`.svgz` bytes to PNG (`rasterizeSvg` from `@oh-my-pi/pi-natives`, max edge 2048px) before the normal encode/resize pipeline. A `:img` selector on a non-SVG file fails with an explicit error.
+7. File metadata is detected from headers. Attachment inputs use their supplied image MIME type. Supported MIME types are `image/png`, `image/jpeg`, `image/gif`, and `image/webp`.
+8. The loader uses `excludeWebP: webpExclusionForModel(model)` (`true` only for models that cannot decode WebP, such as the Ollama family). It calls `resizeImage(...)` when `images.autoResize` is true, or when WebP must be re-encoded for the selected model. Resize failures are swallowed and the original bytes are kept.
+9. If the file header or attachment MIME type is unsupported, `execute(...)` throws `ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.")`.
+10. The tool calls `instrumentedCompleteSimple(...)` with one user message containing two content parts in order:
    - `{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType }`
    - `{ type: "text", text: params.question }`
-10. `systemPrompt` is a one-element array rendered from `packages/coding-agent/src/prompts/tools/inspect-image-system.md`; telemetry is tagged with oneshot kind `inspect_image`. The request carries the thinking effort selected on the resolved vision/default model role.
-11. The model call uses the caller signal plus `inspect_image.timeoutMs` (default 300,000 ms); `0` disables this timeout. Provider errors, aborts, and timeouts become `ToolError`s.
-12. `extractTextContent(...)` from `packages/coding-agent/src/commit/utils.ts` concatenates only `text` content blocks from the assistant message, trims the result, and the tool fails if nothing remains.
-13. Success returns the text plus `details`; `inspectImageToolRenderer` formats the result for the TUI.
+11. `systemPrompt` is a one-element array rendered from `packages/coding-agent/src/prompts/tools/inspect-image-system.md`; telemetry is tagged with oneshot kind `inspect_image`. The request carries the thinking effort selected on the resolved vision/default model role.
+12. The model call uses the caller signal plus `inspect_image.timeoutMs` (default 300,000 ms); `0` disables this timeout. Provider errors, aborts, and timeouts become `ToolError`s.
+13. `extractTextContent(...)` from `packages/coding-agent/src/commit/utils.ts` concatenates only `text` content blocks from the assistant message, trims the result, and the tool fails if nothing remains.
+14. Success returns the text plus `details`; `inspectImageToolRenderer` formats the result for the TUI.
 
 ## Modes / Variants
 - **Original image path**: `images.autoResize` disabled. The original file bytes are base64-encoded and sent with the detected MIME type.
 - **Auto-resized path**: `images.autoResize` enabled. `resizeImage(...)` may downscale and re-encode the image before upload.
+- **SVG path**: `<file>.svg:img` / `<file>.svgz:img` rasterizes the vector source to PNG before upload; the 20 MiB cap applies to the source file.
 - **Unsupported image path**: file exists but header sniffing does not identify PNG/JPEG/GIF/WEBP. The tool returns a `ToolError` before any model call.
 - **Oversize image path**: file size exceeds 20 MiB before upload. The tool returns a `ToolError` before any model call.
 - **Attachment path**: resolve a current-turn pasted/uploaded image by its `Image #N` label or attachment URI without reading a filesystem path.
 
 ## Side Effects
 - Filesystem
-  - For file inputs, resolves and reads the target image from disk.
+  - For file inputs, resolves and reads the target image from disk: stats the file once with `Bun.file(...).stat()` and reads it fully with `fs.readFile(...)`.
+  - SVG inputs are additionally rasterized to PNG in memory.
   - Attachment inputs are loaded from the current turn's in-memory image attachment list.
 - Network
   - Sends the final base64 image payload plus question text to the selected model through `instrumentedCompleteSimple(...)` / the configured simple completion implementation.
@@ -78,6 +82,7 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 - Metadata sniff cap: `DEFAULT_IMAGE_METADATA_HEADER_BYTES = 256 * 1024` bytes. Format detection only reads up to 256 KiB from the file header.
 - Availability is gated by `inspect_image.mode` (`auto`|`on`|`off`, default `auto`) in `packages/coding-agent/src/config/settings-schema.ts`, resolved with the session-scoped `/vision` override and the active model's image capability in `packages/coding-agent/src/utils/inspect-image-mode.ts` / `packages/coding-agent/src/tools/index.ts`. `auto` registers the tool only when the active model lacks native image input; the legacy `inspect_image.enabled` boolean migrates to `mode` (`true`→`on`, `false`→`off`).
 - Upload input cap: `MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024` bytes (20 MiB) in `packages/coding-agent/src/utils/image-loading.ts`.
+- SVG rasterization cap: `SVG_IMAGE_MAX_EDGE_PX = 2048` (max width/height of the rasterized PNG) in `packages/coding-agent/src/utils/image-loading.ts`.
 - Vision request timeout: `inspect_image.timeoutMs` defaults to `300_000` ms (5 minutes); set it to `0` to disable.
 - Auto-resize defaults in `packages/coding-agent/src/utils/image-resize.ts`:
   - `maxWidth: 1568`
@@ -106,8 +111,10 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 - Input file:
   - `Image file too large: <size> exceeds <limit> limit.` from `ImageInputTooLargeError`, remapped to `ToolError`.
   - `inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.` when header sniffing fails.
-  - `No image attachments are available in this turn...` when a reference is used without current-turn image attachments.
-  - `Could not resolve image attachment ... Available image attachments: ...` when the 1-based reference is out of range.
+  - `inspect_image ':img' only supports .svg and .svgz files.` when the `:img` selector targets a non-SVG file.
+  - `Could not rasterize SVG: <message>` when SVG rasterization fails.
+  - `No image attachments are available in this turn. path="<path>" must be a readable file path or attachment URI.` when an attachment reference is used but the turn has no image attachments.
+  - `Could not resolve image attachment '<path>'. Available image attachments: <label -> uri, ...>. Pass an attachment URI or a readable filesystem path.` when the 1-based reference is out of range.
 - Model call:
   - `inspect_image request failed.` if the response stop reason is `error` without a provider message.
   - Provider `errorMessage` is passed through when present.

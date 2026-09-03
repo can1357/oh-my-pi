@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
-import { type Component, type NativeScrollbackLiveRegion, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
+
+withoutTerminalMultiplexer();
 
 // Kitty OSC 66 text-sizing marker and the erase sequences the renderer emits.
 // A scale-`s` heading renders `s` cells tall and `visibleWidth` cells wide, so
@@ -23,12 +26,6 @@ class RawLines implements Component {
 	invalidate(): void {}
 	render(): string[] {
 		return this.#lines;
-	}
-}
-
-class SeamRawLines extends RawLines implements NativeScrollbackLiveRegion {
-	getNativeScrollbackLiveRegionStart(): number {
-		return Number.POSITIVE_INFINITY;
 	}
 }
 
@@ -172,111 +169,6 @@ describe("issue #8318: scaled OSC 66 headings survive repaint and resize", () =>
 
 			const { spacers } = headingAndSpacers(writes, 6);
 			for (const spacer of spacers) expectClearsRightOfGlyph(spacer, 21);
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("clears stale cells when a wide row reflows into the reserved spacer", async () => {
-		const term = new VirtualTerminal(80, 6);
-		const tui = new TUI(term);
-		// Row 1 starts as text far wider than the eventual 14-cell glyph.
-		const content = new RawLines(["intro", `wide prior text ${"x".repeat(40)}`, "tail"]);
-		tui.addChild(content);
-		const writes = captureWrites(term);
-		try {
-			tui.start();
-			await settle(term);
-			writes.length = 0;
-
-			// Reflow: row 0 becomes the sized heading, row 1 becomes its reserved
-			// spacer. The glyph write covers only columns [0, 14); the stale wide
-			// text to the right must still be erased.
-			content.setLines([`${OSC66}s=2;Heading${ST}`, "", "tail"]);
-			tui.requestRender();
-			await settle(term);
-
-			const { heading, spacers } = headingAndSpacers(writes, 1);
-			expect(heading).toContain("Heading");
-			expectClearsRightOfGlyph(spacers[0]!, 14);
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("uses full-frame context when the spacer is the first row below the commit seam", async () => {
-		const term = new VirtualTerminal(80, 4);
-		const tui = new TUI(term);
-		const content = new SeamRawLines(["old heading row", `wide prior text ${"x".repeat(40)}`, "tail-0", "tail-1"]);
-		tui.addChild(content);
-		const writes = captureWrites(term);
-		try {
-			tui.start();
-			await settle(term);
-			writes.length = 0;
-
-			// Appending one row commits frame[0] through the chunk loop. The
-			// reserved frame[1] row becomes window[0], so window-local context
-			// cannot see the heading immediately above the commit seam.
-			content.setLines([`${OSC66}s=2;Heading${ST}`, "", "tail-0", "tail-1", "tail-2"]);
-			tui.requestRender();
-			await settle(term);
-
-			const { heading, spacers } = headingAndSpacers(writes, 1);
-			expect(heading).toContain("Heading");
-			expectClearsRightOfGlyph(spacers[0]!, 14);
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("preserves the top spacer during an in-place viewport rewrite", async () => {
-		const term = new VirtualTerminal(80, 4);
-		const tui = new TUI(term);
-		// The heading is immediately above the visible window while its reserved
-		// lower row is window[0]. An in-place rewrite must classify that row from
-		// the full frame rather than the context-free window slice.
-		tui.addChild(new RawLines(["f0", "f1", `${OSC66}s=2;Heading${ST}`, "", "b0", "b1", "b2"]));
-		const writes = captureWrites(term);
-		try {
-			tui.start();
-			await settle(term);
-			writes.length = 0;
-
-			tui.requestRender(true);
-			await settle(term);
-
-			const paint = writes.join("");
-			expect(paint).toContain("\x1b[14C\x1b[K");
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("preserves the top spacer when the heading scrolls above the resize viewport", async () => {
-		const term = new VirtualTerminal(80, 4);
-		const tui = new TUI(term);
-		// windowTop = frameLength - height = 7 - 4 = 3. The heading sits at row 2
-		// (just above the fold) and its reserved spacer at row 3 = window[0], so
-		// the resize fast path composes it as the first visible row.
-		tui.addChild(new RawLines(["f0", "f1", `${OSC66}s=2;Heading${ST}`, "", "b0", "b1", "b2"]));
-		const writes = captureWrites(term);
-		try {
-			tui.start();
-			await settle(term);
-			writes.length = 0;
-
-			// A width drag paints the viewport synchronously via #emitResizeViewport
-			// before the settle full paint. Capture that throwaway frame directly.
-			term.resize(70, 4);
-			const viewportPaint = writes.find(
-				write => write.includes("\x1b[H") && !write.includes("\x1b[2J") && !write.includes("\x1b[3J"),
-			);
-			expect(viewportPaint).toBeDefined();
-			// Row 0 (the spacer) is emitted right after the final cursor-home.
-			const seg0 = viewportPaint!.split("\r\n")[0]!;
-			const row0 = seg0.slice(seg0.lastIndexOf("\x1b[H") + 3);
-			expectClearsRightOfGlyph(row0, 14);
 		} finally {
 			tui.stop();
 		}

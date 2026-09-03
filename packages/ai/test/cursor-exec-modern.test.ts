@@ -84,6 +84,7 @@ async function dispatchExec(
 		execHandlers?: CursorExecHandlers;
 		requestContextTools?: McpToolDefinition[];
 		requestContextRules?: CursorRule[];
+		externalToolExecutor?: boolean;
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
 	const output = cursorAssistantMessage();
@@ -113,6 +114,8 @@ async function dispatchExec(
 		{ sawTokenDelta: false },
 		options.requestContextTools ?? [],
 		options.requestContextRules,
+		undefined,
+		options.externalToolExecutor,
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -1974,6 +1977,121 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		const answer = soleResult(frames);
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("success");
+	});
+});
+
+describe("Cursor MCP frame: external executor handoff", () => {
+	function mcpCall() {
+		return buildExecMessage({
+			case: "mcpArgs",
+			value: create(McpArgsSchema, {
+				name: "send_message",
+				toolName: "send_message",
+				toolCallId: "call-external-1",
+				providerIdentifier: "external-client",
+			}),
+		});
+	}
+
+	it("acknowledges a client-owned tool without claiming it is missing", async () => {
+		const { frames, results } = await dispatchExec(mcpCall(), { externalToolExecutor: true });
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		const content = answer.value.result.value.content[0]?.content;
+		expect(content?.case).toBe("text");
+		if (content?.case !== "text") throw new Error(`got ${content?.case}`);
+		expect(content.value.text).toContain("handed off to the external client");
+		expect(content.value.text).toContain("Do not retry");
+		expect(results).toEqual([]);
+	});
+
+	it("emits one client-owned tool call across the streamed handoff sequence", async () => {
+		const toolCall = fromBinary(
+			ToolCallSchema,
+			toBinary(
+				ToolCallSchema,
+				create(ToolCallSchema, {
+					tool: {
+						case: "mcpToolCall",
+						value: {
+							args: create(McpArgsSchema, {
+								name: "send_message",
+								toolName: "send_message",
+								toolCallId: "call-external-1",
+								providerIdentifier: "external-client",
+							}),
+						},
+					},
+				}),
+			),
+		);
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usage = { sawTokenDelta: false };
+		const written: Buffer[] = [];
+		const h2Request = {
+			write: (chunk: Buffer) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+
+		processInteractionUpdate(
+			{ message: { case: "toolCallStarted", value: { callId: "handoff-envelope", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: { case: "execServerMessage", value: mcpCall() },
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			usage,
+			[],
+			[],
+			undefined,
+			true,
+		);
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: "handoff-envelope", toolCall } } },
+			output,
+			stream,
+			state,
+			usage,
+		);
+
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+		expect(stream.queue.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+		const answer = soleResult(written.map(decodeClientFrame));
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("success");
+	});
+
+	it("keeps the local no-handler path available to the outer agent loop", async () => {
+		const { frames } = await dispatchExec(mcpCall());
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("toolNotFound");
+	});
+
+	it("still rejects a present handler that returns no result", async () => {
+		const execHandlers: CursorExecHandlers = {};
+		Reflect.set(execHandlers, "mcp", async () => undefined);
+		const { frames } = await dispatchExec(mcpCall(), { execHandlers, externalToolExecutor: true });
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("toolNotFound");
 	});
 });
 

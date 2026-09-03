@@ -167,7 +167,7 @@ function formatRubyPrefix(source: string): string {
 		output.push(content.length === 0 ? "" : INDENT.repeat(indentation) + content, ending);
 	};
 
-	for (let index = 0; index < source.length; ) {
+	for (let index = 0; index < source.length;) {
 		const character = source[index];
 		if (character === "\n" || character === "\r") {
 			const ending = character === "\r" && source[index + 1] === "\n" ? "\r\n" : character;

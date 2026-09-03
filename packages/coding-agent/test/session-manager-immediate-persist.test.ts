@@ -216,6 +216,29 @@ describe("SessionManager JSONL software-crash durability", () => {
 		await resumed.close();
 	});
 
+	it("rejects a corrupt session header without overwriting recoverable transcript bytes", async () => {
+		const cwd = makeTempDir("@pi-corrupt-header-cwd-");
+		const sessionFile = path.join(cwd, "corrupt-session.jsonl");
+		const original = [
+			"{broken header",
+			JSON.stringify({
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp: "2026-08-27T00:00:00.000Z",
+				message: { role: "user", content: "recover me", timestamp: 0 },
+			}),
+			"",
+		].join("\n");
+		fs.writeFileSync(sessionFile, original);
+		const originalBytes = fs.readFileSync(sessionFile);
+
+		await expect(SessionManager.open(sessionFile, undefined, undefined, { initialCwd: cwd })).rejects.toThrow(
+			"session header is missing or malformed",
+		);
+		expect(fs.readFileSync(sessionFile)).toEqual(originalBytes);
+	});
+
 	it("keeps pre-assistant sessions out of history during shutdown", async () => {
 		const cwd = makeTempDir("@pi-empty-session-cwd-");
 		const sessionDir = path.join(cwd, "sessions");

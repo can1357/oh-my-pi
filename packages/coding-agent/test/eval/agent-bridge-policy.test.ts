@@ -59,7 +59,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		options.settings ??
 		Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 		});
 	const artifactsDir = options.artifactsDir ?? null;
@@ -229,7 +229,7 @@ describe("runEvalAgent", () => {
 					session: makeSession({
 						settings: Settings.isolated({
 							"async.enabled": false,
-							"task.isolation.mode": "none",
+							"task.isolation.enabled": false,
 							"task.maxRecursionDepth": 0,
 						}),
 					}),
@@ -244,7 +244,7 @@ describe("runEvalAgent", () => {
 					depth: 3,
 					settings: Settings.isolated({
 						"async.enabled": false,
-						"task.isolation.mode": "none",
+						"task.isolation.enabled": false,
 						"task.maxRecursionDepth": -1,
 					}),
 				}),
@@ -282,7 +282,7 @@ describe("runEvalAgent", () => {
 			modelString: "p/fallback",
 			settings: Settings.isolated({
 				"async.enabled": false,
-				"task.isolation.mode": "none",
+				"task.isolation.enabled": false,
 				"task.enableLsp": true,
 				// Default task.maxRecursionDepth is 2, which would now (correctly)
 				// block depth=2 — widen it so the test still exercises depth=2.
@@ -368,7 +368,7 @@ describe("runEvalAgent", () => {
 		]);
 	});
 
-	it("inherits non-plan LSP and IRC policy for bridge subagents", async () => {
+	it("keeps bridge kernels independent while inheriting non-plan LSP and IRC policy", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
@@ -381,6 +381,7 @@ describe("runEvalAgent", () => {
 		expect(options.enableLsp).toBe(true);
 		expect(options.enableIrc).toBe(true);
 		expect(options.keepAlive).toBe(false);
+		expect(options.parentEvalSessionId).toBeUndefined();
 	});
 
 	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
@@ -401,9 +402,18 @@ describe("runEvalAgent", () => {
 	it("unregisters eval subagents through the bridge cleanup path", async () => {
 		AgentRegistry.resetGlobalForTests();
 		mockAgents();
+		const order: string[] = [];
 		let disposed = false;
 		const cleanupSession = {
+			prepareForHeadlessAdvisorDrain: () => {
+				order.push("prepare");
+			},
+			waitForAdvisorCatchup: async () => {
+				order.push("catchup");
+				return true;
+			},
 			dispose: async () => {
+				order.push("dispose");
 				disposed = true;
 			},
 		} as unknown as AgentSession;
@@ -430,6 +440,9 @@ describe("runEvalAgent", () => {
 		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
 
 		expect(disposed).toBe(true);
+		// The advisor's final-turn review is drained before the runtime is torn
+		// down (#9505): a graceful subagent finish must not abandon the yield.
+		expect(order).toEqual(["prepare", "catchup", "dispose"]);
 		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
 		expect(
 			AgentRegistry.global()
@@ -573,7 +586,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-parallel-");
 		const settings = Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 			"task.maxConcurrency": 2,
 		});
@@ -662,7 +675,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-parallel-");
 		const settings = Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 			"task.maxConcurrency": 2,
 		});
@@ -689,7 +702,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-interrupt-");
 		const settings = Settings.isolated({
 			"async.enabled": false,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			"task.enableLsp": true,
 			"task.maxConcurrency": 6,
 		});
@@ -1091,7 +1104,7 @@ describe("runEvalAgent isolation", () => {
 		return makeSession({
 			settings: Settings.isolated({
 				"async.enabled": false,
-				"task.isolation.mode": "auto",
+				"task.isolation.enabled": true,
 				"task.isolation.merge": "patch",
 				...overrides,
 			}),
@@ -1110,21 +1123,21 @@ describe("runEvalAgent isolation", () => {
 		return { repoRoot };
 	}
 
-	it("rejects isolated=true when task.isolation.mode is 'none'", async () => {
+	it("rejects isolated=true when task.isolation.enabled is false", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		const prepSpy = vi.spyOn(isolationRunner, "prepareIsolationContext");
 
-		const session = makeSession(); // default settings: isolation.mode === "none"
+		const session = makeSession();
 
 		await expect(runEvalAgent({ prompt: "do work", isolated: true }, { session })).rejects.toThrow(
-			'task.isolation.mode to be set; current mode is "none"',
+			"task.isolation.enabled; it is currently false",
 		);
 		expect(prepSpy).not.toHaveBeenCalled();
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("stays non-isolated by default even when task.isolation.mode is set; isolated=true opts in", async () => {
+	it("stays non-isolated by default even when task isolation is enabled; isolated=true opts in", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const isolatedSpy = vi

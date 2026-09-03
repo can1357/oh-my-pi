@@ -1,8 +1,8 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isKimiModelId } from "@oh-my-pi/pi-catalog/identity";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -30,7 +30,7 @@ import type {
 import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
-import { hasVisibleAssistantContent, withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { hasVisibleAssistantContent, withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -41,7 +41,6 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { callWithCopilotModelRetry } from "../utils/retry";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -63,6 +62,7 @@ import type {
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
 	ChatCompletionContentPartText,
+	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
 	ChatCompletionTool,
 	ChatCompletionToolMessageParam,
@@ -79,12 +79,12 @@ import {
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
 import {
-	applyChatCompletionsCompatPolicy,
+	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyOpenAIServiceTier,
-	applyOpenRouterReportedCost,
+	applyProviderReportedCost,
 	applyWireModelIdTransform,
 	calculateOpenAIUsageAccounting,
 	clearOpenAIStrictToolsState,
@@ -94,7 +94,6 @@ import {
 	getOpenAIPromptCacheKey,
 	getOpenAIStrictToolsScope,
 	isCompiledGrammarTooLargeStrictError,
-	isOpenRouterAnthropicModel,
 	isStrictToolsDisabledForScope,
 	type OpenAICompatPolicy,
 	type OpenAICompletionsParams,
@@ -111,7 +110,7 @@ import {
 } from "./openai-shared";
 import { transformMessages } from "./transform-messages";
 import {
-	isDashscopeCompatibleModeTextOnlyQwen,
+	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
 } from "./vision-guard";
@@ -132,6 +131,44 @@ type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["de
 	reasoning_details?: unknown;
 };
 
+type GeminiThoughtSignatureNamespace = "google" | "vertex";
+
+type GeminiThoughtSignatureExtraContent = Partial<
+	Record<GeminiThoughtSignatureNamespace, { thought_signature: string }>
+>;
+
+type OpenAICompletionsFunctionToolCall = ChatCompletionMessageFunctionToolCall & {
+	extra_content?: GeminiThoughtSignatureExtraContent;
+};
+
+const GEMINI_THOUGHT_SIGNATURE_NAMESPACES: readonly GeminiThoughtSignatureNamespace[] = ["google", "vertex"];
+
+function getGeminiThoughtSignatureExtraContent(value: unknown): GeminiThoughtSignatureExtraContent | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	for (const namespace of GEMINI_THOUGHT_SIGNATURE_NAMESPACES) {
+		const providerContent = Reflect.get(value, namespace);
+		if (typeof providerContent !== "object" || providerContent === null) continue;
+		const thoughtSignature = Reflect.get(providerContent, "thought_signature");
+		if (typeof thoughtSignature !== "string" || thoughtSignature.length === 0) continue;
+		return namespace === "google"
+			? { google: { thought_signature: thoughtSignature } }
+			: { vertex: { thought_signature: thoughtSignature } };
+	}
+	return undefined;
+}
+
+function parseGeminiThoughtSignatureExtraContent(
+	thoughtSignature: string | undefined,
+): GeminiThoughtSignatureExtraContent | undefined {
+	if (!thoughtSignature) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(thoughtSignature);
+		return getGeminiThoughtSignatureExtraContent(parsed);
+	} catch {
+		return undefined;
+	}
+}
+
 type OpenAICompletionsAssistantMessageParam = ChatCompletionAssistantMessageParam &
 	Partial<Record<OpenAICompletionsReasoningField, string>> & {
 		reasoning_details?: unknown[];
@@ -149,6 +186,9 @@ type OpenAICompletionsUsageLike = {
 	prompt_cache_miss_tokens?: unknown;
 	prompt_tokens_details?: unknown;
 	completion_tokens_details?: unknown;
+	// Vertex/Gemini reports cache hits here (camelCase) when fronted by an
+	// OpenAI-compatible gateway; the OpenAI-shaped cached fields stay absent.
+	cachedContentTokenCount?: unknown;
 };
 
 type OpenAICompletionsPromptTokenDetails = {
@@ -171,6 +211,7 @@ function hasPositiveCacheReadTokenField(rawUsage: object): boolean {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	if (typeof usageLike.cached_tokens === "number" && usageLike.cached_tokens > 0) return true;
 	if (typeof usageLike.prompt_cache_hit_tokens === "number" && usageLike.prompt_cache_hit_tokens > 0) return true;
+	if (typeof usageLike.cachedContentTokenCount === "number" && usageLike.cachedContentTokenCount > 0) return true;
 
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
 	if (typeof rawPromptTokenDetails !== "object" || rawPromptTokenDetails === null) return false;
@@ -583,6 +624,47 @@ const OPENAI_COMPLETIONS_FIRST_EVENT_TIMEOUT_MESSAGE =
 // converts the already-successful response into a timeout error.
 const OPENAI_COMPLETIONS_POST_FINISH_GRACE_MS = 2_500;
 
+const OPENAI_COMPLETIONS_ERROR_STATUS_BY_TYPE: Readonly<Record<string, number>> = {
+	SERVICE_UNAVAILABLE: 503,
+	TOO_MANY_REQUESTS: 429,
+	REQUEST_TIMEOUT: 408,
+};
+
+function parseOpenAICompletionsErrorStatus(value: unknown): number | undefined {
+	const status =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && /^\d{3}$/.test(value.trim())
+				? Number(value)
+				: undefined;
+	return status !== undefined && Number.isInteger(status) && status >= 400 && status <= 599 ? status : undefined;
+}
+
+function createOpenAICompletionsStreamError(chunk: unknown, provider: string): Error | undefined {
+	if (!chunk || typeof chunk !== "object") return undefined;
+	const error = Reflect.get(chunk, "error");
+	const flatMessage = Reflect.get(chunk, "message");
+	const structuredError = error !== null && typeof error === "object";
+	if (!structuredError && typeof error !== "string" && typeof flatMessage !== "string") return undefined;
+
+	const parsed = AIError.OpenAIHttpError.parseEnvelope(chunk, undefined);
+	const detail = parsed.detail ?? "Provider returned an in-band OpenAI completions stream error";
+	if (!structuredError) {
+		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
+	}
+
+	const typeValue = Reflect.get(error, "type");
+	const codeValue = Reflect.get(error, "code");
+	const type = typeof typeValue === "string" ? typeValue.trim() : undefined;
+	const status =
+		parseOpenAICompletionsErrorStatus(codeValue) ??
+		(type ? OPENAI_COMPLETIONS_ERROR_STATUS_BY_TYPE[type.toUpperCase()] : undefined);
+	if (status === undefined) {
+		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
+	}
+	return new AIError.ProviderHttpError(`${status} ${detail}`, status, { code: parsed.code });
+}
+
 const streamOpenAICompletionsOnce = (
 	model: Model<"openai-completions">,
 	context: Context,
@@ -603,26 +685,31 @@ const streamOpenAICompletionsOnce = (
 		);
 		const { requestAbortController, requestSignal } = abortTracker;
 		const onSseEvent = options?.onSseEvent;
-		const rawSseObserver = onSseEvent
-			? (event: RawSseEvent) => {
-					if (!event.event && event.data && event.data !== "[DONE]") {
-						try {
-							const parsed = JSON.parse(event.data);
-							const resolvedEvent =
-								typeof parsed.type === "string"
-									? parsed.type
-									: typeof parsed.object === "string"
-										? parsed.object
-										: null;
-							if (resolvedEvent) {
-								event.event = resolvedEvent;
-								event.raw = [`event: ${resolvedEvent}`, ...event.raw];
-							}
-						} catch {}
-					}
-					onSseEvent(event, model);
+		// Track the OpenAI `[DONE]` sentinel independently of `onSseEvent`: it is
+		// the streaming protocol's terminal signal, so a stream that ends with it
+		// completed by server agreement even when no `finish_reason` chunk arrived.
+		let sawDoneSentinel = false;
+		const rawSseObserver = (event: RawSseEvent) => {
+			if (event.data === "[DONE]") sawDoneSentinel = true;
+			if (onSseEvent) {
+				if (!event.event && event.data && event.data !== "[DONE]") {
+					try {
+						const parsed = JSON.parse(event.data);
+						const resolvedEvent =
+							typeof parsed.type === "string"
+								? parsed.type
+								: typeof parsed.object === "string"
+									? parsed.object
+									: null;
+						if (resolvedEvent) {
+							event.event = resolvedEvent;
+							event.raw = [`event: ${resolvedEvent}`, ...event.raw];
+						}
+					} catch {}
 				}
-			: undefined;
+				onSseEvent(event, model);
+			}
+		};
 		// Assigned once the block helpers exist (they are scoped to the `try`);
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
@@ -644,6 +731,7 @@ const streamOpenAICompletionsOnce = (
 				options?.headers,
 				options?.initiatorOverride,
 				getOpenAIPromptCacheKey(options),
+				options?.sessionId,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
@@ -664,8 +752,9 @@ const streamOpenAICompletionsOnce = (
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				let { params, strictToolsApplied } = buildParams(model, context, options, effectiveToolStrictModeOverride);
-				appliedStrictTools = strictToolsApplied;
+				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				appliedStrictTools = builtParams.strictToolsApplied;
+				let params = builtParams.params;
 				const reasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"chat-completions",
 					trimmedBaseUrl,
@@ -719,15 +808,12 @@ const streamOpenAICompletionsOnce = (
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.
-					if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					clearTimeout(requestTimeout);
 				}
 			};
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
-				openaiStream = await callWithCopilotModelRetry(() => createCompletionsStream(), {
-					provider: model.provider,
-					signal: requestSignal,
-				});
+				openaiStream = await createCompletionsStream();
 			} catch (error) {
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				const reasoningEffortFallback =
@@ -748,7 +834,7 @@ const streamOpenAICompletionsOnce = (
 						reasoningEffortFallback,
 					);
 				} else if (
-					isOpenRouterAnthropicModel(model) &&
+					model.compat.retryWithoutStrictOnGrammarError &&
 					!disableStrictTools &&
 					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
 				) {
@@ -836,7 +922,7 @@ const streamOpenAICompletionsOnce = (
 				stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 			};
 			const finishPendingToolCallBlocks = (): void => {
-				for (const block of [...pendingToolCallBlocks]) {
+				for (const block of Array.from(pendingToolCallBlocks)) {
 					finishToolCallBlock(block);
 				}
 			};
@@ -1051,6 +1137,8 @@ const streamOpenAICompletionsOnce = (
 			});
 			for await (const chunk of terminalAwareStream) {
 				if (!chunk || typeof chunk !== "object") continue;
+				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
+				if (streamError) throw streamError;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -1205,6 +1293,8 @@ const streamOpenAICompletionsOnce = (
 
 							if (toolCall.id) block.id = toolCall.id;
 							if (incomingName) block.name = incomingName;
+							const extraContent = getGeminiThoughtSignatureExtraContent(Reflect.get(toolCall, "extra_content"));
+							if (extraContent) block.thoughtSignature = JSON.stringify(extraContent);
 							let delta = "";
 							// The OpenAI SDK types `function.arguments` as a JSON string, but MiniMax-compatible
 							// hosts stream a fully-formed object instead. Model both shapes so the branches below
@@ -1301,7 +1391,15 @@ const streamOpenAICompletionsOnce = (
 			// Detect premature stream closure before the normal block-finalization
 			// sweep. Throwing after that sweep would make the error handler emit a
 			// second text_end/thinking_end for the same partial block.
-			if (streamFinishedAt === undefined && output.content.length > 0) {
+			//
+			// Only a genuine truncation — transport EOF with neither a
+			// `finish_reason` chunk nor the `[DONE]` sentinel — is incomplete. A
+			// stream terminated by `[DONE]` completed by server agreement; some
+			// OpenAI-compatible hosts omit or `null` the `finish_reason` and rely on
+			// `[DONE]` alone, so finalize those as the default `stop`
+			// (mapStopReason(null)) instead of surfacing a false incomplete-stream
+			// error and retrying every turn.
+			if (streamFinishedAt === undefined && !sawDoneSentinel && output.content.length > 0) {
 				throw new AIError.ProviderResponseError(
 					"OpenAI completions stream closed before a finish_reason was received",
 					{ provider: model.provider, kind: "incomplete-stream" },
@@ -1391,13 +1489,15 @@ const streamOpenAICompletionsOnce = (
 };
 
 /**
- * Public entry: wrap the single-attempt streamer with bounded empty-completion
- * retries — flaky gateways occasionally 200 with `delta: {}` + `finish_reason:
- * "stop"` and no usage, which would otherwise stall the agent loop. Shared with
- * the Anthropic provider via `withEmptyCompletionRetry`.
+ * Retries benign empty completions and transient provider failures only before
+ * assistant output commits the attempt.
  */
 export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOpenAICompletionsOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOpenAICompletionsOnce, {
+		retryEmptyCompletion: true,
+		retryProviderErrors: true,
+		maxProviderErrorRetries: 1,
+	});
 
 function createRequestSetup(
 	model: Model<"openai-completions">,
@@ -1406,6 +1506,7 @@ function createRequestSetup(
 	extraHeaders?: Record<string, string>,
 	initiatorOverride?: MessageAttribution,
 	promptCacheSessionId?: string,
+	sessionId?: string,
 ): OpenAIRequestSetup & { baseUrl: string } {
 	const apiVersion = $env.AZURE_OPENAI_API_VERSION || "2024-10-21";
 	const deploymentName = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id) ?? model.id;
@@ -1414,12 +1515,19 @@ function createRequestSetup(
 		extraHeaders,
 		initiatorOverride,
 		promptCacheSessionId,
+		sessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
 		// Provider auth/header overlay: Kimi-code hosts require shared client
 		// attribution headers prepended before caller headers. Kept here (not in
 		// the shared helper) because it is provider-specific request setup.
-		prependHeaders: model.provider === "kimi-code" ? getKimiCommonHeaders : undefined,
+		// ClinePass sends the mirrored Cline CLI identity; documented in wire/cline-pass.ts.
+		prependHeaders:
+			model.provider === "kimi-code"
+				? getKimiCommonHeaders
+				: model.provider === "cline-pass"
+					? () => clinePassClientHeaders(promptCacheSessionId)
+					: undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});
@@ -1443,14 +1551,13 @@ function resolveOpenAICompatForRequest(
 
 function dropOpenRouterKimiForcedToolReasoning(
 	params: OpenAICompletionsParams,
-	model: Model<"openai-completions">,
+	_model: Model<"openai-completions">,
 	policy: OpenAICompatPolicy,
 ): void {
 	if (
 		policy.reasoning.disableReason === "forced-tool-choice" &&
 		policy.reasoning.disableMode === "openrouter-enabled-false" &&
-		policy.compat.isOpenRouterHost &&
-		isKimiModelId(model.id)
+		policy.compat.isOpenRouterHost
 	) {
 		delete params.reasoning;
 	}
@@ -1460,14 +1567,8 @@ function hasActiveNativeKimiK3Reasoning(
 	model: Model<"openai-completions">,
 	options: OpenAICompletionsOptions | undefined,
 ): boolean {
-	if (model.provider !== "kimi-code" || model.id.toLowerCase() !== "k3" || !model.reasoning) return false;
-	if (options?.reasoning === undefined || options.disableReasoning) return false;
-	try {
-		const url = new URL(model.baseUrl);
-		return url.hostname === "api.kimi.com" && (url.pathname === "/coding" || url.pathname.startsWith("/coding/"));
-	} catch {
-		return false;
-	}
+	if (!model.compat.nativeKimiK3Reasoning || !model.reasoning) return false;
+	return options?.reasoning !== undefined && !options.disableReasoning;
 }
 
 function isChatCompletionsPromptCacheableContentBlock(
@@ -1514,7 +1615,7 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 	options: OpenAICompletionsOptions | undefined,
 ): void {
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
-	if (model.provider === "kimi-code" && promptCacheKey !== undefined) {
+	if (model.compat.supportsPromptCacheKey && promptCacheKey !== undefined) {
 		params.prompt_cache_key = promptCacheKey;
 	}
 
@@ -1603,7 +1704,7 @@ function buildParams(
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 
 	if (context.tools?.length) {
-		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride, model.provider);
+		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride);
 		params.tools = builtTools.tools;
 		toolStrictMode = builtTools.toolStrictMode;
 		strictToolsApplied = builtTools.strictToolsApplied;
@@ -1726,7 +1827,7 @@ function buildParams(
 	}
 	applyChatCompletionsToolStream(params, model, compat);
 
-	applyChatCompletionsCompatPolicy(params, finalPolicy);
+	applyChatCompletionsReasoningParams(params, model, compat, { ...options, toolChoice: params.tool_choice });
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
 	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
@@ -1761,13 +1862,19 @@ export function parseChunkUsage(
 	const promptCacheHitTokens = usageLike.prompt_cache_hit_tokens;
 	const promptCacheMissTokens = usageLike.prompt_cache_miss_tokens;
 	const promptTokenCachedTokens = promptTokenDetails?.cached_tokens;
+	const cachedContentTokenCount = usageLike.cachedContentTokenCount;
 	const completionReasoningTokens = completionTokenDetails?.reasoning_tokens;
 	const cacheWriteTokens = promptTokenDetails?.cache_write_tokens;
 	const outputTokens = typeof completionTokens === "number" ? completionTokens : 0;
 	const accounting = calculateOpenAIUsageAccounting({
 		promptTokens: typeof promptTokens === "number" ? promptTokens : 0,
 		outputTokens,
-		cachedTokens: firstPositiveNumber(cachedTokens, promptCacheHitTokens, promptTokenCachedTokens),
+		cachedTokens: firstPositiveNumber(
+			cachedTokens,
+			promptCacheHitTokens,
+			promptTokenCachedTokens,
+			cachedContentTokenCount,
+		),
 		reasoningTokens: typeof completionReasoningTokens === "number" ? completionReasoningTokens : 0,
 		cacheWriteOpenRouter: typeof cacheWriteTokens === "number" ? cacheWriteTokens : undefined,
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
@@ -1779,7 +1886,7 @@ export function parseChunkUsage(
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
 	calculateCost(model, usage);
-	applyOpenRouterReportedCost(model, usage, rawUsage);
+	applyProviderReportedCost(model, usage, rawUsage);
 	return usage;
 }
 
@@ -1935,7 +2042,7 @@ export function convertMessages(
 					content: text,
 				});
 			} else {
-				const supportsImages = model.input.includes("image") && !isDashscopeCompatibleModeTextOnlyQwen(model);
+				const supportsImages = isOpenAICompletionsVisionSupported(model);
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
 				for (const item of msg.content) {
@@ -1950,7 +2057,7 @@ export function convertMessages(
 						content.push({
 							type: "image_url",
 							image_url: {
-								url: `data:${item.mimeType};base64,${item.data}`,
+								url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
 								// Chat Completions has no "original"; omit it (provider default).
 								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
 							},
@@ -2167,26 +2274,28 @@ export function convertMessages(
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
 					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`, msg);
 					rememberToolCallId(tc.id, toolCallId);
-					return {
+					const replayedToolCall: OpenAICompletionsFunctionToolCall = {
 						id: normalizeMistralToolId(toolCallId, compat.requiresMistralToolIds),
-						type: "function" as const,
+						type: "function",
 						function: {
 							name: tc.name,
 							arguments: serializeToolArguments(tc.arguments),
 						},
 					};
+					const extraContent = parseGeminiThoughtSignatureExtraContent(tc.thoughtSignature);
+					if (extraContent) replayedToolCall.extra_content = extraContent;
+					return replayedToolCall;
 				});
-				const reasoningDetails = toolCalls
-					.filter(tc => tc.thoughtSignature)
-					.map(tc => {
-						try {
-							const parsed: unknown = JSON.parse(tc.thoughtSignature!);
-							return parsed;
-						} catch {
-							return null;
-						}
-					})
-					.filter(Boolean);
+				const reasoningDetails = toolCalls.flatMap(tc => {
+					const thoughtSignature = tc.thoughtSignature;
+					if (!thoughtSignature) return [];
+					try {
+						const parsed: unknown = JSON.parse(thoughtSignature);
+						return getGeminiThoughtSignatureExtraContent(parsed) ? [] : [parsed];
+					} catch {
+						return [];
+					}
+				});
 				if (reasoningDetails.length > 0) {
 					assistantMsg.reasoning_details = reasoningDetails;
 				}
@@ -2225,7 +2334,7 @@ export function convertMessages(
 					.filter(c => c.type === "text")
 					.map(c => (c as TextContent).text)
 					.join("\n");
-				const supportsImages = model.input.includes("image") && !isDashscopeCompatibleModeTextOnlyQwen(model);
+				const supportsImages = isOpenAICompletionsVisionSupported(model);
 				const hasImages = toolMsg.content.some(c => c.type === "image");
 				const omittedImages = hasImages && !supportsImages;
 
@@ -2257,7 +2366,7 @@ export function convertMessages(
 							imageBlocks.push({
 								type: "image_url",
 								image_url: {
-									url: `data:${block.mimeType};base64,${block.data}`,
+									url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
 								},
 							});
 						}
@@ -2308,12 +2417,11 @@ function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompat,
 	toolStrictModeOverride?: ToolStrictModeOverride,
-	provider?: string,
 ): BuiltOpenAICompletionTools {
-	const rejectXaiRootObjectUnion = provider === "xai" || provider === "xai-oauth";
+	const rejectRootObjectUnion = compat.rejectRootObjectUnion;
 	const adaptedTools = tools.map(tool => {
 		const strict = !NO_STRICT && compat.supportsStrictMode !== false && tool.strict !== false;
-		const baseParameters = rejectXaiRootObjectUnion
+		const baseParameters = rejectRootObjectUnion
 			? flattenExclusiveRequiredRootUnion(toolWireSchema(tool))
 			: toolWireSchema(tool);
 		const adapted = adaptSchemaForStrict(baseParameters, strict);
@@ -2360,7 +2468,7 @@ function convertTools(
 				: compat.toolSchemaFlavor === "grammar"
 					? sanitizeSchemaForGrammar(wireParameters)
 					: wireParameters;
-		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectXaiRootObjectUnion });
+		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(
 				`Tool "${tool.name}" omitted from the openai-completions request: its parameter schema is invalid for this provider at ${violation} (an enum/const value cannot match its declared type, or leftover xAI object-root union). Other tools are unaffected.`,
@@ -2395,11 +2503,17 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 	errorMessage?: string;
 } {
 	if (reason === null) return { stopReason: "stop" };
-	switch (reason) {
+	// Some OpenAI-compatible gateways fronting Google Gemini backends emit the
+	// native uppercase finish reasons (`STOP`, `MAX_TOKENS`) instead of the
+	// lowercase OpenAI contract values. Fold case so a clean completion isn't
+	// misclassified as a provider error.
+	const normalized = typeof reason === "string" ? reason.toLowerCase() : reason;
+	switch (normalized) {
 		case "stop":
 		case "end":
 			return { stopReason: "stop" };
 		case "length":
+		case "max_tokens":
 			return { stopReason: "length" };
 		case "function_call":
 		case "tool_calls":

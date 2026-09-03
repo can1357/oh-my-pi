@@ -14,11 +14,10 @@ import {
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
-	parseIsolationMode,
+	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -50,7 +49,6 @@ async function createGitRepo(): Promise<string> {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	jj.repo.clearRootCache();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 describe("worktree isolation helpers", () => {
@@ -59,20 +57,16 @@ describe("worktree isolation helpers", () => {
 		expect(getGitNoIndexNullPath()).toBe(expected);
 	});
 
-	it("maps every isolation mode to the native backend contract", () => {
-		expect(parseIsolationMode("none")).toBeUndefined();
-		expect(parseIsolationMode("auto")).toBeUndefined();
-		expect(parseIsolationMode("apfs")).toBe(natives.IsoBackendKind.Apfs);
-		expect(parseIsolationMode("btrfs")).toBe(natives.IsoBackendKind.Btrfs);
-		expect(parseIsolationMode("zfs")).toBe(natives.IsoBackendKind.Zfs);
-		expect(parseIsolationMode("reflink")).toBe(natives.IsoBackendKind.LinuxReflink);
-		expect(parseIsolationMode("overlayfs")).toBe(natives.IsoBackendKind.Overlayfs);
-		expect(parseIsolationMode("fuse-overlay")).toBe(natives.IsoBackendKind.Overlayfs);
-		expect(parseIsolationMode("projfs")).toBe(natives.IsoBackendKind.Projfs);
-		expect(parseIsolationMode("fuse-projfs")).toBe(natives.IsoBackendKind.Projfs);
-		expect(parseIsolationMode("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
-		expect(parseIsolationMode("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
-		expect(parseIsolationMode("worktree")).toBe(natives.IsoBackendKind.Rcopy);
+	it("maps every isolation backend to the native backend contract", () => {
+		expect(parseIsolationBackend("auto")).toBeUndefined();
+		expect(parseIsolationBackend("apfs")).toBe(natives.IsoBackendKind.Apfs);
+		expect(parseIsolationBackend("btrfs")).toBe(natives.IsoBackendKind.Btrfs);
+		expect(parseIsolationBackend("zfs")).toBe(natives.IsoBackendKind.Zfs);
+		expect(parseIsolationBackend("reflink")).toBe(natives.IsoBackendKind.LinuxReflink);
+		expect(parseIsolationBackend("overlayfs")).toBe(natives.IsoBackendKind.Overlayfs);
+		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
+		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
+		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
@@ -104,7 +98,7 @@ describe("worktree isolation helpers", () => {
 		expect((error as IsolationBaselineTooLargeError).contentBytes).toBeGreaterThan(
 			ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 		);
-		expect((error as Error).message).toContain("task.isolation.mode: none");
+		expect((error as Error).message).toContain("task.isolation.enabled: false");
 	});
 
 	it("sizes an untracked symlink itself rather than its target", async () => {
@@ -344,7 +338,7 @@ describe("worktree isolation helpers", () => {
 				await runGit(repo, ["commit", "-q", "-m", "task-change-ignored-note"]);
 				await runGit(repo, ["checkout", "-q", BASE_BRANCH]);
 				try {
-					vi.spyOn(git.patch, "canApplyText").mockResolvedValue(true);
+					vi.spyOn(natives.VcsGitRepo.prototype, "canApplyPatch").mockResolvedValue(true);
 					await fs.writeFile(path.join(repo, "merged.txt"), "user wip\n");
 					await fs.writeFile(path.join(repo, magicName), "untracked wip\n");
 					await fs.writeFile(buildLog, "ignored build artifact\n");
@@ -637,7 +631,7 @@ describe("detachGitDir", () => {
 		const iso = await copyTree(wt);
 		const statusBefore = await runGit(iso, ["status", "--porcelain=v1"]);
 
-		const result = await git.detachGitDir(iso, commonDir);
+		const result = await vcs.detachGitDir(iso, commonDir);
 
 		expect(result).toBe("detached");
 		// Working tree (staged/unstaged/untracked) is preserved verbatim.
@@ -667,6 +661,26 @@ describe("detachGitDir", () => {
 		expect(await runGit(wt, ["rev-parse", "omp-fetched"])).toBe(taskCommit);
 	});
 
+	it.skipIf(process.getuid?.() === 0)("keeps shared git metadata intact when the index cannot be read", async () => {
+		const { wt, commonDir } = await makeLinkedWorktree();
+		const iso = await copyTree(wt);
+		const gitEntry = path.join(iso, ".git");
+		const pointerBefore = await fs.readFile(gitEntry, "utf8");
+		const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+		const indexMode = (await fs.stat(indexPath)).mode;
+		await fs.chmod(indexPath, 0);
+		try {
+			await expect(vcs.detachGitDir(iso, commonDir)).rejects.toMatchObject({
+				code: "Io",
+				stderr: expect.stringContaining("Permission denied"),
+			});
+		} finally {
+			await fs.chmod(indexPath, indexMode);
+		}
+		expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
+		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
+	});
+
 	it("leaves an already-independent full-copy checkout untouched", async () => {
 		const src = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-src-"));
 		tempDirs.push(src);
@@ -681,7 +695,7 @@ describe("detachGitDir", () => {
 		);
 		const iso = await copyTree(src); // full `.git` directory copied — its own ODB
 
-		expect(await git.detachGitDir(iso, srcCommon)).toBe("independent");
+		expect(await vcs.detachGitDir(iso, srcCommon)).toBe("independent");
 		// Its objects are self-contained: no alternates file was written.
 		expect(await Bun.file(path.join(iso, ".git", "objects", "info", "alternates")).exists()).toBe(false);
 	});
@@ -699,7 +713,7 @@ describe("detachGitDir", () => {
 		const iso = await copyTree(wt);
 		const statusBefore = await runGit(iso, ["status", "--porcelain=v1"]);
 
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 		// The unborn branch name is preserved and the common dir is now private.
 		expect(await runGit(iso, ["symbolic-ref", "HEAD"])).toBe("refs/heads/fresh-orphan");
 		const isoCommon = path.resolve(
@@ -738,7 +752,7 @@ describe("detachGitDir", () => {
 		expect(await Bun.file(path.join(wt, "drop", "d.txt")).exists()).toBe(false);
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 
 		// The detached isolation still honours sparse checkout: `drop/d.txt` keeps
 		// its skip-worktree bit and is NOT reported as a deletion (which delta
@@ -779,7 +793,7 @@ describe("detachGitDir", () => {
 		);
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 
 		// filemode parity: an explicit core.fileMode=false survives re-init.
 		expect(await runGit(iso, ["config", "core.fileMode"])).toBe("false");
@@ -805,7 +819,7 @@ describe("detachGitDir", () => {
 		const aliasCommonDir = path.join(aliasMain, ".git");
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, aliasCommonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, aliasCommonDir)).toBe("detached");
 
 		// Isolation is fully functional: task branch + commit stay private.
 		await runGit(iso, ["checkout", "-q", "-b", "feature/a", baseSha]);

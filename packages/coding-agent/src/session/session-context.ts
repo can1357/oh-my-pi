@@ -1,14 +1,21 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import {
+	coerceServiceTierByFamily,
+	type OpenAIResponsesHistoryPayload,
+	type ServiceTierByFamily,
+} from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
+	isEmptyErrorTurn,
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
+	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
@@ -155,18 +162,18 @@ function snapcompactHistoryBlocksForContext(
 	return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
 }
 
+/** Reads validated OpenAI Responses replacement history from a compaction entry. */
 export function getOpenAiRemoteCompactionPayload(
 	compaction: CompactionEntry | null | undefined,
-): ProviderPayload | undefined {
+): OpenAIResponsesHistoryPayload | undefined {
 	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
-	if (!candidate || typeof candidate !== "object") return undefined;
-	const remote = candidate as { provider?: unknown; replacementHistory?: unknown };
-	if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
-	if (!Array.isArray(remote.replacementHistory)) return undefined;
+	if (!isRecord(candidate)) return undefined;
+	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
+	if (!Array.isArray(candidate.replacementHistory) || !candidate.replacementHistory.every(isRecord)) return undefined;
 	return {
 		type: "openaiResponsesHistory",
-		provider: remote.provider,
-		items: remote.replacementHistory as Array<Record<string, unknown>>,
+		provider: candidate.provider,
+		items: candidate.replacementHistory,
 	};
 }
 
@@ -333,12 +340,21 @@ export function buildSessionContext(
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
-			if (!options?.transcript && entry.message.role === "assistant" && entry.message.retryRecovery) {
+			if (
+				!options?.transcript &&
+				entry.message.role === "assistant" &&
+				(entry.message.retryRecovery || isEmptyErrorTurn(entry.message))
+			) {
 				return;
 			}
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
-			if (!options?.transcript && entry.customType === PREWALK_PLAN_MESSAGE_TYPE) return;
+			if (
+				!options?.transcript &&
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+			) {
+				return;
+			}
 			if (!isCustomMessageContent(entry.content)) return;
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
@@ -449,6 +465,13 @@ export function buildSessionContext(
 				}
 				if (foundFirstKept) {
 					appendMessage(entry);
+				}
+			}
+		} else if (compaction.providerReplayThroughEntryId) {
+			const replayThroughIdx = path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId);
+			if (replayThroughIdx >= 0 && replayThroughIdx < compactionIdx) {
+				for (let i = replayThroughIdx + 1; i < compactionIdx; i++) {
+					appendMessage(path[i]);
 				}
 			}
 		}

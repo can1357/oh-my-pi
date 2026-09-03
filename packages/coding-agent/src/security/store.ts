@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getSecurityProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import * as git from "../utils/git";
 import { compareSecurityLineage } from "./comparison";
 import type {
 	SecurityComparisonReport,
@@ -169,7 +169,8 @@ export class SecurityStore {
 
 	static async openForCwd(cwd: string, options: SecurityStoreOptions = {}): Promise<SecurityStore> {
 		const resolvedCwd = path.resolve(cwd);
-		const repositoryRoot = (await git.repo.root(resolvedCwd, options.signal)) ?? resolvedCwd;
+		options.signal?.throwIfAborted();
+		const repositoryRoot = vcs.repo(resolvedCwd)?.root() ?? resolvedCwd;
 		return SecurityStore.open(repositoryRoot, options);
 	}
 

@@ -46,7 +46,7 @@
  */
 
 import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
-import { isFableOrMythos, parseAnthropicModel, semverGte } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -364,12 +364,17 @@ const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
 
 /** Eval-ideal format for a model id, or undefined when unmeasured. */
 export function idealShapeVariant(modelId: string): IdealShape | undefined {
-	// The catalog parser is case-sensitive; the regex rules below are not.
-	// Normalize so mixed-case gateway ids keep matching the Anthropic tier.
-	const anthropic = parseAnthropicModel(modelId.toLowerCase());
+	const identity = classifyModel("", modelId, { lenient: true });
+	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
+	const opusFloor = parseRevision("4.7");
 	if (
-		anthropic &&
-		(isFableOrMythos(anthropic.kind) || (anthropic.kind === "opus" && semverGte(anthropic.version, "4.7")))
+		identity.class === "anthropic" &&
+		(identity.family === "fable" ||
+			identity.family === "mythos" ||
+			(identity.family === "opus" &&
+				revision !== undefined &&
+				opusFloor !== undefined &&
+				compareRevision(revision, opusFloor) >= 0))
 	) {
 		// Opus 4.7+ and Fable/Mythos read high-res natively: same recall and
 		// cost as 1568, a third fewer frames. 1932 is the largest *square* not

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ShakeMode } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import {
@@ -43,7 +44,7 @@ describe("/shake dispatch (ACP)", () => {
 	});
 
 	it("parses each explicit mode", async () => {
-		for (const mode of ["elide", "images"] as const) {
+		for (const mode of ["elide", "images", "thinking"] as const) {
 			const h = acpRuntime();
 			await executeAcpBuiltinSlashCommand(`/shake ${mode}`, h.runtime);
 			expect(h.shake).toHaveBeenCalledWith(mode);
@@ -61,7 +62,7 @@ describe("/shake dispatch (ACP)", () => {
 	it("is advertised to ACP clients with the mode hint", () => {
 		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "shake");
 		expect(advertised).toBeDefined();
-		expect(advertised?.input?.hint).toBe("[elide|images]");
+		expect(advertised?.input?.hint).toBe("[elide|images|thinking]");
 	});
 
 	it("advertises /shake images as the image-stripping path and no longer advertises /drop-images", () => {
@@ -90,5 +91,36 @@ describe("/shake dispatch (TUI)", () => {
 		await executeBuiltinSlashCommand("/shake nope", h.runtime);
 		expect(h.handleShakeCommand).not.toHaveBeenCalled();
 		expect(h.showWarning).toHaveBeenCalled();
+	});
+});
+describe("CommandController /shake", () => {
+	it("reports thinking-only drops and rebuilds the transcript", async () => {
+		const rebuildChatFromMessages = vi.fn();
+		const invalidate = vi.fn();
+		const requestRender = vi.fn();
+		const showStatus = vi.fn();
+		const ctx = {
+			session: {
+				shake: vi.fn(async () => ({
+					mode: "thinking" as const,
+					toolResultsDropped: 0,
+					blocksDropped: 0,
+					thinkingBlocksDropped: 2,
+					tokensFreed: 0,
+				})),
+			},
+			rebuildChatFromMessages,
+			statusLine: { invalidate },
+			ui: { requestRender },
+			showStatus,
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		await new CommandController(ctx).handleShakeCommand("thinking");
+
+		expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+		expect(invalidate).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(showStatus).toHaveBeenCalledWith("Dropped 2 thinking blocks from this session.");
 	});
 });

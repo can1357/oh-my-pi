@@ -238,7 +238,7 @@ export async function executeRuby(code: string, options?: RubyExecutorOptions): 
 	const cwd = normalizeKernelSessionCwd(options?.cwd ?? getProjectDir());
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const executionOptions: RubyExecutorOptions = {
-		...(options ?? {}),
+		...options,
 		cwd,
 		deadlineMs,
 	};

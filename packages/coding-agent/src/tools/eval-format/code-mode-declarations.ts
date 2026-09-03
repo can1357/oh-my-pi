@@ -28,8 +28,11 @@ function tsType(schema: JsonSchema | undefined, depth: number): string {
 			return "number";
 		case "boolean":
 			return "boolean";
-		case "array":
-			return `${tsType(schema.items, depth + 1)}[]`;
+		case "array": {
+			const item = tsType(schema.items, depth + 1);
+			// `"a" | "b"[]` parses as `"a" | ("b"[])`, so a union item needs parens.
+			return /[|&]/.test(item) ? `(${item})[]` : `${item}[]`;
+		}
 		case "object": {
 			if (!schema.properties) return "Record<string, unknown>";
 			const required = new Set(schema.required ?? []);

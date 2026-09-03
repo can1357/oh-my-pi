@@ -46,14 +46,18 @@ describe("ollama local provider discovery", () => {
 		expect(model?.api).toBe("openai-responses");
 		expect(model?.contextWindow).toBe(1048576);
 		expect(model?.reasoning).toBe(true);
-		expect(model?.thinking).toEqual({
+		// The ladder is rule-owned and derived at build time: DeepSeek V4's
+		// wire-exact low/high/max lineage ladder (`classes/deepseek.kdl`)
+		// outranks the generic local-Ollama fallback (`providers/ollama.kdl`).
+		expect(model?.thinking).toBeUndefined();
+		expect(model && buildModel(model).thinking).toEqual({
 			mode: "effort",
-			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			efforts: [Effort.Low, Effort.High, Effort.Max],
 		});
 		expect(model?.input).toEqual(["text", "image"]);
 	});
 
-	test("remaps Ollama's unsupported reasoning levels and skips non-reasoning models", async () => {
+	test("derives the rules ladder for thinking models and skips non-reasoning models", async () => {
 		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:11434/v1/models") {
@@ -88,9 +92,8 @@ describe("ollama local provider discovery", () => {
 		const builtReasoningModel = reasoningModel ? buildModel(reasoningModel) : undefined;
 		const builtPlainModel = plainModel ? buildModel(plainModel) : undefined;
 
-		// Ollama's OpenAI-compatible endpoint accepts low/medium/high/max;
-		// reasoning models carry that wire-exact ladder with no remapping
-		// (minimal/xhigh never reach the wire because they are not offered).
+		// Models without a class lineage ladder derive the generic local-Ollama
+		// fallback (`providers/ollama.kdl`) from the `thinking` capability.
 		expect(reasoningModel?.reasoning).toBe(true);
 		expect(builtReasoningModel?.thinking).toEqual({
 			mode: "effort",
@@ -99,6 +102,27 @@ describe("ollama local provider discovery", () => {
 		// Non-reasoning models never send an effort, so they carry no thinking metadata.
 		expect(plainModel?.reasoning).toBe(false);
 		expect(builtPlainModel?.thinking).toBeUndefined();
+	});
+	test("keeps GPT-OSS on the Harmony low/medium/high ladder over the generic fallback", () => {
+		// Regression: the generic `providers/ollama.kdl` fallback carries
+		// priority=-1 so the unscoped `classes/gpt-oss.kdl` Harmony ladder wins
+		// the equal-rank tie instead of throwing AmbiguousOverlapError.
+		const built = buildModel({
+			id: "gpt-oss:20b",
+			name: "GPT-OSS 20B",
+			api: "openai-responses",
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8192,
+		});
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+		});
 	});
 });
 
@@ -175,21 +199,20 @@ describe("ollama reasoning effort normalization (buildModel)", () => {
 			compat,
 		}) as ModelSpec<TApi>;
 
-	test("normalizes a stale ollama responses spec to the wire-exact ladder", () => {
+	test("preserves an authored ollama responses ladder", () => {
 		// A cache row or hand-written config from the remap era: reasoning-capable
-		// with `minimal` offered. The builder must normalize the ladder so the
-		// wire never sends raw `minimal`/`xhigh`.
+		// with `minimal` offered. The builder must honor that authored surface.
 		const model = buildModel(staleOllamaSpec("openai-responses"));
-		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
 		expect(model.thinking?.effortMap).toBeUndefined();
-		// Retired tiers clamp instead of erroring.
-		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.Low);
+		// Selections clamp within the authored range.
+		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.Minimal);
 		expect(clampThinkingLevelForModel(model, Effort.XHigh)).toBe(Effort.High);
 	});
 
-	test("normalizes openai-completions ollama specs too", () => {
+	test("preserves authored openai-completions ollama specs", () => {
 		const model = buildModel(staleOllamaSpec("openai-completions"));
-		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(model.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
 	});
 
 	test("explicit compat overrides survive for live tiers", () => {

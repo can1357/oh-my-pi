@@ -5,7 +5,7 @@ import { Database } from "bun:sqlite";
  *
  * Samples random first-of-session messages from the local history DB, renders
  * the shipped `title-system.md` prompt, and runs every message against a matrix
- * of title models — the on-device ONNX models (LFM2 350M/700M, Gemma 270M) via
+ * of title models — the on-device ONNX models (LFM2.5 230M/350M, Falcon H1 90M) via
  * the tiny-title worker, plus a remote Ollama model (Llama 3.2 3B by default).
  * Each model lane runs concurrently; within a lane requests are sequential
  * because the local worker serializes generation on one pipeline.
@@ -16,8 +16,9 @@ import { Database } from "bun:sqlite";
  * Usage:
  *   bun scripts/bench-title-models.ts
  *   bun scripts/bench-title-models.ts --count 30 --seed 42
- *   bun scripts/bench-title-models.ts --models lfm2-350m,gemma-270m
- *   bun scripts/bench-title-models.ts --ollama-url http://spark.internal:11434 --ollama-models llama3.2:3b,lfm2:2.6b
+ *   bun scripts/bench-title-models.ts --models lfm2.5-230m,falcon-h1-90m
+ *   bun scripts/bench-title-models.ts --local-examples
+ *   bun scripts/bench-title-models.ts --ollama-url http://spark.internal:11434 --ollama-models llama3.2:3b,lfm2.5:2.6b
  *   bun scripts/bench-title-models.ts --db ~/.omp/agent/history.db --out bench.json
  */
 import * as os from "node:os";
@@ -69,14 +70,15 @@ interface BenchConfig {
 	count: number;
 	seed: number;
 	localModels: string[];
+	localExamples: boolean;
 	ollamaUrl: string | null;
 	ollamaModels: string[];
 	outPath: string;
 }
 
-const DEFAULT_LOCAL_MODELS = ["lfm2-350m", "lfm2-700m", "gemma-270m"];
+const DEFAULT_LOCAL_MODELS = ["lfm2.5-230m", "lfm2.5-350m", "falcon-h1-90m"];
 const DEFAULT_OLLAMA_URL = "http://spark.internal:11434";
-const DEFAULT_OLLAMA_MODELS = ["llama3.2:3b", "lfm2:2.6b"];
+const DEFAULT_OLLAMA_MODELS = ["llama3.2:3b", "lfm2.5:2.6b"];
 const MIN_INPUT_CHARS = 10;
 const MAX_INPUT_CHARS = 800;
 
@@ -133,11 +135,11 @@ function sampleHistoryPrompts(dbPath: string, count: number, rng: () => number):
 }
 
 /** Run one local ONNX model over every prompt (sequential; worker is single-lane). */
-async function runLocalLane(model: string, prompts: PreparedPrompt[]): Promise<BenchSample[]> {
+async function runLocalLane(model: string, prompts: PreparedPrompt[], systemPrompt: string): Promise<BenchSample[]> {
 	const samples: BenchSample[] = [];
 	for (const item of prompts) {
 		const started = performance.now();
-		const title = await tinyTitleClient.generate(model, item.input, { systemPrompt: TITLE_PROMPT_NO_EXAMPLES });
+		const title = await tinyTitleClient.generate(model, item.input, { systemPrompt });
 		samples.push({ id: item.id, input: item.input, title, ms: performance.now() - started });
 	}
 	return samples;
@@ -162,12 +164,13 @@ async function runOllamaLane(baseUrl: string, model: string, prompts: PreparedPr
 			body: JSON.stringify({
 				model,
 				stream: false,
+				think: false,
 				keep_alive: "10m",
 				messages: [
 					{ role: "system", content: TITLE_PROMPT_WITH_EXAMPLES },
 					{ role: "user", content: `<user>\n${item.input}\n</user>` },
 				],
-				options: { temperature: 0, num_predict: 32 },
+				options: { temperature: 0, num_predict: 1024 },
 			}),
 		});
 		if (!response.ok) throw new Error(`Ollama ${response.status}: ${await response.text()}`);
@@ -229,6 +232,7 @@ function parseArgs(argv: string[]): BenchConfig {
 					.map(model => model.trim())
 					.filter(Boolean)
 			: DEFAULT_LOCAL_MODELS,
+		localExamples: has("--local-examples"),
 		ollamaUrl: has("--no-ollama") ? null : (ollamaUrlArg ?? DEFAULT_OLLAMA_URL),
 		ollamaModels: ollamaModelsArg
 			? ollamaModelsArg
@@ -256,14 +260,13 @@ async function main(): Promise<void> {
 
 	console.info(`Benchmarking ${rows.length} prompts (seed ${config.seed}) from ${config.dbPath}`);
 
+	const localPrompt = config.localExamples ? TITLE_PROMPT_WITH_EXAMPLES : TITLE_PROMPT_NO_EXAMPLES;
 	// Each model is its own concurrent lane; the local worker still serializes
 	// its own lanes internally, but the Ollama lane genuinely runs in parallel.
-	const laneTasks: Promise<BenchLane>[] = [
-		...config.localModels.map(async (model): Promise<BenchLane> => {
-			const samples = await runLocalLane(model, prepared);
-			return { model, transport: "local", samples, summary: summarize(samples) };
-		}),
-	];
+	const laneTasks: Promise<BenchLane>[] = config.localModels.map(async (model): Promise<BenchLane> => {
+		const samples = await runLocalLane(model, prepared, localPrompt);
+		return { model, transport: "local", samples, summary: summarize(samples) };
+	});
 	if (config.ollamaUrl) {
 		const url = config.ollamaUrl;
 		for (const model of config.ollamaModels) {

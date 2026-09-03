@@ -53,10 +53,12 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
+		"supportsReasoningSummary?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
+		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
@@ -105,6 +107,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"defaultLevel?": EffortSchema,
 		"effortMap?": ReasoningEffortMapSchema,
 		"supportsDisplay?": "boolean",
+		"requiresEffort?": "boolean",
 		// Legacy range vocabulary (pre-efforts configs).
 		"minLevel?": EffortSchema,
 		"maxLevel?": EffortSchema,
@@ -130,6 +133,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 				...(value.defaultLevel !== undefined && { defaultLevel: value.defaultLevel }),
 				...(value.effortMap !== undefined && { effortMap: value.effortMap }),
 				...(value.supportsDisplay !== undefined && { supportsDisplay: value.supportsDisplay }),
+				...(value.requiresEffort !== undefined && { requiresEffort: value.requiresEffort }),
 			};
 		});
 
@@ -186,6 +190,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
+		"preferWebsockets?": "boolean",
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"contextPromotionTarget?": "string",
@@ -237,6 +242,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextWindow?": "number",
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
+		"preferWebsockets?": "boolean",
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"contextPromotionTarget?": "string",
@@ -266,7 +272,18 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ProviderDiscoverySchema = type({
 		type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm"',
 		"timeoutMs?": "number",
+		/**
+		 * Defaults to `true`. Set `false` to fetch the model list from
+		 * `{baseUrl}/models` without injecting `/v1` — for gateways that root
+		 * their OpenAI-compatible surface at a versioned path (e.g.
+		 * `https://api.opper.ai/v3/compat`) where the forced `/v1/models`
+		 * returns a different, smaller model list.
+		 */
+		"injectV1?": "boolean",
 	}).narrow((value, ctx) => {
+		if (value.injectV1 !== undefined && value.type !== "openai-models-list") {
+			return ctx.mustBe("injectV1 only on openai-models-list discovery");
+		}
 		if (
 			value.timeoutMs !== undefined &&
 			(typeof value.timeoutMs !== "number" || value.timeoutMs <= 0 || !Number.isFinite(value.timeoutMs))
@@ -291,6 +308,21 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"models?": ModelDefinitionSchema.array(),
 		"modelOverrides?": { "[string]": ModelOverrideSchema },
 		"disableStrictTools?": "boolean",
+		/**
+		 * Amazon Bedrock Guardrail id or ARN attached to every Converse request under
+		 * this provider. Required by accounts that gate `bedrock:InvokeModel*` on the
+		 * `bedrock:GuardrailIdentifier` condition key.
+		 */
+		"guardrailIdentifier?": "string",
+		/** Bedrock guardrail version (defaults to `"DRAFT"` when a guardrail is set). */
+		"guardrailVersion?": "string",
+		/** Bedrock guardrail trace verbosity. */
+		"guardrailTrace?": '"enabled" | "disabled" | "enabled_full"',
+		/**
+		 * Bedrock invocation-log tags attached to every Converse request under this
+		 * provider (max 16 entries; keys/values limited to `[a-zA-Z0-9\s:_@$#=/+,-.]`).
+		 */
+		"requestMetadata?": { "[string]": "string" },
 		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's

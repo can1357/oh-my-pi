@@ -46,6 +46,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 	const NOTICE_SOURCE = "compaction";
 	const NO_PROGRESS_FRAGMENT = "Compaction freed too little context to make progress";
+	const IMAGE_REMEDY_FRAGMENT = "reduce archived image frames (";
 	const SEEDED_FRAME_COUNT = 16;
 
 	function makeFrames(count: number): Record<string, unknown>[] {
@@ -396,11 +397,12 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 		const notices = collectNotices();
 		await triggerMaintenance();
-
 		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(1);
 		expect(noProgress[0].level).toBe("warning");
+		expect(noProgress[0].message).toContain(IMAGE_REMEDY_FRAGMENT);
 		// The dead-end badge must live on the ACTIVE (rebuilt) entry — the
 		// collapsed transcript only shows the latest compaction divider.
 		const compactions = sessionManager
@@ -409,6 +411,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		const active = compactions.at(-1);
 		expect(snapcompact.getPreservedArchive(active?.preserveData)?.frames.length).toBe(4);
 		expect(active?.warning).toContain(NO_PROGRESS_FRAGMENT);
+		expect(active?.warning).toContain(IMAGE_REMEDY_FRAGMENT);
 	});
 
 	it("bails when the kept tail plus fixed context leaves no frame budget", async () => {

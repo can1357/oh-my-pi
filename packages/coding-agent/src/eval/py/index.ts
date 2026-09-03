@@ -11,6 +11,7 @@ import {
 	readInterpreterSetting as sharedReadInterpreterSetting,
 	toExecutorBackendResult,
 } from "../backend-helpers";
+import type { BackendProbeOptions } from "../probe";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
 
@@ -28,8 +29,8 @@ export default {
 	label: "Python",
 	highlightLang: "python",
 
-	async isAvailable(session: ToolSession): Promise<boolean> {
-		const availability = await checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session));
+	async isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean> {
+		const availability = await checkPythonKernelAvailability(session.cwd, readInterpreterSetting(session), opts);
 		return availability.ok;
 	},
 

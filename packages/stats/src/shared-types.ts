@@ -34,6 +34,8 @@ export interface AggregatedStats {
 	cacheSavings: number;
 	/** Total cost */
 	totalCost: number;
+	/** Requests with token usage but no public-equivalent subscription price. */
+	unpricedRequests: number;
 	/** Total premium requests */
 	totalPremiumRequests: number;
 	/** Average duration in ms */
@@ -122,6 +124,8 @@ export interface CostTimeSeriesPoint {
 	provider: string;
 	/** Total cost for this bucket */
 	cost: number;
+	/** Requests excluded because no public-equivalent subscription price exists. */
+	unpricedRequests: number;
 	/** Cost breakdown */
 	costInput: number;
 	costOutput: number;
@@ -129,6 +133,21 @@ export interface CostTimeSeriesPoint {
 	costCacheWrite: number;
 	/** Request count */
 	requests: number;
+}
+
+/**
+ * One local calendar day of aggregate request activity, for the `/usage`
+ * activity heatmap in the coding-agent TUI.
+ */
+export interface DailyActivityPoint {
+	/** Local calendar date, `YYYY-MM-DD`. */
+	day: string;
+	/** Summed API-equivalent cost for the day. */
+	cost: number;
+	/** Request count for the day. */
+	requests: number;
+	/** Total tokens (input + output + cache) for the day. */
+	totalTokens: number;
 }
 
 /**
@@ -302,6 +321,8 @@ export interface ToolUsageStats {
 	outputTokensShare: number;
 	/** Cost (USD) of invoking turns, attributed per call share. */
 	costShare: number;
+	/** Share of unpriced subscription requests attributed to this tool. */
+	unpricedRequestsShare: number;
 	/** Unix ms of the most recent call in range. */
 	lastUsed: number;
 }
@@ -343,6 +364,8 @@ export interface ProviderAggregate {
 	/** Uncached input + cache reads + cache writes + output. */
 	totalTokens: number;
 	totalCost: number;
+	/** Requests excluded because no public-equivalent subscription price exists. */
+	unpricedRequests: number;
 	totalPremiumRequests: number;
 	avgTokensPerSecond: number | null;
 }
@@ -366,6 +389,8 @@ export interface ProviderTimeSeriesPoint {
 	provider: string;
 	totalTokens: number;
 	cost: number;
+	/** Requests excluded because no public-equivalent subscription price exists. */
+	unpricedRequests: number;
 	requests: number;
 }
 
@@ -437,4 +462,127 @@ export interface ProviderDashboardStats {
 	series: ProviderTimeSeriesPoint[];
 	usageSeries: UsageWindowSeries[];
 	windowInsights: ProviderWindowInsight[];
+}
+/**
+ * One row of the Traces session list: a root session with every child
+ * transcript (task subagents, advisors) folded in.
+ */
+export interface SessionSummary {
+	/** Absolute root session file path (trace key). */
+	file: string;
+	/** Decoded project path (e.g. `/work/pi`). */
+	folder: string;
+	title: string | null;
+	/** ms epoch of first activity. */
+	startedAt: number;
+	/** ms epoch of last activity, children included. */
+	endedAt: number;
+	/** Assistant messages, children folded in. */
+	requests: number;
+	toolCalls: number;
+	/** Child transcript count. */
+	subagents: number;
+	totalTokens: number;
+	costTotal: number;
+	models: string[];
+}
+
+export type TraceSpanKind = "turn" | "model" | "tool" | "subagent" | "background";
+
+/** One rendered block on a trace track lane. */
+export interface TraceSpan {
+	/** `${track.id}:${entryId}` (+`:${toolCallId}` for tool spans); stable across refetch. */
+	id: string;
+	kind: TraceSpanKind;
+	/** ms epoch. */
+	start: number;
+	/** ms epoch, >= start. */
+	end: number;
+	/** ≤80 chars: tool name / model id / user-text head / agent name. */
+	label: string;
+	/** ≤160 chars: args projection / result head / task text. */
+	detail?: string;
+	/** Journal entry id for /api/session/entry. */
+	entryId?: string;
+	toolCallId?: string;
+	model?: string;
+	/** usage.totalTokens (model spans). */
+	tokens?: number;
+	/** usage.cost.total (model spans). */
+	cost?: number;
+	/** Time to first token, ms offset from start. */
+	ttft?: number;
+	isError?: boolean;
+	/** End synthesized (no result / pending at session exit). */
+	unterminated?: boolean;
+	/** Set on `subagent` spans whose child transcript became a track. */
+	childTrackId?: string;
+}
+
+/** Point event drawn on a track header row. */
+export interface TraceMarker {
+	/** ms epoch. */
+	time: number;
+	kind: "compaction" | "model_change" | "mode_change" | "reset" | "session_exit";
+	/** e.g. "compaction 142k→38k", model id, mode name, exit kind. */
+	label: string;
+}
+
+/** One transcript (main session, subagent, advisor) in a trace. */
+export interface TraceTrack {
+	/** "main" or slash-joined child key: "Scout1", "Scout1/Nested2", "__advisor". */
+	id: string;
+	parentId: string | null;
+	label: string;
+	/** session_init.agent when recorded. */
+	agent: string | null;
+	/** session_init.resolvedModel ?? first assistant model. */
+	model: string | null;
+	/** Absolute transcript path (for entry fetch). */
+	file: string;
+	/** Sorted by start. */
+	spans: TraceSpan[];
+	markers: TraceMarker[];
+}
+
+/** Per-tool duration aggregate across all tracks of one trace. */
+export interface TraceToolStat {
+	tool: string;
+	calls: number;
+	errors: number;
+	totalMs: number;
+	maxMs: number;
+}
+
+/** Headline aggregates for one trace. */
+export interface TraceSummary {
+	wallMs: number;
+	/** Summed model-span duration on the main track. */
+	modelMs: number;
+	/** Summed tool-span duration on the main track. */
+	toolMs: number;
+	/** Wall time not covered by any span on any track. */
+	idleMs: number;
+	turns: number;
+	requests: number;
+	toolCalls: number;
+	subagents: number;
+	totalTokens: number;
+	costTotal: number;
+	/** Sorted totalMs desc. */
+	toolStats: TraceToolStat[];
+}
+
+/** Complete span tree for one session, `/api/session/trace` payload. */
+export interface SessionTrace {
+	file: string;
+	title: string | null;
+	cwd: string | null;
+	startedAt: number;
+	endedAt: number;
+	/** Root transcript mtime; doubles as the ETag. */
+	mtimeMs: number;
+	/** DFS order, main first. */
+	tracks: TraceTrack[];
+	summary: TraceSummary;
 }

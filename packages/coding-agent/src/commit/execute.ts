@@ -4,7 +4,7 @@
  * wrapper that keeps a requested `--push` honest.
  */
 
-import * as git from "../utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 /**
  * A commit or push failure that has already been reported to the user with a
@@ -29,8 +29,8 @@ export class CommitAbortedError extends Error {
  * @param error The failure to surface; its captured stderr/stdout is shown.
  * @param note Optional trailing status line (split-plan progress, recovery).
  */
-export function abortOnGitFailure(context: string, error: git.GitCommandError, note?: string): never {
-	const detail = error.result.stderr.trim() || error.result.stdout.trim() || error.message;
+export function abortOnGitFailure(context: string, error: vcs.VcsError, note?: string): never {
+	const detail = error.stderr.trim() || error.stdout.trim() || error.message;
 	const body = detail
 		.split("\n")
 		.map(line => `    ${line}`)
@@ -43,13 +43,13 @@ export function abortOnGitFailure(context: string, error: git.GitCommandError, n
 /**
  * Push the current branch, reporting a refused push (missing upstream, rejected
  * ref) through {@link abortOnGitFailure} instead of letting the raw
- * `GitCommandError` escape. Prints the success line on completion.
+ * `VcsError` escape. Prints the success line on completion.
  */
 export async function pushOrAbort(cwd: string): Promise<void> {
 	try {
-		await git.push(cwd);
+		await vcs.requireGit(cwd).push({});
 	} catch (error) {
-		if (error instanceof git.GitCommandError) abortOnGitFailure("Push failed", error);
+		if (vcs.isVcsError(error)) abortOnGitFailure("Push failed", error);
 		throw error;
 	}
 	process.stdout.write("Pushed to remote.\n");

@@ -27,7 +27,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 interface SteerCall {
 	content: string;
-	options?: { deliverAs?: "steer" | "followUp" };
+	options?: { deliverAs?: "steer" | "followUp" | "aside" };
 }
 
 interface FakeSessionConfig {
@@ -99,6 +99,8 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		waitForIdle: async () => {
 			await hang;
 		},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		sendUserMessage: async (content, options) => {
 			steerCalls.push({ content: String(content), options });
 		},

@@ -20,12 +20,12 @@
     "./*.js": "./src/*.ts"
   },
   "scripts": {
-    "check": "biome check . && bun run check:types",
+    "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit",
-    "lint": "biome lint .",
+    "lint": "oxlint .",
     "test": "bun test --parallel",
-    "fix": "biome check --write --unsafe .",
-    "fmt": "biome format --write .",
+    "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
     "generate": "bun run src/generate.ts --typescript-dir /tmp/pi-mono-source",
     "edit-shapes": "bun run src/edit-shape-stats.ts"
   },
@@ -34,7 +34,6 @@
     "@babel/parser": "catalog:",
     "@babel/traverse": "catalog:",
     "@babel/types": "catalog:",
-    "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
     "@oh-my-pi/pi-coding-agent": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",

@@ -1056,7 +1056,8 @@ mod tests {
 	}
 
 	#[test]
-	#[ignore = "full repository sweep; run with `cargo test --release -p pi-ast -- --ignored`"]
+	#[ignore = "full repository sweep; run with `cargo nextest run --release -p pi-ast \
+	            --run-ignored ignored-only`"]
 	fn pruned_walk_matches_unpruned_on_full_repo_corpus() {
 		let files = repo_files(None);
 		assert!(files.len() > 3000, "expected the whole corpus, got {}", files.len());

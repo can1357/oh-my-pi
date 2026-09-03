@@ -11,6 +11,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -50,6 +51,19 @@ function createFixture(streamingMessage: AssistantMessage) {
 		updateContent: vi.fn(),
 		markTranscriptBlockFinalized,
 	};
+	const chatChildren: unknown[] = [];
+	const chatContainer = {
+		children: chatChildren,
+		addChild: vi.fn((child: { seal?(): void }) => {
+			chatChildren.push(child);
+			mountedComponents.push(child);
+		}),
+		removeChild: vi.fn((child: unknown) => {
+			const index = chatChildren.indexOf(child);
+			if (index >= 0) chatChildren.splice(index, 1);
+		}),
+		canRemoveBlock: vi.fn(() => true),
+	};
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
@@ -61,7 +75,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		noteDisplayableThinkingContent: vi.fn(() => false),
-		chatContainer: { addChild: vi.fn((child: { seal?(): void }) => mountedComponents.push(child)) },
+		chatContainer,
 		toolOutputExpanded: false,
 		settings,
 		session: { getToolByName: () => undefined, hasBuiltInTool: () => true },
@@ -71,7 +85,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 	} as unknown as InteractiveModeContext;
 
 	const controller = new EventController(ctx);
-	return { controller, markTranscriptBlockFinalized };
+	return { controller, markTranscriptBlockFinalized, ctx };
 }
 
 async function dispatchUpdate(message: AssistantMessage) {
@@ -147,5 +161,41 @@ describe("EventController finalizes assistant block when tool-call args stream",
 		const row = mountedComponents.at(-1) as unknown as { render(width: number): string[] } | undefined;
 		expect(row).toBeDefined();
 		expect(row?.render(120).join("\n")).toContain("2026-01-02 03:04:05");
+	});
+});
+describe("EventController finalizes orphaned post-tool assistant segments", () => {
+	afterEach(() => {
+		for (const component of mountedComponents.splice(0)) component.seal?.();
+		resetSettingsForTest();
+		vi.restoreAllMocks();
+	});
+
+	// Regression: post-tool assistant segments are created unfinalized at
+	// message_update and finalized only at message_end. A dropped message_end
+	// (mid-stream throw, superseded attempt) used to leave the segment active
+	// forever — one unfinalized block at the transcript frontier blocks history
+	// retirement, so every later block degraded to its one-line live allocation.
+	it("finalizes a segment whose message_end never fired at the next message_start", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const message = makeStreamingMessage([
+			{ type: "toolCall", id: "tc-seg", name: "write", arguments: { file_path: "/tmp/c.ts", content: "z" } },
+			{ type: "text", text: "post-tool commentary" },
+		]);
+		const { controller, ctx } = createFixture(message);
+		await controller.handleEvent({
+			type: "message_update",
+			message,
+			assistantMessageEvent: undefined as never,
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		const segment = ctx.chatContainer.children.find(child => child instanceof AssistantMessageComponent);
+		expect(segment).toBeInstanceOf(AssistantMessageComponent);
+		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(false);
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: makeStreamingMessage([]),
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
+		controller.dispose();
 	});
 });

@@ -42,6 +42,16 @@ const ALPHANUMERIC_SWAP_PENALTY = 5;
 const COMPACT_PHRASE_BONUS = 1200;
 const PHRASE_BONUS = 1000;
 
+/**
+ * Shortest needle worth scanning past its leading occurrence for.
+ *
+ * One or two characters sit mid-word in nearly every candidate — "im" is inside
+ * "experimental" — so rescanning that short would hand the word-start bonus to
+ * the whole corpus at once and reshuffle the list on the opening keystrokes of a
+ * search instead of narrowing it. Shadowing only misleads for real phrases.
+ */
+const MIN_SHADOW_RESCAN_LENGTH = 3;
+
 function normalizeForSearch(value: string): string {
 	return value
 		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
@@ -172,6 +182,53 @@ function isWordBoundaryPhrase(normalized: string, index: number, length: number)
 	return before && after;
 }
 
+/**
+ * Offset of the first whole-word occurrence of `phrase` in `normalized`, or -1.
+ *
+ * A bare `indexOf` reports only the leading occurrence, so a qualifying match is
+ * dropped whenever an earlier non-qualifying one shadows it — the whole word
+ * "image" in "reimage image provider" loses to the "image" inside "reimage".
+ * Occurrences are scanned left to right, so the first qualifying hit is also the
+ * best-scoring one: the caller's position tiebreak grows with the offset.
+ *
+ * Only a hit buried inside a word can shadow. A leading hit that already starts
+ * a word is an ordinary prefix match — the query is "image" and the text says
+ * "images" — and it is scored exactly as before rather than borrowing a
+ * whole-word bonus from some later occurrence; `findCompactWordStart` treats its
+ * leading word-start hit the same way. The rescan is additionally limited to
+ * {@link MIN_SHADOW_RESCAN_LENGTH} and longer needles.
+ */
+function findWordBoundaryPhrase(normalized: string, phrase: string): number {
+	if (phrase.length === 0) return -1;
+	const first = normalized.indexOf(phrase);
+	if (first < 0) return -1;
+	if (isWordBoundaryPhrase(normalized, first, phrase.length)) return first;
+	if (first === 0 || normalized[first - 1] === " ") return -1;
+	if (phrase.length < MIN_SHADOW_RESCAN_LENGTH) return -1;
+	for (let at = normalized.indexOf(phrase, first + 1); at >= 0; at = normalized.indexOf(phrase, at + 1)) {
+		if (isWordBoundaryPhrase(normalized, at, phrase.length)) return at;
+	}
+	return -1;
+}
+
+/**
+ * Offset of the first occurrence of `needle` that starts a word in `index.compact`,
+ * or -1. Same shadowing hazard, and the same length floor, as
+ * {@link findWordBoundaryPhrase}.
+ */
+function findCompactWordStart(index: SearchIndex, needle: string): number {
+	if (needle.length === 0) return -1;
+	const { compact, compactWordStarts } = index;
+	const first = compact.indexOf(needle);
+	if (first < 0) return -1;
+	if (compactWordStarts.has(first)) return first;
+	if (needle.length < MIN_SHADOW_RESCAN_LENGTH) return -1;
+	for (let at = compact.indexOf(needle, first + 1); at >= 0; at = compact.indexOf(needle, at + 1)) {
+		if (compactWordStarts.has(at)) return at;
+	}
+	return -1;
+}
+
 function scoreTokenAgainstWord(token: string, word: SearchWord): FuzzyMatch | null {
 	if (word.text === token) {
 		return { matches: true, score: withPosition(-200, word.index) };
@@ -230,8 +287,8 @@ function scoreTokenDirect(token: string, index: SearchIndex): FuzzyMatch {
 	if (token.length === 0) return { matches: true, score: 0 };
 
 	let best: FuzzyMatch | null = null;
-	const compactIndex = index.compact.indexOf(token);
-	if (compactIndex >= 0 && index.compactWordStarts.has(compactIndex)) {
+	const compactIndex = findCompactWordStart(index, token);
+	if (compactIndex >= 0) {
 		best = { matches: true, score: withPosition(-140, compactIndex) };
 	}
 
@@ -290,14 +347,14 @@ function fuzzyMatchCore(pq: PreparedQuery | null, index: SearchIndex): FuzzyMatc
 	}
 
 	let totalScore = 0;
-	const phraseIndex = index.normalized.indexOf(pq.normalized);
-	if (phraseIndex >= 0 && isWordBoundaryPhrase(index.normalized, phraseIndex, pq.normalized.length)) {
+	const phraseIndex = findWordBoundaryPhrase(index.normalized, pq.normalized);
+	if (phraseIndex >= 0) {
 		totalScore -= PHRASE_BONUS;
 		totalScore += phraseIndex * 0.01;
 	}
 
-	const compactPhraseIndex = index.compact.indexOf(pq.compact);
-	if (compactPhraseIndex >= 0 && index.compactWordStarts.has(compactPhraseIndex)) {
+	const compactPhraseIndex = findCompactWordStart(index, pq.compact);
+	if (compactPhraseIndex >= 0) {
 		totalScore -= COMPACT_PHRASE_BONUS;
 		totalScore += compactPhraseIndex * 0.01;
 	}

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import * as zlib from "node:zlib";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
@@ -891,9 +891,50 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should reject malformed internal-URL selectors instead of dumping the whole resource", async () => {
-			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100" })).rejects.toThrow(
-				/Invalid selector ':-100'/,
+			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100-5" })).rejects.toThrow(
+				/Invalid selector ':-100-5'/,
 			);
+		});
+
+		it("reads the last N lines with a :-N tail selector (1 leading context line, no trailing)", async () => {
+			const testFile = path.join(testDir, "tail-test.txt");
+			const lines = Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`);
+			fs.writeFileSync(testFile, lines.join("\n"));
+
+			const output = getTextOutput(await readTool.execute("test-tail", { path: `${testFile}:-10` }));
+
+			expect(output).not.toContain("Line 89");
+			expect(output).toContain("Line 90");
+			expect(output).toContain("Line 91");
+			expect(output).toContain("Line 100");
+			expect(output).not.toContain("Use :");
+		});
+
+		it("tails a file past the snapshot cap without buffering it", async () => {
+			const testFile = path.join(testDir, "tail-large.txt");
+			const line = `${"x".repeat(1024)}`;
+			const total = 12_000;
+			fs.writeFileSync(testFile, Array.from({ length: total }, (_, i) => `${i + 1} ${line}`).join("\n"));
+			expect(fs.statSync(testFile).size).toBeGreaterThan(8 * 1024 * 1024);
+
+			const output = getTextOutput(await readTool.execute("test-tail-large", { path: `${testFile}:-3` }));
+
+			expect(output).not.toContain(`${total - 4} x`);
+			expect(output).toContain(`${total - 3} x`);
+			expect(output).toContain(`${total} x`);
+		});
+
+		it("tail selector is verbatim under :raw and clamps to the whole file when N exceeds it", async () => {
+			const testFile = path.join(testDir, "tail-raw.txt");
+			fs.writeFileSync(testFile, "alpha\nbeta\ngamma\n");
+
+			const raw = getTextOutput(await readTool.execute("test-tail-raw", { path: `${testFile}:raw:-2` }));
+			expect(raw).toBe("gamma\n");
+
+			const clamped = getTextOutput(await readTool.execute("test-tail-clamp", { path: `${testFile}:-50` }));
+			expect(clamped).toContain("alpha");
+			expect(clamped).toContain("gamma");
+			expect(clamped).not.toContain("beyond end of file");
 		});
 
 		it("should include truncation details when truncated", async () => {
@@ -965,6 +1006,132 @@ describe("Coding Agent Tools", () => {
 				);
 				expect(getTextOutput(artifactResult)).toContain(line);
 				expect(saveArtifact).not.toHaveBeenCalled();
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("should strip payloads duplicated by structured MCP blocks (#9687)", async () => {
+			// MCP results carry a second copy of the payload under `details.rawContent`.
+			// Everything already stored elsewhere must be pruned so it cannot re-inflate
+			// on-disk size: text and `resource.text` land in the spill artifact, image
+			// data survives on the result content. Only resource URI/MIME/blob metadata,
+			// which has no other home, is retained.
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 64,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 64,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "mcp-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["mcp__server__tool"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			const payload = "SEARCH RESULT LINE\n".repeat(4000);
+			const resourceMeta = {
+				uri: "file:///workspace/result.bin",
+				mimeType: "application/octet-stream",
+				blob: "AAECAw==",
+			};
+			const resource = {
+				type: "resource" as const,
+				resource: { ...resourceMeta, text: "duplicated resource body\n".repeat(200) },
+			};
+			const image = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+			const mcpTool = {
+				name: "mcp__server__tool",
+				description: "fake mcp tool returning a large structured payload",
+				async execute() {
+					return {
+						content: [
+							{ type: "text" as const, text: payload },
+							{ type: "image" as const, data: image.data, mimeType: image.mimeType },
+						],
+						details: {
+							serverName: "server",
+							mcpToolName: "tool",
+							rawContent: [{ type: "text", text: payload }, resource, image],
+						},
+					};
+				},
+			};
+
+			try {
+				const wrapped = wrapToolWithMetaNotice(mcpTool as unknown as AgentTool);
+				const result = await wrapped.execute("mcp-call", {}, undefined, undefined, context);
+
+				const truncation = result.details?.meta?.truncation;
+				expect(truncation?.artifactId).toBeDefined();
+				expect(Buffer.byteLength(getTextOutput(result), "utf-8")).toBeLessThan(Buffer.byteLength(payload, "utf-8"));
+
+				// Text and image are represented elsewhere; only resource metadata
+				// (without the artifact-stored text) survives on details.rawContent.
+				expect(result.details?.rawContent).toEqual([{ type: "resource", resource: resourceMeta }]);
+				// The image block is preserved on the result content.
+				expect(result.content).toContainEqual({
+					type: "image",
+					data: image.data,
+					mimeType: image.mimeType,
+				});
+
+				const artifactPath = path.join(
+					spillManager.getArtifactsDir()!,
+					`${truncation.artifactId}.mcp__server__tool.log`,
+				);
+				expect(await Bun.file(artifactPath).text()).toBe(payload);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("should not prune details.rawContent for non-MCP tool results (#9689)", async () => {
+			// SDK/extension tools share this spill wrapper and their `details` payload
+			// is unconstrained. A tool that happens to name a field `rawContent` must
+			// keep it verbatim: only the MCP bridge (serverName + mcpToolName) mirrors
+			// its content there, so a bare property-name collision must not lose data.
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactTailBytes": 64,
+				"tools.artifactTailLines": 10,
+				"tools.artifactHeadBytes": 64,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "sdk-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const context = {
+				...createTestToolContext(["custom_sdk_tool"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+
+			const payload = "SDK OUTPUT LINE\n".repeat(4000);
+			// No serverName/mcpToolName markers → not an MCP result.
+			const rawContent = [
+				{ type: "text", text: "extension-owned text that must survive" },
+				{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+			];
+			const sdkTool = {
+				name: "custom_sdk_tool",
+				description: "fake sdk tool that uses details.rawContent for its own data",
+				async execute() {
+					return {
+						content: [{ type: "text" as const, text: payload }],
+						details: { rawContent },
+					};
+				},
+			};
+
+			try {
+				const wrapped = wrapToolWithMetaNotice(sdkTool as unknown as AgentTool);
+				const result = await wrapped.execute("sdk-call", {}, undefined, undefined, context);
+
+				// Spill still fired on the oversized content.
+				expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
+				// The tool's own rawContent is left untouched.
+				expect(result.details?.rawContent).toEqual(rawContent);
 			} finally {
 				await spillManager.close();
 			}
@@ -1836,13 +2003,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "Hello, world!";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-6", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "testing",
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-call-6", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "testing",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should fail if text appears multiple times", async () => {
@@ -1850,13 +2017,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "foo foo foo";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-7", {
-					path: testFile,
-					old_string: "foo",
-					new_string: "bar",
-				}),
-			).rejects.toThrow(/Found 3 occurrences/);
+			const result = await editTool.execute("test-call-7", {
+				path: testFile,
+				old_string: "foo",
+				new_string: "bar",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 3 occurrences/);
 		});
 
 		it("should replace all occurrences with replace_all: true", async () => {
@@ -1870,7 +2037,7 @@ describe("Coding Agent Tools", () => {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced 3 occurrences");
+			expect(getTextOutput(result)).toContain("qux bar qux baz qux");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("qux bar qux baz qux");
 		});
@@ -1894,28 +2061,28 @@ function b() {
 			);
 
 			// With multiple fuzzy matches, the tool rejects for safety to avoid ambiguous replacements
-			await expect(
-				editTool.execute("test-all-fuzzy", {
-					path: testFile,
-					old_string: "if (x) {\n  doThing();\n}",
-					new_string: "if (y) {\n  doOther();\n}",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Found 2 high-confidence matches/);
+			const result = await editTool.execute("test-all-fuzzy", {
+				path: testFile,
+				old_string: "if (x) {\n  doThing();\n}",
+				new_string: "if (y) {\n  doOther();\n}",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 2 high-confidence matches/);
 		});
 
 		it("should fail with replace_all: true if no matches found", async () => {
 			const testFile = path.join(testDir, "edit-all-nomatch.txt");
 			fs.writeFileSync(testFile, "hello world");
 
-			await expect(
-				editTool.execute("test-all-nomatch", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "bar",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-all-nomatch", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "bar",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should replace multiline text with replace_all: true", async () => {
@@ -1929,7 +2096,7 @@ function b() {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced 2 occurrences");
+			expect(getTextOutput(result)).toContain("replaced");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("start\nreplaced\nend\nstart\nreplaced\nend");
 		});
@@ -1945,7 +2112,7 @@ function b() {
 				replace_all: true,
 			});
 
-			expect(getTextOutput(result)).toContain("Successfully replaced text");
+			expect(getTextOutput(result)).toContain("hello universe");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("hello universe");
 		});
@@ -2203,7 +2370,7 @@ function b() {
 			await asyncJobManager.dispose();
 		});
 
-		it("should auto-background long-running commands when enabled", async () => {
+		it("should auto-background at the threshold even with a longer timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const updates: string[] = [];
 			const asyncJobManager = new AsyncJobManager({
@@ -2231,6 +2398,7 @@ function b() {
 				"test-call-9-auto-running",
 				{
 					command: "printf 'start\\n'; sleep 0.03; printf 'done\\n'",
+					timeout: 3_600,
 				},
 				undefined,
 				update => {
@@ -3073,7 +3241,7 @@ describe("edit tool CRLF handling", () => {
 			new_string: "replaced line\n",
 		});
 
-		expect(getTextOutput(result)).toContain("Successfully replaced");
+		expect(getTextOutput(result)).toContain("replaced line");
 	});
 
 	it("should preserve CRLF line endings after edit", async () => {
@@ -3109,13 +3277,13 @@ describe("edit tool CRLF handling", () => {
 
 		fs.writeFileSync(testFile, "hello\r\nworld\r\n---\r\nhello\nworld\n");
 
-		await expect(
-			editTool.execute("test-crlf-dup", {
-				path: testFile,
-				old_string: "hello\nworld\n",
-				new_string: "replaced\n",
-			}),
-		).rejects.toThrow(/Found 2 occurrences/);
+		const result = await editTool.execute("test-crlf-dup", {
+			path: testFile,
+			old_string: "hello\nworld\n",
+			new_string: "replaced\n",
+		});
+		expect(result.isError).toBe(true);
+		expect(getTextOutput(result)).toMatch(/Found 2 occurrences/);
 	});
 
 	// TODO: CRLF preservation broken by LSP formatting - fix later

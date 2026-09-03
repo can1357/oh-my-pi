@@ -26,7 +26,7 @@ import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
-import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
+import { type SlashCommand, slashCommandCapability, slashCommandFrontmatterDisplay } from "../capability/slash-command";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
 
@@ -37,6 +37,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	resolveUserPath,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -196,6 +197,13 @@ interface OpenCodeMCPConfig {
 	headers?: Record<string, string>;
 	enabled?: boolean;
 	timeout?: number;
+	oauth?: {
+		clientId?: string;
+		clientSecret?: string;
+		scope?: string;
+		callbackPort?: number;
+		redirectUri?: string;
+	};
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -215,6 +223,19 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
 		record[key] = item;
 	}
 	return record;
+}
+
+function normalizeOAuth(value: unknown): MCPServer["oauth"] | undefined {
+	if (!isRecord(value)) return undefined;
+
+	const oauth = {
+		clientId: typeof value.clientId === "string" ? value.clientId : undefined,
+		clientSecret: typeof value.clientSecret === "string" ? value.clientSecret : undefined,
+		scope: typeof value.scope === "string" ? value.scope : undefined,
+		callbackPort: typeof value.callbackPort === "number" ? value.callbackPort : undefined,
+		redirectUri: typeof value.redirectUri === "string" ? value.redirectUri : undefined,
+	};
+	return Object.values(oauth).some(item => item !== undefined) ? oauth : undefined;
 }
 
 function normalizeCommand(
@@ -313,6 +334,7 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
 		enabled: serverConfig.enabled,
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
+		oauth: normalizeOAuth(serverConfig.oauth),
 		transport,
 		_source: createSourceMeta(PROVIDER_ID, source.path, source.level),
 	};
@@ -385,17 +407,20 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 function readOpencodeCommandToggles(): { enableUser: boolean; enableProject: boolean } {
 	try {
 		return {
-			enableUser: settings.get("commands.enableOpencodeUser") ?? true,
+			enableUser: settings.get("commands.enableOpencodeUser") === true,
 			enableProject: settings.get("commands.enableOpencodeProject") ?? true,
 		};
 	} catch {
-		return { enableUser: true, enableProject: true };
+		return { enableUser: false, enableProject: true };
 	}
 }
 
 async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashCommand>> {
 	const { enableUser, enableProject } = readOpencodeCommandToggles();
-	const userCommandsDir = enableUser ? getUserPath(ctx, "opencode", "commands") : null;
+	// The legacy commands toggle is a commands-only opt-in for ~/.config/opencode.
+	const userCommandsDir = enableUser
+		? resolveUserPath(ctx, "opencode", "commands")
+		: getUserPath(ctx, "opencode", "commands");
 	const projectCommandsDir = enableProject ? getProjectPath(ctx, "opencode", "commands") : null;
 
 	const transformCommand =
@@ -406,6 +431,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 				name: String(commandName),
 				path: filePath,
 				content: body,
+				...slashCommandFrontmatterDisplay(frontmatter),
 				level,
 				_source: source,
 			};

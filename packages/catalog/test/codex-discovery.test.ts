@@ -191,9 +191,11 @@ describe("Codex model discovery", () => {
 			Effort.XHigh,
 			Effort.Max,
 		]);
-		expect(blue.cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
+		// Standard API pricing is rule-owned (`providers/openai-codex.kdl`
+		// cost-patch) and corrected at build time.
+		expect(buildModel(blue).cost).toEqual({ input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 });
 		expect(red.contextWindow).toBe(400_000);
-		expect(red.cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
+		expect(buildModel(red).cost).toEqual({ input: 12.5, output: 75, cacheRead: 1.25, cacheWrite: 15.625 });
 	});
 
 	it("floors stale reported windows for GPT-5.6 luna/sol/terra and honors reports above the floor", async () => {

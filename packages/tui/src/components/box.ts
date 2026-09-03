@@ -59,6 +59,16 @@ export class Box implements Component {
 		this.#bgFn = bgFn;
 		this.#border = border;
 	}
+	/** Return container layout and child-count state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			childCount: this.children.length,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			bordered: this.#border !== undefined,
+			ignoreTight: this.#ignoreTight,
+		};
+	}
 
 	addChild(component: Component): void {
 		this.children.push(component);

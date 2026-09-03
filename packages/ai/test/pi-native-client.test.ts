@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -131,6 +132,22 @@ function fakeModel(overrides: Partial<Model<"anthropic-messages">> = {}): Model<
 		...overrides,
 	} as ModelSpec<"anthropic-messages">);
 }
+function fakeBedrockModel(overrides: Partial<Model<"bedrock-converse-stream">> = {}): Model<"bedrock-converse-stream"> {
+	return buildModel({
+		id: "amazon.nova-lite-v1:0",
+		name: "Amazon Nova Lite",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: "http://llm-gateway.internal:4000",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0.8, output: 2.4, cacheRead: 0.08, cacheWrite: 0.1 },
+		contextWindow: 300_000,
+		maxTokens: 5_000,
+		transport: "pi-native",
+		...overrides,
+	} as ModelSpec<"bedrock-converse-stream">);
+}
 
 const baseContext: Context = {
 	systemPrompt: ["you are helpful"],
@@ -178,6 +195,79 @@ describe("streamPiNative request shape", () => {
 		expect(body.context).toEqual(baseContext);
 		expect(body.stream).toBe(true);
 		expect(body.options.temperature).toBe(0.7);
+	});
+	it("forwards Bedrock guardrails from the model through streamSimple", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(
+			fakeBedrockModel({
+				guardrailIdentifier: "arn:aws:bedrock:eu-west-1:123456789012:guardrail/example",
+				guardrailVersion: "7",
+				guardrailTrace: "enabled_full",
+			}),
+			baseContext,
+			{ apiKey: "gw-bearer", fetch: fetchImpl },
+		).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options).toMatchObject({
+			guardrailIdentifier: "arn:aws:bedrock:eu-west-1:123456789012:guardrail/example",
+			guardrailVersion: "7",
+			guardrailTrace: "enabled_full",
+		});
+	});
+	it("forwards requestMetadata flattened from the model and per-call options, per-call winning on collision", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(fakeBedrockModel({ requestMetadata: { team: "growth", environment: "prod" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+			requestMetadata: { environment: "staging", run: "42" },
+		}).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options.requestMetadata).toEqual({ team: "growth", environment: "staging", run: "42" });
+	});
+
+	it("forwards a model-configured User-Agent override across the pi-native wire", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(fakeBedrockModel({ headers: { "User-Agent": "custom-ua/1.0" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+		}).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options.headers).toEqual({ "User-Agent": "custom-ua/1.0" });
+	});
+
+	it("keeps the caller's own User-Agent over a model-configured one", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamSimple(fakeBedrockModel({ headers: { "User-Agent": "from-model" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+			headers: { "user-agent": "from-caller" },
+		}).result();
+
+		const body = JSON.parse(captured.init?.body as string);
+		expect(body.options.headers).toEqual({ "user-agent": "from-caller" });
 	});
 
 	it("strips non-wire fields (signal, apiKey, fetch, callbacks) from `options`", async () => {

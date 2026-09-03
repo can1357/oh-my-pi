@@ -68,7 +68,7 @@ function makeHub(focusAgent: (id: string) => Promise<void>) {
 	return { hub, doneCalls: () => doneCalls, done: done.promise, renderRequested: renderRequested.promise };
 }
 
-const ROSTER_ENTRY_PATTERN = /^(❯| ) (\S+) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+)/u;
+const ROSTER_ENTRY_PATTERN = /^(❯| ) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+) (\S+)/u;
 
 function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: number): string {
 	const cells = hub.render(width).map(raw => {
@@ -90,6 +90,20 @@ function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: n
 		entry.push(cell.trimEnd());
 	}
 	return entry.join("\n");
+}
+
+function renderedRosterIds(hub: AgentHubOverlayComponent, width: number): string[] {
+	const ids: string[] = [];
+	for (const raw of hub.render(width)) {
+		const line = Bun.stripANSI(raw);
+		if (!line.startsWith("│ ")) continue;
+		const divider = line.indexOf("│", Math.max(2, Math.floor(line.length / 3)));
+		if (divider < 0) continue;
+		const cell = line.slice(2, Math.max(2, divider - 1));
+		const match = ROSTER_ENTRY_PATTERN.exec(cell);
+		if (match?.[3]) ids.push(match[3]);
+	}
+	return ids;
 }
 
 describe("Agent hub Enter activation", () => {
@@ -133,6 +147,56 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("Enter opens an aborted agent's read-only transcript instead of focusing it", () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: null,
+			status: "aborted",
+		});
+		const focusAgent = vi.fn(async () => {});
+		let viewer: { render(width: number): readonly string[] } | undefined;
+		const showOverlay = vi.fn((component: { render(width: number): readonly string[] }) => {
+			viewer = component;
+			return { hide: () => {} };
+		});
+		const setFocus = vi.fn();
+		const onDone = vi.fn();
+		const hub = new AgentHubOverlayComponent({
+			settings: Settings.isolated(),
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone,
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent,
+			ui: {
+				requestRender: () => {},
+				requestComponentRender: () => {},
+				showOverlay,
+				setFocus,
+			} as never,
+		});
+
+		hub.handleInput("\r");
+
+		expect(focusAgent).not.toHaveBeenCalled();
+		expect(showOverlay).toHaveBeenCalledWith(expect.anything(), {
+			width: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		expect(setFocus).toHaveBeenCalledWith(expect.anything());
+		expect(Bun.stripANSI(viewer!.render(120).join("\n"))).not.toContain("Enter:send");
+		expect(onDone).not.toHaveBeenCalled();
+		hub.dispose();
+	});
+
 	it("lists persisted subagent session files after restart", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-");
 		const sessionFile = path.join(tempDir.path(), "main.jsonl");
@@ -156,6 +220,41 @@ describe("Agent hub Enter activation", () => {
 		const workerEntry = renderedRosterEntry(hub, "Worker", 120);
 		expect(workerEntry).toContain("○ Worker");
 		expect(agents.get("Worker")?.sessionFile).toBe(workerSessionFile);
+		hub.dispose();
+	});
+
+	it("ranks restored subagents by recency rather than readdir order", async () => {
+		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-order-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		await Bun.write(sessionFile, "");
+		// Alphabetical readdir order (Aaa, Bbb, Ccc) is the reverse of recency:
+		// Ccc is the most recently active. The roster must apply the status/recency
+		// ranking to every restored agent, not append them in discovery order.
+		const workers: Array<[string, number]> = [
+			["Aaa", Date.parse("2026-07-30T01:00:00.000Z")],
+			["Bbb", Date.parse("2026-07-30T02:00:00.000Z")],
+			["Ccc", Date.parse("2026-07-30T03:00:00.000Z")],
+		];
+		for (const [id, mtime] of workers) {
+			const file = path.join(tempDir.path(), "main", `${id}.jsonl`);
+			await Bun.write(file, persistedChildJsonl(id));
+			await fs.utimes(file, new Date(mtime), new Date(mtime));
+		}
+		const agents = new AgentRegistry();
+		const hub = new AgentHubOverlayComponent({
+			settings: Settings.isolated(),
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry: agents,
+			irc: new IrcBus(agents),
+			focusAgent: async () => {},
+			sessionFile,
+		});
+		await hub.persistedSubagentsReady;
+
+		expect(renderedRosterIds(hub, 120)).toEqual(["Ccc", "Bbb", "Aaa"]);
 		hub.dispose();
 	});
 
@@ -205,7 +304,7 @@ describe("Agent hub Enter activation", () => {
 		expect(agents.get("Parent")?.parentId).toBe("Main");
 		expect(agents.get("Child")?.parentId).toBe("Parent");
 		hub.handleInput("t");
-		expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── Child");
+		expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── ○ Child");
 		hub.dispose();
 	});
 
@@ -253,7 +352,7 @@ describe("Agent hub Enter activation", () => {
 		});
 		const workerEntry = renderedRosterEntry(hub, "Worker", 120);
 		expect(workerEntry).toContain("Inspect dependency boundaries and report unsafe coupling.");
-		expect(workerEntry.replace(/\s+/g, " ")).toContain("usage —");
+		expect(workerEntry.replace(/\s+/g, " ")).toContain("usage ·");
 		expect(workerEntry).not.toContain("$0.000");
 		hub.dispose();
 	});
