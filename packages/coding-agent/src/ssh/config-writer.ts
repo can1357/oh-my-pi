@@ -3,11 +3,10 @@
  *
  * Utilities for reading/writing ssh.json files at user or project level.
  */
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
+import { publishSerializedConfig, resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
 
 export interface SSHHostConfig {
 	host: string;
@@ -49,48 +48,7 @@ export async function readSSHConfigFile(filePath: string): Promise<SSHConfigFile
  */
 export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile): Promise<void> {
 	const writePath = await resolveSymlinkWriteTarget(filePath);
-	await publishSSHConfig(writePath, config);
-}
-
-/**
- * Stage and publish against an ALREADY-RESOLVED target — the path pinned by
- * `withConfigFileLock`. No re-resolution happens here, so a symlink swapped in
- * at the target mid-lock cannot redirect the write to a file this lock does
- * not cover. The temp file is staged in the target's own directory so the
- * atomic rename can never fail with EXDEV across mounts.
- */
-async function publishSSHConfig(writePath: string, config: SSHConfigFile): Promise<void> {
-	const dir = path.dirname(writePath);
-	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-
-	// ssh.json is credential-adjacent (hosts, usernames, key paths), so the
-	// published mode keeps only the owner bits of the referent's current mode —
-	// stricter-than-600 owner modes survive, group/world bits are dropped like
-	// the unconditional 0o600 always did — and a new file falls back to the
-	// private default.
-	let mode = 0o600;
-	try {
-		mode = (await fs.promises.stat(writePath)).mode & 0o700;
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-	}
-
-	// Write to a per-writer temp file, then atomically rename into place. The
-	// temp name is unique (pid + random) so two concurrent writers — e.g. the
-	// user- and project-level paths aliasing one referent — never share one
-	// `.tmp` path and rename each other's file out from under them.
-	const tmpPath = `${writePath}.${process.pid}.${randomUUID()}.tmp`;
-	const content = JSON.stringify(config, null, 2);
-	try {
-		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-		// Creation modes pass through umask; restore the preserved mode.
-		await fs.promises.chmod(tmpPath, mode);
-		// Rename to final path (atomic on most systems)
-		await fs.promises.rename(tmpPath, writePath);
-	} catch (error) {
-		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
-		throw error;
-	}
+	await publishSerializedConfig(writePath, JSON.stringify(config, null, 2));
 }
 
 /**
@@ -148,7 +106,7 @@ export async function addSSHHost(filePath: string, name: string, hostConfig: SSH
 		};
 
 		// Write back (against the pinned, already-resolved target)
-		await publishSSHConfig(writePath, updated);
+		await publishSerializedConfig(writePath, JSON.stringify(updated, null, 2));
 	});
 }
 
@@ -184,7 +142,7 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
 		};
 
 		// Write back (against the pinned, already-resolved target)
-		await publishSSHConfig(writePath, updated);
+		await publishSerializedConfig(writePath, JSON.stringify(updated, null, 2));
 	});
 }
 
@@ -211,7 +169,7 @@ export async function removeSSHHost(filePath: string, name: string): Promise<voi
 		};
 
 		// Write back (against the pinned, already-resolved target)
-		await publishSSHConfig(writePath, updated);
+		await publishSerializedConfig(writePath, JSON.stringify(updated, null, 2));
 	});
 }
 

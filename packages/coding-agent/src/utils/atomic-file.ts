@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -320,6 +321,40 @@ function enotDir(message: string): Error & { code?: string } {
 	const notDir = new Error(`ENOTDIR: ${message}`) as Error & { code?: string };
 	notDir.code = "ENOTDIR";
 	return notDir;
+}
+
+/**
+ * Stage serialized content and publish it atomically against an ALREADY-RESOLVED
+ * config target — the path pinned by {@link withConfigFileLock}. The temp file
+ * is per-writer unique (pid + random, in the target's own directory so the
+ * rename cannot EXDEV across mounts); its mode takes only the OWNER bits of
+ * the referent's current mode — credential-bearing configs drop group/world
+ * bits exactly like an unconditional 0o600 did, while stricter-than-600 owner
+ * modes survive, and a new file falls back to owner-only — and is chmod'd
+ * explicitly because creation modes pass through umask. The rename itself goes
+ * through {@link replaceFileAtomically}, so Windows `EPERM`/`EEXIST`
+ * replacement failures recover instead of failing the write.
+ */
+export async function publishSerializedConfig(writePath: string, content: string): Promise<void> {
+	const dir = path.dirname(writePath);
+	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+
+	let mode = 0o600;
+	try {
+		mode = (await fs.promises.stat(writePath)).mode & 0o700;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+
+	const tmpPath = `${writePath}.${process.pid}.${randomUUID()}.tmp`;
+	try {
+		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		await fs.promises.chmod(tmpPath, mode);
+		await replaceFileAtomically(tmpPath, writePath);
+	} catch (error) {
+		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+		throw error;
+	}
 }
 
 /**

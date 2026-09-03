@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateFsCache } from "../capability/fs";
-import { resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
+import { publishSerializedConfig, resolveSymlinkWriteTarget, withConfigFileLock } from "../utils/atomic-file";
 
 import { validateServerConfig } from "./config";
 import { MCP_CONFIG_SCHEMA_URL, type MCPConfigFile, type MCPServerConfig } from "./types";
@@ -50,46 +50,13 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 }
 
 /**
- * Stage and publish against an ALREADY-RESOLVED target — the path pinned by
- * {@link withConfigFileLock}. No re-resolution happens here, so a symlink
- * swapped in at the target mid-lock cannot redirect the write to a file this
- * lock does not cover. The temp file is staged in the target's own directory
- * so the atomic rename can never cross a filesystem boundary (EXDEV).
+ * Serialize and publish against an ALREADY-RESOLVED target — the path pinned
+ * by {@link withConfigFileLock}. No re-resolution happens here (see
+ * publishSerializedConfig), so a symlink swapped in at the target mid-lock
+ * cannot redirect the write to a file this lock does not cover.
  */
 async function publishMCPConfig(writePath: string, config: MCPConfigFile): Promise<void> {
-	const dir = path.dirname(writePath);
-	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-
-	// mcp.json carries credentials (server `env`, auth `headers`), so the
-	// published mode keeps only the owner bits of the referent's current mode
-	// — stricter-than-600 owner modes (e.g. 0o400) survive, group/world bits
-	// are dropped like the unconditional 0o600 always did — and a new file
-	// falls back to the private default.
-	let mode = 0o600;
-	try {
-		mode = (await fs.promises.stat(writePath)).mode & 0o700;
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
-	}
-
-	// Write to a per-writer temp file, then atomically rename into place. The
-	// temp name is unique (pid + random) so two concurrent writers to the same
-	// config never share one `.tmp` path and rename each other's file out from
-	// under them (which surfaced as ENOENT or a clobbered final file).
-	const tmpPath = `${writePath}.${process.pid}.${randomUUID()}.tmp`;
-	const content = JSON.stringify(withSchema(config), null, 2);
-	try {
-		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-		// Creation modes pass through umask, so restore the preserved mode
-		// explicitly — a rename would otherwise publish a umask-filtered mode.
-		await fs.promises.chmod(tmpPath, mode);
-		// Rename to final path (atomic on most systems)
-		await fs.promises.rename(tmpPath, writePath);
-	} catch (error) {
-		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
-		throw error;
-	}
-	// Invalidate the capability fs cache so subsequent reads see the new content
+	await publishSerializedConfig(writePath, JSON.stringify(withSchema(config), null, 2));
 	invalidateFsCache(writePath);
 }
 
