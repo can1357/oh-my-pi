@@ -852,6 +852,11 @@ export class InputController {
 			// During compaction, queue immediately so bash/python/loop-mode branches do
 			// not consume the skill before the compaction-resume path re-parses it.
 			if (text && isKnownSkillCommand(this.ctx, text)) {
+				// Capture here too: this branch's own early returns below would
+				// otherwise skip the non-skill capture further down.
+				if (this.ctx.loopModeEnabled) {
+					this.ctx.setLoopPrompt(text);
+				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 					this.ctx.queueCompactionMessage(text, "steer", images);
