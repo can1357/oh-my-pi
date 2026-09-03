@@ -229,7 +229,7 @@ export type RpcResponse =
 
 	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
-	| { id?: string; type: "response"; command: "steer"; success: true; data: { accepted: boolean } }
+	| { id?: string; type: "response"; command: "steer"; success: true; data?: { accepted: boolean } }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "clear_queue"; success: true; data: RpcClearQueueResult }
 	| { id?: string; type: "response"; command: "abort"; success: true }

@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { handleRpcAbort, type RpcAbortSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import type { RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const CLI_DIR = path.join(import.meta.dir, "..");
@@ -87,6 +88,13 @@ function ok(command: Record<string, unknown>, data?: object): object {
 function fail(command: Record<string, unknown>, error: string): object {
 	return { id: command.id, type: "response", command: command.type, success: false, error };
 }
+
+/** Legacy success shape stays assignable to the exported wire union. */
+const LEGACY_STEER_SUCCESS = {
+	type: "response",
+	command: "steer",
+	success: true,
+} satisfies RpcResponse;
 
 describe("RPC active-turn steering (real server)", () => {
 	let sessionDir: string;
@@ -233,8 +241,11 @@ describe("RPC active-turn steering (client mirror)", () => {
 		expect(server.received.every(command => typeof command.id === "string")).toBe(true);
 	});
 
-	test("treats a data-less steer response from a pre-capability server as accepted", async () => {
-		const server = createFakeRpcServer(READY_V1, command => ok(command));
+	test("treats a typed data-less steer response from a pre-capability server as accepted", async () => {
+		const server = createFakeRpcServer(READY_V1, command => ({
+			...LEGACY_STEER_SUCCESS,
+			id: command.id,
+		}));
 		using client = new RpcClient({ spawn: () => server.process });
 		await client.start();
 
