@@ -17,6 +17,7 @@ import type {
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
@@ -145,15 +146,16 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 );
 
 /**
- * Bedrock guardrail fields to spread onto a model spec, dropping keys that a
- * provider override left unset so an override never clobbers an existing value
- * with `undefined`.
+ * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
+ * that a provider override left unset so an override never clobbers an
+ * existing value with `undefined`.
  */
-function guardrailOverrideFields(override: ProviderOverride): Partial<ModelSpec<Api>> {
+function bedrockProviderFields(override: ProviderOverride): Partial<ModelSpec<Api>> {
 	const fields: Partial<ModelSpec<Api>> = {};
 	if (override.guardrailIdentifier !== undefined) fields.guardrailIdentifier = override.guardrailIdentifier;
 	if (override.guardrailVersion !== undefined) fields.guardrailVersion = override.guardrailVersion;
 	if (override.guardrailTrace !== undefined) fields.guardrailTrace = override.guardrailTrace;
+	if (override.requestMetadata !== undefined) fields.requestMetadata = override.requestMetadata;
 	return fields;
 }
 
@@ -195,53 +197,6 @@ function isExtendedContextEnabledFromSettings(settingsInstance?: Settings): bool
 	}
 }
 
-interface CatalogModelMetrics {
-	int?: number;
-	tps?: number;
-}
-
-function collectCatalogModelMetrics(models: readonly Model<Api>[]): Map<string, CatalogModelMetrics> {
-	const metrics = new Map<string, CatalogModelMetrics>();
-	for (const model of models) {
-		const int = model.int != null && Number.isFinite(model.int) ? model.int : undefined;
-		const tps = model.tps != null && Number.isFinite(model.tps) && model.tps > 0 ? model.tps : undefined;
-		if (int === undefined && tps === undefined) continue;
-		const key = model.id.toLowerCase();
-		const current = metrics.get(key);
-		metrics.set(key, {
-			...(int !== undefined || current?.int !== undefined ? { int: int ?? current?.int } : {}),
-			...(tps !== undefined || current?.tps !== undefined ? { tps: tps ?? current?.tps } : {}),
-		});
-	}
-	return metrics;
-}
-
-function applyCatalogModelMetrics(
-	models: Model<Api>[],
-	metrics: ReadonlyMap<string, CatalogModelMetrics>,
-): Model<Api>[] {
-	if (metrics.size === 0) return models;
-	let changed: Model<Api>[] | undefined;
-	for (let index = 0; index < models.length; index++) {
-		const model = models[index];
-		const metric = metrics.get(model.id.toLowerCase());
-		if (!metric) continue;
-		if (
-			(metric.int === undefined || metric.int === model.int) &&
-			(metric.tps === undefined || metric.tps === model.tps)
-		) {
-			continue;
-		}
-		changed ??= [...models];
-		changed[index] = {
-			...model,
-			...(metric.int !== undefined ? { int: metric.int } : {}),
-			...(metric.tps !== undefined ? { tps: metric.tps } : {}),
-		};
-	}
-	return changed ?? models;
-}
-
 /** Authentication material returned to legacy extensions for one model request. */
 export type ResolvedRequestAuth =
 	| {
@@ -265,7 +220,7 @@ export class ModelRegistry {
 	#cachedAuthoritativeProviders: Set<string> = new Set();
 	#runtimeDiscoveredModels: Model<Api>[] = [];
 	#runtimeAuthoritativeProviders: Set<string> = new Set();
-	#catalogMetrics: Map<string, CatalogModelMetrics> = new Map();
+	#catalogMetrics = new CatalogMetricsIndex();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
 	#customProviderApiKeys: Map<string, string> = new Map();
@@ -318,17 +273,16 @@ export class ModelRegistry {
 	#settings: Settings | undefined;
 
 	#captureCatalogMetrics(models: readonly Model<Api>[], replace: boolean): void {
-		const incoming = collectCatalogModelMetrics(models);
-		if (incoming.size === 0) return;
 		if (replace) {
-			this.#catalogMetrics = incoming;
+			const incoming = new CatalogMetricsIndex(models);
+			if (!incoming.isEmpty) this.#catalogMetrics = incoming;
 			return;
 		}
-		for (const [id, metrics] of incoming) this.#catalogMetrics.set(id, metrics);
+		this.#catalogMetrics.add(models);
 	}
 
 	#withCatalogMetrics(models: Model<Api>[]): Model<Api>[] {
-		return applyCatalogModelMetrics(models, this.#catalogMetrics);
+		return applyCatalogMetrics(models, this.#catalogMetrics);
 	}
 
 	#resolveCommandBackedApiKey(provider: string, options?: { forceCommandRefresh?: boolean }): CommandApiKeyResolution {
@@ -910,8 +864,8 @@ export class ModelRegistry {
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
 		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
-		const withProviderGuardrails = this.#applyProviderGuardrailOverrides(withModelOverrides);
-		return this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withProviderGuardrails));
+		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
+		return this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withProviderBedrock));
 	}
 
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
@@ -1398,6 +1352,7 @@ export class ModelRegistry {
 				providerConfig.compat ||
 				providerConfig.disableStrictTools ||
 				providerConfig.guardrailIdentifier ||
+				providerConfig.requestMetadata ||
 				providerConfig.remoteCompaction ||
 				providerConfig.transport
 			) {
@@ -1419,6 +1374,7 @@ export class ModelRegistry {
 					guardrailIdentifier: providerConfig.guardrailIdentifier,
 					guardrailVersion: providerConfig.guardrailVersion,
 					guardrailTrace: providerConfig.guardrailTrace,
+					requestMetadata: providerConfig.requestMetadata,
 				});
 			}
 
@@ -1550,9 +1506,9 @@ export class ModelRegistry {
 		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
-		const withProviderGuardrails = this.#applyProviderGuardrailOverrides(withModelOverrides);
+		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
 		this.#unprojectedModels = this.#applyLlamaCppModelFixups(
-			this.#applyRuntimeProviderOverrides(withProviderGuardrails),
+			this.#applyRuntimeProviderOverrides(withProviderBedrock),
 		);
 		this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 	}
@@ -2110,20 +2066,21 @@ export class ModelRegistry {
 		return buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));
 	}
 
-	#applyProviderGuardrailOverrides(models: Model<Api>[]): Model<Api>[] {
+	#applyProviderBedrockOverrides(models: Model<Api>[]): Model<Api>[] {
 		if (this.#providerOverrides.size === 0) return models;
 		return models.map(model => {
 			const override = this.#providerOverrides.get(model.provider);
 			if (!override) return model;
-			const guardrailFields = guardrailOverrideFields(override);
+			const bedrockFields = bedrockProviderFields(override);
 			if (
-				guardrailFields.guardrailIdentifier === undefined &&
-				guardrailFields.guardrailVersion === undefined &&
-				guardrailFields.guardrailTrace === undefined
+				bedrockFields.guardrailIdentifier === undefined &&
+				bedrockFields.guardrailVersion === undefined &&
+				bedrockFields.guardrailTrace === undefined &&
+				bedrockFields.requestMetadata === undefined
 			) {
 				return model;
 			}
-			return buildModel({ ...toModelSpec(model), ...guardrailFields } as ModelSpec<Api>);
+			return buildModel({ ...toModelSpec(model), ...bedrockFields } as ModelSpec<Api>);
 		});
 	}
 
@@ -2734,7 +2691,7 @@ export class ModelRegistry {
 						return this.#applyProviderTransportOverrideToModel(model, runtimeTransportOverride);
 					})
 				: nextModels;
-			this.#unprojectedModels = this.#applyProviderGuardrailOverrides(nextModelsWithTransport);
+			this.#unprojectedModels = this.#applyProviderBedrockOverrides(nextModelsWithTransport);
 
 			this.#models = this.#withCatalogMetrics(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			this.#invalidateProviderModelCache(providerName);

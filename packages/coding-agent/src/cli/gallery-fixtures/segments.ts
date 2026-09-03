@@ -91,6 +91,10 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "active", context: { turnElapsedMs: 92_000 } },
 				{ label: "focused subagent", context: { focusedAgentId: "Scout" } },
 			];
+		case "status":
+			return [
+				{ label: "multiple extension statuses", context: { hookStatuses: ["Indexer ready", "Tests passing"] } },
+			];
 		case "model":
 			return [
 				{ label: "normal" },

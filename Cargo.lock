@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6189,11 +6189,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.1.5"
+version = "18.1.6"
 
 [[package]]
 name = "pi-edit"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6212,7 +6212,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "async-trait",
  "libc",
@@ -6224,7 +6224,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6254,6 +6254,7 @@ dependencies = [
  "image",
  "inferno",
  "libc",
+ "log",
  "napi",
  "napi-build",
  "napi-derive",
@@ -6298,13 +6299,14 @@ dependencies = [
  "xkeysym",
  "xutf",
  "xxhash-rust",
+ "zbus",
  "zstd",
  "zune-jpeg",
 ]
 
 [[package]]
 name = "pi-shell"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6332,9 +6334,10 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "gix",
+ "gix-utils",
  "jj-lib",
  "libc",
  "pi-iso",
@@ -6346,7 +6349,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6361,7 +6364,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.5"
+version = "18.1.6"
 dependencies = [
  "dashmap",
  "globset",
@@ -10305,9 +10308,9 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xutf"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a14f3ca7038796715a5f5fd1c22aac21423b4f86fd9ef5585ef1744a5cfc573e"
+checksum = "990cc0159ef1d38b900524ac2308778ce60de2d32af70f40a71517c6b299fe8a"
 
 [[package]]
 name = "xxhash-rust"

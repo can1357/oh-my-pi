@@ -1211,6 +1211,12 @@ export interface Model<TApi extends Api = Api> {
 	guardrailVersion?: string;
 	/** Bedrock guardrail trace verbosity. */
 	guardrailTrace?: "enabled" | "disabled" | "enabled_full";
+	/**
+	 * Bedrock invocation-log tags attached to every Converse request for this
+	 * model. Set from `providers.<provider>.requestMetadata`; the Bedrock
+	 * transport reads it directly and validates it against AWS's limits.
+	 */
+	requestMetadata?: Record<string, string>;
 }
 
 /**

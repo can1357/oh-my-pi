@@ -382,6 +382,7 @@ export class ChatTranscriptBuilder {
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 		this.#trackExpandable(assistantComponent);
+		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
 
 		if (settings.get("display.cacheMissMarker")) {

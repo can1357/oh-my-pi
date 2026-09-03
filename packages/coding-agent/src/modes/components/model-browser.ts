@@ -234,23 +234,40 @@ interface RoleProviderStats {
 	firstRole: number;
 }
 
+/** User affinity used to order search matches within one relevance tier. */
+interface SearchAffinity {
+	/** `provider/id` (lowercased) → rank; configured-role models first, then MRU. */
+	models: Map<string, number>;
+	/** provider (lowercased) → rank; explicit order, then role providers, then MRU providers. */
+	providers: Map<string, number>;
+}
+
 /**
- * Build provider affinity from explicit configuration, configured role
- * assignments, and recent model use. Auto-selected roles are catalog policy,
- * not evidence of user preference.
+ * Build model and provider affinity from explicit configuration, configured
+ * role assignments, and recent model use. Auto-selected roles are catalog
+ * policy, not evidence of user preference.
  */
-function buildPreferredProviderRanks(
+function buildSearchAffinity(
 	providerOrder: ReadonlyArray<string>,
 	roles: RoleAssignments,
 	mruOrder: ReadonlyArray<string>,
-): Map<string, number> {
-	const ordered: string[] = [];
+): SearchAffinity {
+	const models: string[] = [];
+	const seenModels = new Set<string>();
+	const addModel = (selector: string) => {
+		const key = selector.toLowerCase();
+		if (seenModels.has(key)) return;
+		seenModels.add(key);
+		models.push(key);
+	};
+
+	const providers: string[] = [];
 	const seenProviders = new Set<string>();
 	const addProvider = (provider: string) => {
 		const key = provider.trim().toLowerCase();
 		if (!key || seenProviders.has(key)) return;
 		seenProviders.add(key);
-		ordered.push(key);
+		providers.push(key);
 	};
 
 	for (const provider of providerOrder) addProvider(provider);
@@ -263,6 +280,7 @@ function buildPreferredProviderRanks(
 		seenRoles.add(role);
 		const assignment = roles[role];
 		if (assignment && !assignment.autoSelected) {
+			addModel(`${assignment.model.provider}/${assignment.model.id}`);
 			const provider = assignment.model.provider.toLowerCase();
 			const current = roleStats.get(provider);
 			if (current) {
@@ -275,6 +293,7 @@ function buildPreferredProviderRanks(
 	};
 	for (const role of MODEL_ROLE_IDS) recordRole(role);
 	for (const role in roles) recordRole(role);
+	for (const selector of mruOrder) addModel(selector);
 
 	const preferredByRole = [...roleStats.entries()].sort(
 		([, a], [, b]) => b.count - a.count || a.firstRole - b.firstRole,
@@ -286,7 +305,10 @@ function buildPreferredProviderRanks(
 		if (slash > 0) addProvider(selector.slice(0, slash));
 	}
 
-	return new Map(ordered.map((provider, index) => [provider, index]));
+	return {
+		models: new Map(models.map((selector, index) => [selector, index])),
+		providers: new Map(providers.map((provider, index) => [provider, index])),
+	};
 }
 
 /** Collapse punctuation so exact and contiguous model-name matches form stable relevance tiers. */
@@ -442,7 +464,7 @@ export class ModelBrowser implements Component {
 	#visibleItems: ModelBrowserItem[] = [];
 	#roles: RoleAssignments = {};
 	#mruOrder: ReadonlyArray<string> = [];
-	#preferredProviderRanks = new Map<string, number>();
+	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
 	#perf: ReadonlyMap<string, ModelPerfStats> = new Map();
 	#selectedIndex = 0;
 	#hoveredIndex: number | null = null;
@@ -475,7 +497,7 @@ export class ModelBrowser implements Component {
 		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
-		this.#syncPreferredProviderRanks();
+		this.#syncAffinity();
 	}
 
 	/** Mark `selector` as the session's active model (undefined clears the mark). */
@@ -495,20 +517,16 @@ export class ModelBrowser implements Component {
 
 	setRoles(roles: RoleAssignments): void {
 		this.#roles = roles;
-		this.#syncPreferredProviderRanks();
+		this.#syncAffinity();
 	}
 
 	setMruOrder(order: ReadonlyArray<string>): void {
 		this.#mruOrder = order;
-		this.#syncPreferredProviderRanks();
+		this.#syncAffinity();
 	}
 
-	#syncPreferredProviderRanks(): void {
-		this.#preferredProviderRanks = buildPreferredProviderRanks(
-			this.#settings.get("modelProviderOrder"),
-			this.#roles,
-			this.#mruOrder,
-		);
+	#syncAffinity(): void {
+		this.#affinity = buildSearchAffinity(this.#settings.get("modelProviderOrder"), this.#roles, this.#mruOrder);
 	}
 
 	/** Measured TPS/TTFT averages keyed by `provider/id` selector (see AgentStorage.getModelPerf). */
@@ -713,9 +731,10 @@ export class ModelBrowser implements Component {
 				items = matches;
 			} else {
 				// Exact and contiguous text matches remain ahead of fuzzy-only
-				// candidates. Within each relevance tier, prefer providers the
-				// user configured, assigned to roles, or used recently; then
-				// use fuzzy quality and the normal MRU/version ordering.
+				// candidates. Within each relevance tier: models the user
+				// assigned to a role or used recently, then providers the user
+				// configured, assigned, or used recently, then fuzzy quality,
+				// then the normal MRU/version ordering.
 				sortModelItems(matches, { roles: this.#roles, mruOrder: this.#mruOrder, skipRoleRank: true });
 				const fallbackRanks = new Map(matches.map((item, index) => [item, index]));
 				const queryKey = compactModelSearchText(query);
@@ -732,9 +751,14 @@ export class ModelBrowser implements Component {
 					const tierCmp = (aSearch?.tier ?? Number.MAX_SAFE_INTEGER) - (bSearch?.tier ?? Number.MAX_SAFE_INTEGER);
 					if (tierCmp !== 0) return tierCmp;
 
+					const modelCmp =
+						(this.#affinity.models.get(a.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+						(this.#affinity.models.get(b.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
+					if (modelCmp !== 0) return modelCmp;
+
 					const providerCmp =
-						(this.#preferredProviderRanks.get(a.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
-						(this.#preferredProviderRanks.get(b.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
+						(this.#affinity.providers.get(a.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+						(this.#affinity.providers.get(b.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
 					if (providerCmp !== 0) return providerCmp;
 
 					const bucketCmp =
