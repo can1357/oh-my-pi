@@ -112,6 +112,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		let markCount = 0;
 		let sentOptions: { triggerTurn?: boolean } | undefined;
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
@@ -160,6 +161,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		const output: object[] = [];
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
@@ -214,6 +216,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		const output: object[] = [];
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
@@ -265,6 +268,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		const output: object[] = [];
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
@@ -317,6 +321,7 @@ describe("reportLocalOnlyPromptResult", () => {
 		const thrown = new Error("missing model");
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
@@ -405,6 +410,7 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 		let extensionActions: ExtensionActions | undefined;
 		const extensionUserMessages = new RpcExtensionUserMessageTracker();
 		const session = {
+			getAgentId: () => undefined,
 			extensionRunner: {
 				initialize: (actions: ExtensionActions) => {
 					extensionActions = actions;
