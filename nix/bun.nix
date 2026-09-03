@@ -655,7 +655,6 @@
   };
   "@oh-my-pi/browser-relay" = copyPathToStore ../packages/browser-relay;
   "@oh-my-pi/collab-web" = copyPathToStore ../packages/collab-web;
-  "@oh-my-pi/hashline" = copyPathToStore ../packages/hashline;
   "@oh-my-pi/omp-stats" = copyPathToStore ../packages/stats;
   "@oh-my-pi/omptype" = copyPathToStore ../packages/omptype;
   "@oh-my-pi/pi-agent-core" = copyPathToStore ../packages/agent;
@@ -1482,9 +1481,9 @@
     url = "https://registry.npmjs.org/diff/-/diff-9.0.0.tgz";
     hash = "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==";
   };
-  "electron-to-chromium@1.5.416" = fetchurl {
-    url = "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.416.tgz";
-    hash = "sha512-K6bvB2BjnNrugtIih6ewlbBI9DXa976jIdiIlRLHhBoEI9a4JaQjjHyF+A1IQI543aQYR4LnmOrT/K5fZj0aPA==";
+  "electron-to-chromium@1.5.417" = fetchurl {
+    url = "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.417.tgz";
+    hash = "sha512-4T+DTDWuMPM4aHlHwWdAVCVWwp7LDilnhzkj+c/Lbj91XSQrLuOmZSLtS9Q4iIqjlPUbPOnC624zDVVHCHaolQ==";
   };
   "emnapi@1.11.3" = fetchurl {
     url = "https://registry.npmjs.org/emnapi/-/emnapi-1.11.3.tgz";

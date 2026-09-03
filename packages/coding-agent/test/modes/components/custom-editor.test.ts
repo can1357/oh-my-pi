@@ -4,6 +4,7 @@ import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { $ } from "bun";
 import { getDefaultPasteImageKeys } from "../../../src/config/keybindings";
+import { chipLabel } from "../../../src/modes/composer-attachments";
 import {
 	CustomEditor,
 	extractBracketedImagePastePaths,
@@ -205,6 +206,31 @@ describe("CustomEditor bracketed path paste", () => {
 		]);
 	});
 
+	it("routes a pasted video path through the attachment callback", () => {
+		const { editor } = makeEditor();
+		const video = "/Users/me/Movies/launch cut.mp4";
+		const pasted: string[] = [];
+		editor.onPasteImagePath = path => {
+			pasted.push(path);
+		};
+
+		editor.handleInput(bracketedPaste(video));
+
+		expect(extractBracketedImagePastePaths(bracketedPaste(video))).toEqual([video]);
+		expect(pasted).toEqual([video]);
+		expect(editor.getText()).toBe("");
+	});
+
+	it("keeps video previews distinct from image chips", () => {
+		const { editor } = makeEditor();
+		editor.pendingImages = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		editor.pendingImageLinks = ["/tmp/launch.mp4"];
+		editor.setCollapsedText("[Video #1, 960x480]");
+
+		expect(editor.getText()).toBe(chipLabel("video", 1));
+		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
+	});
+
 	it("strips `file://` URLs to the local filesystem path before loading the image", () => {
 		// macOS / Ghostty / iTerm2 sometimes forward the pasteboard's
 		// `public.file-url` representation when the user does Finder→Copy
@@ -296,10 +322,11 @@ describe("CustomEditor configured paste image keys", () => {
 });
 
 describe("extractImagePathFromText (issue #3506)", () => {
-	it("returns the path when the text is a single image file path", () => {
+	it("returns the path when the text is a single image or video file path", () => {
 		expect(extractImagePathFromText("/tmp/screenshot.png")).toBe("/tmp/screenshot.png");
 		expect(extractImagePathFromText("/Users/me/Pictures/photo.jpeg")).toBe("/Users/me/Pictures/photo.jpeg");
 		expect(extractImagePathFromText("C:\\Users\\me\\img.gif")).toBe("C:\\Users\\me\\img.gif");
+		expect(extractImagePathFromText("/Users/me/Movies/launch.mp4")).toBe("/Users/me/Movies/launch.mp4");
 	});
 
 	it("ignores surrounding whitespace from a clipboard read", () => {

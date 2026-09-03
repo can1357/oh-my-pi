@@ -473,6 +473,62 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "skillful",
+		icon: "compass",
+		description: "Toggle listing available skills in the system prompt (session only)",
+		acpDescription: "Toggle skill listing",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "List skills in the prompt for this session" },
+			{ name: "off", description: "Omit the skills listing for this session" },
+			{ name: "status", description: "Show skill listing status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`Skill listing: ${runtime.ctx.session.settings.get("skillful") ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg === "status") {
+				await runtime.output(
+					`Skill listing: ${runtime.session.settings.get("skillful") ? "on" : "off"} (session override; default from the skillful setting).`,
+				);
+				return commandConsumed();
+			}
+			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
+				const enabled =
+					arg === "on"
+						? await runtime.session.setSkillful(true)
+						: arg === "off"
+							? await runtime.session.setSkillful(false)
+							: await runtime.session.toggleSkillful();
+				await runtime.output(`Skill listing ${enabled ? "enabled" : "disabled"} for this session.`);
+				return commandConsumed();
+			}
+			return usage("Usage: /skillful [on|off|status]", runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg === "status") {
+				runtime.ctx.showStatus(`Skill listing: ${runtime.ctx.session.settings.get("skillful") ? "on" : "off"}.`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
+				const enabled =
+					arg === "on"
+						? await runtime.ctx.session.setSkillful(true)
+						: arg === "off"
+							? await runtime.ctx.session.setSkillful(false)
+							: await runtime.ctx.session.toggleSkillful();
+				runtime.ctx.showStatus(`Skill listing ${enabled ? "enabled" : "disabled"} for this session.`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /skillful [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "extended-context",
 		icon: "expand",
 		description: "Toggle premium long-context windows",

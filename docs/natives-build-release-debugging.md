@@ -310,7 +310,7 @@ Generated declarations currently include exports from these Rust modules:
 | AST/block/summary      | `astGrep`, `astEdit`, `blockRangeAt`, `summarizeCode`                                                                                   | `ast.rs`, `block.rs`, `summary.rs`                                           |
 | Text/highlight/tokens  | `visibleWidth`, `truncateToWidth`, `highlightCode`, `countTokens`                                                                       | `text.rs`, `highlight.rs`, `tokens.rs`                                       |
 | Shell/PTY/process/keys | `executeShell`, `Shell`, `PtySession`, `Process`, `parseKey`                                                                            | `shell.rs`, `pty.rs`, `ps.rs`, `keys.rs`                                     |
-| Media/system/iso       | `encodeSixel`, `copyToClipboard`, `detectMacOSAppearance`, `MacOSPowerAssertion`, `getWorkProfile`, `isoBackend`, `isoStart`, `isoDiff` | `sixel.rs`, `clipboard.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `iso.rs` |
+| Media/system/iso       | `encodeSixel`, `copyToClipboard`, `detectMacOSAppearance`, `PowerAssertion`, `getWorkProfile`, `isoBackend`, `isoStart`, `isoDiff`      | `sixel.rs`, `clipboard.rs`, `appearance.rs`, `power.rs`, `prof.rs`, `iso.rs` |
 
 ## Failure behavior and diagnostics
 

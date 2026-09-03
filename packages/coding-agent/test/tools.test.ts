@@ -2003,13 +2003,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "Hello, world!";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-6", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "testing",
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-call-6", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "testing",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should fail if text appears multiple times", async () => {
@@ -2017,13 +2017,13 @@ describe("Coding Agent Tools", () => {
 			const originalContent = "foo foo foo";
 			fs.writeFileSync(testFile, originalContent);
 
-			await expect(
-				editTool.execute("test-call-7", {
-					path: testFile,
-					old_string: "foo",
-					new_string: "bar",
-				}),
-			).rejects.toThrow(/Found 3 occurrences/);
+			const result = await editTool.execute("test-call-7", {
+				path: testFile,
+				old_string: "foo",
+				new_string: "bar",
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 3 occurrences/);
 		});
 
 		it("should replace all occurrences with replace_all: true", async () => {
@@ -2061,28 +2061,28 @@ function b() {
 			);
 
 			// With multiple fuzzy matches, the tool rejects for safety to avoid ambiguous replacements
-			await expect(
-				editTool.execute("test-all-fuzzy", {
-					path: testFile,
-					old_string: "if (x) {\n  doThing();\n}",
-					new_string: "if (y) {\n  doOther();\n}",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Found 2 high-confidence matches/);
+			const result = await editTool.execute("test-all-fuzzy", {
+				path: testFile,
+				old_string: "if (x) {\n  doThing();\n}",
+				new_string: "if (y) {\n  doOther();\n}",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Found 2 high-confidence matches/);
 		});
 
 		it("should fail with replace_all: true if no matches found", async () => {
 			const testFile = path.join(testDir, "edit-all-nomatch.txt");
 			fs.writeFileSync(testFile, "hello world");
 
-			await expect(
-				editTool.execute("test-all-nomatch", {
-					path: testFile,
-					old_string: "nonexistent",
-					new_string: "bar",
-					replace_all: true,
-				}),
-			).rejects.toThrow(/Could not find/);
+			const result = await editTool.execute("test-all-nomatch", {
+				path: testFile,
+				old_string: "nonexistent",
+				new_string: "bar",
+				replace_all: true,
+			});
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Could not find/);
 		});
 
 		it("should replace multiline text with replace_all: true", async () => {
@@ -3277,13 +3277,13 @@ describe("edit tool CRLF handling", () => {
 
 		fs.writeFileSync(testFile, "hello\r\nworld\r\n---\r\nhello\nworld\n");
 
-		await expect(
-			editTool.execute("test-crlf-dup", {
-				path: testFile,
-				old_string: "hello\nworld\n",
-				new_string: "replaced\n",
-			}),
-		).rejects.toThrow(/Found 2 occurrences/);
+		const result = await editTool.execute("test-crlf-dup", {
+			path: testFile,
+			old_string: "hello\nworld\n",
+			new_string: "replaced\n",
+		});
+		expect(result.isError).toBe(true);
+		expect(getTextOutput(result)).toMatch(/Found 2 occurrences/);
 	});
 
 	// TODO: CRLF preservation broken by LSP formatting - fix later

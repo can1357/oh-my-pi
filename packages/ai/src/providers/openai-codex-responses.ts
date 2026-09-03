@@ -137,13 +137,9 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	preferWebsockets?: boolean;
 	serviceTier?: ServiceTier;
 	/**
-	 * Responses Lite transport override; defaults to the model's catalog
-	 * `useResponsesLite` flag (codex-rs `use_responses_lite`). Sends
-	 * `x-openai-internal-codex-responses-lite: true` on HTTP requests and on the
-	 * WebSocket upgrade (the marker is connection-scoped there, so lite and
-	 * non-lite turns never share a pooled socket), moves instructions/tools
-	 * into input items, strips image detail, and disables parallel tool
-	 * calling — mirroring codex-rs.
+	 * Responses Lite transport opt-in. Normal inference defaults to full
+	 * Responses; provider-native compaction explicitly follows the model's
+	 * `useResponsesLite` flag.
 	 */
 	responsesLite?: boolean;
 	/**
@@ -1450,7 +1446,7 @@ function createCodexRequestContext(
 			? createCodexProviderSessionState()
 			: undefined;
 	const transportProviderSessionState = isolatedTransportState ?? providerSessionState;
-	const responsesLite = resolveCodexResponsesLite(model, options?.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options?.responsesLite);
 	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (sessionKey && publicSessionKey) {
@@ -3067,7 +3063,7 @@ export async function prewarmOpenAICodexResponses(
 	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
-	const responsesLite = resolveCodexResponsesLite(model, options?.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options?.responsesLite);
 	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (publicSessionKey && sessionKey) {

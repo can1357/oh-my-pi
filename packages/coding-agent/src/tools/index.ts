@@ -1,5 +1,5 @@
-import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
@@ -192,6 +192,15 @@ export interface ToolSession {
 	promptTemplates?: PromptTemplate[];
 	/** Pre-loaded rules (forwarded to subagents to skip re-discovery). */
 	rules?: Rule[];
+	/**
+	 * This session's agent-scoped applicable rule set — rulebook + always-apply
+	 * + triggered TTSR rules, already bucketed against this session's `agents`
+	 * frontmatter. Distinct from {@link rules} (the full unfiltered discovery
+	 * result forwarded to children): this is what `rule://` resolution needs so
+	 * a subagent-only rule stays readable from inside that subagent, instead of
+	 * only from the top-level session's process-global snapshot.
+	 */
+	activeRules?: readonly Rule[];
 	/**
 	 * Pre-discovered extension source paths. Forwarded to subagents so they
 	 * skip the FS scan but still re-bind extensions to their own session-scoped
@@ -402,15 +411,8 @@ export interface ToolSession {
 	/** Get the most recent completed rewind, if this session just rewound a checkpoint. */
 	getLastCompletedRewind?: () => CompletedRewindState | undefined;
 
-	/** Per-session snapshot store of file contents as last shown to the model
-	 *  by `read`/`search`. Used by hashline anchor-stale recovery to
-	 *  reconstruct the version the model authored anchors against when the
-	 *  file changed out-of-band. Lazily initialized by `getFileSnapshotStore`. */
-	fileSnapshotStore?: InMemorySnapshotStore;
-
-	/** Per-session `CUT`/`PASTE` clipboard register shared across edit
-	 *  calls. Lazily initialized by `getEditClipboard`. */
-	editClipboard?: Clipboard;
+	/** Native snapshots, clipboard registers, and no-op guard shared by edit calls. */
+	editStore?: EditStore;
 
 	/** Per-session log of unresolved git merge conflict regions surfaced by
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`
@@ -421,13 +423,6 @@ export interface ToolSession {
 	/** Per-session ledger of post-edit LSP diagnostics already surfaced to the
 	 *  model for each file. Lazily initialized by `getDiagnosticsLedger`. */
 	diagnosticsLedger?: import("../lsp/diagnostics-ledger").DiagnosticsLedger;
-
-	/** Per-session ledger of consecutive byte-identical no-op edits, keyed by
-	 *  canonical file path. The hashline executor escalates a soft no-op hint
-	 *  to a thrown error once the same payload no-ops `NOOP_HARD_LIMIT` times,
-	 *  breaking subagent loops that ignore the textual hint (issue #2081).
-	 *  Lazily initialized by `getNoopLoopGuard`. */
-	noopLoopGuard?: import("../edit/hashline/noop-loop-guard").NoopLoopGuard;
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
