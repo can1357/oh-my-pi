@@ -533,13 +533,21 @@ describe("ErrorBannerComponent", () => {
 		expect(rendered).toContain("Dismissed when you send your next message.");
 	});
 
-	it("caps an oversized multi-line error to a few lines", () => {
+	it("caps an oversized multi-line error to a few rows and points at expansion", () => {
 		const huge = Array.from({ length: 50 }, (_, i) => `error detail line ${i}`).join("\n");
 		const banner = new ErrorBannerComponent(huge);
-		const lines = Bun.stripANSI(banner.render(120).join("\n")).split("\n");
-		const detailLines = lines.filter(line => line.includes("error detail line"));
-		expect(detailLines.length).toBeLessThanOrEqual(3);
-		expect(detailLines.length).toBeGreaterThan(0);
+		const rendered = Bun.stripANSI(banner.render(120).join("\n"));
+		const detailLines = rendered.split("\n").filter(line => line.includes("error detail line"));
+		expect(detailLines.length).toBe(4);
+		expect(rendered).toMatch(/\+46 more lines \(.+ to expand\)/);
+	});
+
+	it("wraps a long single-line error across rows instead of cutting it", () => {
+		const body = `400 ${JSON.stringify({ error: { message: "The requested model is not supported.", code: "model_not_supported", param: "model", type: "invalid_request_error" } })}`;
+		const banner = new ErrorBannerComponent(body);
+		const rendered = Bun.stripANSI(banner.render(60).join("\n"));
+		expect(rendered.replace(/\n\s*/g, "")).toContain('"type":"invalid_request_error"}}');
+		expect(rendered).not.toContain("more line");
 	});
 });
 

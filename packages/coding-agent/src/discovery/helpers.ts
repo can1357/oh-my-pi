@@ -11,10 +11,18 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
-import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
+import {
+	MAIN_AGENT_RULE_NAME,
+	parseRuleAgents,
+	parseRuleConditionAndScope,
+	type Rule,
+	type RuleFrontmatter,
+	SUB_AGENT_RULE_NAME,
+} from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
@@ -88,9 +96,12 @@ export const SOURCE_PATHS = {
 export type SourceId = keyof typeof SOURCE_PATHS;
 
 /**
- * Get user-level path for a source.
+ * Resolve a user-level path for a source without the `~/` opt-in gate.
+ * Only for callers that hold their own explicit opt-in (a per-capability
+ * `skills.enable*User` / `commands.enable*User` toggle); everything else
+ * goes through {@link getUserPath}.
  */
-export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+export function resolveUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
 	// Native user config is profile-scoped via getAgentDir() (the active profile's
 	// agent dir), matching builtin.ts and getMCPConfigPath("user").
 	if (source === "native") return path.join(getAgentDir(), subpath);
@@ -98,6 +109,15 @@ export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string)
 	const paths = SOURCE_PATHS[source];
 	if (!paths.userAgent) return null;
 	return path.join(ctx.home, paths.userAgent, subpath);
+}
+
+/**
+ * Get user-level path for a source, or null when its `~/` config is not
+ * opted in (see {@link isUserSourceEnabled}).
+ */
+export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+	if (!isUserSourceEnabled(source, ctx)) return null;
+	return resolveUserPath(ctx, source, subpath);
 }
 
 /**
@@ -217,6 +237,7 @@ export function buildRuleFromMarkdown(
 		condition,
 		astCondition,
 		scope,
+		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,
 		_source: source,
 	};
@@ -259,6 +280,16 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 
 	if (!name || !description) {
+		return null;
+	}
+	// "main" is the sentinel `agentName` for the top-level session (see
+	// MAIN_AGENT_RULE_NAME); "sub" is the fallback `agentName` for a subagent
+	// session with no explicit name (see SUB_AGENT_RULE_NAME / sdk.ts). A
+	// custom agent definition sharing either name would resolve to the same
+	// sentinel value, letting it load rules scoped `agents: [main]` or
+	// `agents: [sub]` that are documented to target only that session kind.
+	const normalizedName = name.trim().toLowerCase();
+	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
 		return null;
 	}
 
@@ -919,6 +950,8 @@ export interface ClaudePluginRoot {
 	path: string;
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
+	/** Registry or explicit CLI source that supplied this root. */
+	origin: "claude" | "omp" | "plugin-dir";
 }
 
 /**
@@ -1138,6 +1171,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "claude",
 					});
 				}
 			}
@@ -1186,6 +1220,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope === "local" ? "project" : entry.scope || "user",
+						origin: "omp",
 					});
 				}
 			}
@@ -1224,6 +1259,7 @@ export async function listClaudePluginRoots(
 							version: entry.version || "unknown",
 							path: entry.installPath,
 							scope: "project",
+							origin: "omp",
 						});
 					}
 				}

@@ -3,7 +3,7 @@ import { buildAnthropicClientOptions, streamAnthropic } from "@oh-my-pi/pi-ai/pr
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildAnthropicUrl } from "@oh-my-pi/pi-ai/utils/anthropic-auth";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { OPENCODE_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -16,7 +16,7 @@ function makeCopilotClaudeModel(): Model<"anthropic-messages"> {
 		api: "anthropic-messages",
 		provider: "github-copilot",
 		baseUrl: "https://api.githubcopilot.com",
-		headers: { ...OPENCODE_HEADERS },
+		headers: { ...COPILOT_API_HEADERS },
 		reasoning: true,
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -65,7 +65,7 @@ describe("Anthropic Copilot auth config", () => {
 			stream: true,
 			dynamicHeaders: {
 				"X-Initiator": "user",
-				"Openai-Intent": "conversation-edits",
+				"Openai-Intent": "conversation-agent",
 			},
 		});
 
@@ -151,7 +151,7 @@ describe("Anthropic Copilot auth config", () => {
 
 		expect(options.baseURL).toBe("https://copilot-api.ghe.example.com");
 	});
-	it("includes Copilot static headers from model.headers", () => {
+	it("includes Copilot CLI static headers from model.headers", () => {
 		const model = makeCopilotClaudeModel();
 		const options = buildAnthropicClientOptions({
 			model,
@@ -161,7 +161,14 @@ describe("Anthropic Copilot auth config", () => {
 			dynamicHeaders: {},
 		});
 
-		expect(options.defaultHeaders["User-Agent"]).toContain("opencode");
+		expect(options.defaultHeaders).toMatchObject({
+			"User-Agent": "copilot/1.0.82",
+			"Editor-Version": "copilot/1.0.82",
+			"Copilot-Integration-Id": "copilot-developer-cli",
+			"Copilot-Harness-Id": "copilot-sdk",
+			"Openai-Intent": "conversation-agent",
+			"X-GitHub-Api-Version": "2026-08-01",
+		});
 	});
 
 	it("includes interleaved-thinking beta header when enabled", () => {
@@ -243,7 +250,10 @@ describe("Anthropic Copilot auth config", () => {
 
 	it("merges Copilot headers case-insensitively so auth headers cannot duplicate", () => {
 		const result = buildAnthropicClientOptions({
-			model: { ...makeCopilotClaudeModel(), headers: { ...OPENCODE_HEADERS, authorization: "Bearer override" } },
+			model: {
+				...makeCopilotClaudeModel(),
+				headers: { ...COPILOT_API_HEADERS, authorization: "Bearer override" },
+			},
 			apiKey: "ghu_test",
 			extraBetas: [],
 			stream: true,

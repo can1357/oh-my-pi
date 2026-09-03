@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
+import { type AutocompleteProvider, matchesKey, type PasteOptions, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
@@ -28,6 +28,7 @@ import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
+import { resolveReadPath } from "../../tools/path-utils";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import {
@@ -40,6 +41,13 @@ import { getSlashCommandUsage, loadSlashCommandUsage, recordSlashCommandUsage } 
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
+import {
+	VideoError,
+	buildVideoContactSheetPng,
+	createVideoPreviewImage,
+	isVideoPath,
+	probeVideo,
+} from "../../utils/video";
 import { resizeImage } from "../../utils/image-resize";
 
 /**
@@ -517,7 +525,7 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
 		);
 		this.ctx.editor.onPasteTextRaw = () => void this.handleClipboardTextRawPaste();
-		this.ctx.editor.onLargePaste = (text, lineCount) => this.handleLargePaste(text, lineCount);
+		this.ctx.editor.onLargePaste = (text, lineCount, options) => this.handleLargePaste(text, lineCount, options);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.copyPrompt",
 			this.ctx.keybindings.getKeys("app.clipboard.copyPrompt"),
@@ -1581,21 +1589,28 @@ export class InputController {
 		return allQueued.length;
 	}
 
-	async #insertPendingImage(imageData: ImageContent): Promise<void> {
-		const image: ImageContent = { type: "image", data: imageData.data, mimeType: imageData.mimeType };
-		const imageLink = (
-			await materializeImageReferenceLinks([image], this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager))
-		)?.[0];
+	async #insertPendingImage(imageData: ImageContent, videoPath?: string): Promise<void> {
+		const image: ImageContent = videoPath
+			? createVideoPreviewImage(imageData, videoPath)
+			: { type: "image", data: imageData.data, mimeType: imageData.mimeType };
+		const imageLink =
+			videoPath ??
+			(
+				await materializeImageReferenceLinks([image], this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager))
+			)?.[0];
 		this.ctx.editor.pendingImages.push(image);
 		this.ctx.editor.pendingImageLinks.push(imageLink);
 		this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 		const imageNum = this.ctx.editor.pendingImages.length;
 		const dims = await this.#imageDimensions(imageData);
 		setCachedImageDimensions(image, dims ?? null);
+		const kind = videoPath === undefined ? "image" : "video";
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
-		const expansion = dims ? `[Image #${imageNum}, ${dims.width}x${dims.height}]` : `[Image #${imageNum}]`;
-		this.ctx.editor.insertAtom(chipLabel("image", imageNum), expansion);
+		const expansion = dims
+			? `[${kind === "video" ? "Video" : "Image"} #${imageNum}, ${dims.width}x${dims.height}]`
+			: `[${kind === "video" ? "Video" : "Image"} #${imageNum}]`;
+		this.ctx.editor.insertAtom(chipLabel(kind, imageNum), expansion);
 		this.ctx.ui.requestRender();
 	}
 
@@ -1611,11 +1626,11 @@ export class InputController {
 		return undefined;
 	}
 
-	async #normalizeAndInsertPastedImage(image: ImageContent, unsupportedMessage: string): Promise<boolean> {
+	async #normalizePastedImage(image: ImageContent, unsupportedMessage: string): Promise<ImageContent | null> {
 		let imageData = await ensureSupportedImageInput(image);
 		if (!imageData) {
 			this.ctx.showStatus(unsupportedMessage);
-			return false;
+			return null;
 		}
 		if (settings.get("images.autoResize")) {
 			try {
@@ -1629,7 +1644,13 @@ export class InputController {
 				// Keep the normalized image when resize fails.
 			}
 		}
-		await this.#insertPendingImage(imageData);
+		return imageData;
+	}
+
+	async #normalizeAndInsertPastedImage(image: ImageContent, unsupportedMessage: string): Promise<boolean> {
+		const normalized = await this.#normalizePastedImage(image, unsupportedMessage);
+		if (!normalized) return false;
+		await this.#insertPendingImage(normalized);
 		return true;
 	}
 
@@ -1646,6 +1667,33 @@ export class InputController {
 	 * the outcome (image attached, or an unsupported-format status surfaced), so
 	 * the caller stops without emitting its own degraded diagnostic.
 	 */
+	/**
+	 * Attach a pasted video path as a contact-sheet preview grid through the
+	 * image pipeline. A missing ffmpeg (or probe failure) degrades to a text
+	 * paste with an actionable status; ENOENT propagates to the caller's
+	 * clipboard-fallback handling.
+	 */
+	async #insertPendingVideoPreview(pastedPath: string): Promise<void> {
+		try {
+			const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
+			const meta = await probeVideo(absolutePath);
+			const sheet = await buildVideoContactSheetPng(absolutePath, meta);
+			const preview = await this.#normalizePastedImage(
+				{ type: "image", data: sheet.png.data, mimeType: sheet.png.mimeType },
+				"Unsupported pasted video preview format",
+			);
+			if (preview) await this.#insertPendingImage(preview, absolutePath);
+		} catch (error) {
+			if (error instanceof VideoError) {
+				this.ctx.editor.pasteText(pastedPath);
+				this.ctx.ui.requestRender();
+				this.ctx.showStatus(error.message);
+				return;
+			}
+			throw error;
+		}
+	}
+
 	async #tryPasteClipboardImage(): Promise<boolean> {
 		const env = process.env;
 		if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return false;
@@ -1664,6 +1712,10 @@ export class InputController {
 
 	async handleImagePathPaste(path: string): Promise<void> {
 		try {
+			if (isVideoPath(path)) {
+				await this.#insertPendingVideoPreview(path);
+				return;
+			}
 			const image = await loadImageInput({
 				path,
 				cwd: this.ctx.sessionManager.getCwd(),
@@ -1832,10 +1884,12 @@ export class InputController {
 	 * `true` to intercept (the editor skips its default `[Paste]` marker) once the paste reaches the
 	 * configured `paste.largeMenuThreshold` line count; otherwise `false` for default collapse-to-marker
 	 * behavior. The async menu is fired and forgotten — the editor only needs the synchronous verdict.
+	 * A paste whose input burst already carries the submit key skips the menu: nobody can answer it
+	 * before the submit lands, so the paste is staged the way cancelling the menu would.
 	 */
-	handleLargePaste(text: string, lineCount: number): boolean {
+	handleLargePaste(text: string, lineCount: number, options: PasteOptions = {}): boolean {
 		const threshold = this.ctx.settings.get("paste.largeMenuThreshold");
-		if (!(threshold > 0) || lineCount < threshold) {
+		if (!(threshold > 0) || lineCount < threshold || options.submitAfterPaste) {
 			// Below the menu threshold: stage the paste as a text-attachment chip
 			// (compact token in the buffer, band card above the editor).
 			this.ctx.editor.insertTextAttachment(text);

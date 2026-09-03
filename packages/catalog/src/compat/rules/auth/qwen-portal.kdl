@@ -1,0 +1,9 @@
+auth "qwen-portal" {
+	name "Qwen Portal"
+	login "api-key" {
+		auth-url "https://chat.qwen.ai"
+		instructions "Copy your Qwen OAuth token or API key"
+		prompt "Paste your Qwen OAuth token or API key" placeholder="sk-..."
+		validate "chat-completions" label="qwen-portal" base-url="https://portal.qwen.ai/v1" model="coder-model"
+	}
+}

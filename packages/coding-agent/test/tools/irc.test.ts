@@ -45,7 +45,7 @@ function makeFakeSession(): FakeSession {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		waitForIrcAutoReplies: async () => {},
+		waitForIrcReplies: async () => {},
 		deliverIrcMessage: async (msg: IrcMessage) => {
 			if (nextError) {
 				const err = nextError;

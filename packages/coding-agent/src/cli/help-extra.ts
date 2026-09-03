@@ -28,6 +28,7 @@ export function getExtraHelpText(): string {
   MISTRAL_API_KEY            - Mistral models
   ZAI_API_KEY                - z.ai models (ZhipuAI/GLM)
   UMANS_AI_CODING_PLAN_API_KEY - Umans AI Coding Plan models
+  ABLITERATION_API_KEY       - Abliteration uncensored GLM models
   UMANS_WEBSEARCH_PROVIDER    - Umans gateway web search backend (native or exa)
   MINIMAX_API_KEY            - MiniMax models
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
@@ -49,7 +50,7 @@ export function getExtraHelpText(): string {
   PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
   TAVILY_API_KEY             - Tavily web search
   TINYFISH_API_KEY           - TinyFish web search
-  FIRECRAWL_API_KEY          - Firecrawl web search
+  FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend
   ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
   ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)
 

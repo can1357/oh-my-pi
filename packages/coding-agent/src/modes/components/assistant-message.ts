@@ -1,11 +1,11 @@
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import {
+	type Component,
 	Container,
 	Image,
 	type ImageBudget,
 	ImageProtocol,
 	Markdown,
-	replaceTabs,
 	Spacer,
 	TERMINAL,
 	Text,
@@ -14,21 +14,24 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { resolveImageOptions } from "../../tools/render-utils";
+import { WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
+import { formatErrorBlock } from "./error-block";
+import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
 
 /**
- * Max lines of a turn-ending provider error rendered inline in the transcript.
- * Bounds pathological error bodies — e.g. a proxy 502 whose body is a full HTML
- * page — so they can't flood the scrollback. Blank lines are dropped and each
- * line is width-truncated by {@link getPreviewLines}. Full text is still kept in
- * the persisted session.
+ * Max wrapped rows of a turn-ending provider error rendered inline in the
+ * transcript. Bounds pathological error bodies — e.g. a proxy 502 whose body
+ * is a full HTML page — so they can't flood the scrollback, while a long
+ * single-line body wraps to the width instead of being cut at a fixed column.
+ * Full text is still kept in the persisted session.
  */
-const MAX_TRANSCRIPT_ERROR_LINES = 8;
+const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
@@ -199,7 +202,7 @@ export class AssistantMessageComponent extends Container {
 	#errorPinned = false;
 	/**
 	 * Whether the inline turn-ending error block renders its full body instead of
-	 * the {@link MAX_TRANSCRIPT_ERROR_LINES}-capped preview. Toggled by
+	 * the {@link MAX_TRANSCRIPT_ERROR_ROWS}-capped preview. Toggled by
 	 * {@link setExpanded} so Ctrl+O (tool-output expansion) reveals a long
 	 * provider error whose tail would otherwise be unreachable in the live TUI.
 	 */
@@ -255,9 +258,73 @@ export class AssistantMessageComponent extends Container {
 	#thinkingRateLive = false;
 
 	#textColorTransform?: (text: string) => string;
+	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
+	#reactionTarget: ReactionTarget | undefined;
+	/** Reaction lifted from the reply's opening line, once resolved. */
+	#reaction: string | undefined;
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
+	}
+
+	/**
+	 * Choose the block this reply reacts to from the transcript it is about to
+	 * join: the nearest preceding reaction-capable block (the user's bubble),
+	 * looking past turn attachments such as file mentions or injected notices
+	 * but never past an earlier reply — a continuation after tool calls has
+	 * nothing to react to. Call before adding this component. An
+	 * already-resolved reaction is re-applied, and a message rendered verbatim
+	 * for lack of a target is re-rendered with its reaction line stripped.
+	 */
+	pickReactionTarget(transcript: readonly Component[]): void {
+		this.#reactionTarget = undefined;
+		for (let index = transcript.length - 1; index >= 0; index--) {
+			const block = transcript[index]!;
+			if (isReactionTarget(block)) {
+				this.#reactionTarget = block;
+				break;
+			}
+			if (block instanceof AssistantMessageComponent) break;
+		}
+		if (this.#reaction !== undefined) this.#reactionTarget?.setReaction(this.#reaction);
+		if (this.#lastMessage && this.#openingText(this.#lastMessage)?.split.emoji !== undefined) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/** The reply's first non-empty text block with its reaction split, if any. */
+	#openingText(message: AssistantMessage): { index: number; block: TextContent; split: ReactionSplit } | undefined {
+		const index = message.content.findIndex(content => content.type === "text" && content.text.length > 0);
+		const block = message.content[index];
+		if (block?.type !== "text") return undefined;
+		return { index, block, split: splitReaction(block.text) };
+	}
+
+	/**
+	 * Display form of `message` with the reaction line handled: stripped and
+	 * forwarded to the target once resolved, withheld entirely while a streaming
+	 * prefix could still become one, and left verbatim when there is no target.
+	 */
+	#displayMessage(message: AssistantMessage, transient: boolean): AssistantMessage {
+		const opening = this.#openingText(message);
+		if (!opening) return message;
+		const { index, block, split } = opening;
+		let text: string;
+		if (split.emoji !== undefined) {
+			if (this.#reaction !== split.emoji) {
+				this.#reaction = split.emoji;
+				this.#reactionTarget?.setReaction(split.emoji);
+			}
+			if (!this.#reactionTarget) return message;
+			text = split.body;
+		} else if (split.pending && transient) {
+			text = "";
+		} else {
+			return message;
+		}
+		const content = message.content.slice();
+		content[index] = { ...block, text };
+		return { ...message, content };
 	}
 	constructor(
 		message?: AssistantMessage,
@@ -615,42 +682,26 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Render a turn-ending provider error inline. Collapsed (default), it drops
-	 * blank lines, clamps the line count to {@link MAX_TRANSCRIPT_ERROR_LINES},
-	 * and width-truncates each line so a pathological body — e.g. the HTML page a
-	 * proxy returns on a 502 — can't flood the transcript, appending a dim
-	 * `ctrl+o`/expand hint when lines were hidden. Expanded (via
-	 * {@link setExpanded}), it renders the full body — tabs replaced, blank lines
-	 * preserved — letting {@link Text} word-wrap each line to the render width so
-	 * the complete message is reachable. Mirrors {@link ErrorBannerComponent}.
+	 * Render a turn-ending provider error inline, wrapped to the render width.
+	 * Collapsed (default), the block keeps {@link MAX_TRANSCRIPT_ERROR_ROWS}
+	 * wrapped rows and ends with a dim `ctrl+o`/expand hint when rows were cut,
+	 * so a pathological body — e.g. the HTML page a proxy returns on a 502 —
+	 * can't flood the transcript. Expanded (via {@link setExpanded}), every row
+	 * is rendered so the complete message is reachable. Mirrors
+	 * {@link ErrorBannerComponent}. The caller owns the separating Spacer.
 	 */
 	#appendErrorBlock(message: string): void {
-		if (this.#errorExpanded) {
-			const [first = "Unknown error", ...rest] = replaceTabs(message.replace(/\s+$/, "")).split("\n");
-			this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${first}`), 1, 0));
-			for (const line of rest) {
-				this.#contentContainer.addChild(new Text(theme.fg("error", `  ${line}`), 1, 0));
-			}
-			return;
-		}
-		const total = message.split("\n").filter(l => l.trim()).length;
-		const lines = getPreviewLines(message, MAX_TRANSCRIPT_ERROR_LINES, TRUNCATE_LENGTHS.LINE);
-		if (lines.length === 0) lines.push("Unknown error");
-		// The caller owns the separating Spacer; adding one here doubled the gap.
-		this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${lines[0]}`), 1, 0));
-		for (const line of lines.slice(1)) {
-			this.#contentContainer.addChild(new Text(theme.fg("error", `  ${line}`), 1, 0));
-		}
-		if (total > lines.length) {
-			const hidden = total - lines.length;
-			this.#contentContainer.addChild(
-				new Text(
-					theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyHint()} to expand)`),
-					1,
-					0,
-				),
-			);
-		}
+		const maxRows = this.#errorExpanded ? Number.POSITIVE_INFINITY : MAX_TRANSCRIPT_ERROR_ROWS;
+		this.#contentContainer.addChild(
+			new WidthAwareText(
+				contentWidth =>
+					formatErrorBlock(message, contentWidth, maxRows, (line, index) =>
+						theme.fg("error", index === 0 ? `Error: ${line}` : line),
+					),
+				1,
+				0,
+			),
+		);
 	}
 
 	/** Toggle rendering for assistant-native and tool-result images. */
@@ -877,6 +928,9 @@ export class AssistantMessageComponent extends Container {
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
+		// Everything below renders the display form; #lastMessage keeps the
+		// verbatim message so re-renders re-derive the reaction deterministically.
+		message = this.#displayMessage(message, this.#lastUpdateTransient);
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
 		// animating hidden-thinking block feeds the shared session tracker. The

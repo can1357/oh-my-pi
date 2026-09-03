@@ -9,7 +9,7 @@ import {
 import { skillCapability } from "../capability/skill";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
-import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
+import { type Skill as CapabilitySkill, isUserSourceEnabled, loadCapability } from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
@@ -136,8 +136,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const {
 		cwd = getProjectDir(),
 		enabled = true,
-		enableCodexUser = true,
-		enableClaudeUser = true,
+		enableCodexUser = false,
+		enableClaudeUser = false,
 		enableClaudeProject = true,
 		enablePiUser = true,
 		enablePiProject = true,
@@ -154,31 +154,21 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	if (!enabled) {
 		return { skills: [], warnings: [] };
 	}
-	// Fall-through gate for third-party CLI providers (claude-plugins, opencode,
-	// gemini, github, ...) that share user intent with the named third-party
-	// source toggles but don't have a dedicated control of their own. Only the
-	// third-party toggles count here: the OMP-native providers (`agents`,
-	// `native`) get explicit branches in `isSourceEnabled` below, so folding
-	// them into the fallback would re-enable unrelated third-party CLIs whenever
-	// the user kept the default `.agent[s]/skills` toggles on while turning off
-	// Codex/Claude/Pi (issue #2401 / PR #2405 review).
-	const anyThirdPartySkillToggleEnabled =
-		enableCodexUser || enableClaudeUser || enableClaudeProject || enablePiUser || enablePiProject;
-
 	function isSourceEnabled(source: SourceMeta): boolean {
 		const { provider, level } = source;
 		// Managed skills (auto-learn) are OMP-native and discovered unconditionally
 		// — third-party CLI toggles must never silently hide them (cf. #2401). The
 		// master `enabled` flag above still gates them.
 		if (provider === MANAGED_SKILLS_PROVIDER_ID) return true;
-		if (provider === "codex" && level === "user") return enableCodexUser;
-		if (provider === "claude" && level === "user") return enableClaudeUser;
+		if (provider === "codex" && level === "user") return enableCodexUser || isUserSourceEnabled("codex");
+		if (provider === "claude" && level === "user") return enableClaudeUser || isUserSourceEnabled("claude");
 		if (provider === "claude" && level === "project") return enableClaudeProject;
 		if (provider === "native" && level === "user") return enablePiUser;
 		if (provider === "native" && level === "project") return enablePiProject;
 		if (provider === "agents" && level === "user") return enableAgentsUser;
 		if (provider === "agents" && level === "project") return enableAgentsProject;
-		return anyThirdPartySkillToggleEnabled;
+		if (level === "user") return isUserSourceEnabled(provider);
+		return true;
 	}
 
 	// Use capability API to load all skills

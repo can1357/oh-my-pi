@@ -319,6 +319,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		/** Bedrock guardrail trace verbosity. */
 		"guardrailTrace?": '"enabled" | "disabled" | "enabled_full"',
 		/**
+		 * Bedrock invocation-log tags attached to every Converse request under this
+		 * provider (max 16 entries; keys/values limited to `[a-zA-Z0-9\s:_@$#=/+,-.]`).
+		 */
+		"requestMetadata?": { "[string]": "string" },
+		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's
 		 * `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The

@@ -112,7 +112,7 @@ describe("task approval details surface the dispatch", () => {
 		return TaskTool.create({
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": true }),
+			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => spawns,
 		} as unknown as ToolSession);

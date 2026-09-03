@@ -25,7 +25,7 @@ function makeSession(spawns: string): ToolSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.batch": true,
-		"task.isolation.mode": "none",
+		"task.isolation.enabled": false,
 	});
 	return {
 		cwd: process.cwd(),
@@ -104,7 +104,7 @@ describe("task tool description scout gating", () => {
 		const settings = Settings.isolated({
 			"async.enabled": false,
 			"task.batch": true,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			...(disabledScout ? { "task.disabledAgents": ["scout"] } : {}),
 		});
 		const tool = await TaskTool.create({

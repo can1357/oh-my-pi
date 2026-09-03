@@ -94,6 +94,34 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		expect(historyText).toContain("Could not read history://missing-second:1-3");
 	});
 
+	it("tails an in-memory internal resource with :-N", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tail-skill-"));
+		tempDirs.push(tempDir);
+		const skillDir = path.join(tempDir, "tail-skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		const body = Array.from({ length: 30 }, (_, i) => `body-line-${i + 1}`).join("\n");
+		await Bun.write(path.join(skillDir, "SKILL.md"), `${makeSkillMd("tail-skill", tempDir)}${body}\n`);
+
+		const { skills } = await loadSkills({ ...ALL_DEFAULT_SOURCES_DISABLED, customDirectories: [tempDir] });
+		setActiveSkills(skills);
+		const session: ToolSession = {
+			cwd: tempDir,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+		};
+		const result = await new ReadTool(session).execute("read-skill-tail", { path: "skill://tail-skill:-4" });
+		const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+
+		// Last 4 body lines plus one leading context line; nothing earlier.
+		expect(text).not.toContain("body-line-25");
+		expect(text).toContain("body-line-26");
+		expect(text).toContain("body-line-27");
+		expect(text).toContain("body-line-30");
+		expect(text).not.toContain("tail-skill skill.");
+	});
+
 	it("keeps first-wins across multiple custom directories", async () => {
 		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-a-"));
 		tempDirs.push(dirA);

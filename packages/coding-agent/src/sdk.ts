@@ -52,7 +52,13 @@ import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
-import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+import {
+	MAIN_AGENT_RULE_NAME,
+	type Rule,
+	ruleCapability,
+	setActiveRules,
+	SUB_AGENT_RULE_NAME,
+} from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
@@ -141,7 +147,7 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -569,6 +575,11 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
+	/**
+	 * Agent definition name used to evaluate rule `agents` scoping. Defaults to
+	 * "main" for a top-level session / "sub" for a subagent.
+	 */
+	agentName?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/**
@@ -1635,6 +1646,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		skillWarnings = discovered.warnings;
 	}
 
+	// Agent identity must resolve before rule discovery: `agents` frontmatter decides
+	// which rules are bucketed into this session at all.
+	const isSubagentSession = (options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix);
+	const agentKind: AgentKind = isSubagentSession ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME;
+	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
+
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
 		"discoverTtsrRules",
@@ -1649,6 +1666,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
 				builtinRules: ttsrSettings.builtinRules,
 				disabledRules: ttsrSettings.disabledRules,
+				agentName: resolvedAgentName,
 			});
 			if (existingSession.injectedTtsrRules.length > 0) {
 				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
@@ -1718,9 +1736,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	const resolvedAgentDisplayName =
-		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
-	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
+	const resolvedAgentDisplayName = options.agentDisplayName ?? agentKind;
 	let registeredAgentRef: AgentRef | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
@@ -1792,6 +1808,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			refreshSkills: () => session.refreshSkills(),
 			rules: allRules,
+			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
 			subagentEventBus,
 			outputSchema: options.outputSchema,
@@ -3129,7 +3146,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
 					: "",
 				resolvedCustomPrompt: options.customSystemPrompt,
-				skills: session?.skills ?? skills,
+				skills: settings.get("skillful") ? (session?.skills ?? skills) : [],
 				contextFiles,
 				tools: promptTools,
 				toolNames,
@@ -3162,6 +3179,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				includeModelInPrompt: settings.get("includeModelInPrompt"),
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
+				reactions: agentKind === "main" && options.hasUI === true && settings.get("tui.reactions"),
 				activeRepoContext,
 			});
 

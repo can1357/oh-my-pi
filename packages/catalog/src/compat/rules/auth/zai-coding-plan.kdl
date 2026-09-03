@@ -1,0 +1,29 @@
+auth "zai-coding-plan" {
+	name "Z.AI (GLM Coding Plan · Sign in)"
+	login "oauth-code" {
+		client-id "client_P8X5CMWmlaRO9gyO-KSqtg" env="ZAI_OAUTH_CLIENT_ID"
+		authorize-url "https://chat.z.ai/api/oauth/authorize" env="ZAI_OAUTH_AUTHORIZE_URL"
+		// No PKCE: matches ZCode's authorize request verbatim.
+		// ZCode registers this exact loopback URI; any other host/port is rejected (#10245).
+		callback port=9999 path="/callback" hostname="127.0.0.1" redirect-uri="http://127.0.0.1:9999/callback" port-fallback=#false
+		instructions "Complete Z.ai login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted."
+		token url="https://zcode.z.ai/api/v1/oauth/token" url-env="ZAI_OAUTH_TOKEN_URL" body="json" standard=#false {
+			params {
+				provider "zai"
+				code "{code}"
+				redirect_uri "{redirect_uri}"
+				state "{state}"
+			}
+		}
+		credential {
+			access "data.zai.access_token"
+			expires "never"
+			email "data.user.email"
+			account-id "data.user.id"
+		}
+		// Business login then provisions/reuses OMP's durable id.secret API key.
+		after-exchange hook="zai-mint-key"
+	}
+	store-as "zai"
+	refresh "none"
+}

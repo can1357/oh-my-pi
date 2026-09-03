@@ -1254,6 +1254,52 @@ function lexDocument(text: string): Token[] {
 	return lexWindowed(text);
 }
 
+/** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
+export interface MarkdownLink {
+	/** Visible link text (equals `href` for autolinks and bare URLs). */
+	text: string;
+	/** Destination exactly as marked resolved it (references resolved, no normalization). */
+	href: string;
+}
+
+/**
+ * Every link token in `text`, in document order, from the same configured
+ * lexer the renderer uses — so fenced code, code spans, escapes, reference
+ * definitions and the GFM autolink rules agree with what is drawn on screen.
+ * Duplicate hrefs are kept; callers decide how to fold them.
+ */
+export function extractMarkdownLinks(text: string): MarkdownLink[] {
+	const links: MarkdownLink[] = [];
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const link = token as Tokens.Link;
+				if (typeof link.href === "string" && link.href.length > 0) {
+					links.push({
+						text: typeof link.text === "string" && link.text.length > 0 ? link.text : link.href,
+						href: link.href,
+					});
+				}
+				continue;
+			}
+			// Containers: paragraphs, emphasis, lists, blockquotes, table cells.
+			const any = token as {
+				tokens?: Token[];
+				items?: Token[];
+				header?: Array<{ tokens?: Token[] }>;
+				rows?: Array<Array<{ tokens?: Token[] }>>;
+			};
+			walk(any.tokens);
+			walk(any.items);
+			if (any.header) for (const cell of any.header) walk(cell.tokens);
+			if (any.rows) for (const row of any.rows) for (const cell of row) walk(cell.tokens);
+		}
+	};
+	walk(lexDocument(text));
+	return links;
+}
+
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
 export function clearRenderCache(): void {
 	renderCache.clear();

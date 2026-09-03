@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [18.1.6] - 2026-09-03
+
+### Added
+
+- Added catalog-delivered model intelligence scores and estimated output throughput to help compare model capabilities and performance.
+
+### Changed
+
+- Improved model search and selection so configured roles, provider preferences, and recent usage are prioritized while browsing and filtering models.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added the Abliteration (abliteration.ai) provider, including its documented abliterated-model catalog and live model discovery.
+- Added the GLM 5.3 Promo 50 model.
+- Added computer-use capability metadata to model configurations.
+- Added declarative provider authentication policies covering login, refresh, environment-key, and credential behavior, with generated compatibility data and typed accessors.
+
+### Changed
+
+- Gemini 3.8 Flash now supports reasoning modes and image inputs.
+- Updated the GitHub Copilot API version to 2026-08-01.
+- Reduced input pricing for the minimax/minimax-m2 model.
+- Renamed Meta Model API contributor SKUs to use the Muse Spark 1.x (C) naming.
+
+### Fixed
+
+- GitHub Copilot model discovery now respects the Copilot CLI identity, ensuring eligible enterprise and experimental models are available.
+- Fixed startup failures when discovering Bedrock-style Mistral Mixtral models.
+- Fixed Muse Spark 1.3 contributor models on OpenCode gateways so they use the correct Responses API route.
+- Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
+
+## [18.1.4] - 2026-09-02
+
+### Changed
+
+- Enabled Cursor tool schema projection for supported models
+
+### Fixed
+
+- Antigravity and Gemini CLI now collapse every Gemini Flash generation from 3.6 on (`gemini-3.8-flash-low/-medium/-high` and the `-tiered` alias, and future revisions) into one routed `gemini-<rev>-flash` entry via a revision-templated `variant-family`, instead of surfacing raw per-level ids until a per-revision rule lands.
+
 ## [18.1.3] - 2026-09-02
 
 ### Added

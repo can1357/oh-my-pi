@@ -1,0 +1,9 @@
+auth "nanogpt" {
+	name "NanoGPT"
+	login "api-key" {
+		auth-url "https://nano-gpt.com/api"
+		instructions "Create or copy your NanoGPT API key"
+		prompt "Paste your NanoGPT API key" placeholder="sk-..."
+		validate "models-endpoint" url="https://nano-gpt.com/api/v1/models"
+	}
+}
