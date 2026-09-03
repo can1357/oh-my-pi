@@ -211,7 +211,12 @@ describe("skills", () => {
 				const claudeProvider = capability?.providers.find(provider => provider.id === "claude");
 				expect(claudeProvider).toBeDefined();
 
-				const result = await claudeProvider!.load({ cwd: tempProjectDir, home: tempHomeDir, repoRoot: null });
+				const result = await claudeProvider!.load({
+					cwd: tempProjectDir,
+					home: tempHomeDir,
+					repoRoot: null,
+					includeOptOutUserSources: true,
+				});
 				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
 			} finally {
 				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
