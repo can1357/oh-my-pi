@@ -230,4 +230,20 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		expect(Object.keys(JSON.parse(await fs.readFile(original, "utf-8")).mcpServers)).toEqual(["pinned"]);
 		expect(await fs.readFile(link, "utf-8").catch(() => "")).toBe("");
 	});
+
+	it("recreates the referent of a dangling ancestor directory link", async () => {
+		// `dotfiles-link -> missing/dotfiles` (dangling DIRECTORY link) with
+		// the config path INSIDE it: lstat through the dangling link is ENOENT
+		// and realpath(parent) cannot resolve either, so the resolver must
+		// walk the full path, follow the ancestor link, and recreate
+		// missing/dotfiles/mcp.json instead of failing mkdir through the link.
+		const linkDir = path.join(dir, "dotfiles-link");
+		await fs.symlink(path.join(dir, "missing", "dotfiles"), linkDir);
+
+		await addMCPServer(path.join(linkDir, "mcp.json"), "alpha", { type: "stdio", command: "a" });
+
+		expect((await fs.lstat(linkDir)).isSymbolicLink()).toBe(true);
+		const config = await readMCPConfigFile(path.join(dir, "missing", "dotfiles", "mcp.json"));
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
 });
