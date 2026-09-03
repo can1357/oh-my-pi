@@ -1209,6 +1209,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.reactions": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Agent Reactions",
+			description: "Invite the agent to react to your message with an emoji badge on its bubble",
+		},
+	},
+
 	"tui.codexResetFireworks": {
 		type: "boolean",
 		default: false,

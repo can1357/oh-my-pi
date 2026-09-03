@@ -308,6 +308,7 @@ export class UiHelpers {
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
+				assistantComponent.pickReactionTarget(this.ctx.chatContainer.children);
 				this.ctx.chatContainer.addChild(assistantComponent);
 				break;
 			}

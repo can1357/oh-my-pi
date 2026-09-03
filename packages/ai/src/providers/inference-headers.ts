@@ -51,13 +51,26 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	}
 }
 
+function isHeaderRecord(headers: RequestInit["headers"]): headers is Record<string, string> {
+	return headers !== undefined && !(headers instanceof Headers) && !Array.isArray(headers);
+}
+
 /**
  * Apply omp's process-wide inference User-Agent default. Any explicit header,
  * including Anthropic and Codex OAuth fingerprints, remains authoritative.
+ *
+ * Plain-object headers stay plain objects: custom `fetch` implementations
+ * (proxies, tests) index `init.headers` by name and must not be handed a
+ * `Headers` instance instead.
  */
 export function withInferenceUserAgent(fetchImpl: FetchImpl): FetchImpl {
 	return (input, init) => {
 		const sourceHeaders = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+		if (isHeaderRecord(sourceHeaders)) {
+			const headers = { ...sourceHeaders };
+			setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+			return fetchImpl(input, { ...init, headers });
+		}
 		const headers = new Headers(sourceHeaders);
 		if (headers.has("User-Agent")) return fetchImpl(input, init);
 		headers.set("User-Agent", USER_AGENT);

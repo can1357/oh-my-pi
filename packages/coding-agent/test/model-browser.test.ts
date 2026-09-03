@@ -114,6 +114,34 @@ describe("ModelBrowser search ranking", () => {
 
 		expect(browser.getSelected()?.selector).toBe("ollama/lfm2:2.6b");
 	});
+
+	test("a recently used model outranks a peer from a role-assigned provider", () => {
+		// Regression: with a `glm` role on fireworks, typing "muse" selected
+		// fireworks/muse-glimmer-30b over the muse-spark model actually used.
+		const glm = makeModel("fireworks", "glm-5.2");
+		const browser = makeBrowser(
+			[glm, makeModel("fireworks", "muse-glimmer-30b"), makeModel("meta", "muse-spark-1.3-contributor")],
+			["meta/muse-spark-1.3-contributor"],
+			{ roles: { glm: { model: glm, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false } } },
+		);
+
+		browser.setQuery("muse");
+
+		expect(browser.getSelected()?.selector).toBe("meta/muse-spark-1.3-contributor");
+	});
+
+	test("a role-assigned model outranks a recently used model", () => {
+		const assigned = makeModel("fireworks", "muse-glimmer-30b");
+		const browser = makeBrowser(
+			[assigned, makeModel("meta", "muse-spark-1.3-contributor")],
+			["meta/muse-spark-1.3-contributor"],
+			{ roles: { fast: { model: assigned, thinkingLevel: ThinkingLevel.Inherit, autoSelected: false } } },
+		);
+
+		browser.setQuery("muse");
+
+		expect(browser.getSelected()?.selector).toBe("fireworks/muse-glimmer-30b");
+	});
 });
 
 describe("ModelBrowser perf display", () => {
