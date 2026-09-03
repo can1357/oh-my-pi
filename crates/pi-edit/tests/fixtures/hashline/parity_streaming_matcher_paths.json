@@ -1,0 +1,51 @@
+{
+	"source": "packages/coding-agent/test/edit/streaming-matcher-paths.test.ts",
+	"cases": [
+		{
+			"name": "extracts the path from a single section header",
+			"input": "[demo.ts#ABCD]\nPUT 1-1:\n+const x = 1;\n",
+			"paths": ["demo.ts"]
+		},
+		{
+			"name": "extracts paths from multiple section headers in order, deduped",
+			"input": "[src/a.ts#ABCD]\nPUT 1-1:\n+const a = 1;\n[src/b.ts#EF01]\nPUT 1-1:\n+const b = 2;\n[src/a.ts#1234]\nPUT 2-2:\n+const c = 3;\n",
+			"paths": ["src/a.ts", "src/b.ts", "src/a.ts"]
+		},
+		{
+			"name": "tolerates a streaming partial payload (header complete, body still mid-typed)",
+			"input": "[src/partial.ts#ABCD]\nSWAP 1.=",
+			"paths": ["src/partial.ts"]
+		},
+		{
+			"name": "handles paths with spaces and recovers apply_patch-style header noise",
+			"input": "[dir with spaces/file.ts#1A2B]\nPUT 1-1:\n+after\n[*** Update File: src/recovered.ts#1A2B]\nPUT 1-1:\n+after\n",
+			"paths": ["dir with spaces/file.ts", "src/recovered.ts"]
+		},
+		{
+			"name": "returns undefined when input has no section header",
+			"input": "PUT 1-1:\n+x",
+			"paths": []
+		},
+		{
+			"name": "hashline splits multi-section payloads into one entry per file",
+			"input": "[src/a.ts#ABCD]\nPUT 1-1:\n+const a = 1;\n[README.md#EF01]\nPUT 1-1:\n+# Heading\n[src/a.ts#1234]\nPUT 2-2:\n+const c = 3;\n",
+			"paths": ["src/a.ts", "README.md", "src/a.ts"],
+			"entries": [
+				["src/a.ts", "const a = 1;\nconst c = 3;"],
+				["README.md", "# Heading"]
+			]
+		},
+		{
+			"name": "returns undefined when no entries are recoverable yet",
+			"input": "",
+			"paths": [],
+			"entries": []
+		}
+	],
+	"skipped": [
+		{ "name": "ts-no-any triggers when filePaths come from the hashline header", "reason": "TTSR rule-manager integration is TypeScript-owned; the Rust inspect contract is covered by the cases above." },
+		{ "name": "ts-no-any does NOT trigger when filePaths are missing — the regression's pre-fix state", "reason": "TTSR rule-manager integration is TypeScript-owned; empty Rust matcher inspection is covered above." },
+		{ "name": "multi-file hashline isolates a .md hunk's `: any` from a sibling .ts entry", "reason": "TTSR rule-manager integration is TypeScript-owned; per-file Rust matcher entries are covered above." },
+		{ "name": "multi-file hashline fires only on the .ts entry when the .ts entry carries `: any`", "reason": "TTSR rule-manager integration is TypeScript-owned; per-file Rust matcher entries are covered above." }
+	]
+}

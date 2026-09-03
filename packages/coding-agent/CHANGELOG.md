@@ -2,28 +2,69 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the local session-title model choices with LFM2.5 230M, LFM2.5 350M, and Falcon H1 Tiny 90M.
+
 ### Added
 
-- Added the Abliteration provider to `/login` and `ABLITERATION_API_KEY` to `--help` ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
+- Video files can be attached or read through system ffmpeg as preview grids with metadata; use `:412` or `:1h5m42s` to inspect individual frames.
+- The model picker now shows a brain-icon intelligence column and uses catalog TPS as an estimate until local performance data exists.
+- Added `report` field to scout agent definitions for detailed, non-summarized findings
+- Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
 
 ### Changed
 
-- Removed incorrect retry instructions from unsupported model error messages
-- Refreshed the built-in `smol`/`slow` model priority chains: `slow` now prefers Codex GPT-5.6 Sol, then Claude Fable 5.1/5, Kimi K3, GLM-5.3, Opus 5; `smol` prefers the newest Gemini Flash, then gpt-oss-120b, Cerebras GLM, Haiku 4.5, GPT-5.6 Luna. Older generations (Opus 4.1–4.7, GPT-5.1–5.4) dropped from the chains.
-
-### Removed
-
-- Removed the bundled `designer` subagent and the `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
+- Session history is now sorted by modification time, then creation time, then file path
+- Cleaned up trailing periods from agent activity descriptions in the UI
+- Increased maximum file snapshot size to 4MB
+- Edit tool engines (replace/patch/apply_patch/hashline/sloppy) now run natively with streamed diff previews computed off the main thread
+- Inlined approved plan content directly into agent history to reduce redundant read operations
 
 ### Fixed
 
 - Fixed sessions with skills disabled still advertising unavailable `skill://` resources ([#10215](https://github.com/can1357/oh-my-pi/issues/10215)).
-- Provider errors in the transcript and the pinned error banner now wrap to the terminal width instead of being cut at a fixed column with no way to read the rest; long bodies keep a bounded number of rows and end with the `Ctrl+O to expand` hint.
-- Gemini `MALFORMED_FUNCTION_CALL` turns where the model wrote the call as text (`call:default_api:read{…}`) no longer stop on a pinned error: the session keeps the turn, tells the model the call was rejected, and continues (bounded to three attempts per prompt).
-- Auto-compaction recovery no longer loops indefinitely when a model repeatedly returns an empty `response.incomplete` (`length`) turn: the length-stop recovery path is now bounded and surfaces an actionable error after a few failed attempts instead of scheduling `shake-retry` forever and persisting hundreds of empty assistant turns ([#10594](https://github.com/can1357/oh-my-pi/issues/10594)).
-- MCP servers now retry after transient startup handshake timeouts instead of remaining disconnected for the session ([#10478](https://github.com/can1357/oh-my-pi/issues/10478)).
-- Programs supervised by `hub start` no longer hang waiting for terminal replies: the broker answers cursor-position, device-attribute, and color queries on their PTY.
-- A large paste followed by Enter in the same input burst now submits with the paste attached instead of leaving the composer idle behind the large-paste menu ([#10576](https://github.com/can1357/oh-my-pi/issues/10576)).
+- Fixed embedded title models receiving online few-shot examples and failing on tokenizer templates containing generation-mask statements.
+- Fixed Alt+P model searches retaining the current model's list position after results changed; selection now moves to the best match unless every preceding choice remains unchanged
+- Fixed model picker searches ignoring provider preferences; explicitly ordered, role-assigned, and recently used providers now rank first among similarly relevant matches
+- Fixed `/new` reviving the previous conversation in-process or after a restart, including across terminal changes and delayed extension events
+- Fixed protocol handler incorrectly escaping raw text content from agent responses
+- Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
+- Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
+- Fixed the status line missing from the first frame at startup; its normal icons, colors, and chrome now appear immediately with ellipses in dynamic fields until the live values replace them in place.
+- Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
+- Fixed provider-qualified model roles written with a dotted revision (`anthropic/claude-fable-5.1:high`) silently resolving to OpenRouter's same-named flat id instead of the first-party `claude-fable-5-1`, which surfaced when a plan-mode tier or cycle-order role was applied; the dotted spelling now binds inside the named provider and fails closed when that provider is unavailable.
+
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added Abliteration provider support to `/login`, including `ABLITERATION_API_KEY` configuration and help text.
+- Added clone-first Git worktree support that carries over ignored build artifacts when creating worktrees, with a configurable `worktree.clone` setting and fallback to a standard checkout. This is supported by `github pr_checkout`, `omp worktree add`, and `git worktree add` commands entered through the Bash tool.
+- Added the `omp worktree add` command with Git-compatible branch, detach, path, and commit options.
+- Added `/wt` (alias `/worktree`) to create a linked worktree with uncommitted changes and move the current session into it while leaving the original checkout untouched.
+- Added the `:-N` read selector to tail the last N lines of files, directories, archives, artifacts, internal URLs (`history://`, `skill://`, …), and web URLs; combines with `:raw` (`:raw:-60`).
+
+### Changed
+
+- Foreign user-level configuration sources (`~/.cursor`, `~/.codex`, `~/.claude`, `~/.gemini`, `~/.config/opencode`, `~/.codeium/windsurf`) are now opt-in via `enabledProviders`, while project-level configurations in CWD and `.agents` continue to load by default.
+- Split subagent isolation configuration into `task.isolation.enabled` and `isolation.backend`; existing `task.isolation.mode` settings are migrated automatically.
+- Updated the built-in `smol` and `slow` model priority chains to favor newer recommended models and remove older model generations.
+- Improved unsupported-model error messages by removing retry guidance that does not apply.
+
+### Fixed
+
+- Fixed automatic title generation so `--no-title` also prevents todo-initialization title refreshes, while automatic titles retain the selected OAuth account without sharing foreground request identity.
+- Fixed provider errors so they wrap to the terminal width and remain readable in the transcript and pinned error banner, with long messages available through the expansion hint.
+- Fixed Gemini malformed function-call turns so textual tool-call output is rejected conversationally and the session can continue instead of stopping with a pinned error.
+- Fixed auto-compaction recovery getting stuck in repeated retries when models return empty length-limited responses; it now stops with an actionable error.
+- Fixed MCP servers failing to reconnect after transient startup handshake timeouts.
+- Fixed programs supervised by `hub start` hanging when querying terminal capabilities.
+- Fixed large pastes followed immediately by Enter so the input is submitted with the pasted content instead of being left in the large-paste menu.
+
+### Removed
+
+- Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
 
 ## [18.1.3] - 2026-09-02
 

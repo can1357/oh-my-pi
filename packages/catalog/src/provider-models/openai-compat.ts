@@ -110,6 +110,8 @@ export interface ModelsDevModel {
 	};
 	status?: string;
 	provider?: { npm?: string };
+	int?: number;
+	tps?: number;
 }
 
 function toModelName(value: unknown, fallback: string): string {
@@ -6518,6 +6520,8 @@ export function mapModelsDevToModels(
 				},
 				contextWindow: toPositiveNumber(m.limit?.context, desc.defaultContextWindow ?? null),
 				maxTokens: toPositiveNumber(m.limit?.output, desc.defaultMaxTokens ?? null),
+				...(m.int != null ? { int: m.int } : {}),
+				...(m.tps != null ? { tps: m.tps } : {}),
 				...(m.tool_call === false ? { supportsTools: false } : {}),
 				...(desc.compat && { compat: desc.compat }),
 				...(desc.headers && { headers: { ...desc.headers } }),

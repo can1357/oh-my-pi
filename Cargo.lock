@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6188,8 +6188,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-diff"
+version = "18.1.5"
+
+[[package]]
+name = "pi-edit"
+version = "18.1.5"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "pi-ast",
+ "pi-diff",
+ "pi-walker",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "xutf",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "pi-iso"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "async-trait",
  "libc",
@@ -6201,12 +6224,13 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "anyhow",
  "arboard",
  "ashpd",
  "ast-grep-core",
+ "async-trait",
  "atspi",
  "base64 0.22.1",
  "clap",
@@ -6243,6 +6267,8 @@ dependencies = [
  "pdf-inspector",
  "phf 0.13.1",
  "pi-ast",
+ "pi-diff",
+ "pi-edit",
  "pi-iso",
  "pi-shell",
  "pi-vcs",
@@ -6278,7 +6304,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6306,11 +6332,12 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "pi-iso",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6319,7 +6346,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6334,7 +6361,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.4"
+version = "18.1.5"
 dependencies = [
  "dashmap",
  "globset",

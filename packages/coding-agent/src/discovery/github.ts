@@ -17,7 +17,7 @@
  */
 import * as path from "node:path";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
-import { registerProvider } from "../capability";
+import { isUserSourceEnabled, registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
 import { type Instruction, instructionCapability } from "../capability/instruction";
@@ -67,15 +67,17 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	}
 
 	// User-global instructions (~/.copilot/copilot-instructions.md), applied across all repos.
-	const userInstructionsPath = path.join(resolveCopilotHome(ctx.home), "copilot-instructions.md");
-	const userContent = await readFile(userInstructionsPath);
-	if (userContent) {
-		items.push({
-			path: userInstructionsPath,
-			content: userContent,
-			level: "user",
-			_source: createSourceMeta(PROVIDER_ID, userInstructionsPath, "user"),
-		});
+	if (isUserSourceEnabled("github", ctx)) {
+		const userInstructionsPath = path.join(resolveCopilotHome(ctx.home), "copilot-instructions.md");
+		const userContent = await readFile(userInstructionsPath);
+		if (userContent) {
+			items.push({
+				path: userInstructionsPath,
+				content: userContent,
+				level: "user",
+				_source: createSourceMeta(PROVIDER_ID, userInstructionsPath, "user"),
+			});
+		}
 	}
 
 	// Each COPILOT_CUSTOM_INSTRUCTIONS_DIRS entry contributes an AGENTS.md (Copilot CLI

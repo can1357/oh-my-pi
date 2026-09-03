@@ -23,6 +23,7 @@ wayland-pipewire = ["dep:pipewire"]
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 arboard.workspace = true
 ast-grep-core.workspace = true
 base64.workspace = true
@@ -51,6 +52,8 @@ pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
 pi-ast.workspace = true
+pi-diff.workspace = true
+pi-edit.workspace = true
 pi-iso.workspace = true
 pi-shell.workspace = true
 pi-voice.workspace = true

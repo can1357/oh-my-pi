@@ -1,4 +1,3 @@
-import type { Clipboard, SnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	Box,
@@ -15,7 +14,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
+import { type PerFileDiffPreview, renderStreamingFallback } from "../../edit/renderer";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
@@ -31,6 +30,7 @@ import {
 } from "../../tools/renderers";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import type { XdevState } from "../../tools/xdev";
+import type { EditMode } from "../../utils/edit-mode";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
@@ -41,37 +41,6 @@ import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
 }
-/**
- * Drop trailing removal/hunk-header lines that appear in a streaming diff
- * before the matching `+added` lines have arrived. Without this, a partial
- * apply_patch / hashline preview shows `-old` first and then visibly grows
- * the `+new` block beneath it — the "removals first, additions catching up"
- * jitter. Once the next streaming tick brings the additions in, the trailing
- * block reappears alongside them.
- */
-function stripTrailingUnbalancedRemoval(diff: string | undefined): string | undefined {
-	if (!diff) return diff;
-	const lines = diff.split("\n");
-	let lastAddIdx = -1;
-	for (let i = lines.length - 1; i >= 0; i--) {
-		if (lines[i].startsWith("+")) {
-			lastAddIdx = i;
-			break;
-		}
-	}
-	let hasTrailingUnbalanced = false;
-	for (let i = lastAddIdx + 1; i < lines.length; i++) {
-		const line = lines[i];
-		if (line.startsWith("-") || line.startsWith("@@")) {
-			hasTrailingUnbalanced = true;
-			break;
-		}
-	}
-	if (!hasTrailingUnbalanced) return diff;
-	if (lastAddIdx === -1) return "";
-	return lines.slice(0, lastAddIdx + 1).join("\n");
-}
-
 type DisplaceableToolName = "hub" | "todo";
 
 function isTodoToolDetails(details: unknown): details is TodoToolDetails {
@@ -109,18 +78,6 @@ function displaceableToolName(
 	return undefined;
 }
 
-function stabilizeStreamingPreviews(previews: PerFileDiffPreview[]): PerFileDiffPreview[] {
-	let changed = false;
-	const next = previews.map(preview => {
-		if (!preview.diff) return preview;
-		const trimmed = stripTrailingUnbalancedRemoval(preview.diff);
-		if (trimmed === preview.diff) return preview;
-		changed = true;
-		return { ...preview, diff: trimmed ?? "" };
-	});
-	return changed ? next : previews;
-}
-
 function isEditLikeToolName(toolName: string): boolean {
 	return toolName === "edit" || toolName === "apply_patch";
 }
@@ -129,35 +86,6 @@ function resolveEditModeForTool(toolName: string, tool: AgentTool | undefined): 
 	if (toolName === "apply_patch") return "apply_patch";
 	if (toolName !== "edit") return undefined;
 	return (tool as { mode?: EditMode } | undefined)?.mode;
-}
-
-function rawTextInputFromPartialJson(partialJson: unknown): string | undefined {
-	if (typeof partialJson !== "string") return undefined;
-	if (partialJson.length === 0) return undefined;
-	const trimmed = partialJson.trimStart();
-	if (trimmed.length === 0) return undefined;
-	const first = trimmed[0];
-	// Function-tool arguments stream as JSON. Custom/free-form tools stream raw
-	// text in the same transport field; only the raw form is a valid fallback for
-	// the conventional `input` parameter.
-	if (first === "{" || first === '"') return undefined;
-	return partialJson;
-}
-
-/** Read the streamed raw-JSON buffer a tool block stashes on its args, narrowed
- *  rather than cast: a missing or non-string `__partialJson` yields `undefined`. */
-function partialJsonOf(args: unknown): string | undefined {
-	if (args == null || typeof args !== "object" || !("__partialJson" in args)) return undefined;
-	const value = args.__partialJson;
-	return typeof value === "string" ? value : undefined;
-}
-
-function getArgsWithStreamedTextInput(args: unknown): unknown {
-	if (args == null || typeof args !== "object") return args;
-	const record = args as Record<string, unknown>;
-	if (typeof record.input === "string") return args;
-	const input = rawTextInputFromPartialJson(record.__partialJson);
-	return input === undefined ? args : { ...record, input };
 }
 
 type ToolRendererStage = "call" | "result";
@@ -232,18 +160,14 @@ export interface ToolExecutionUi {
 }
 
 export interface ToolExecutionOptions {
-	snapshots?: SnapshotStore;
-	/** Session-persistent edit clipboard register, forked per preview frame. */
-	clipboard?: Clipboard;
 	showImages?: boolean; // default: true (only used if terminal supports images)
 	/** Allow the name-keyed renderer registry only when the active tool is the built-in implementation. */
 	useBuiltInRenderer?: boolean;
-	editFuzzyThreshold?: number;
-	editAllowFuzzy?: boolean;
 }
 
 export interface ToolExecutionHandle extends Component {
 	updateArgs(args: any, toolCallId?: string): void;
+	updateStreamPreview?(update: unknown): void;
 	updateResult(
 		result: {
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -350,10 +274,6 @@ export class ToolExecutionComponent extends Container {
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
 	#showImages: boolean;
-	#editFuzzyThreshold: number | undefined;
-	#editAllowFuzzy: boolean | undefined;
-	#snapshots?: SnapshotStore;
-	#clipboard?: Clipboard;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
 	// partial updates, but the block is ready to retire as history.
@@ -367,8 +287,8 @@ export class ToolExecutionComponent extends Container {
 	#blockVersion = 0;
 	#lastDisplayKey: string | undefined;
 	// Bumped whenever a render input that #rebuildDisplay consumes but the memo
-	// key cannot cheaply hash changes: streamed call args, the async edit-diff
-	// preview, and Kitty PNG conversions. Folded into the dirty key so those
+	// key cannot cheaply hash changes: streamed call args, native edit-diff
+	// previews, and Kitty PNG conversions. Folded into the dirty key so those
 	// updates are not swallowed by the memo (see #updateDisplay).
 	#displayInputVersion = 0;
 	// Set once #rebuildDisplay has populated the display. Replaces a
@@ -383,7 +303,6 @@ export class ToolExecutionComponent extends Container {
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
 	#ui: ToolExecutionUi;
-	#cwd: string;
 	#result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError?: boolean;
@@ -392,14 +311,7 @@ export class ToolExecutionComponent extends Container {
 	// Edit preview state
 	#editMode?: EditMode;
 	#editDiffPreview?: PerFileDiffPreview[];
-	#editDiffAbort?: AbortController;
-	#editDiffLastArgsKey?: string;
-	// Latest in-flight streaming diff recompute, captured so it can be awaited.
-	#editDiffInFlight?: Promise<void>;
-	/** Set when newer args arrived while a preview compute was in flight; the
-	 *  drain loop re-runs once the current compute settles, so a slow diff
-	 *  coalesces streamed ticks instead of being aborted by each one. */
-	#editDiffDirty = false;
+	#previewReady?: PromiseWithResolvers<void>;
 	// Cached converted images for Kitty protocol (which requires PNG), keyed by index
 	#convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	// Spinner animation for partial task results
@@ -449,7 +361,7 @@ export class ToolExecutionComponent extends Container {
 		options: ToolExecutionOptions = {},
 		tool: AgentTool | undefined,
 		ui: ToolExecutionUi,
-		cwd: string = getProjectDir(),
+		_cwd: string = getProjectDir(),
 		_toolCallId?: string,
 	) {
 		super();
@@ -457,15 +369,11 @@ export class ToolExecutionComponent extends Container {
 		this.#toolLabel = tool?.label ?? toolName;
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
 		this.#showImages = options.showImages ?? true;
-		this.#editFuzzyThreshold = options.editFuzzyThreshold;
-		this.#editAllowFuzzy = options.editAllowFuzzy;
-		this.#snapshots = options.snapshots;
-		this.#clipboard = options.clipboard;
 		this.#tool = tool;
 		this.#ui = ui;
-		this.#cwd = cwd;
 		this.#args = args;
 		this.#editMode = resolveEditModeForTool(toolName, tool);
+		if (this.#editMode) this.#previewReady = Promise.withResolvers<void>();
 
 		// Always create both - contentBox for custom tools/bash/tools with renderers, contentText for other built-ins.
 		// paddingY is 1 so background-tinted blocks (custom/extension tools and the
@@ -489,7 +397,6 @@ export class ToolExecutionComponent extends Container {
 
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
-		this.#schedulePreviewDiff();
 	}
 
 	updateArgs(args: any, _toolCallId?: string): void {
@@ -501,7 +408,6 @@ export class ToolExecutionComponent extends Container {
 		this.#args = args;
 		this.#displayInputVersion++;
 		this.#updateSpinnerAnimation();
-		this.#schedulePreviewDiff();
 		this.#updateDisplay();
 	}
 
@@ -513,7 +419,6 @@ export class ToolExecutionComponent extends Container {
 		const alreadyComplete = this.#argsComplete;
 		this.#argsComplete = true;
 		this.#updateSpinnerAnimation();
-		this.#schedulePreviewDiff();
 		if (alreadyComplete) return;
 		this.#displayInputVersion++;
 		this.#updateDisplay();
@@ -530,53 +435,58 @@ export class ToolExecutionComponent extends Container {
 		this.#executionStartedAtNow = performance.now();
 		this.#argsComplete = true;
 		this.#updateSpinnerAnimation();
-		this.#schedulePreviewDiff();
 		this.#displayInputVersion++;
 		this.#updateDisplay();
 	}
 
 	/**
-	 * Await the streaming diff recompute kicked off by the most recent
-	 * `updateArgs`/`setArgsComplete`. The recompute reads the file and re-runs the
-	 * whole-file Myers diff off the render path, signalling completion only via a
-	 * throttled `requestRender`. Tests await this to sample a *settled* preview
-	 * deterministically instead of racing the spinner's render ticks.
+	 * Resolve once the final (`streaming: false`) preview batch lands or the
+	 * result settles. Callers without a live batch source (gallery snapshots)
+	 * pass a budget so a component that will never receive a batch cannot
+	 * hang them; live approval gates omit it and wait indefinitely.
 	 */
-	async whenPreviewSettled(): Promise<void> {
-		await this.#editDiffInFlight;
-	}
-
-	/**
-	 * Schedule a streaming diff preview recompute, coalescing bursts of
-	 * `updateArgs` into one compute at a time: run the current compute to
-	 * completion and re-run only after it settles when newer args arrived, never
-	 * cancelling an in-flight compute on a fresh tick. The reveal controller pushes
-	 * args ~30fps and a whole-file hashline/large-file diff can outlast a frame, so
-	 * cancel-per-tick would starve every compute and no preview would land until
-	 * args complete. Coalescing lets each diff land, so the preview tracks the
-	 * stream at the rate the diffs can sustain.
-	 */
-	#schedulePreviewDiff(): void {
-		if (!this.#editMode) return;
-		this.#editDiffDirty = true;
-		if (this.#editDiffInFlight) return;
-		this.#editDiffInFlight = this.#drainPreviewDiff().finally(() => {
-			this.#editDiffInFlight = undefined;
-		});
-	}
-
-	async #drainPreviewDiff(): Promise<void> {
-		// One microtask of deferral so a same-tick settled result (transcript
-		// rebuild: construct → updateResult within one sync replay chunk) cancels
-		// the compute before the edit engine runs instead of after. Session
-		// restore settles thousands of historical edit calls this way; without
-		// the deferral each one re-ran the full sloppy matcher + whole-file diff
-		// to produce a preview the renderer discards in favor of `details.diff`.
-		await undefined;
-		while (this.#editDiffDirty) {
-			this.#editDiffDirty = false;
-			await this.#computePreviewDiff();
+	async whenPreviewSettled(timeoutMs?: number): Promise<void> {
+		if (this.#previewReady === undefined) return;
+		if (timeoutMs === undefined) {
+			await this.#previewReady.promise;
+			return;
 		}
+		await Promise.race([this.#previewReady.promise, Bun.sleep(timeoutMs)]);
+	}
+
+	updateStreamPreview(update: unknown): void {
+		if (
+			this.#previewDiffSettled() ||
+			update === null ||
+			typeof update !== "object" ||
+			!("files" in update) ||
+			!Array.isArray(update.files)
+		) {
+			return;
+		}
+		if ("streaming" in update && update.streaming === false) this.#previewReady?.resolve();
+		if (update.files.length === 0) return;
+		const rawFiles: unknown[] = update.files;
+		const files = rawFiles.filter(
+			(
+				file,
+			): file is {
+				path: string;
+				diff?: string | null;
+				firstChangedLine?: number | null;
+				error?: string | null;
+			} => file !== null && typeof file === "object" && "path" in file && typeof file.path === "string",
+		);
+		if (files.length === 0) return;
+		this.#editDiffPreview = files.map(file => ({
+			path: file.path,
+			diff: file.diff ?? undefined,
+			firstChangedLine: file.firstChangedLine ?? undefined,
+			error: file.error ?? undefined,
+		}));
+		this.#displayInputVersion++;
+		this.#updateDisplay();
+		this.#ui.requestRender();
 	}
 
 	/**
@@ -587,76 +497,6 @@ export class ToolExecutionComponent extends Container {
 	#previewDiffSettled(): boolean {
 		const result = this.#result;
 		return result !== undefined && !this.#isPartial && (result.isError === true || result.details != null);
-	}
-	async #computePreviewDiff(): Promise<void> {
-		if (this.#previewDiffSettled()) return;
-		const editMode = this.#editMode;
-		if (!editMode) return;
-		const strategy = EDIT_MODE_STRATEGIES[editMode];
-		if (!strategy) return;
-
-		const args = this.#args;
-		if (args == null || typeof args !== "object") return;
-
-		const previewArgs = getArgsWithStreamedTextInput(args);
-		const partialJson = partialJsonOf(previewArgs);
-		const isStreaming = !this.#argsComplete;
-		let effectiveArgs: unknown;
-		try {
-			effectiveArgs = strategy.extractCompleteEdits(previewArgs, partialJson, isStreaming);
-		} catch {
-			effectiveArgs = previewArgs;
-		}
-
-		// Coalesce duplicate computes for identical args. The key pairs the
-		// streaming flag with a content hash: the final (args-complete) pass
-		// computes an untrimmed diff and must run even when the payload is
-		// byte-identical to the last streamed chunk — only `isStreaming` differs,
-		// and it flips the trailing-line trim. Without the flag a single-line edit
-		// whose trailing payload line never gets a newline stays stuck on the
-		// trimmed "no changes" streaming preview and renders no diff. Hashing keeps
-		// the retained key tiny instead of holding the whole serialized blob.
-		const streamingState = this.#argsComplete ? "final" : "stream";
-		let argsKey: string;
-		try {
-			argsKey = `${streamingState}:${Bun.hash(JSON.stringify(effectiveArgs))}`;
-		} catch {
-			// effectiveArgs isn't JSON-serializable (exotic value in tool args).
-			// The raw streamed JSON is a plain string, so hash that instead of a
-			// timestamp — a deterministic key keeps the dedup cache working
-			// instead of recomputing (and re-reading the file) on every render.
-			argsKey = `${streamingState}:partial:${Bun.hash(partialJson ?? "")}`;
-		}
-		if (argsKey === this.#editDiffLastArgsKey) return;
-		this.#editDiffLastArgsKey = argsKey;
-
-		// Single-flight (the drain loop never overlaps computes), so this controller
-		// only ever cancels the live compute on teardown via `stopAnimation`.
-		const controller = new AbortController();
-		this.#editDiffAbort = controller;
-
-		try {
-			if (editMode === "hashline" && !this.#snapshots) return;
-			const previews = await strategy.computeDiffPreview(effectiveArgs, {
-				cwd: this.#cwd,
-				signal: controller.signal,
-				snapshots: this.#snapshots!,
-				clipboard: this.#clipboard,
-				fuzzyThreshold: this.#editFuzzyThreshold,
-				allowFuzzy: this.#editAllowFuzzy,
-				isStreaming,
-			});
-			if (controller.signal.aborted) return;
-			if (previews) {
-				this.#editDiffPreview = isStreaming ? stabilizeStreamingPreviews(previews) : previews;
-				this.#displayInputVersion++;
-				this.#updateDisplay();
-				this.#ui.requestRender();
-			}
-		} catch (err) {
-			if (controller.signal.aborted) return;
-			logger.warn("Edit preview diff failed", { tool: this.#toolName, error: String(err) });
-		}
 	}
 
 	updateResult(
@@ -682,12 +522,7 @@ export class ToolExecutionComponent extends Container {
 		// When tool is complete, ensure args are marked complete so spinner stops
 		if (!isPartial) {
 			this.#argsComplete = true;
-		}
-		if (this.#editMode && this.#previewDiffSettled()) {
-			// Stop the streaming-preview pipeline: a queued or in-flight compute
-			// would produce a diff the renderer ignores once details exist.
-			this.#editDiffDirty = false;
-			this.#editDiffAbort?.abort();
+			this.#previewReady?.resolve();
 		}
 		this.#updateSpinnerAnimation();
 		this.#updateTodoStrikeAnimation();
@@ -932,11 +767,7 @@ export class ToolExecutionComponent extends Container {
 			this.#renderState.spinnerFrame = undefined;
 		}
 		this.#stopTodoStrikeAnimation();
-		this.#editDiffAbort?.abort();
-		this.#editDiffAbort = undefined;
-		// Drop any queued rerun so the drain loop exits instead of recomputing a
-		// preview for a torn-down block after its in-flight compute is aborted.
-		this.#editDiffDirty = false;
+		this.#previewReady?.resolve();
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -1398,7 +1229,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#getCallArgsForRender(): any {
-		const renderArgs = getArgsWithStreamedTextInput(this.#args);
+		const renderArgs = this.#args;
 		if (!isEditLikeToolName(this.#toolName)) {
 			return renderArgs;
 		}
@@ -1464,8 +1295,7 @@ export class ToolExecutionComponent extends Container {
 			}
 			if (!previews?.some(preview => preview.diff)) {
 				const editMode = this.#editMode;
-				const strategy = editMode ? EDIT_MODE_STRATEGIES[editMode] : undefined;
-				const fallback = strategy?.renderStreamingFallback(getArgsWithStreamedTextInput(this.#args), theme);
+				const fallback = editMode ? renderStreamingFallback(editMode, this.#args, theme) : "";
 				if (fallback) context.editStreamingFallback = fallback;
 			}
 			context.renderDiff = renderDiff;

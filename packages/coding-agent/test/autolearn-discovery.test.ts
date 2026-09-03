@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -42,6 +43,7 @@ describe("managed-skills discovery", () => {
 
 	afterEach(async () => {
 		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+		disableUserSource("claude");
 		spyOn(os, "homedir").mockRestore();
 		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);
@@ -137,6 +139,7 @@ describe("managed-skills discovery", () => {
 	it("preserves provider priority when duplicate authored providers are both enabled (#4648)", async () => {
 		await writeSkill(path.join(tempHome, ".claude", "skills"), "priority-authored", "Enabled claude.");
 		await writeSkill(path.join(tempHome, ".agents", "skills"), "priority-authored", "Enabled agents.");
+		enableUserSource("claude");
 		const { skills } = await loadSkills({ cwd: tempCwd });
 		const matches = skills.filter(s => s.name === "priority-authored");
 		expect(matches).toHaveLength(1);

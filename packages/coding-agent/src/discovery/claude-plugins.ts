@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { registerProvider } from "../capability";
+import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
@@ -44,8 +44,10 @@ async function allowedRoots(
 	surface: "skills" | "mcp" | "other",
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	const flags = await Promise.all(roots.map(root => legacyProviderAllowed(root.path, surface)));
-	return { roots: roots.filter((_, i) => flags[i]), warnings };
+	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
+	const scopedRoots = userEnabled ? roots : roots.filter(r => r.scope === "project");
+	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
+	return { roots: scopedRoots.filter((_, i) => flags[i]), warnings };
 }
 
 interface ClaudePluginManifest {
