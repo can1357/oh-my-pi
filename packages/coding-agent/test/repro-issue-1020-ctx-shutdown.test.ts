@@ -75,6 +75,7 @@ describe("issue #1020 - ctx.shutdown() in interactive mode", () => {
 			syncComposerShape: () => {},
 			session: {
 				extensionRunner: fakeExtensionRunner,
+				discoverStartupSkillPaths: async () => {},
 			},
 			setToolUIContext: () => {},
 			editor: {

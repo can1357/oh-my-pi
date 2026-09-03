@@ -1352,6 +1352,9 @@ export class VibeSessionRegistry {
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: [...(session.skills ?? [])],
+			// Parent snapshot forwarded for perf; keep the child's own
+			// resources_discover contributions mergeable (executor.ts).
+			mergeDiscoveredSkillPaths: true,
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,

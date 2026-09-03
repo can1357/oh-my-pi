@@ -53,6 +53,19 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
+	// resources_discover and session_start handlers share this action context, so
+	// a handler calling sendMessage/sendUserMessage starts an async session send
+	// that the action itself does not expose a promise for (callers only see
+	// trackAgentInvokingMessage/markAgentInvokingMessage side effects). Track
+	// every such send here so callers can drain them before proceeding — matching
+	// the task executor's equivalent queue (executor.ts, `pendingExtensionMessages`).
+	const pendingExtensionSends: Promise<unknown>[] = [];
+	const drainPendingExtensionSends = async (): Promise<void> => {
+		while (pendingExtensionSends.length > 0) {
+			await Promise.all(pendingExtensionSends.splice(0));
+		}
+	};
+
 	runner.initialize(
 		// ExtensionActions
 		{
@@ -75,9 +88,11 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 						);
 					}
 				}
-				sendTask.catch(e => {
-					reportSendError("extension_send", e instanceof Error ? e : new Error(String(e)));
-				});
+				pendingExtensionSends.push(
+					sendTask.catch(e => {
+						reportSendError("extension_send", e instanceof Error ? e : new Error(String(e)));
+					}),
+				);
 			},
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
@@ -86,9 +101,11 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				} else {
 					markAgentInvokingMessage?.();
 				}
-				sendTask.catch(e => {
-					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
-				});
+				pendingExtensionSends.push(
+					sendTask.catch(e => {
+						reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
+					}),
+				);
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
@@ -155,4 +172,21 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 
 	runner.onError(reportRuntimeError);
 	await runner.emit({ type: "session_start" });
+	// A session_start handler can call sendMessage/sendUserMessage (e.g. to
+	// announce startup state) from the same shared action context as any other
+	// handler; drain those before resources_discover so they land in order.
+	await drainPendingExtensionSends();
+	// resources_discover fires after `session_start` per its public contract
+	// (extensibility/extensions/types.ts) — only now are runtime actions and
+	// `onError` wired, so extension-contributed skill directories are folded
+	// into the session's skill snapshot before the first prompt.
+	await session.discoverStartupSkillPaths();
+	// A resources_discover handler can likewise call sendMessage/sendUserMessage
+	// (e.g. to announce a discovered directory); the action starts the send but
+	// never exposes its promise, so without this the caller (print mode's
+	// immediate session.prompt(), print-mode.ts) can observe the session as
+	// still streaming and throw AgentBusyError, or reorder the initial turn.
+	// Drain before returning so every extension-triggered send is settled —
+	// mirrors the task executor's post-discovery drain (executor.ts).
+	await drainPendingExtensionSends();
 }

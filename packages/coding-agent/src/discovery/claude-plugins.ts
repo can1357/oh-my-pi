@@ -17,6 +17,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
+import { realpathIfExists } from "./contained-path";
 import {
 	buildRuleFromMarkdown,
 	type ClaudePluginRoot,
@@ -59,6 +60,13 @@ interface ClaudePluginManifest {
 interface ResolvedPluginDir {
 	dirs: string[];
 	warnings: string[];
+	/**
+	 * Dirs that came from a manifest declaration (rather than the
+	 * conventional fallback). A declared entry may point directly at a
+	 * single skill directory, so skill scans treat its own `SKILL.md` as a
+	 * leaf boundary; the fallback collection root never is.
+	 */
+	declaredDirs: Set<string>;
 }
 
 interface ResolvedMCPConfig {
@@ -176,7 +184,7 @@ async function resolvePluginDir(
 	}
 
 	if (configured === undefined) {
-		return { dirs: [fallbackDir], warnings: [] };
+		return { dirs: [fallbackDir], warnings: [], declaredDirs: new Set() };
 	}
 
 	// Dedup preserves order: default entry (when included) first, then declared
@@ -186,6 +194,7 @@ async function resolvePluginDir(
 	const seen = new Set<string>();
 	const dirs: string[] = [];
 	const warnings: string[] = [];
+	const declaredDirs = new Set<string>();
 	if (includeFallback) {
 		seen.add(fallbackDir);
 		dirs.push(fallbackDir);
@@ -201,9 +210,10 @@ async function resolvePluginDir(
 		if (seen.has(resolved)) continue;
 		seen.add(resolved);
 		dirs.push(resolved);
+		declaredDirs.add(resolved);
 	}
 
-	return { dirs, warnings };
+	return { dirs, warnings, declaredDirs };
 }
 
 // =============================================================================
@@ -218,12 +228,15 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const results = await Promise.all(
 		roots.map(async root => {
 			const includeFallback = !(await skillsManifestReplacesFallback(root));
-			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(
-				root,
-				["skills"],
-				"skills",
-				includeFallback,
-			);
+			const {
+				dirs: skillsDirs,
+				warnings: resolveWarnings,
+				declaredDirs,
+			} = await resolvePluginDir(root, ["skills"], "skills", includeFallback);
+			// §4.1 containment for candidates below the resolved dirs: a
+			// symlinked child inside a declared directory must not pull in
+			// skills from outside the plugin package.
+			const realRoot = await realpathIfExists(root.path);
 			const scanResults = await Promise.all(
 				skillsDirs.map(dir =>
 					scanSkillsFromDir(ctx, {
@@ -231,6 +244,11 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.scope,
 						includeSelf: true,
+						// Only a manifest-DECLARED entry may be an individual skill
+						// leaf; the conventional `skills/` collection keeps loading a
+						// root SKILL.md alongside its children.
+						selfIsBoundary: declaredDirs.has(dir),
+						containWithin: realRoot ?? undefined,
 					}),
 				),
 			);

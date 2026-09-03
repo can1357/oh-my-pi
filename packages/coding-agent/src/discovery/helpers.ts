@@ -393,6 +393,25 @@ export interface ScanSkillsFromDirOptions {
 	 * semantic every non-Claude provider relies on.
 	 */
 	includeSelf?: boolean;
+	/**
+	 * Filesystem-resolved root every discovered `SKILL.md` must stay within
+	 * (Agent Plugins §4.1 containment). A candidate whose resolved path
+	 * escapes this root is skipped with a warning instead of loaded — a
+	 * symlinked child inside a declared directory must not pull in external
+	 * skills. Unset: no containment; the symlinked curated-pool convention
+	 * (native/opencode skill dirs) depends on following links outside the
+	 * scanned directory.
+	 */
+	containWithin?: string;
+	/**
+	 * With {@link includeSelf}, a directory whose own `SKILL.md` loaded is
+	 * treated as a LEAF: nested fixtures (`examples/demo/SKILL.md`) are not
+	 * scanned as separate skills. Manifest entries pointing directly at one
+	 * skill directory set this; conventional collection roots (a plugin's
+	 * `skills/` fallback) leave it unset so a root `SKILL.md` still loads
+	 * alongside the child skills, as it always did.
+	 */
+	selfIsBoundary?: boolean;
 }
 
 // Stable ordering used for skill lists in prompts: name (case-insensitive), then name, then path.
@@ -411,7 +430,30 @@ export async function scanSkillsFromDir(
 ): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
-	const { dir, level, providerId, requireDescription = false } = options;
+	const { level, providerId, requireDescription = false, containWithin } = options;
+	// Under containment the scan dir must be canonical before candidates are
+	// built from it: a symlinked plugin root (marketplace install, --plugin-dir)
+	// yields lexical candidate paths outside the canonical root, and the
+	// lexical pre-check in `resolveContainedPath` would then reject every
+	// valid skill (PR #9379 round-6 review). The root itself must also PROVE
+	// containment before the readdir below — a `skills/` dir that is itself a
+	// symlink out of the package must fail closed without being enumerated
+	// (round-9 review). Resolve FIRST, then contain: the caller-provided path
+	// may be lexically outside the canonical base (reached through a
+	// symlinked install path) while resolving inside it.
+	let dir = options.dir;
+	if (containWithin !== undefined) {
+		const realDir = await realpathIfExists(options.dir);
+		if (realDir === null) {
+			return { items, warnings };
+		}
+		const resolvedRoot = await resolveContainedPath(containWithin, realDir);
+		if (resolvedRoot.status !== "ok") {
+			warnings.push(`Skipping skills directory outside the plugin root: ${options.dir}`);
+			return { items, warnings };
+		}
+		dir = resolvedRoot.realPath;
+	}
 
 	let entries: fs.Dirent[];
 	try {
@@ -442,6 +484,12 @@ export async function scanSkillsFromDir(
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
 				level,
+				// §4.1: `skill://` asset access enforces canonical containment
+				// only when `containRoot` is present (skill-protocol.ts,
+				// bash-skill-urls.ts) — a scan that proved containment must
+				// stamp the root, or an in-package SKILL.md could still reach
+				// assets through an out-of-package symlink.
+				...(containWithin !== undefined && { containRoot: containWithin }),
 				_source: createSourceMeta(providerId, skillPath, level),
 			});
 		} catch {
@@ -449,11 +497,32 @@ export async function scanSkillsFromDir(
 		}
 	};
 
+	// Containment gate (Agent Plugins §4.1): a candidate reached through a
+	// symlink inside a declared directory may resolve outside the plugin
+	// root; prove containment before the read consumes external content.
+	const loadContained = async (skillPath: string): Promise<void> => {
+		if (containWithin === undefined) return loadSkill(skillPath);
+		const resolved = await resolveContainedPath(containWithin, skillPath);
+		if (resolved.status === "outside") {
+			warnings.push(`Skipping skill outside the plugin root: ${skillPath}`);
+			return;
+		}
+		if (resolved.status === "missing") return;
+		return loadSkill(skillPath);
+	};
+
 	const work: Promise<void>[] = [];
 	if (options.includeSelf) {
 		const selfSkillPath = path.join(dir, "SKILL.md");
 		if (fs.existsSync(selfSkillPath)) {
-			work.push(loadSkill(selfSkillPath));
+			await loadContained(selfSkillPath);
+			if (options.selfIsBoundary) {
+				// A directly declared skill directory is a leaf, not a collection:
+				// its own SKILL.md defines the single skill, and nested fixtures
+				// (`examples/demo/SKILL.md`) must not surface as separate skills.
+				items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
+				return { items, warnings };
+			}
 		}
 	}
 	for (const entry of entries) {
@@ -461,7 +530,43 @@ export async function scanSkillsFromDir(
 		if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 		const skillPath = path.join(dir, entry.name, "SKILL.md");
 		if (fs.existsSync(skillPath)) {
-			work.push(loadSkill(skillPath));
+			work.push(loadContained(skillPath));
+			continue;
+		}
+		// Namespace directory: curated pools nest one level (<dir>/<ns>/<skill>/SKILL.md),
+		// e.g. skills/core-ops/deel/SKILL.md via the symlinked pools in ~/.claude/skills
+		// and ~/.config/opencode/skills. A dir without its own SKILL.md is scanned exactly
+		// one level deeper; deeper nesting stays invisible.
+		const namespaceDir = path.join(dir, entry.name);
+		if (containWithin !== undefined) {
+			// The readdir below FOLLOWS a symlinked namespace dir, so containment
+			// must be proven before enumeration — not only per candidate file —
+			// or a link to a large or sensitive external tree gets traversed.
+			const resolved = await resolveContainedPath(containWithin, namespaceDir);
+			if (resolved.status === "outside") {
+				warnings.push(`Skipping skill namespace outside the plugin root: ${namespaceDir}`);
+				continue;
+			}
+			if (resolved.status === "missing") continue;
+		}
+		let children: fs.Dirent[];
+		try {
+			children = await fs.promises.readdir(namespaceDir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const child of children) {
+			if (child.name.startsWith(".")) continue;
+			if (!child.isDirectory() && !child.isSymbolicLink()) continue;
+			const nestedSkillPath = path.join(dir, entry.name, child.name, "SKILL.md");
+			// Async existence check folded into `work` (not awaited inline) so
+			// scanning a namespace with many children stays fully concurrent
+			// instead of serially blocking the event loop with sync fs stats.
+			work.push(
+				Bun.file(nestedSkillPath)
+					.exists()
+					.then(exists => (exists ? loadContained(nestedSkillPath) : undefined)),
+			);
 		}
 	}
 	await Promise.all(work);

@@ -584,4 +584,125 @@ describe("listClaudePluginRoots", () => {
 		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("user");
 	});
+
+	test("a skills/ dir that is itself a symlink outside the plugin is rejected before enumeration (PR #9379 round-9 review)", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "rooted-link-plugin");
+		const outside = path.join(tempDir, "outside-skills-tree");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginPath, { recursive: true });
+		await fs.mkdir(path.join(outside, "escaped-root-skill"), { recursive: true });
+		await fs.writeFile(
+			path.join(outside, "escaped-root-skill", "SKILL.md"),
+			"---\nname: escaped-root-skill\ndescription: Behind a symlinked scan root\n---\nBody\n",
+		);
+		// The conventional `skills/` dir itself is a symlink OUT of the package:
+		// containment must fail closed before the readdir enumerates the target.
+		await fs.symlink(outside, path.join(pluginPath, "skills"), "dir");
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"rooted-link-plugin@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+		expect(result.all.some(skill => skill.name === "escaped-root-skill")).toBe(false);
+		expect(result.warnings).toContainEqual(
+			expect.stringContaining("Skipping skills directory outside the plugin root"),
+		);
+	});
+
+	test("a conventional skills/ collection with a root SKILL.md keeps loading its children (PR #9379 round-8 review)", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "collection-plugin");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "skills", "child-skill"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"collection-plugin@market": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		// No manifest: the conventional skills/ fallback is a COLLECTION even
+		// when it carries a root SKILL.md — the root loads alongside children,
+		// unlike a manifest entry declaring an individual skill directory.
+		await fs.writeFile(
+			path.join(pluginPath, "skills", "SKILL.md"),
+			"---\nname: root-skill\ndescription: Root of the collection\n---\nBody\n",
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "skills", "child-skill", "SKILL.md"),
+			"---\nname: child-skill\ndescription: Child inside the collection\n---\nBody\n",
+		);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const names = result.all.map(skill => skill.name);
+		expect(names).toContain("root-skill");
+		expect(names).toContain("child-skill");
+	});
+
+	test("a symlinked install path still discovers manifest skills under containment (PR #9379 round-6 review)", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const realPluginPath = path.join(tempDir, "plugins", "real-linked-plugin");
+		// The registry records a SYMLINK as the install path — the marketplace
+		// install / --plugin-dir shape. Containment must canonicalize the scan
+		// dirs too, or every skill silently classifies as outside the root.
+		const linkedPluginPath = path.join(tempDir, "plugins", "linked-plugin");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(realPluginPath, ".claude-plugin"), { recursive: true });
+		await fs.mkdir(path.join(realPluginPath, "skills", "linked-skill"), { recursive: true });
+		await fs.symlink(realPluginPath, linkedPluginPath, "dir");
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"linked-plugin@market": [
+					{
+						scope: "user",
+						installPath: linkedPluginPath,
+						version: "1.0.0",
+						installedAt: "2025-01-01T00:00:00Z",
+						lastUpdated: "2025-01-01T00:00:00Z",
+					},
+				],
+			},
+		};
+
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(path.join(realPluginPath, ".claude-plugin", "plugin.json"), JSON.stringify({}));
+		await fs.writeFile(
+			path.join(realPluginPath, "skills", "linked-skill", "SKILL.md"),
+			"---\nname: linked-skill\ndescription: Reached through a symlinked install path\n---\nBody\n",
+		);
+
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const found = result.all.find(skill => skill.name === "linked-skill");
+		expect(found).toBeDefined();
+		// The scan proved containment, so the loaded skill must carry the resolved
+		// root — `skill://` asset access enforces canonical containment only when
+		// `containRoot` is present (PR #9379 round-9 review).
+		expect(found?.containRoot).toBe(await fs.realpath(linkedPluginPath));
+	});
 });

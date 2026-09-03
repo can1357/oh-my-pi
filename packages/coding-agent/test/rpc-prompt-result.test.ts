@@ -119,6 +119,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
 				sentOptions = options;
 				return true;
@@ -167,6 +168,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			// Mirrors AgentSession.sendCustomMessage's aside contract: `false` iff no turn started.
 			sendCustomMessage: async () => false,
 		} as unknown as AgentSession;
@@ -221,6 +223,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendCustomMessage: async () => true,
 		} as unknown as AgentSession;
 
@@ -272,6 +275,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendUserMessage: async (content: unknown) => {
 				sentContent = content;
 			},
@@ -324,6 +328,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendUserMessage: async () => {
 				throw thrown;
 			},
