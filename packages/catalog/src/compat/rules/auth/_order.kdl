@@ -3,7 +3,7 @@
 // without a login flow sort alphabetically after this list.
 login-order "openai-codex" "anthropic" "zai" "zai-coding-plan" "kimi-code" "openrouter" "github-copilot" \
 	"cursor" "devin" "google-antigravity" "google-gemini-cli" "openai-codex-device" "xai" "xai-oauth" \
-	"gitlab-duo" "gitlab-duo-agent" "alibaba-coding-plan" "alibaba-token-plan" "aiand" "zhipu-coding-plan" \
+	"gitlab-duo" "gitlab-duo-agent" "alibaba-coding-plan" "alibaba-token-plan" "aiand" "abliteration" "zhipu-coding-plan" \
 	"umans" "qwen-portal" "sakana" "minimax-code" "minimax-code-cn" "xiaomi" "xiaomi-token-plan-sgp" \
 	"xiaomi-token-plan-ams" "xiaomi-token-plan-cn" "firepass" "cline-pass" "deepseek" "meta" "moonshot" \
 	"cerebras" "baseten" "fireworks" "together" "nvidia" "novita" "deepinfra" "huggingface" "perplexity" \

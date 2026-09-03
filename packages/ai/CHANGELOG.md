@@ -5,6 +5,8 @@
 ### Added
 
 - Added Muse Code subscriptions as a Meta login option, with subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
+- Added `/login abliteration` (API key validated against `/v1/models`) with `ABLITERATION_API_KEY` / `ABLIT_KEY` env fallbacks ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
+
 ### Changed
 
 - Provider login and token-refresh flows are now driven by the catalog's `auth/*.kdl` rules through generic API-key, authorization-code and device-code engines; hand-written per-provider registry modules were removed and provider-specific residue lives in named hooks

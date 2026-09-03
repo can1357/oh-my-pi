@@ -5,9 +5,18 @@
 ### Fixed
 
 - Fixed strict authentication probes using Meta account tokens instead of Muse Code subscription keys.
+### Added
+
+- Added the Abliteration provider to `/login` and `ABLITERATION_API_KEY` to `--help` ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
+
 ### Changed
 
 - Removed incorrect retry instructions from unsupported model error messages
+- Refreshed the built-in `smol`/`slow` model priority chains: `slow` now prefers Codex GPT-5.6 Sol, then Claude Fable 5.1/5, Kimi K3, GLM-5.3, Opus 5; `smol` prefers the newest Gemini Flash, then gpt-oss-120b, Cerebras GLM, Haiku 4.5, GPT-5.6 Luna. Older generations (Opus 4.1–4.7, GPT-5.1–5.4) dropped from the chains.
+
+### Removed
+
+- Removed the bundled `designer` subagent and the `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
 
 ### Fixed
 

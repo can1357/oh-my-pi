@@ -8,6 +8,7 @@
 - Added the `auth/*.kdl` rule stratum: every provider's login, refresh, env-key and credential policy is now declared in KDL and compiled into `rules.json` (`bun run gen:compat`), with typed accessors in `compat/auth` and generated provider-id unions in `compat/auth-ids`
 - Added GLM 5.3 Promo 50 model
 - Added support for computer-use capabilities in model configurations
+- Added the Abliteration (abliteration.ai) provider with its documented `abliterated-model*` catalog and live `/v1/models` discovery ([#10515](https://github.com/can1357/oh-my-pi/pull/10515) by [@kmccleary3301](https://github.com/kmccleary3301))
 
 ### Changed
 

@@ -2,6 +2,7 @@
 	"version": 1,
 	"files": [
 		"auth/_order.kdl",
+		"auth/abliteration.kdl",
 		"auth/aiand.kdl",
 		"auth/aimlapi.kdl",
 		"auth/alibaba-coding-plan.kdl",
@@ -100,6 +101,7 @@
 		"classes/qwen.kdl",
 		"classes/stepfun.kdl",
 		"classes/xai.kdl",
+		"providers/abliteration.kdl",
 		"providers/aiand.kdl",
 		"providers/aimlapi.kdl",
 		"providers/alibaba-coding-plan.kdl",
@@ -581,6 +583,32 @@
 						"rationale": "The opaque Umans lab deployment is backed by the reviewed GLM 5.3 Flash family",
 						"provenance": "models.json census",
 						"provider": "umans",
+						"class": "glm"
+					},
+					{
+						"id": "abliteration-glm-5-3-family",
+						"model": "abliterated-model-large-v2",
+						"rationale": "Abliteration's Large V2 is an abliterated GLM 5.3 deployment",
+						"provenance": "docs.abliteration.ai/models (2026-09)",
+						"provider": "abliteration",
+						"class": "glm",
+						"revision": "5.3.0"
+					},
+					{
+						"id": "abliteration-glm-5-2-family",
+						"model": "abliterated-model-large",
+						"rationale": "Abliteration's Large is an abliterated GLM 5.2 deployment",
+						"provenance": "docs.abliteration.ai/models (2026-09)",
+						"provider": "abliteration",
+						"class": "glm",
+						"revision": "5.2.0"
+					},
+					{
+						"id": "abliteration-glm-base-family",
+						"model": "abliterated-model",
+						"rationale": "Abliteration's base deployment is GLM-derived; the docs do not pin the revision",
+						"provenance": "docs.abliteration.ai/models (2026-09)",
+						"provider": "abliteration",
 						"class": "glm"
 					}
 				]
@@ -5002,7 +5030,83 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:39",
+				"source": "classes/glm.kdl:46",
+				"class": "glm",
+				"providers": [
+					"abliteration"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.2.0"
+					},
+					{
+						"op": "<",
+						"revision": "5.3.0"
+					}
+				],
+				"wire": {
+					"reasoningEffortMap": {
+						"xhigh": "max"
+					}
+				},
+				"thinking": {
+					"defaultLevel": "high",
+					"efforts": [
+						"high",
+						"xhigh",
+						"max"
+					]
+				}
+			},
+			{
+				"source": "classes/glm.kdl:55",
+				"class": "glm",
+				"providers": [
+					"abliteration"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.3.0"
+					}
+				],
+				"wire": {
+					"reasoningEffortMap": {
+						"medium": "high",
+						"xhigh": "max"
+					}
+				},
+				"thinking": {
+					"defaultLevel": "max",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					],
+					"requiresEffort": true
+				}
+			},
+			{
+				"source": "classes/glm.kdl:42",
+				"class": "glm",
+				"providers": [
+					"abliteration"
+				],
+				"thinking": {
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high",
+						"xhigh"
+					]
+				}
+			},
+			{
+				"source": "classes/glm.kdl:68",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -5030,7 +5134,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:49",
+				"source": "classes/glm.kdl:78",
 				"class": "glm",
 				"providers": [
 					"zai"
@@ -5051,7 +5155,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:61",
+				"source": "classes/glm.kdl:90",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -5071,7 +5175,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:65",
+				"source": "classes/glm.kdl:94",
 				"class": "glm",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5083,7 +5187,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:69",
+				"source": "classes/glm.kdl:98",
 				"class": "glm",
 				"providers": [
 					"openrouter",
@@ -5100,7 +5204,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:80",
+				"source": "classes/glm.kdl:109",
 				"class": "glm",
 				"models": [
 					{
@@ -6514,6 +6618,16 @@
 				"class": "xai",
 				"wire": {
 					"thinkingLoopGuard": "xai"
+				}
+			},
+			{
+				"source": "providers/abliteration.kdl:5",
+				"providers": [
+					"abliteration"
+				],
+				"wire": {
+					"includeEncryptedReasoning": false,
+					"streamIdleTimeoutMs": 0
 				}
 			},
 			{
@@ -15941,6 +16055,22 @@
 						"kind": "models-endpoint",
 						"label": "ai&",
 						"url": "https://api.aiand.com/v1/models"
+					}
+				}
+			},
+			{
+				"id": "abliteration",
+				"apiKeyFormat": "bearer",
+				"name": "Abliteration",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://abliteration.ai/console",
+					"instructions": "Copy your API key from the Abliteration console",
+					"prompt": "Paste your Abliteration API key",
+					"placeholder": "ak_...",
+					"validate": {
+						"kind": "models-endpoint",
+						"url": "https://api.abliteration.ai/v1/models"
 					}
 				}
 			},

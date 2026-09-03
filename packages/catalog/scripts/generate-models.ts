@@ -33,6 +33,7 @@ import {
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
+	ABLITERATION_STATIC_MODELS,
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
@@ -639,6 +640,12 @@ async function generateModels() {
 	// authoritative and replaces the seed.
 	if (!authoritativeCatalogProviders.has("aiand")) {
 		allModels.push(...AIAND_STATIC_MODELS);
+	}
+	// Seed Abliteration's documented catalog so the provider is usable when
+	// generation has no ABLITERATION_API_KEY. A live `/v1/models` snapshot is
+	// authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("abliteration")) {
+		allModels.push(...ABLITERATION_STATIC_MODELS);
 	}
 	// Seed Yolo-Auto's documented catalog so the provider is usable when
 	// generation has no YOLO_AUTO_API_KEY. A live `/v1/models` snapshot is
