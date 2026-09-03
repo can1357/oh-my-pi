@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp update` falsely warning "could not verify updated version" on mise installs: verification now runs the exact version's install dir resolved through mise instead of the update process's stale PATH entry, and recovery hints point at `mise install --force` instead of the curl installer.
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes

@@ -443,6 +443,31 @@ async function getMiseBinDirs(): Promise<string[]> {
 	}
 }
 
+/**
+ * Resolve the bin directory mise installed `version` into, without consulting
+ * the running process's PATH. `mise activate` exports the pinned version's
+ * install dir (`.../installs/github-can1357-oh-my-pi/<old>`) ahead of the
+ * shims, and `mise upgrade` deletes that dir when it uninstalls the old
+ * version — so a PATH lookup inside the still-running old process finds the
+ * removed binary. Passing the explicit `tool@version` resolves the install
+ * dir for the exact expected version regardless of the stale PATH and of any
+ * cwd-local tool pins.
+ */
+async function getMiseVersionBinDir(version: string): Promise<string | undefined> {
+	if (!$which("mise")) return undefined;
+	try {
+		const result = await $`mise bin-paths ${MISE_TOOL}@${version}`.quiet().nothrow();
+		if (result.exitCode !== 0) return undefined;
+		return result
+			.text()
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.find(line => line.length > 0);
+	} catch {
+		return undefined;
+	}
+}
+
 function getMiseDataDir(): string {
 	const override = process.env.MISE_DATA_DIR;
 	if (override && override.length > 0) return override;
@@ -1193,6 +1218,55 @@ async function printVerification(expectedVersion: string): Promise<void> {
 	printVerificationResult(await verifyInstalledVersion(expectedVersion), expectedVersion);
 }
 
+/** Injectable probes for {@link printMiseVerification}; production steps shell out to mise. */
+export interface MiseVerificationSteps {
+	/** Resolve the bin dir mise installed `version` into, or undefined when unresolvable. */
+	binDirForVersion: (version: string) => Promise<string | undefined>;
+	/** Fall back to the PATH-based probe used by every other update channel. */
+	verifyViaPath: (expectedVersion: string) => Promise<InstalledVersionVerification>;
+}
+
+function productionMiseVerificationSteps(): MiseVerificationSteps {
+	return {
+		binDirForVersion: getMiseVersionBinDir,
+		verifyViaPath: verifyInstalledVersion,
+	};
+}
+
+/**
+ * Verify a mise update by running the exact binary mise just installed.
+ *
+ * The PATH probe {@link printVerification} relies on is guaranteed stale for
+ * an activated mise: `mise activate` exports the pinned version's install dir
+ * ahead of the shims, and `mise upgrade` uninstalls the old version dir, so
+ * `$which(omp)` inside the still-running old process finds the removed
+ * binary. The version-pinned probe resolves the new install dir through mise
+ * itself, independent of the stale PATH and of cwd-local tool pins.
+ */
+export async function printMiseVerification(
+	expectedVersion: string,
+	steps: MiseVerificationSteps = productionMiseVerificationSteps(),
+): Promise<void> {
+	const binDir = await steps.binDirForVersion(expectedVersion);
+	// mise normalizes github-release assets to the tool name; Windows assets
+	// keep the .exe suffix. Without a version-pinned dir (older mise), the
+	// PATH probe still works for shim-only setups: a shim re-reads the config
+	// pin the upgrade just bumped.
+	const binaryName = process.platform === "win32" ? `${APP_NAME}.exe` : APP_NAME;
+	const result = binDir
+		? await verifyBinaryAtPath(path.join(binDir, binaryName), expectedVersion)
+		: await steps.verifyViaPath(expectedVersion);
+	if (result.ok) {
+		printVerifiedVersion(expectedVersion);
+		return;
+	}
+	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
+	// A curl reinstall drops the binary into ~/.local/bin, which mise shims
+	// and activated install dirs shadow; recovery must go through mise itself.
+	const hint = binDir ? `mise install --force ${MISE_TOOL}@${expectedVersion}` : installerHint();
+	console.log(chalk.yellow(`You may need to reinstall: ${hint}`));
+}
+
 async function unlinkIfExists(filePath: string): Promise<void> {
 	try {
 		await fs.promises.unlink(filePath);
@@ -1686,7 +1760,7 @@ async function updateViaMise(expectedVersion: string, force: boolean): Promise<v
 		}
 	}
 
-	await printVerification(expectedVersion);
+	await printMiseVerification(expectedVersion);
 }
 
 // Monotonic within this process so two updates started in the same millisecond

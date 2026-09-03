@@ -446,6 +446,99 @@ describe("update-cli package manager commands", () => {
 	});
 });
 
+describe("update-cli mise verification", () => {
+	const version = "18.1.5";
+
+	async function prepare(): Promise<{ installDir: string; logLines: string[] }> {
+		const loadedTheme = await getThemeByName("dark");
+		if (!loadedTheme) throw new Error("theme unavailable");
+		setThemeInstance(loadedTheme);
+		const logLines: string[] = [];
+		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			logLines.push(args.map(String).join(" "));
+		});
+		const installDir = path.join(await makeTempDir(), "installs", "github-can1357-oh-my-pi", version);
+		await fs.mkdir(installDir, { recursive: true });
+		return { installDir, logLines };
+	}
+
+	async function writeFakeOmp(installDir: string, reportedVersion: string): Promise<string> {
+		const binaryPath = path.join(installDir, process.platform === "win32" ? "omp.exe" : "omp");
+		await Bun.write(binaryPath, `#!/bin/sh\necho omp/${reportedVersion}\n`);
+		await fs.chmod(binaryPath, 0o755);
+		return binaryPath;
+	}
+
+	// Regression: `mise activate` exports the pinned version's install dir in
+	// PATH and `mise upgrade` deletes that dir when it uninstalls the old
+	// version, so the PATH probe inside the still-running old process finds the
+	// removed 18.1.3 binary and always warns. Verification must ask mise where
+	// the pinned version lives instead.
+	it.skipIf(process.platform === "win32")(
+		"verifies through the version-pinned mise install dir instead of the stale PATH entry",
+		async () => {
+			const { installDir, logLines } = await prepare();
+			await writeFakeOmp(installDir, version);
+			const verifyViaPath = vi.fn(async () => ({
+				ok: false,
+				path: "/stale/installs/github-can1357-oh-my-pi/18.1.3/omp",
+			}));
+
+			await updateCli.printMiseVerification(version, {
+				binDirForVersion: async () => installDir,
+				verifyViaPath,
+			});
+
+			expect(verifyViaPath).not.toHaveBeenCalled();
+			expect(logLines.some(line => line.includes("Updated to 18.1.5"))).toBe(true);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"reports a wrong-version pinned binary with a mise-specific recovery hint",
+		async () => {
+			const { installDir, logLines } = await prepare();
+			await writeFakeOmp(installDir, "18.1.3");
+
+			await updateCli.printMiseVerification(version, {
+				binDirForVersion: async () => installDir,
+				verifyViaPath: async () => ({ ok: false }),
+			});
+
+			expect(logLines.some(line => line.includes("18.1.3") && line.includes(`expected ${version}`))).toBe(true);
+			expect(logLines.some(line => line.includes(`mise install --force github:can1357/oh-my-pi@${version}`))).toBe(
+				true,
+			);
+			expect(logLines.some(line => line.includes("omp.sh/install"))).toBe(false);
+		},
+	);
+
+	it("falls back to the PATH probe when mise cannot resolve the pinned install dir", async () => {
+		const { logLines } = await prepare();
+		const verifyViaPath = vi.fn(async () => ({ ok: true, actual: version, path: "~/.local/share/mise/shims/omp" }));
+
+		await updateCli.printMiseVerification(version, {
+			binDirForVersion: async () => undefined,
+			verifyViaPath,
+		});
+
+		expect(verifyViaPath).toHaveBeenCalledWith(version);
+		expect(logLines.some(line => line.includes(`Updated to ${version}`))).toBe(true);
+	});
+
+	it("keeps the generic installer hint for the PATH fallback failure", async () => {
+		const { logLines } = await prepare();
+
+		await updateCli.printMiseVerification(version, {
+			binDirForVersion: async () => undefined,
+			verifyViaPath: async () => ({ ok: false, path: "~/.local/share/mise/shims/omp" }),
+		});
+
+		expect(logLines.some(line => line.includes("omp.sh/install"))).toBe(true);
+		expect(logLines.some(line => line.includes("mise install --force"))).toBe(false);
+	});
+});
+
 describe("update-cli npm rename contract", () => {
 	it("parses a well-formed omp.rename pointer and rejects malformed ones", () => {
 		expect(resolveReleaseRename({ omp: { rename: { package: "@new/omp", natives: "@new/natives" } } })).toEqual({
