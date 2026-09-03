@@ -295,11 +295,11 @@ describe("fetchCursorUsableModels", () => {
 	});
 
 	it("raises documented Cursor context-window floors at buildModel time", async () => {
-		// GetUsableModels specs stay on the 200k discovery fallback (bundled
-		// refs for these ids are 200k). `providers/cursor.kdl`
-		// context-window-floor applies once the spec is built. Opus/fable
-		// use unbundled preview ids so the 300k floor is not masked by a 1M
-		// bundled reference. A labeled gpt-5.6 row stays at 1M.
+		// Discovered models that match bundled references receive the
+		// reference's contextWindow (256k Grok, 262k Kimi, 272k GPT-5.6).
+		// Unbundled preview ids stay on the 200k discovery fallback, then
+		// `providers/cursor.kdl` context-window-floor applies once the spec
+		// is built. A labeled gpt-5.6 row stays at 1M.
 		const response = create(GetUsableModelsResponseSchema, {
 			models: [
 				create(ModelDetailsSchema, { modelId: "cursor-grok-4.6" }),
@@ -318,11 +318,11 @@ describe("fetchCursorUsableModels", () => {
 		expect(models).toEqual([
 			expect.objectContaining({ id: "claude-fable-5-preview", contextWindow: 200_000 }),
 			expect.objectContaining({ id: "claude-opus-5-preview", contextWindow: 200_000 }),
-			expect.objectContaining({ id: "cursor-grok-4.5", contextWindow: 200_000 }),
-			expect.objectContaining({ id: "cursor-grok-4.6", contextWindow: 200_000 }),
-			expect.objectContaining({ id: "gpt-5.6-sol-fast", contextWindow: 200_000 }),
+			expect.objectContaining({ id: "cursor-grok-4.5", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "cursor-grok-4.6", contextWindow: 256_000 }),
+			expect.objectContaining({ id: "gpt-5.6-sol-fast", contextWindow: 272_000 }),
 			expect.objectContaining({ id: "gpt-5.6-sol-medium", contextWindow: 1_000_000 }),
-			expect.objectContaining({ id: "kimi-k2.7-code", contextWindow: 200_000 }),
+			expect.objectContaining({ id: "kimi-k2.7-code", contextWindow: 262_000 }),
 		]);
 
 		const built = models?.map(model => buildModel(model));
