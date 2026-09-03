@@ -194,9 +194,13 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		component.dispose();
 		resetSettingsForTest();
 
-		await Promise.resolve();
-		await Promise.resolve();
+		try {
+			await Promise.resolve();
+			await Promise.resolve();
 
-		expect(onBranchChange).not.toHaveBeenCalled();
+			expect(onBranchChange).not.toHaveBeenCalled();
+		} finally {
+			await Settings.init({ inMemory: true });
+		}
 	});
 });
