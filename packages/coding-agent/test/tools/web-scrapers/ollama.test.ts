@@ -26,6 +26,8 @@ describe("handleOllama URL parsing & route rejection", () => {
 		expect(await handleOllama("https://ollama.com/download", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/search", 5000)).toBeNull();
 		expect(await handleOllama("https://ollama.com/signin", 5000)).toBeNull();
+		expect(await handleOllama("https://ollama.com/pricing", 5000)).toBeNull();
+		expect(await handleOllama("https://ollama.com/account", 5000)).toBeNull();
 	});
 
 	it("returns null for malformed URLs", async () => {

@@ -41,6 +41,8 @@ const RESERVED_ROOTS = new Set([
 	"privacy",
 	"license",
 	"settings",
+	"pricing",
+	"account",
 ]);
 
 function extractMetaDescription(html: string): string | null {
