@@ -3,7 +3,9 @@ import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
 
-type SkillCommandHost = Pick<InteractiveModeContext, "skillCommands" | "session" | "showError">;
+type SkillCommandHost = Pick<InteractiveModeContext, "skillCommands" | "showError"> & {
+	session: Pick<InteractiveModeContext["session"], "promptCustomMessage">;
+};
 
 type SkillPromptMessage = Pick<
 	CustomMessage<SkillPromptDetails>,

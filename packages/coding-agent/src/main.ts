@@ -68,7 +68,7 @@ import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import type * as SetupWizardModule from "./modes/setup-wizard";
 import type { SetupScene } from "./modes/setup-wizard";
-import { buildSkillCommandPrompt, isKnownSkillCommand } from "./modes/skill-command";
+import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
@@ -340,7 +340,7 @@ export async function submitInteractiveInput(
 		}
 		const skillHost = {
 			skillCommands: mode.skillCommands,
-			session: session as AgentSession,
+			session,
 			showError: mode.showError,
 		};
 		if (input.customType) {
@@ -364,14 +364,12 @@ export async function submitInteractiveInput(
 				userInitiated: input.userInitiated,
 			});
 		} else if (isKnownSkillCommand(skillHost, input.text)) {
-			// Without this, a resubmitted loop prompt reaches the model as a literal
-			// `/skill:` token instead of the skill's expanded content (matches #8138).
-			const built = await buildSkillCommandPrompt(skillHost, input.text, streamingBehavior, input.images);
-			if (built) {
-				await session.promptCustomMessage(built.message, built.options);
-			} else {
-				await session.prompt(input.text, { images: input.images, streamingBehavior });
-			}
+			// Resubmitted skill text must dispatch through the skill path, or the
+			// model receives a literal `/skill:` token.
+			await invokeSkillCommandFromText(skillHost, input.text, streamingBehavior, {
+				images: input.images,
+				propagateErrors: true,
+			});
 		} else {
 			await session.prompt(input.text, { images: input.images, streamingBehavior });
 		}
