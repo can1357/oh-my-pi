@@ -33,7 +33,6 @@ import {
 import { getLinterClient } from "./clients";
 import { getServersForFile } from "./config";
 import {
-	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
 	isOnlyQueriedDeclaration,
@@ -352,15 +351,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const minVersion = client.diagnosticsVersion;
 						await refreshFile(client, resolved, signal);
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
-						// on demand; their first response routinely overruns the 3s single-file
-						// budget, which would otherwise surface as a false "OK". An explicit
-						// diagnostics request can afford to wait, bounded by the tool timeout.
-						const waitCapMs = detailed
-							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
-							: isProjectAwareLspServer(serverConfig)
-								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
-								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
+						// Project-aware servers (Roslyn, tsserver, rust-analyzer, …) compute pull
+						// diagnostics on demand; their first response routinely overruns the 3s
+						// single-file budget. A shorter per-file cap for globs made every file of
+						// a large workspace report "all language servers failed" (the pull never
+						// returned in time), so batch and single requests share one cap and the
+						// tool timeout bounds the whole loop.
+						const waitCapMs = isProjectAwareLspServer(serverConfig)
+							? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
+							: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 						const diagnostics = await waitForDiagnostics(client, uri, {
 							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
 							signal,

@@ -39,7 +39,6 @@ export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
  * (still capped by the tool-level timeout).
  */
 export const PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS = 10_000;
-export const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
 const DIAGNOSTICS_POLL_MS = 100;
 const DIAGNOSTICS_SETTLE_MS = 250;
 /**

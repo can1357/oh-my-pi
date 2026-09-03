@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `lsp diagnostics` on a glob reporting every file as "all language servers failed" on large workspaces: multi-file requests now wait the same per-file budget as single-file requests instead of a 400ms cap that project-aware servers such as rust-analyzer never met on their first pull (#10701).
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes
