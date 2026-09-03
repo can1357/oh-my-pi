@@ -157,23 +157,14 @@ describe("Meta Model API provider", () => {
 
 	test("keeps incomplete credential enumeration non-authoritative", async () => {
 		const options = metaModelManagerOptions({
-			apiKeys: ["LLM|catalog-a", "LLM|catalog-b"],
+			apiKeys: ["LLM|catalog-a"],
 			apiKeysComplete: false,
-			fetch: (_input, init) =>
-				Promise.resolve(
-					modelListResponse(
-						new Headers(init?.headers).get("Authorization") === "Bearer LLM|catalog-a"
-							? ["muse-spark-1.4"]
-							: ["muse-spark-1.4-contributor"],
-					),
-				),
+			fetch: () => Promise.resolve(modelListResponse(["muse-spark-1.4"])),
 		});
 
 		const result = await resolveProviderModels({ ...options, cacheDbPath: ":memory:" }, "online");
 
 		expect(result.stale).toBe(true);
-		expect(result.models.map(model => model.id)).toEqual(
-			expect.arrayContaining(["muse-spark-1.4", "muse-spark-1.4-contributor"]),
-		);
+		expect(result.models.map(model => model.id)).toContain("muse-spark-1.4");
 	});
 });

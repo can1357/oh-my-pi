@@ -4582,7 +4582,7 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 	return {
 		...primary,
 		cacheProviderId: resolveModelCacheProviderId("meta", { apiKeys, baseUrl: config?.baseUrl }),
-		...(optionsByKey.length > 1 && {
+		...((optionsByKey.length > 1 || config?.apiKeysComplete === false) && {
 			fetchDynamicModels: async () => {
 				const rosters = await Promise.all(optionsByKey.map(options => options.fetchDynamicModels?.()));
 				const available = rosters.filter(
