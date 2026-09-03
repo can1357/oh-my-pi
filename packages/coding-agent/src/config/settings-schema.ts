@@ -574,9 +574,9 @@ export const SETTINGS_SCHEMA = {
 			group: "Advisor",
 			label: "Advisor Immune Turns",
 			description:
-				"After an advisor concern or blocker interrupts, route further concerns/blockers non-interruptingly for this many primary turns.",
+				"After an advisor blocker interrupts the agent or a concern wakes an idle agent, show further concerns as visible cards instead of waking the agent for this many primary turns. Blockers are exempt. Concerns raised while the agent is running always land at its next step and are unaffected.",
 			options: [
-				{ value: "0", label: "0 turns", description: "Allow every concern/blocker to interrupt." },
+				{ value: "0", label: "0 turns", description: "Let every concern wake an idle agent." },
 				{ value: "1", label: "1 turn" },
 				{ value: "2", label: "2 turns" },
 				{ value: "3", label: "3 turns", description: "Default." },
