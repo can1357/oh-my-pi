@@ -7,6 +7,10 @@
 - Added `report` field to scout agent definitions for detailed, non-summarized findings
 - Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
 
+### Changed
+
+- Inlined approved plan content directly into agent history to reduce redundant read operations
+
 ### Fixed
 
 - Fixed protocol handler incorrectly escaping raw text content from agent responses
