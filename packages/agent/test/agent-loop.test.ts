@@ -1625,6 +1625,141 @@ describe("agentLoop with AgentMessage", () => {
 		expect(sawInterruptInContext).toBe(true);
 	});
 
+	it("keeps deferred interruptible calls off the steering-aborted signal", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		let deferredSignalAborted: boolean | undefined;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			interruptible: params => params.value === "deferred",
+			deferSteering: params => params.value === "deferred",
+			async execute(_toolCallId, params, signal) {
+				if (params.value === "deferred") deferredSignalAborted = signal?.aborted;
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `ok:${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const parentSteer: AgentMessage = {
+			role: "user",
+			content: "parent steering",
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		let steerDelivered = false;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-first", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-deferred", name: "echo", arguments: { value: "deferred" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () =>
+				executed.length >= 1 && !steerDelivered ? { queued: true, source: "agent" } : { queued: false },
+			getSteeringMessages: async () => {
+				if (executed.length < 1 || steerDelivered) return [];
+				steerDelivered = true;
+				return [parentSteer];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		expect(executed).toEqual(["first", "deferred"]);
+		expect(deferredSignalAborted).toBe(false);
+		const deferredEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === "tool-deferred",
+		);
+		expect(deferredEnd?.isError).toBe(false);
+	});
+
+	it("checks IRC cancellation after steering already interrupted the batch", async () => {
+		const toolSchema = type({ value: "string" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			interruptible: params => params.value === "deferred",
+			deferSteering: params => params.value === "deferred",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `ok:${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const parentSteer: AgentMessage = {
+			role: "user",
+			content: "parent steering",
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		let steerDelivered = false;
+		let ircChecks = 0;
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-first", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-deferred", name: "echo", arguments: { value: "deferred" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () =>
+				executed.length >= 1 && !steerDelivered ? { queued: true, source: "agent" } : { queued: false },
+			hasIrcInterrupts: () => {
+				ircChecks++;
+				return executed.length >= 1;
+			},
+			getSteeringMessages: async () => {
+				if (executed.length < 1 || steerDelivered) return [];
+				steerDelivered = true;
+				return [parentSteer];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		expect(ircChecks).toBeGreaterThan(0);
+		expect(executed).toEqual(["first"]);
+		const deferredEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === "tool-deferred",
+		);
+		expect(deferredEnd?.isError).toBe(true);
+	});
+
 	it("should skip remaining tool calls with system advisory wording when advisor steering is queued", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];

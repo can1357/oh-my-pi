@@ -268,6 +268,20 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	strict = true;
 	readonly intent = "omit" as const;
 	lenientArgValidation = true;
+	/**
+	 * Protects terminal submissions from a queued steering skip. Only a
+	 * successful incremental section (`type: [...]` with a non-error result)
+	 * stays steerable — it matches the subprocess registry's `shouldTerminate`
+	 * classification below, so an array-typed *error* submission (terminal
+	 * `status: "aborted"`) is protected like every other terminal yield.
+	 */
+	readonly deferSteering = (args: unknown): boolean => {
+		if (!isPlainRecord(args)) return true;
+		const yieldType = args.type;
+		if (!Array.isArray(yieldType) || yieldType.length === 0) return true;
+		const result = resolveResultRecord(args, yieldType as string[]);
+		return result !== undefined && typeof result.error === "string";
+	};
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;

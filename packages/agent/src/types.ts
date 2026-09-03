@@ -795,6 +795,17 @@ export interface AgentTool<
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
 	/**
+	 * Whether a queued steering message must wait for this call to execute. A
+	 * function resolves this per call from the prepared arguments. When both
+	 * policies are enabled, this overrides {@link interruptible} for steering;
+	 * external and peer-IRC aborts still apply.
+	 *
+	 * Reserve this for calls whose emitted result is a committed protocol
+	 * outcome; ordinary queued work remains skippable so immediate steering stays
+	 * responsive.
+	 */
+	deferSteering?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
+	/**
 	 * Controls how the INTENT_FIELD (`i`) is handled for this tool.
 	 * - `"require"` (default): `i` is injected and required in the parameter schema.
 	 * - `"optional"`: `i` is injected as an optional/nullable field.

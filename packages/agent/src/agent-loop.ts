@@ -2299,6 +2299,15 @@ async function prepareToolCallDispatch(
 	}
 	return prepared;
 }
+function resolveToolCallFlag<TArgs>(policy: boolean | ((args: TArgs) => boolean) | undefined, args: TArgs): boolean {
+	if (typeof policy !== "function") return policy === true;
+	try {
+		return policy(args);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Execute tool calls from an assistant message.
  */
@@ -2342,11 +2351,16 @@ async function executeToolCalls(
 	// anything; ignoring it is always safe.
 	const steeringSoftController = new AbortController();
 	// Interruptible tools (pure waits: hub wait, vibe) observe steering +
-	// external + IRC aborts. Every other tool sees ONLY the external signal:
-	// neither queued steering nor a peer IRC ever hard-kills a partially
-	// side-effecting foreground tool (e.g. `bash`) — those get the cooperative
-	// `steeringSignal` above, and the message injects at the next boundary.
+	// external + IRC aborts. Calls that defer steering omit only the steering
+	// abort, retaining external and peer-IRC cancellation. Every other tool sees
+	// ONLY the external signal: neither queued steering nor a peer IRC ever
+	// hard-kills a partially side-effecting foreground tool (e.g. `bash`) —
+	// those get the cooperative `steeringSignal` above, and the message injects
+	// at the next boundary.
 	const nonInterruptibleSignal: AbortSignal = signal ?? new AbortController().signal;
+	const deferredSteeringSignal: AbortSignal = signal
+		? AbortSignal.any([signal, ircAbortController.signal])
+		: ircAbortController.signal;
 	const interruptibleSignal: AbortSignal = signal
 		? AbortSignal.any([signal, steeringAbortController.signal, ircAbortController.signal])
 		: AbortSignal.any([steeringAbortController.signal, ircAbortController.signal]);
@@ -2365,26 +2379,20 @@ async function executeToolCalls(
 			args: toolCall.arguments as Record<string, unknown>,
 		};
 		const { tool, args } = prepared;
-		const interruptibleMode = tool?.interruptible;
-		let interruptible = false;
-		if (typeof interruptibleMode === "function") {
-			try {
-				// Resolved from the prepared (possibly hook-revised) args so an
-				// argument-dependent policy governs the call that actually runs.
-				interruptible = interruptibleMode(args);
-			} catch {
-				// Resolver failures default to preserving the tool's outcome.
-				interruptible = false;
-			}
-		} else {
-			interruptible = interruptibleMode === true;
-		}
+		const interruptible = resolveToolCallFlag(tool?.interruptible, args);
+		const deferSteering = resolveToolCallFlag(tool?.deferSteering, args);
+		const toolSignal = interruptible
+			? deferSteering
+				? deferredSteeringSignal
+				: interruptibleSignal
+			: nonInterruptibleSignal;
 		return {
 			toolCall,
 			tool,
 			args,
 			interruptible,
-			signal: interruptible ? interruptibleSignal : nonInterruptibleSignal,
+			deferSteering,
+			signal: toolSignal,
 			started: false,
 			result: undefined as AgentToolResult<any> | undefined,
 			isError: false,
@@ -2399,15 +2407,18 @@ async function executeToolCalls(
 	});
 
 	const checkIrcInterrupts = async (): Promise<void> => {
-		// IRC only fires once: a peer interrupt already recorded on interruptState
-		// must not re-abort, and (unlike steering) never re-consumes a queue.
-		if (!shouldInterruptImmediately || signal?.aborted || interruptState.triggered) return;
-		if (hasIrcInterrupts && (await hasIrcInterrupts())) {
+		// IRC has its own abort channel: steering may have fired first while a
+		// deferred interruptible call is still running. The controller, not the
+		// shared first-interrupt state, is the idempotence guard.
+		if (!shouldInterruptImmediately || signal?.aborted || ircAbortController.signal.aborted) return;
+		if (hasIrcInterrupts && (await hasIrcInterrupts()) && !ircAbortController.signal.aborted) {
 			// Peer IRC hard-aborts interruptible waits only; foreground tools keep
 			// running (no partial side effects) but get the cooperative soft
 			// signal so backgroundable work can step aside for the peer message.
-			interruptState.triggered = true;
-			interruptState.source = "irc";
+			if (!interruptState.triggered) {
+				interruptState.triggered = true;
+				interruptState.source = "irc";
+			}
 			ircAbortController.abort();
 			steeringSoftController.abort();
 		}
@@ -2448,6 +2459,9 @@ async function executeToolCalls(
 				steeringAbortController.abort();
 				steeringSoftController.abort();
 			}
+			// IRC uses an independent queue and must remain observable after
+			// steering so deferred interruptible calls retain peer cancellation.
+			await checkIrcInterrupts();
 			return;
 		}
 		await checkIrcInterrupts();
@@ -2503,8 +2517,13 @@ async function executeToolCalls(
 		// work still queued behind the aborted wait too — otherwise a batched
 		// `todo`/`write` gets dropped as "Skipped due to pending peer interrupt"
 		// purely for being ordered after the wait (#7493). User/system steering
-		// still preempts everything queued.
-		if (interruptState.triggered && (record.interruptible || interruptState.source !== "irc")) {
+		// still preempts queued work unless the call protects a committed outcome.
+		const defersCurrentInterrupt = record.deferSteering && interruptState.source !== "irc";
+		if (
+			interruptState.triggered &&
+			!defersCurrentInterrupt &&
+			(record.interruptible || interruptState.source !== "irc")
+		) {
 			// Skip both span emission and the collector orphan record here. The
 			// tail sweep below (after `Promise.allSettled`) is the single path
 			// that handles "no result message was produced" — it calls
@@ -2722,7 +2741,7 @@ async function executeToolCalls(
 	// detection hard-aborts interruptible waits, soft-signals cooperative tools
 	// (auto-background bash), and skips not-yet-started tools, so the boundary
 	// dequeue below injects the message promptly. Gated on immediate-interrupt
-	// mode; checkSteering is idempotent (no-op once triggered).
+	// mode; per-channel abort controllers make repeated checks idempotent.
 	const watchSteeringWhileRunning =
 		shouldInterruptImmediately && (hasSteeringMessages !== undefined || hasIrcInterrupts !== undefined);
 	const eventDrivenSteeringWatch =

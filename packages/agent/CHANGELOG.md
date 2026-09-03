@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed queued steering skipping tool calls whose emitted result must commit before the message is handled.
+
 ## [18.1.2] - 2026-09-01
 
 ### Fixed

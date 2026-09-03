@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -7,6 +9,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
+import { subprocessToolRegistry } from "@oh-my-pi/pi-coding-agent/task/subprocess-tool-registry";
 import { arrayValuedLabels } from "../../src/task/yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
@@ -57,6 +60,87 @@ describe("YieldTool", () => {
 		const tool = new YieldTool(createSession());
 		const result = await tool.execute("call-1", { result: { data: { ok: true } } } as never);
 		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
+	});
+	it("executes a terminal yield emitted before parent steering", async () => {
+		const tool = new YieldTool(createSession());
+		const yieldCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-yield-steering",
+			name: "yield",
+			arguments: { result: { data: { report: "finished" } } },
+		};
+		const mock = createMockModel({
+			responses: [{ content: [yieldCall] }, { content: ["parent steering handled"] }],
+		});
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+			interruptMode: "immediate",
+		});
+		const events: AgentEvent[] = [];
+		let steeringSent = false;
+		const unsubscribe = agent.subscribe(event => {
+			events.push(event);
+			if (
+				!steeringSent &&
+				event.type === "message_update" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(content => content.type === "toolCall" && content.name === "yield")
+			) {
+				steeringSent = true;
+				agent.steer({
+					role: "user",
+					content: "Wrap up now with your findings.",
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+			}
+		});
+
+		await agent.prompt("start");
+		unsubscribe();
+
+		expect(steeringSent).toBe(true);
+		const yieldEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === yieldCall.id,
+		);
+		expect(yieldEnd?.isError).toBe(false);
+		expect(yieldEnd?.result.details).toEqual({
+			data: { report: "finished" },
+			status: "success",
+			error: undefined,
+		});
+	});
+
+	it("defers steering for every terminal yield, including array-typed error submissions", async () => {
+		const handler = subprocessToolRegistry.getHandler("yield");
+		if (!handler?.shouldTerminate) throw new Error("yield subprocess handler must register shouldTerminate");
+		const shouldTerminate = handler.shouldTerminate;
+		const cases: Array<{ label: string; args: Record<string, unknown> }> = [
+			{ label: "array-typed error", args: { type: ["findings"], result: { error: "blocked" } } },
+			{ label: "array-typed success section", args: { type: ["findings"], result: { data: "one finding" } } },
+			{ label: "string-typed terminal success", args: { type: "summary", result: { data: { ok: true } } } },
+			{ label: "untyped terminal success", args: { result: { data: { ok: true } } } },
+		];
+		for (const { label, args } of cases) {
+			const tool = new YieldTool(createSession());
+			const result = await tool.execute(`call-${label}`, args as never);
+			const terminal = shouldTerminate({
+				toolName: "yield",
+				toolCallId: `call-${label}`,
+				result: { content: result.content, details: result.details },
+				isError: result.isError,
+			});
+			// A queued steering skip must fire only for a call the registry treats
+			// as non-terminal — otherwise the parent never receives the outcome.
+			expect({ label, defer: tool.deferSteering(args) }).toEqual({ label, defer: terminal });
+		}
 	});
 
 	it("accepts aborted payload with error only", async () => {
