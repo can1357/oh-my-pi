@@ -2,10 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { computeFileHash } from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey, getFileSnapshotStore } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
+import { computeFileHash } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
 import * as localProtocol from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -133,7 +132,6 @@ describe("write tool atomic local routing", () => {
 		expect(text).toContain(`[${expectedDisplayPath}#${hash}]`);
 		expect(text).toContain(`Successfully wrote ${content.length} bytes to ${expectedDisplayPath}`);
 		expect(text).toContain("[Notice: Made executable via chmod +x]");
-		expect(getFileSnapshotStore(session).byHash(canonicalSnapshotKey(absolutePath), hash)?.text).toBe(content);
 	});
 
 	it("keeps a COMMITTED local write successful when cancellation and bookkeeping failure arrive afterward", async () => {
@@ -185,6 +183,5 @@ describe("write tool atomic local routing", () => {
 		expect(result.details?.resolvedPath).toBe(absolutePath);
 		expect(text).toContain(`Successfully wrote ${content.length} bytes to ${displayPath(tmpDir, absolutePath)}`);
 		expect(text).toContain("Warning: write committed but mutation-version update failed.");
-		expect(getFileSnapshotStore(session).byHash(canonicalSnapshotKey(absolutePath), hash)?.text).toBe(content);
 	});
 });
