@@ -1,3 +1,3 @@
-Shows your worker-session roster: id, CLI flavor (`fast`/`good`), state (`starting`/`running`/`idle`/`dead`), model, turn count, queued messages, and a one-line gist of each session's latest activity.
+Worker-session roster: id, CLI flavor (`fast`/`good`), state (`starting`/`running`/`idle`/`dead`), model, turn count, queued messages, one-line gist of latest activity.
 
-Use it to reorient: which sessions exist, who is busy, who is idle and ready for the next instruction.
+Use to reorient: existing sessions, busy workers, idle workers ready for next instruction.

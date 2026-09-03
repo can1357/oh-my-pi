@@ -28,6 +28,10 @@ const anthropicErrorBody = JSON.stringify({
 	type: "error",
 	error: { type: "invalid_request_error", message: "The compiled grammar is too large." },
 });
+const anthropicOverloadedErrorBody = JSON.stringify({
+	type: "error",
+	error: { type: "overloaded_error", message: "Overloaded" },
+});
 
 describe("AnthropicMessagesClient error mapping", () => {
 	it("maps non-2xx responses to AnthropicApiError with status and body in message", async () => {
@@ -134,6 +138,19 @@ describe("AnthropicMessagesClient retries", () => {
 		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
 		expect(calls.length).toBe(3); // initial attempt + 2 retries
 	});
+
+	it("disables the cap when maxRetryDelayMs is negative", async () => {
+		const { calls, fetch } = createFetchMock([
+			new Response("overloaded", { status: 429, headers: { "retry-after-ms": "1" } }),
+			new Response("{}", { status: 200 }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch });
+
+		const response = await client.messages.create(params, { maxRetryDelayMs: -1 }).asResponse();
+
+		expect(response.status).toBe(200);
+		expect(calls.length).toBe(2);
+	});
 });
 
 describe("AnthropicMessagesClient timeout and abort", () => {
@@ -210,5 +227,451 @@ describe("AnthropicMessagesClient request assembly", () => {
 		expect(headers.authorization).toBe("Bearer right-token");
 		expect(headers.Authorization).toBeUndefined();
 		expect(calls[0].url).toBe("https://api.anthropic.com/v1/messages");
+	});
+});
+
+describe("AnthropicMessagesClient retry-after cap", () => {
+	it("uses the documented 60-second default cap when callers omit one", async () => {
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 429, headers: { "retry-after": "120" } }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch });
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		expect(error.status).toBe(429);
+		expect(calls.length).toBe(1);
+	});
+
+	it("declines a retry and preserves original status/body/headers when retry-after exceeds maxRetryDelayMs", async () => {
+		const errorHeaders = { "retry-after": "120", "request-id": "req_cap" };
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 429, headers: errorHeaders }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch });
+
+		const error = await client.messages
+			.create(params, { maxRetryDelayMs: 60_000 })
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		expect(error.status).toBe(429);
+		expect(error.message).toContain("overloaded");
+		expect(error.headers.get("request-id")).toBe("req_cap");
+		expect(calls.length).toBe(1);
+	});
+
+	it("cancels and releases an open error-body reader when the caller aborts", async () => {
+		const controller = new AbortController();
+		const encoder = new TextEncoder();
+		let readBlocked = false;
+		let bodyCancelled = false;
+		let response: Response | undefined;
+		const openBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(encoder.encode("overloaded"));
+			},
+			pull() {
+				readBlocked = true;
+				return Promise.withResolvers<void>().promise;
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const fetch: FetchImpl = async () => {
+			response = new Response(openBody, {
+				status: 429,
+				headers: { "retry-after": "120", "request-id": "req_abort" },
+			});
+			return response;
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch });
+
+		const pending = client.messages
+			.create(params, { signal: controller.signal, maxRetryDelayMs: 60_000 })
+			.asResponse();
+		for (let i = 0; i < 1000 && !readBlocked; i++) await Promise.resolve();
+		if (!readBlocked) throw new Error("Anthropic error-body read did not block");
+
+		controller.abort();
+		const error = await pending.catch(err => err as Error);
+		if (!(error instanceof Error)) throw new Error("Expected request abort error");
+		for (let i = 0; i < 1000 && !bodyCancelled; i++) await Promise.resolve();
+		if (!bodyCancelled) throw new Error("Anthropic error-body reader was not cancelled");
+
+		expect(error).toBeInstanceOf(AIError.AbortError);
+		expect(error.message).toBe("Request was aborted.");
+		expect(response?.body?.locked).toBe(false);
+	});
+
+	it("bounds a never-ending error body without a caller signal", async () => {
+		const encoder = new TextEncoder();
+		let readBlocked = false;
+		let bodyCancelled = false;
+		let response: Response | undefined;
+		const openBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(encoder.encode("overloaded"));
+			},
+			pull() {
+				readBlocked = true;
+				return new Promise<void>(() => {});
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const fetch: FetchImpl = async () => {
+			response = new Response(openBody, {
+				status: 529,
+				headers: { "retry-after": "120", "request-id": "req_body_timeout" },
+			});
+			return response;
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch });
+
+		AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(5);
+		try {
+			const error = await client.messages
+				.create(params, { maxRetryDelayMs: 60_000 })
+				.asResponse()
+				.catch(err => err as AIError.AnthropicApiError);
+			if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+			expect(readBlocked).toBe(true);
+			expect(error.status).toBe(529);
+			expect(error.message).toBe("529 overloaded");
+			expect(error.headers.get("request-id")).toBe("req_body_timeout");
+			expect(bodyCancelled).toBe(true);
+			expect(response?.body?.locked).toBe(false);
+		} finally {
+			AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(undefined);
+		}
+	});
+
+	it("preserves bounded partial error details when the body stream errors", async () => {
+		const encoder = new TextEncoder();
+		let response: Response | undefined;
+		const partialBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(encoder.encode("partial detail"));
+			},
+			pull(streamController) {
+				streamController.error(new Error("socket closed"));
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => {
+				response = new Response(partialBody, { status: 502, headers: { "request-id": "req_partial" } });
+				return response;
+			},
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error.status).toBe(502);
+		expect(error.message).toBe("502 partial detail");
+		expect(error.headers.get("request-id")).toBe("req_partial");
+		expect(response?.body?.locked).toBe(false);
+	});
+
+	it("flushes an incomplete UTF-8 prefix at clean error-body EOF", async () => {
+		let response: Response | undefined;
+		const incompleteBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(new Uint8Array([0xe2, 0x82]));
+				streamController.close();
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => {
+				response = new Response(incompleteBody, { status: 500 });
+				return response;
+			},
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error.message).toBe("500 \uFFFD");
+		expect(response?.body?.locked).toBe(false);
+	});
+
+	it("keeps complete error text without flushing an incomplete UTF-8 prefix after a read rejection", async () => {
+		const completeText = new TextEncoder().encode("complete text");
+		const completeTextWithIncompletePrefix = new Uint8Array(completeText.byteLength + 2);
+		completeTextWithIncompletePrefix.set(completeText);
+		completeTextWithIncompletePrefix.set([0xe2, 0x82], completeText.byteLength);
+		let response: Response | undefined;
+		let pullErrored = false;
+		const rejectedBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(completeTextWithIncompletePrefix);
+			},
+			pull(streamController) {
+				pullErrored = true;
+				streamController.error(new Error("socket closed"));
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => {
+				response = new Response(rejectedBody, { status: 502 });
+				return response;
+			},
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error.message).toBe("502 complete text");
+		expect(error.message).not.toContain("\uFFFD");
+		expect(response?.body?.locked).toBe(false);
+		expect(pullErrored).toBe(true);
+	});
+
+	it("does not flush an incomplete UTF-8 prefix when the error body times out", async () => {
+		const readBlocked = Promise.withResolvers<void>();
+		let didBlockRead = false;
+		let bodyCancelled = false;
+		const incompleteBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(new Uint8Array([0xe2, 0x82]));
+			},
+			pull() {
+				didBlockRead = true;
+				return readBlocked.promise;
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => new Response(incompleteBody, { status: 500 }),
+		});
+
+		AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(5);
+		try {
+			const error = await client.messages
+				.create(params)
+				.asResponse()
+				.catch(err => err as AIError.AnthropicApiError);
+			if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+			expect(error.message).toBe("500 status code (no body)");
+			expect(error.message).not.toContain("\uFFFD");
+			expect(didBlockRead).toBe(true);
+			expect(bodyCancelled).toBe(true);
+		} finally {
+			AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(undefined);
+		}
+	});
+
+	it("bounds, marks, and cancels a continuously ready oversized error body", async () => {
+		const chunk = new TextEncoder().encode("x".repeat(1024));
+		let bodyCancelled = false;
+		let response: Response | undefined;
+		const oversizedBody = new ReadableStream<Uint8Array>({
+			pull(streamController) {
+				streamController.enqueue(chunk);
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const fetch: FetchImpl = async () => {
+			response = new Response(oversizedBody, { status: 400 });
+			return response;
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 0, fetch });
+
+		const startedAt = performance.now();
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+		for (let i = 0; i < 1000 && !bodyCancelled; i++) await Promise.resolve();
+		if (!bodyCancelled) throw new Error("Anthropic error-body reader was not cancelled");
+
+		expect(performance.now() - startedAt).toBeLessThan(1_000);
+		expect(error.message).toBe(`400 ${"x".repeat(64 * 1024)}\n[Response body truncated after 64 KiB]`);
+		expect(response?.body?.locked).toBe(false);
+	});
+
+	it("preserves an exact 64 KiB error body without marking or cancelling it", async () => {
+		const body = new Uint8Array(64 * 1024).fill(120);
+		let bodyCancelled = false;
+		const exactBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(body);
+				streamController.close();
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => new Response(exactBody, { status: 400 }),
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error.message).toBe(`400 ${"x".repeat(64 * 1024)}`);
+		expect(bodyCancelled).toBe(false);
+	});
+
+	it("marks and cancels only after observing the 64 KiB-plus-one error-body byte", async () => {
+		const firstChunk = new Uint8Array(64 * 1024).fill(120);
+		const overflowByte = new Uint8Array([120]);
+		let bodyCancelled = false;
+		const overflowingBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(firstChunk);
+				streamController.enqueue(overflowByte);
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => new Response(overflowingBody, { status: 400 }),
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error.message).toBe(`400 ${"x".repeat(64 * 1024)}\n[Response body truncated after 64 KiB]`);
+		expect(bodyCancelled).toBe(true);
+	});
+
+	it("does not append a replacement character for UTF-8 split by the truncation boundary", async () => {
+		const body = new Uint8Array(64 * 1024 + 2).fill(120);
+		body.set([0xe2, 0x82, 0xac], 64 * 1024 - 1);
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => new Response(body, { status: 400 }),
+		});
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.catch(err => err as AIError.AnthropicApiError);
+		if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+		expect(error.message).toBe(`400 ${"x".repeat(64 * 1024 - 1)}\n[Response body truncated after 64 KiB]`);
+		expect(error.message).not.toContain("\uFFFD");
+	});
+
+	it("bounds continuously-ready empty error-body chunks without accumulating read reactions", async () => {
+		let pulls = 0;
+		let bodyCancelled = false;
+		const emptyBody = new ReadableStream<Uint8Array>({
+			pull(streamController) {
+				pulls += 1;
+				streamController.enqueue(new Uint8Array());
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const client = new AnthropicMessagesClient({
+			apiKey: "sk-test",
+			maxRetries: 0,
+			fetch: async () => new Response(emptyBody, { status: 500 }),
+		});
+
+		AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(5);
+		try {
+			const startedAt = performance.now();
+			const error = await client.messages
+				.create(params)
+				.asResponse()
+				.catch(err => err as AIError.AnthropicApiError);
+			if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+
+			expect(performance.now() - startedAt).toBeLessThan(1_000);
+			expect(pulls).toBeGreaterThan(0);
+			expect(pulls).toBeLessThan(100_000);
+			expect(bodyCancelled).toBe(true);
+			expect(error.message).toBe("500 status code (no body)");
+		} finally {
+			AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(undefined);
+		}
+	});
+
+	it("checks the deadline before an always-ready error body can starve timer callbacks", async () => {
+		let bodyCancelled = false;
+		let response: Response | undefined;
+		const alwaysReadyBody = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(new Uint8Array([120]));
+			},
+			pull(streamController) {
+				streamController.enqueue(new Uint8Array([120]));
+			},
+			cancel() {
+				bodyCancelled = true;
+			},
+		});
+		const fetch: FetchImpl = async () => {
+			response = new Response(alwaysReadyBody, { status: 500 });
+			return response;
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 0, fetch });
+
+		AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(0);
+		try {
+			const startedAt = performance.now();
+			const error = await client.messages
+				.create(params)
+				.asResponse()
+				.catch(err => err as AIError.AnthropicApiError);
+			if (!(error instanceof AIError.AnthropicApiError)) throw new Error("Expected AnthropicApiError");
+			for (let i = 0; i < 1000 && !bodyCancelled; i++) await Promise.resolve();
+			if (!bodyCancelled) throw new Error("Anthropic error-body reader was not cancelled");
+
+			expect(performance.now() - startedAt).toBeLessThan(1_000);
+			expect(error.message).toBe("500 status code (no body)");
+			expect(response?.body?.locked).toBe(false);
+		} finally {
+			AIError.__anthropicApiErrorForTesting.setBodyReadTimeoutMs(undefined);
+		}
 	});
 });

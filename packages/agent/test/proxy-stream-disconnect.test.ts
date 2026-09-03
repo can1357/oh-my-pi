@@ -9,7 +9,7 @@
 import { describe, expect, it } from "bun:test";
 import type { ProxyAssistantMessageEvent } from "@oh-my-pi/pi-agent-core/proxy";
 import { type ProxyMessageEventStream, streamProxy } from "@oh-my-pi/pi-agent-core/proxy";
-import type { AssistantMessageEvent, Context, FetchImpl, Model, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -194,7 +194,55 @@ describe("streamProxy — server disconnect without terminal event", () => {
 
 		const result = await stream.result();
 		expect(result.stopReason).toBe("stop");
-		expect(result.content.length).toBeGreaterThan(0);
+		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("restores terminal blocks that have no proxy stream events", async () => {
+		const finalizedContent: AssistantMessage["content"] = [
+			{ type: "thinking", thinking: "Search first.", thinkingSignature: "sig-1" },
+			{
+				type: "anthropicServerTool",
+				block: {
+					type: "server_tool_use",
+					id: "srvtoolu_1",
+					name: "web_search",
+					input: { query: "current UTC date" },
+				},
+			},
+			{
+				type: "anthropicServerTool",
+				block: {
+					type: "web_search_tool_result",
+					tool_use_id: "srvtoolu_1",
+					content: [{ type: "web_search_result", encrypted_content: "opaque-result" }],
+				},
+			},
+			{ type: "thinking", thinking: "Use the result.", thinkingSignature: "sig-2" },
+			{ type: "toolCall", id: "toolu_write", name: "write", arguments: { path: "date.txt" } },
+		];
+		const events: ProxyAssistantMessageEvent[] = [
+			{ type: "start" },
+			{ type: "thinking_start", contentIndex: 0 },
+			{ type: "thinking_delta", contentIndex: 0, delta: "Search first." },
+			{ type: "thinking_end", contentIndex: 0, contentSignature: "sig-1" },
+			{ type: "thinking_start", contentIndex: 1 },
+			{ type: "thinking_delta", contentIndex: 1, delta: "Use the result." },
+			{ type: "thinking_end", contentIndex: 1, contentSignature: "sig-2" },
+			{ type: "toolcall_start", contentIndex: 2, id: "toolu_write", toolName: "write" },
+			{ type: "toolcall_delta", contentIndex: 2, delta: '{"path":"date.txt"}' },
+			{ type: "toolcall_end", contentIndex: 2 },
+			{ type: "done", reason: "toolUse", usage: { ...baseUsage }, content: finalizedContent },
+		];
+		const body = buildSseBody(events);
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+		const result = await streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toEqual(finalizedContent);
 	});
 
 	it("completes with error event when server sends an 'error' terminal event", async () => {
@@ -224,6 +272,7 @@ describe("streamProxy — server disconnect without terminal event", () => {
 		const result = await stream.result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("rate_limit_exceeded");
+		expect(result.content).toEqual([{ type: "text", text: "Hel" }]);
 	});
 
 	it("does not leak partialJson when server disconnects mid-tool-call", async () => {

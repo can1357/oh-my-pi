@@ -7,6 +7,7 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -20,21 +21,23 @@ export interface TavilySearchParams {
 	query: string;
 	num_results?: number;
 	recency?: "day" | "week" | "month" | "year";
+	/** `site:` hosts mapped to Tavily's `include_domains`. */
+	include_domains?: string[];
+	/** `-site:` hosts mapped to Tavily's `exclude_domains`. */
+	exclude_domains?: string[];
+	/** `after:` inclusive lower bound, ISO `YYYY-MM-DD`, mapped to `start_date`. */
+	start_date?: string;
+	/** `before:` upper bound, ISO `YYYY-MM-DD`, mapped to `end_date`. */
+	end_date?: string;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 }
 
-interface TavilySearchResult {
-	title?: string | null;
-	url?: string | null;
-	content?: string | null;
-	published_date?: string | null;
-}
-
 interface TavilySearchResponse {
-	answer?: string | null;
-	results?: TavilySearchResult[];
-	request_id?: string | null;
+	answer?: unknown;
+	results?: unknown;
+	request_id?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -83,7 +86,21 @@ export function buildRequestBody(params: TavilySearchParams): Record<string, unk
 		include_answer: "advanced",
 		include_raw_content: false,
 	};
-	if (params.recency) {
+	if (params.include_domains?.length) {
+		body.include_domains = params.include_domains;
+	}
+	if (params.exclude_domains?.length) {
+		body.exclude_domains = params.exclude_domains;
+	}
+	if (params.start_date) {
+		body.start_date = params.start_date;
+	}
+	if (params.end_date) {
+		body.end_date = params.end_date;
+	}
+	// Explicit before:/after: bounds take precedence over the relative recency
+	// window; sending both would over-restrict.
+	if (params.recency && !params.start_date && !params.end_date) {
 		body.time_range = params.recency;
 	}
 	return body;
@@ -97,7 +114,7 @@ async function callTavilySearch(apiKey: string, params: TavilySearchParams): Pro
 			Authorization: `Bearer ${apiKey}`,
 		},
 		body: JSON.stringify(buildRequestBody(params)),
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -117,28 +134,36 @@ async function callTavilySearch(apiKey: string, params: TavilySearchParams): Pro
 		throw new SearchProviderError("tavily", `Tavily API error (${response.status}): ${message}`, response.status);
 	}
 
-	return (await response.json()) as TavilySearchResponse;
+	const payload: unknown = await response.json();
+	return asRecord(payload) ?? {};
 }
 
 function toSearchResponse(response: TavilySearchResponse, numResults: number): SearchResponse {
 	const sources: SearchSource[] = [];
 
-	for (const result of response.results ?? []) {
-		if (!result.url) continue;
-		sources.push({
-			title: result.title ?? result.url,
-			url: result.url,
-			snippet: result.content ?? undefined,
-			publishedDate: result.published_date ?? undefined,
-			ageSeconds: dateToAgeSeconds(result.published_date ?? undefined),
-		});
+	if (Array.isArray(response.results)) {
+		for (const value of response.results) {
+			const result = asRecord(value);
+			if (!result || typeof result.url !== "string" || !result.url) continue;
+			const title = typeof result.title === "string" && result.title ? result.title : result.url;
+			const snippet = typeof result.content === "string" ? result.content : undefined;
+			const publishedDate = typeof result.published_date === "string" ? result.published_date : undefined;
+			sources.push({
+				title,
+				url: result.url,
+				snippet,
+				publishedDate,
+				ageSeconds: dateToAgeSeconds(publishedDate),
+			});
+		}
 	}
 
+	const answer = typeof response.answer === "string" ? response.answer.trim() || undefined : undefined;
 	return {
 		provider: "tavily",
-		answer: response.answer?.trim() || undefined,
+		answer,
 		sources: sources.slice(0, numResults),
-		requestId: response.request_id ?? undefined,
+		requestId: typeof response.request_id === "string" ? response.request_id : undefined,
 		authMode: "api_key",
 	};
 }
@@ -148,15 +173,37 @@ function hasRenderableResponse(response: SearchResponse): boolean {
 	return response.sources.length > 0;
 }
 
+/** Bare hosts from `site:` values (path parts are enforced by the central lenient filter). */
+function siteHosts(sites: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const site of sites) {
+		const host = site.split("/", 1)[0];
+		if (host) hosts.add(host);
+	}
+	return [...hosts];
+}
+
 /** Execute Tavily web search. */
 export async function searchTavily(params: SearchParams): Promise<SearchResponse> {
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const tavilyParams: TavilySearchParams = {
 		query: params.query,
 		num_results: params.numSearchResults ?? params.limit,
 		recency: params.recency,
 		signal: params.signal,
+		timeoutMs: params.timeoutMs,
 		fetch: params.fetch,
 	};
+	if (parsed.hasDirectives) {
+		// Tavily prefers clean natural text; re-emit only phrases and -exclusions.
+		tavilyParams.query = formatQuery(parsed, { phrases: true, negation: true });
+		const include = siteHosts(parsed.sites);
+		const exclude = siteHosts(parsed.excludedSites);
+		if (include.length > 0) tavilyParams.include_domains = include;
+		if (exclude.length > 0) tavilyParams.exclude_domains = exclude;
+		if (parsed.after) tavilyParams.start_date = parsed.after;
+		if (parsed.before) tavilyParams.end_date = parsed.before;
+	}
 	const keyOrResolver: ApiKey = params.authStorage.resolver("tavily", {
 		sessionId: params.sessionId,
 	});
@@ -171,11 +218,16 @@ export async function searchTavily(params: SearchParams): Promise<SearchResponse
 		withAuth(keyOrResolver, key => callTavilySearch(key, searchParams), authOptions);
 
 	const response = toSearchResponse(await callWithAuth(tavilyParams), numResults);
-	if (!tavilyParams.recency || hasRenderableResponse(response)) {
+	const hasTimeFilter = Boolean(tavilyParams.recency || tavilyParams.start_date || tavilyParams.end_date);
+	if (!hasTimeFilter || hasRenderableResponse(response)) {
 		return response;
 	}
 
-	return toSearchResponse(await callWithAuth({ ...tavilyParams, recency: undefined }), numResults);
+	// Time filters commonly zero out results; retry once without them.
+	return toSearchResponse(
+		await callWithAuth({ ...tavilyParams, recency: undefined, start_date: undefined, end_date: undefined }),
+		numResults,
+	);
 }
 
 /** Search provider for Tavily web search. */

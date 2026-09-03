@@ -12,25 +12,36 @@
  */
 import {
 	type BlockResolution,
-	buildCompactDiffPreview,
+	type Clipboard,
+	commitClipboard,
+	forkClipboard,
 	MismatchError as HashlineMismatchError,
 	Patch,
 	Patcher,
 	type PatchSectionResult,
 	type PreparedSection,
+	startClipboardBatch,
 } from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
-import { outputMeta } from "../../tools/output-meta";
 import { ToolError } from "../../tools/tool-errors";
+import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString } from "../diff";
+import { getEditClipboard } from "../edit-clipboard";
 import { getFileSnapshotStore } from "../file-snapshot-store";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "../renderer";
-import { pruneOversizedEditSnapshots } from "../snapshot-details";
+import {
+	createAggregateEditDetails,
+	createAggregateEditToolResult,
+	createEditResult,
+	getEditResultText,
+	joinEditResultText,
+	toEditToolResult,
+} from "../result";
 import { nativeBlockResolver } from "./block-resolver";
 import { HashlineFilesystem } from "./filesystem";
-import { hashPatchInput, NOOP_HARD_LIMIT, recordNoopEdit, resetNoopEdit } from "./noop-loop-guard";
+import { hashPatchInput, recordNoopEdit, resetNoopEdit } from "./noop-loop-guard";
 import { type HashlineParams, hashlineEditParamsSchema } from "./params";
 
 export interface ExecuteHashlineSingleOptions {
@@ -40,11 +51,13 @@ export interface ExecuteHashlineSingleOptions {
 	batchRequest?: LspBatchRequest;
 	writethrough: WritethroughCallback;
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
+	/** Observes a committed content transition before result snapshots are pruned. */
+	onApplied?: AppliedEditObserver;
 }
 
 function noChangeDiagnostic(path: string): string {
 	// The patch parsed and applied cleanly but produced no change — the
-	// `|literal` body rows matched the file content at the targeted lines
+	// `+TEXT` body rows matched the file content at the targeted lines
 	// byte-for-byte. The model usually misreads this as "wrong anchor, try
 	// again with a bigger payload" and starts duplicating content; the
 	// message below names the cause directly so the next turn can re-read
@@ -98,13 +111,38 @@ interface RenderedSection {
 	perFileResult: EditToolPerFileResult;
 }
 
+async function observeAppliedSection(
+	observer: AppliedEditObserver | undefined,
+	prepared: PreparedSection,
+	result: PatchSectionResult,
+): Promise<void> {
+	if (!observer || !prepared.exists || result.op === "delete" || result.op === "noop") return;
+	await observer({
+		path: result.moveDest ?? result.path,
+		prev: prepared.rawContent,
+		next: result.written,
+	});
+}
+
+const BLOCK_OP_LABELS: Record<BlockResolution["op"], string> = {
+	replace: "PUT N*:",
+	insert_after: "PUT >N*:",
+	cut: "CUT N*",
+	paste_after: "PUT >N*",
+};
+
 function formatBlockResolution(resolution: BlockResolution): string {
-	const op = resolution.op === "delete" ? "DEL.BLK" : resolution.op === "insert_after" ? "INS.BLK.POST" : "SWAP.BLK";
+	const op = BLOCK_OP_LABELS[resolution.op].replace("N", String(resolution.anchorLine));
 	const lines = resolution.end - resolution.start + 1;
 	const span =
 		resolution.start === resolution.end ? `line ${resolution.start}` : `lines ${resolution.start}-${resolution.end}`;
-	const suffix = resolution.op === "insert_after" ? `; body lands after line ${resolution.end}` : "";
-	return `${op} ${resolution.anchorLine} → resolved ${span} (${lines} line${lines === 1 ? "" : "s"})${suffix}`;
+	const suffix =
+		resolution.op === "insert_after"
+			? `; body lands after line ${resolution.end}`
+			: resolution.op === "paste_after"
+				? `; clipboard lands after line ${resolution.end}`
+				: "";
+	return `${op} → resolved ${span} (${lines} line${lines === 1 ? "" : "s"})${suffix}`;
 }
 
 function renderSection(
@@ -113,84 +151,52 @@ function renderSection(
 	sourcePath: string,
 ): RenderedSection {
 	if (result.op === "delete") {
-		const toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema> = {
-			content: [{ type: "text", text: `Deleted ${result.path}` }],
-			details: pruneOversizedEditSnapshots({
-				diff: "",
-				op: "delete",
-				path: result.path,
-				oldText: result.before,
-				meta: outputMeta().get(),
-			}),
-		};
+		const editResult = createEditResult({
+			displayPath: result.path,
+			resultPath: result.path,
+			diff: "",
+			op: "delete",
+			oldText: result.before,
+		});
 		return {
-			toolResult,
-			perFileResult: pruneOversizedEditSnapshots({
-				path: result.path,
-				diff: "",
-				op: "delete",
-				oldText: result.before,
-			}),
+			toolResult: toEditToolResult(editResult),
+			perFileResult: editResult.perFileResult,
 		};
 	}
 
 	if (result.op === "noop") {
-		const toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema> = {
-			content: [{ type: "text", text: noChangeDiagnostic(result.path) }],
-			details: { diff: "", op: "update", meta: outputMeta().get() },
-		};
+		const editResult = createEditResult({
+			displayPath: result.path,
+			diff: "",
+			op: "update",
+			text: noChangeDiagnostic(result.path),
+		});
 		return {
-			toolResult,
-			perFileResult: { path: result.path, diff: "", op: "update" },
+			toolResult: toEditToolResult(editResult),
+			perFileResult: editResult.perFileResult,
 		};
 	}
 
 	const diff = generateDiffString(result.before, result.after, undefined, { path: result.path });
-	const preview = buildCompactDiffPreview(diff.diff);
-	const meta = outputMeta()
-		.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
-		.get();
-
-	const warningsBlock = result.warnings.length > 0 ? `\n\nWarnings:\n${result.warnings.join("\n")}` : "";
-	const previewBlock = preview.preview ? `\n${preview.preview}` : "";
-	const blockBlock =
-		result.blockResolutions && result.blockResolutions.length > 0
-			? `\n${result.blockResolutions.map(formatBlockResolution).join("\n")}`
-			: "";
-	const moveBlock = result.moveDest ? `\nMoved to ${result.moveDest}` : "";
 	const firstChangedLine = result.firstChangedLine ?? diff.firstChangedLine;
+	const editResult = createEditResult({
+		displayPath: result.moveDest ?? result.path,
+		resultPath: result.moveDest ?? result.path,
+		header: result.header,
+		diff: diff.diff,
+		firstChangedLine,
+		diagnostics,
+		op: result.op,
+		move: result.moveDest,
+		sourcePath: result.moveDest ? sourcePath : undefined,
+		oldText: result.before,
+		newText: result.after,
+		beforePreview: result.blockResolutions?.map(formatBlockResolution),
+		warnings: result.warnings,
+	});
 	return {
-		toolResult: {
-			content: [
-				{
-					type: "text",
-					text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}`,
-				},
-			],
-			details: pruneOversizedEditSnapshots({
-				diff: diff.diff,
-				firstChangedLine,
-				diagnostics,
-				op: result.op,
-				move: result.moveDest,
-				path: result.moveDest ?? result.path,
-				sourcePath: result.moveDest ? sourcePath : undefined,
-				oldText: result.before,
-				newText: result.after,
-				meta,
-			}),
-		},
-		perFileResult: pruneOversizedEditSnapshots({
-			path: result.moveDest ?? result.path,
-			diff: diff.diff,
-			firstChangedLine,
-			diagnostics,
-			op: result.op,
-			move: result.moveDest,
-			sourcePath: result.moveDest ? sourcePath : undefined,
-			oldText: result.before,
-			newText: result.after,
-		}),
+		toolResult: toEditToolResult(editResult),
+		perFileResult: editResult.perFileResult,
 	};
 }
 
@@ -213,12 +219,20 @@ export async function executeHashlineSingle(
 	const enforceSeenLines = options.session.settings.get("edit.enforceSeenLines");
 	const patcher = new Patcher({ fs, snapshots, blockResolver: nativeBlockResolver, enforceSeenLines });
 
+	// Named registers persist across edit calls; the anonymous register is
+	// batch-local. Each batch starts without anonymous state and publishes
+	// named registers only after writes land.
+	const sessionClipboard = getEditClipboard(options.session);
+	const clipboard = startClipboardBatch(sessionClipboard);
+
 	// Single-section fast path: prepare, commit, render.
 	const inputHash = hashPatchInput(options.input);
 	if (patch.sections.length === 1) {
 		fs.setBatchRequest(narrowBatchRequest(options.batchRequest, true));
-		const prepared = await patcher.prepare(patch.sections[0]);
+		const prepared = await patcher.prepare(patch.sections[0], clipboard);
 		const sectionResult = await patcher.commit(prepared);
+		await observeAppliedSection(options.onApplied, prepared, sectionResult);
+		commitClipboard(clipboard, sessionClipboard);
 		if (sectionResult.op === "noop") {
 			const { count, escalate } = recordNoopEdit(options.session, sectionResult.canonicalPath, inputHash);
 			if (escalate) {
@@ -231,9 +245,18 @@ export async function executeHashlineSingle(
 	}
 
 	// Multi-section: prepare every section up front so we fail fast before
-	// any write hits the filesystem.
+	// any write hits the filesystem. One batch-local register spans the batch,
+	// so `CUT` in one section feeds a register-backed `PUT` in a later one.
 	const prepared: PreparedSection[] = [];
-	for (const section of patch.sections) prepared.push(await patcher.prepare(section));
+	// Register state after each section's prepare. Commits are non-atomic: a
+	// mid-batch write failure leaves earlier sections on disk, so the session
+	// register must reflect exactly the landed prefix — content a landed CUT
+	// deleted would otherwise be lost.
+	const sectionStates: Clipboard[] = [];
+	for (const section of patch.sections) {
+		prepared.push(await patcher.prepare(section, clipboard));
+		sectionStates.push(forkClipboard(clipboard));
+	}
 	assertUniqueCanonicalPaths(prepared);
 	for (const entry of prepared) {
 		if (entry.isNoop) {
@@ -251,6 +274,8 @@ export async function executeHashlineSingle(
 		const isLast = i === prepared.length - 1;
 		fs.setBatchRequest(narrowBatchRequest(options.batchRequest, isLast));
 		const sectionResult = await patcher.commit(prepared[i]);
+		await observeAppliedSection(options.onApplied, prepared[i], sectionResult);
+		commitClipboard(sectionStates[i], sessionClipboard);
 		if (sectionResult.op === "noop") {
 			const { count, escalate } = recordNoopEdit(options.session, sectionResult.canonicalPath, inputHash);
 			throw escalate
@@ -260,21 +285,10 @@ export async function executeHashlineSingle(
 		resetNoopEdit(options.session, sectionResult.canonicalPath);
 		rendered.push(renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared[i].section.path));
 	}
-
-	return {
-		content: [
-			{
-				type: "text",
-				text: rendered
-					.map(r => r.toolResult.content.map(part => (part.type === "text" ? part.text : "")).join("\n"))
-					.join("\n\n"),
-			},
-		],
-		details: pruneOversizedEditSnapshots({
-			diff: rendered.map(r => r.toolResult.details?.diff ?? "").join("\n"),
-			perFileResults: rendered.map(r => r.perFileResult),
-		}),
-	};
+	return createAggregateEditToolResult(
+		joinEditResultText(rendered.map(entry => getEditResultText(entry.toolResult))),
+		createAggregateEditDetails({ perFileResults: rendered.map(entry => entry.perFileResult) }),
+	);
 }
 
 export { HashlineMismatchError, type HashlineParams, hashlineEditParamsSchema };

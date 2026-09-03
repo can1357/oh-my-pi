@@ -156,6 +156,8 @@ fn pre_exec_detach_session_reparent() -> Result<(), std::io::Error> {
 	if pid > 0 {
 		// Intermediate parent: exit now to orphan the grandchild. `_exit` avoids
 		// running atexit handlers or flushing inherited buffers in the fork.
+		// SAFETY: this post-fork intermediate child must terminate without
+		// running destructors or touching inherited buffered state.
 		unsafe { libc::_exit(0) };
 	}
 	Ok(())

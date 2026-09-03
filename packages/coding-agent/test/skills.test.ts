@@ -1,17 +1,20 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
+	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocation,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-
+import { restoreEnvValue } from "./helpers/settings-test-state";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
@@ -45,8 +48,13 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 
 describe("skills", () => {
 	describe("loadSkillsFromDir", () => {
-		const loadFixtureRoot = () => loadSkillsFromDir({ dir: fixturesDir, source: "test" });
+		let fixtureRoot: LoadSkillsResult;
 
+		beforeAll(async () => {
+			fixtureRoot = await loadSkillsFromDir({ dir: fixturesDir, source: "test" });
+		});
+
+		const loadFixtureRoot = async () => fixtureRoot;
 		it("should load a valid skill from a skills root", async () => {
 			const { skills, warnings } = await loadFixtureRoot();
 			const validSkill = skills.find(skill => skill.name === "valid-skill");
@@ -156,22 +164,34 @@ describe("skills", () => {
 	});
 
 	describe("loadSkills with options", () => {
+		let customDirectorySkills: LoadSkillsResult;
+
+		beforeAll(async () => {
+			customDirectorySkills = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [fixturesDir],
+			});
+		});
 		it("should load from customDirectories only when built-ins disabled", async () => {
-			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
+			const { skills } = customDirectorySkills;
 			expect(skills.length).toBeGreaterThan(0);
 			// Custom directory skills have source "custom:user"
 			expect(skills.every(s => s.source.startsWith("custom"))).toBe(true);
 		});
 
 		it("should return customDirectory skills sorted by name (case-insensitive)", async () => {
-			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
+			const { skills } = customDirectorySkills;
 
 			expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
 		});
 
 		it("should keep user Claude skills when project .claude/skills is missing", async () => {
+			const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+			delete process.env.CLAUDE_CONFIG_DIR;
+			delete Bun.env.CLAUDE_CONFIG_DIR;
 			const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-home-"));
 			const tempProjectDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-project-"));
+			enableUserSource("claude");
 
 			try {
 				const userSkillDir = path.join(tempHomeDir, ".claude", "skills", "user-only-skill");
@@ -196,6 +216,8 @@ describe("skills", () => {
 				const result = await claudeProvider!.load({ cwd: tempProjectDir, home: tempHomeDir, repoRoot: null });
 				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
 			} finally {
+				disableUserSource("claude");
+				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 				await removeWithRetries(tempProjectDir);
 				await removeWithRetries(tempHomeDir);
 			}
@@ -232,6 +254,87 @@ describe("skills", () => {
 				await removeWithRetries(tempHome);
 				await removeWithRetries(tempCwd);
 			}
+		});
+
+		it("should load Windows host ~/.agents/skills when running under WSL (#3779)", async () => {
+			const tempHostHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-host-"));
+			const tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-cwd-"));
+			const skillDir = path.join(tempHostHome, ".agents", "skills", "wsl-host-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", "description: Loaded from WSL host USERPROFILE", "---", "", "# wsl-host-skill"].join("\n"),
+			);
+			const previousWslDistroName = process.env.WSL_DISTRO_NAME;
+			const previousWslInterop = process.env.WSL_INTEROP;
+			const previousUserProfile = process.env.USERPROFILE;
+			const previousPlatform = process.platform;
+			Object.defineProperty(process, "platform", { value: "linux" });
+			process.env.WSL_DISTRO_NAME = "Ubuntu";
+			delete process.env.WSL_INTEROP;
+			process.env.USERPROFILE = tempHostHome;
+			try {
+				const { skills } = await loadSkills({
+					enableCodexUser: false,
+					enableClaudeUser: false,
+					enableClaudeProject: false,
+					enablePiUser: false,
+					enablePiProject: false,
+					cwd: tempCwd,
+				});
+				const skill = skills.find(s => s.name === "wsl-host-skill");
+				expect(skill?.source).toBe("agents:user");
+				expect(skill?.filePath).toBe(path.join(skillDir, "SKILL.md"));
+			} finally {
+				if (previousWslDistroName === undefined) delete process.env.WSL_DISTRO_NAME;
+				else process.env.WSL_DISTRO_NAME = previousWslDistroName;
+				if (previousWslInterop === undefined) delete process.env.WSL_INTEROP;
+				else process.env.WSL_INTEROP = previousWslInterop;
+				if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+				else process.env.USERPROFILE = previousUserProfile;
+				Object.defineProperty(process, "platform", { value: previousPlatform });
+				await removeWithRetries(tempHostHome);
+				await removeWithRetries(tempCwd);
+			}
+		});
+
+		it("converts Windows USERPROFILE paths to the default WSL mount (#3779)", () => {
+			const resolved = getWslWindowsHomeCandidate({
+				platform: "linux",
+				env: { WSL_DISTRO_NAME: "Ubuntu", USERPROFILE: "C:\\Users\\alice" },
+				wslPath: () => undefined,
+			});
+
+			expect(resolved).toBe("/mnt/c/Users/alice");
+		});
+
+		it("resolves the Windows profile through interop when USERPROFILE is not exported (#3779)", () => {
+			const resolved = getWslWindowsHomeCandidate({
+				platform: "linux",
+				env: { WSL_DISTRO_NAME: "Ubuntu" },
+				windowsUserProfile: () => "C:\\Users\\alice",
+				wslPath: () => "/mnt/c/Users/alice",
+			});
+
+			expect(resolved).toBe("/mnt/c/Users/alice");
+		});
+
+		it("kills a host probe that never exits instead of blocking startup (#8402)", () => {
+			// Integration test against real OS timer behavior: the contract is that
+			// runHostProbe's spawnSync `timeout` actually kills a genuinely blocked
+			// child. Injecting a short deadline preserves that native lifecycle
+			// coverage without paying the production discovery budget.
+			const start = performance.now();
+			const result = runHostProbe([process.execPath, "-e", "await Bun.sleep(60_000)"], 25);
+			const elapsed = performance.now() - start;
+			expect(result).toBeUndefined();
+			// Loose bound proves the probe returned via its timeout, not the child.
+			expect(elapsed).toBeLessThan(1_000);
+		});
+
+		it("returns trimmed stdout for a host probe that succeeds (#8402)", () => {
+			const result = runHostProbe([process.execPath, "-e", "process.stdout.write('  host-home  ')"]);
+			expect(result).toBe("host-home");
 		});
 
 		it("respects an explicit enableAgentsUser: false (#2401)", async () => {
@@ -567,10 +670,10 @@ describe("parseSkillInvocation", () => {
 				name: "reviewer",
 				args: "$echo",
 			});
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: testing literal string containing shell variable
+			// oxlint-disable-next-line no-template-curly-in-string -- testing literal string containing shell variable
 			expect(parseSkillInvocation("${HOME}/bin /skill:foo")).toEqual({
 				name: "foo",
-				// biome-ignore lint/suspicious/noTemplateCurlyInString: testing literal string containing shell variable
+				// oxlint-disable-next-line no-template-curly-in-string -- testing literal string containing shell variable
 				args: "${HOME}/bin",
 			});
 		});

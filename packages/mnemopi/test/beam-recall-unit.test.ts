@@ -116,6 +116,28 @@ describe("beam recall free functions", () => {
 		expect(new Set(results.map(result => result.tier_label))).toEqual(new Set(["working", "episodic"]));
 	});
 
+	it("keeps global episodic rows visible when a channelId filter is active while still isolating other channels", async () => {
+		const beam = makeBeam();
+		// Global row with channel_id NULL — the shape produced by importFromDict()
+		// and by any cross-channel/global memory. Must survive a channelId filter.
+		insertEpisodic(beam, "em-global", "quokka migration protocol uses base64 snapshots");
+		// Non-global row owned by a different channel/session — must stay hidden.
+		beam.db.run(
+			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, scope, channel_id, veracity, memory_type) VALUES ('em-other-channel', 'quokka migration protocol for team beta', 'test', ?, 'other-session', 0.5, 'session', 'other-bank', 'unknown', 'general')",
+			["2026-05-30T12:00:00.000Z"],
+		);
+
+		const results = await recall(beam, "quokka migration protocol", 5, {
+			queryTime: "2026-05-30T12:00:00.000Z",
+			channelId: "project-bank",
+			includeWorking: false,
+		});
+
+		const ids = results.map(result => result.id);
+		expect(ids).toContain("em-global");
+		expect(ids).not.toContain("em-other-channel");
+	});
+
 	it("boosts memories near the requested temporal target", async () => {
 		const beam = makeBeam();
 		insertEpisodic(beam, "em-old", "incident alpha resolved by rotating credentials", {

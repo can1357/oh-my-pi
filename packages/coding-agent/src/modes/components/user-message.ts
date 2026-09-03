@@ -1,15 +1,31 @@
 import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { imageReferenceHyperlink, renderPlaceholders } from "../image-references";
+import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
+import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
 
-// OSC 133 shell integration: marks prompt zones for terminal multiplexers
-// Do not emit OSC 133 C ("command start") here: the transcript has no matching
-// command-finished marker, so terminals can group later assistant/tool output
-// under the first submitted prompt.
+// OSC 133 shell integration: marks prompt zones for terminal multiplexers.
+//
+// The zone must be *closed* within the same render. `133;B` sets a sticky
+// cursor semantic of `.input` in Ghostty (and Ghostty-derived terminals such
+// as cmux) that only a command-start marker clears; leaving it latched makes
+// `cursorIsAtPrompt()` permanently true and tags every subsequently painted
+// cell as `.input`. Combined with `cursor-click-to-move = true` (Ghostty's
+// default) that turns every left-click inside the pane into a burst of
+// synthesized arrow keys on omp's pty, slamming the editor caret to column 0
+// (#8030, #6115).
+//
+// `133;C` is therefore emitted immediately followed by `133;D;0` at the end of
+// the bubble. That clears the input state without reintroducing the grouping
+// problem the marker was originally omitted to avoid: the command zone opens
+// and finishes inside this component, so later assistant/tool output can never
+// be grouped under the first submitted prompt.
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
+const OSC133_COMMAND_START = "\x1b]133;C\x07";
+const OSC133_COMMAND_DONE = "\x1b]133;D;0\x07";
+const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAND_DONE;
 
 /**
  * Component that renders a user message
@@ -24,24 +40,33 @@ export class UserMessageComponent extends Container {
 
 	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
 		super();
+		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
+		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
+		// Markdown layout so wrapping and bubble padding are computed on the visible text.
+		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
 		const bgColor = (value: string) => theme.bg("userMessageBg", value);
 		// Paint the magic keywords ("ultrathink"/"orchestrate"/"workflowz") inside the rendered
 		// bubble too — matching the live editor glow. The Markdown component routes code spans and
 		// fenced blocks through its own code styling (never `color`), so those are already excluded;
 		// `highlightMagicKeywords` additionally restores the bubble's own foreground after each
 		// painted keyword so the gradient never bleeds into the rest of the line.
-		const keywordReset = theme.getFgAnsi("userMessageText") || "\x1b[39m";
+		const keywordReset = theme.getFgOnBgAnsi("userMessageText", "userMessageBg");
 		const baseText = synthetic
 			? (value: string) => theme.fg("dim", value)
-			: (value: string) => theme.fg("userMessageText", highlightMagicKeywords(value, keywordReset));
-		const imageLabel = (value: string) => theme.fg("accent", `\x1b[1m\x1b[4m${value}\x1b[24m\x1b[22m`);
+			: (value: string) =>
+					theme.fgOnBg("userMessageText", "userMessageBg", highlightMagicKeywords(value, keywordReset));
 		const color = (value: string) =>
 			renderPlaceholders(value, {
 				renderText: baseText,
-				renderReference: (label, kind, index) =>
-					kind === "image"
-						? imageReferenceHyperlink(label, index, imageLinks, imageLabel)
-						: theme.fg("accent", `\x1b[1m${label}\x1b[22m`),
+				renderReference: (label, kind, index, form) => {
+					// Chip tokens keep their composer identity color; the bubble's own
+					// foreground resumes after the token (same pattern as keywords).
+					const styled =
+						form === "chip"
+							? `${attachmentSgr(kind, index)}\x1b[1m${label}\x1b[22m${keywordReset}`
+							: theme.fg("accent", `\x1b[1m${label}\x1b[22m`);
+					return kind === "image" ? imageReferenceHyperlink(label, index, imageLinks, () => styled) : styled;
+				},
 			});
 		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,
@@ -61,7 +86,7 @@ export class UserMessageComponent extends Container {
 		}
 		const wrapped = lines.slice();
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
-		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_END;
+		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
 		return wrapped;

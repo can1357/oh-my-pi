@@ -1,20 +1,20 @@
 //! Cross-platform process tree management.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+	collections::{HashMap, HashSet},
+	time::Duration,
+};
 
 use anyhow::Result;
 use parking_lot::Mutex;
+/// Current state of a process reference.
+///
+/// Defined in `pi-builtins` alongside the process-table snapshots its process
+/// builtins read, and re-exported here so this module — and `pi-natives`
+/// through it — keeps one status type for both concerns.
+pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
-
-/// Current state of a process reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProcessStatus {
-	/// The referenced process is still running.
-	Running,
-	/// The referenced process has exited or is no longer observable.
-	Exited,
-}
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -1391,7 +1391,21 @@ impl Process {
 	}
 
 	fn signal_tree(&self, signal: i32) -> u32 {
-		let descendants = self.live_descendants();
+		self.signal_tree_excluding(signal, &host_protected_pids())
+	}
+
+	/// Signal this process and its live descendants (children first), skipping
+	/// any pid in `protected`.
+	///
+	/// `protected` shields the harness itself: a run-cancellation sweep must
+	/// never hard-kill the host. On Windows the
+	/// descendant tree is derived from raw `th32ParentProcessID` values that
+	/// outlive their recorded parent, so a freshly spawned child whose recycled
+	/// pid matches the harness's stale parent pid makes the harness enumerate
+	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
+	/// with no cleanup and no `session_exit` record (#7452, related #4605).
+	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
+		let descendants = self.signalable_descendants(protected);
 		let mut signaled = 0u32;
 		// If self leads its own process group, also signal the group — this catches
 		// grandchildren reparented to init when their immediate parent died inside
@@ -1406,10 +1420,31 @@ impl Process {
 				signaled += 1;
 			}
 		}
-		if self.inner.kill(signal) {
+		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
 			signaled += 1;
 		}
 		signaled
+	}
+
+	/// Live descendants with every protected subtree pruned, not just the exact
+	/// protected pids.
+	///
+	/// The flattened descendant list can contain a protected node (the harness,
+	/// on a Windows PID-reuse false-descendant) *together with* that node's real
+	/// children, which were collected by recursing through it. Skipping only the
+	/// exact protected pid would still terminate those unrelated worker/tool
+	/// subprocesses, so drop every node whose recorded parent chain — within the
+	/// enumerated set — passes through a protected pid (#7452 review).
+	fn signalable_descendants(&self, protected: &HashSet<i32>) -> Vec<Self> {
+		let descendants = self.live_descendants();
+		let parents: HashMap<i32, i32> = descendants
+			.iter()
+			.filter_map(|descendant| descendant.ppid().map(|parent| (descendant.pid(), parent)))
+			.collect();
+		descendants
+			.into_iter()
+			.filter(|descendant| !pid_in_protected_subtree(descendant.pid(), protected, &parents))
+			.collect()
 	}
 
 	async fn terminate_tree_impl(
@@ -1424,16 +1459,19 @@ impl Process {
 		}
 
 		let process_group = if group { self.group_id() } else { None };
+		let protected = host_protected_pids();
 
 		// Polite wave: SIGTERM the group, every live descendant, then the root.
 		if let Some(pgid) = process_group {
 			let _ = kill_process_group(pgid, TERM_SIGNAL);
 		}
-		let mut descendants = self.live_descendants();
+		let mut descendants = self.signalable_descendants(&protected);
 		for child in &descendants {
 			let _ = child.inner.kill(TERM_SIGNAL);
 		}
-		let _ = self.inner.kill(TERM_SIGNAL);
+		if !protected.contains(&self.pid()) {
+			let _ = self.inner.kill(TERM_SIGNAL);
+		}
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before KILL).
@@ -1455,15 +1493,61 @@ impl Process {
 		if let Some(pgid) = process_group {
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
-		descendants = self.live_descendants();
+		descendants = self.signalable_descendants(&protected);
 		for child in &descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}
-		let _ = self.inner.kill(KILL_SIGNAL);
+		if !protected.contains(&self.pid()) {
+			let _ = self.inner.kill(KILL_SIGNAL);
+		}
 
 		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
 			.await
 	}
+}
+
+/// The harness pid — the one process a run-cancellation sweep must never
+/// signal.
+///
+/// On Unix the descendant walk is identity-pinned (pidfd / start-time), so the
+/// host can never appear as a false descendant and this set is a harmless
+/// no-op safety net. On Windows the descendant tree is derived from raw
+/// `th32ParentProcessID` values that survive their recorded parent's death: a
+/// freshly spawned child whose recycled pid matches the harness's stale parent
+/// pid makes the harness enumerate as a false descendant, so cancelling a
+/// timed-out bash run would `TerminateProcess` the host with no cleanup and no
+/// `session_exit` record (#7452, related #4605).
+///
+/// Do not walk the host's numeric parent chain here. On Windows the host's
+/// recorded parent pid can itself have been recycled onto the cancellation
+/// target; treating that raw pid as protected would spare the hung command and
+/// prune all of its descendants from cleanup.
+fn host_protected_pids() -> HashSet<i32> {
+	i32::try_from(std::process::id()).into_iter().collect()
+}
+
+/// True when `pid` is itself protected or descends — within the enumerated
+/// `parents` map (pid -> recorded parent pid) — from a protected pid. Used to
+/// prune a whole protected subtree from a cancellation sweep so a false
+/// descendant of the harness cannot drag the harness's real children into the
+/// kill set (#7452).
+fn pid_in_protected_subtree(
+	pid: i32,
+	protected: &HashSet<i32>,
+	parents: &HashMap<i32, i32>,
+) -> bool {
+	let mut current = pid;
+	// Bound the walk against a corrupted or cyclic parent chain.
+	for _ in 0..256 {
+		if protected.contains(&current) {
+			return true;
+		}
+		match parents.get(&current) {
+			Some(&parent) if parent != current => current = parent,
+			_ => return false,
+		}
+	}
+	false
 }
 
 async fn wait_for_exit(
@@ -1814,6 +1898,90 @@ const fn platform_process_group_alive(_pgid: i32) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The harness pid must be the only protected pid. Including its recorded
+	/// parent would be unsafe on Windows: that stale numeric pid can have been
+	/// recycled onto the timed-out command, causing cancellation to spare the
+	/// hung target and its whole subtree.
+	#[test]
+	fn host_protected_pids_includes_self() {
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		assert_eq!(
+			host_protected_pids(),
+			HashSet::from([self_pid]),
+			"only the harness pid may be protected from cancellation sweeps",
+		);
+	}
+
+	/// Regression test for #7452: a cancellation sweep must never signal the
+	/// protected host pid, even when it is enumerated as the sweep root. On
+	/// Windows a recycled pid can make the harness surface as
+	/// a false descendant of a just-spawned child; `TerminateProcess`-ing it
+	/// killed the whole session with no `session_exit` record. The observable
+	/// defense — provable cross-platform — is that `signal_tree_excluding`
+	/// leaves a protected pid untouched.
+	#[cfg(unix)]
+	#[test]
+	fn signal_tree_spares_protected_pids() {
+		use std::{process::Command, thread, time::Duration};
+
+		let mut child = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let child_pid = i32::try_from(child.id()).expect("child pid fits in i32");
+		let root = Process::from_pid(child_pid).expect("pin child");
+
+		// Treat the child's pid as protected (standing in for the harness/an
+		// ancestor). The sweep must refuse to signal it.
+		let protected: HashSet<i32> = HashSet::from([child_pid]);
+		let signaled = root.signal_tree_excluding(KILL_SIGNAL, &protected);
+		assert_eq!(signaled, 0, "a protected root must never be signalled");
+
+		// The protected process is still alive after the sweep.
+		thread::sleep(Duration::from_millis(50));
+		assert_eq!(
+			root.status(),
+			ProcessStatus::Running,
+			"a protected pid must survive a cancellation sweep",
+		);
+
+		// With no protection the same sweep reaps it — proves the skip is what
+		// spared it, not a dead target.
+		let reaped = root.signal_tree_excluding(KILL_SIGNAL, &HashSet::new());
+		assert!(reaped >= 1, "an unprotected root must be signalled");
+		let _ = child.wait();
+	}
+
+	/// Regression test for the #7453 review: pruning a protected node must drop
+	/// its whole subtree, not just the exact protected pid. A Windows PID-reuse
+	/// false-descendant collects the harness together with the harness's real
+	/// children (LSP servers, worker/tool subprocesses); skipping only the host
+	/// pid would still terminate those. `pid_in_protected_subtree` walks the
+	/// enumerated parent map so any node under a protected pid is excluded.
+	#[test]
+	fn protected_subtree_is_pruned_not_just_the_pid() {
+		// root(1) -> host(2, protected) -> worker(3); root(1) -> real_child(4).
+		let parents: HashMap<i32, i32> = HashMap::from([(2, 1), (3, 2), (4, 1)]);
+		let protected: HashSet<i32> = HashSet::from([2]);
+
+		assert!(
+			pid_in_protected_subtree(2, &protected, &parents),
+			"the protected node itself must be excluded",
+		);
+		assert!(
+			pid_in_protected_subtree(3, &protected, &parents),
+			"a child collected through the protected node must be excluded too",
+		);
+		assert!(
+			!pid_in_protected_subtree(4, &protected, &parents),
+			"a real child of the sweep root must still be signalled",
+		);
+		assert!(
+			!pid_in_protected_subtree(1, &protected, &parents),
+			"the sweep root must not be pruned",
+		);
+	}
 
 	/// `kill_process_group` is the last line of defense: even if a future
 	/// caller manages to feed the harness's own pgid into the signal path,

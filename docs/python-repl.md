@@ -17,23 +17,21 @@ It covers tool behavior, runner lifecycle, environment handling, execution seman
 
 ## What eval's Python backend is
 
-The `eval` tool executes one or more Python cells inside a retained `python` subprocess that speaks NDJSON over stdin/stdout. No Jupyter gateway and no extra pip dependencies are required — a vanilla Python 3.8+ interpreter is enough. Rich `display()` output (PIL, pandas, plotly, matplotlib figures) keeps working because the wrapper implements MIME-bundle dispatch.
+The `eval` tool executes one Python cell per call inside a retained `python` subprocess that speaks NDJSON over stdin/stdout. No Jupyter gateway and no extra pip dependencies are required. The bundled runner uses Python 3.10 syntax (`str | None`), so the effective requirement is Python 3.10+. Rich `display()` output (PIL, pandas, plotly, matplotlib figures) works because the wrapper implements MIME-bundle dispatch.
 
-Tool params:
+Current tool input:
 
 ```ts
 {
-  cells: Array<{
-    language: "py" | "js";
-    code: string;
-    title?: string;
-    timeout?: number; // seconds, clamped to 1..3600, default 30. Inactivity budget — see "Cell timeout".
-    reset?: boolean; // reset this cell's selected runtime before execution
-  }>;
+  language: "py";
+  code: string;
+  title?: string;
+  timeout?: number; // seconds; default 30, 0 disables, otherwise clamped to 1..3600
+  reset?: boolean;  // wipe the Python kernel before this call
 }
 ```
 
-The tool is `concurrency = "exclusive"` for a session, so calls do not overlap.
+The session-scoped wire schema advertises only enabled runtimes. The static implementation also supports `"js"`, `"rb"`, and `"jl"`; Python and JavaScript default on, while Ruby and Julia are opt-in. The tool is `concurrency = "exclusive"` for a session, so calls do not overlap. State persists across separate calls to the same language runtime.
 
 ## Kernel lifecycle
 
@@ -94,7 +92,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 | `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                   |
 | `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                  |
 | `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
-| `%%bash` / `%%sh`                 | Run the cell body via `bash`/`sh`.                                                                                                                          |
+| `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
 | `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |
 | `%%timeit`                        | Time the cell body.                                                                                                                                         |
 | `%%writefile <path>`              | Write body to file.                                                                                                                                         |
@@ -112,23 +110,17 @@ Unknown magic names raise `NameError: UsageError: ...` inside the cell.
   - Multiple owners can share the same retained kernel for that key.
   - Calls through the tool are exclusive, so tool invocations do not overlap.
   - A dead retained subprocess is replaced before execution.
-  - If the subprocess dies during execution, it is replaced and the cell is retried once.
+  - If the subprocess dies during execution, it is replaced and the call is retried once.
 - `per-call`
-  - Spawns a fresh subprocess for each request.
-  - Shuts the subprocess down after the request.
+  - Spawns a fresh subprocess for each call.
+  - Shuts the subprocess down after the call.
   - No cross-call state persistence.
 
-### Multi-cell behavior in a single tool call
+### State across eval calls
 
-Python cells run sequentially in the same selected Python kernel instance for that tool call.
+Each tool call contains one cell. Python calls run sequentially because the tool is exclusive, and later calls reuse the selected retained kernel in `session` mode.
 
-If an intermediate cell fails:
-
-- Earlier cell state remains in memory.
-- Tool returns a targeted error indicating which cell failed.
-- Later cells are not executed.
-
-`reset=true` is per cell and resets that language runtime before the cell executes.
+If a cell fails, definitions and mutations completed before the error can remain in kernel memory. `reset: true` resets only the selected language runtime before that call; other language runtimes are untouched.
 
 ## Environment filtering and runtime resolution
 
@@ -150,25 +142,19 @@ The runner additionally receives `PYTHONUNBUFFERED=1` and `PYTHONIOENCODING=utf-
 
 ## Tool availability and mode selection
 
-`eval.py` / `eval.js` (both default `true`) plus optional boolean env flags `PI_PY` / `PI_JS` control eval backend exposure:
+The backend settings `eval.py` / `eval.js` default to `true`; `eval.rb` / `eval.jl` default to `false`. Optional boolean environment flags `PI_PY`, `PI_JS`, `PI_RB`, and `PI_JL` override their corresponding setting independently.
 
-- Python backend only (`eval.py=true`, `eval.js=false`, or `PI_PY=1 PI_JS=0`)
-- JavaScript backend only (`eval.py=false`, `eval.js=true`, or `PI_PY=0 PI_JS=1`)
-- both backends (`eval.py=true`, `eval.js=true`, or `PI_PY=1 PI_JS=1`)
+The tool's session-scoped schema lists only enabled runtimes. If Python preflight fails while another runtime is enabled, `eval` remains available for that runtime and a `py` call reports a Python-backend availability error with enabled alternatives.
 
-`PI_PY` and `PI_JS` use normal boolean flag parsing. Each flag, when set, overrides only its own setting; an unset flag falls back to its setting (`eval.py` / `eval.js`, both default `true`).
-
-If Python preflight fails and `eval.js` is enabled, `eval` remains available for `js` cells; `py` cells fail with a Python-backend availability error.
-
-Python prelude helpers include `agent(prompt, *, agent="task", model=None, label=None, schema=None, handle=False)`. It synchronously calls the host bridge, runs one subagent through the task executor, and returns the final text. When `schema` is supplied, the helper parses the subagent's JSON output and returns the object. When `handle=True`, it instead returns a DAG node dict (`{"text", "output", "handle", "id", "agent"}`) whose `handle` is the spawned agent's recoverable `agent://<id>` URI (the parsed object lands under `"data"` when `schema` is also set), so a downstream `pipeline`/`parallel` stage can reference the transcript by handle instead of re-inlining it.
+Python prelude helpers include `agent(prompt, *, agent="task", label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None, handle=False)`. It synchronously calls the host bridge and returns final text, or parsed data when `schema` is supplied. `schema_mode` selects permissive or strict structured-output handling; the isolation/apply/merge flags control task worktree behavior. With `handle=True`, it returns a DAG node dict (`{"text", "output", "handle", "id", "agent"}`) whose handle is the recoverable `agent://<id>` URI; parsed output is also stored under `"data"` when available.
 
 ## Execution flow and cancellation/timeout
 
 ### Cell timeout
 
-Each eval cell `timeout` is in seconds, defaults to 30, and is clamped to `1..3600`. It is a **wall-clock budget on the cell's own work** that the watchdog (`IdleTimeout`, `src/eval/idle-timeout.ts`) enforces, **but it is suspended while a host-side `agent()`/`parallel()`/`completion()` bridge call is in flight**: those calls emit synthetic pause/resume timeout-control status events (`withBridgeTimeoutPause`, `src/eval/bridge-timeout.ts`) that pause the watchdog entirely and start a fresh timeout window when control returns to the runtime, so a long fanout or a slow completion runs to completion instead of being killed mid-stream. Pause is reference-counted because `parallel()` can have multiple bridge calls in flight at once.
+`timeout` is in seconds and defaults to 30. `0` disables the cell timeout; nonzero values are clamped to `1..3600` seconds and by a positive `tools.maxTimeout` ceiling before being passed to `IdleTimeout`. The timeout is suspended while a host-side `agent()` / `parallel()` / `completion()` bridge call is in flight: those calls emit reference-counted pause/resume events through `withBridgeTimeoutPause`, and a fresh timeout window begins when control returns.
 
-The pause/resume events are the **sole** mechanism that suspends the budget. Everything else the cell does — compute, `stdout`/`stderr`, `log()`/`phase()`, and ordinary (non-agent) tool calls — counts against `timeout`, so a cell that is not delegating to an agent/completion is bounded by a plain wall-clock timeout. The tool combines the caller abort signal, the session abort signal, and the watchdog's signal with `AbortSignal.any(...)`; no wall-clock deadline is passed to the backend, so neither runtime arms a competing fixed timer.
+The pause/resume events are the sole mechanism that suspends the budget. Compute, `stdout`/`stderr`, `log()`/`phase()`, and ordinary tool calls count against it. The tool combines caller, session, and watchdog abort signals with `AbortSignal.any(...)`; the backend does not arm a competing deadline.
 
 ### Kernel execution cancellation
 
@@ -230,15 +216,15 @@ Output is streamed through `OutputSink` and may be persisted to artifact storage
 
 ## Operational troubleshooting
 
-- **Python backend not available** — Check `eval.py`, `PI_PY`, and that `python`/`python3` is on PATH. If preflight fails and `eval.js` is enabled, use a `js` cell.
-- **No Python on PATH** — Install a system Python 3.8+ or place a venv at `~/.omp/python-env`. `omp setup python --check` reports the resolved interpreter.
-- **Execution hangs then times out** — Increase tool `timeout` (max 3600s) if workload is legitimate. For stuck native code, cancellation triggers `SIGINT` first then escalates; the session restarts on the next request.
+- **Python backend not available** — Check `eval.py`, `PI_PY`, and that `python`/`python3` is on PATH. If another backend is enabled, use its advertised language token.
+- **No Python on PATH** — Install a system Python 3.10+ or place a compatible venv at `~/.omp/python-env`. `omp setup python --check` reports the resolved interpreter.
+- **Execution hangs then times out** — Increase `timeout` for legitimate work or set it to `0` to disable the watchdog. For stuck native code, cancellation sends `SIGINT` first and then escalates; session mode recreates the kernel on the next request if it had to be killed.
 - **stdin/input prompts in Python code** — `input()` is not supported; pass data programmatically.
-- **Working directory errors** — Tool validates `cwd` exists and is a directory before execution.
+- **Working directory errors** — Python runs in the session cwd. Use `%cd` or `os.chdir()` inside the retained kernel to change it.
 
 ## Relevant environment variables
 
-- `PI_PY` / `PI_JS` — eval backend exposure overrides
+- `PI_PY` / `PI_JS` / `PI_RB` / `PI_JL` — per-backend exposure overrides
 - `PI_PYTHON_SKIP_CHECK=1` — bypass Python preflight/warm checks
 - `PI_PYTHON_INTEGRATION=1` — enable gated integration tests that spawn a real Python
 - `PI_PYTHON_IPC_TRACE=1` — log NDJSON frames exchanged with the runner subprocess

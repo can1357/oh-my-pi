@@ -334,8 +334,15 @@ export class GuestClient {
 				break;
 			case "state":
 				this.#state = frame.state;
+				// Host state is authoritative for liveness in both directions: the
+				// payload is built at fire time, so `isStreaming` is never stale.
+				// This covers a connected guest that misses the discrete `agent_start`
+				// without receiving a new `welcome` (for example, mid-stream).
+				this.#working = frame.state.isStreaming;
 				if (!frame.state.isStreaming) {
-					this.#working = false;
+					// Host idle implies no tool can be running, so clear any card
+					// pinned by a dropped `tool_execution_end` off this signal.
+					this.#activeTools = new Map();
 					if (this.#streamDone) {
 						this.#stream = null;
 						this.#streamDone = false;
@@ -453,6 +460,9 @@ export class GuestClient {
 				break;
 			case "auto_retry_start":
 				this.#pushNotice("info", `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+				break;
+			case "auto_retry_end":
+				if (!event.success) this.#pushNotice("error", event.finalError ?? "retry failed");
 				break;
 			case "auto_compaction_start":
 				this.#pushNotice("info", `compacting context (${event.reason})`);

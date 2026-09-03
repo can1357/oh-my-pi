@@ -192,56 +192,60 @@ export class OmfgController {
 
 	async #saveCandidate(request: OmfgRequest, candidate: OmfgCandidate): Promise<SaveCandidateResult> {
 		if (this.#shouldStop(request)) return { kind: "aborted" };
-		request.component.setStatus("saving", "Choose where to save or amend the TTSR rule…");
-		const location = await this.ctx.showHookSelector("Save TTSR rule where?", [
-			PROJECT_OPTION,
-			GLOBAL_OPTION,
-			AMEND_OPTION,
-		]);
-		if (!this.#isActiveRequest(request)) return { kind: "aborted" };
-		if (!location) {
-			request.component.markAborted();
-			this.#closeActiveRequest({ abort: false });
-			return { kind: "aborted" };
-		}
 
-		if (location === AMEND_OPTION) {
-			request.component.setStatus("confirming", "Describe how to amend the rule…");
-			const amendment = await this.ctx.showHookInput(
-				"Amend TTSR rule",
-				"e.g. Make it specific to Ruby string eval in tool:write(*.rb)",
-			);
+		for (;;) {
+			request.component.setStatus("saving", "Choose where to save or amend the TTSR rule…");
+			const location = await this.ctx.showHookSelector("Save TTSR rule where?", [
+				PROJECT_OPTION,
+				GLOBAL_OPTION,
+				AMEND_OPTION,
+			]);
 			if (!this.#isActiveRequest(request)) return { kind: "aborted" };
-			const feedback = amendment?.trim();
-			if (!feedback) {
+			if (!location) {
 				request.component.markAborted();
 				this.#closeActiveRequest({ abort: false });
 				return { kind: "aborted" };
 			}
-			return { kind: "amend", feedback };
-		}
 
-		const target = this.#resolveTarget(location, candidate.rule.name);
-		if (await Bun.file(target.filePath).exists()) {
-			const shouldOverwrite = await this.ctx.showHookConfirm(
-				"Overwrite TTSR rule?",
-				`${shortenPath(target.filePath)} already exists. Overwrite it?`,
-			);
-			if (!this.#isActiveRequest(request)) return { kind: "aborted" };
-			if (!shouldOverwrite) {
-				request.component.markRejected();
-				return { kind: "rejected" };
+			if (location === AMEND_OPTION) {
+				request.component.setStatus("confirming", "Describe how to amend the rule…");
+				const amendment = await this.ctx.showHookInput(
+					"Amend TTSR rule",
+					"e.g. Make it specific to Ruby string eval in tool:write(*.rb)",
+				);
+				if (!this.#isActiveRequest(request)) return { kind: "aborted" };
+				const feedback = amendment?.trim();
+				if (!feedback) continue;
+				return { kind: "amend", feedback };
 			}
+
+			const target = this.#resolveTarget(location, candidate.rule.name);
+			if (await Bun.file(target.filePath).exists()) {
+				const shouldOverwrite = await this.ctx.showHookConfirm(
+					"Overwrite TTSR rule?",
+					`${shortenPath(target.filePath)} already exists. Overwrite it?`,
+				);
+				if (!this.#isActiveRequest(request)) return { kind: "aborted" };
+				if (!shouldOverwrite) {
+					request.component.markRejected();
+					return { kind: "rejected" };
+				}
+			}
+
+			request.component.setStatus("saving", `Saving ${candidate.rule.name}…`);
+			await Bun.write(target.filePath, candidate.fileContent);
+			if (!this.#isActiveRequest(request)) return { kind: "aborted" };
+
+			const savedRule = buildOmfgRuleForPath(
+				candidate.rule.name,
+				candidate.fileContent,
+				target.filePath,
+				target.level,
+			);
+			this.#registerLive(savedRule);
+			request.component.markSaved(shortenPath(target.filePath));
+			return { kind: "saved" };
 		}
-
-		request.component.setStatus("saving", `Saving ${candidate.rule.name}…`);
-		await Bun.write(target.filePath, candidate.fileContent);
-		if (!this.#isActiveRequest(request)) return { kind: "aborted" };
-
-		const savedRule = buildOmfgRuleForPath(candidate.rule.name, candidate.fileContent, target.filePath, target.level);
-		this.#registerLive(savedRule);
-		request.component.markSaved(shortenPath(target.filePath));
-		return { kind: "saved" };
 	}
 
 	#resolveTarget(location: string, ruleName: string): { filePath: string; level: OmfgRuleSourceLevel } {

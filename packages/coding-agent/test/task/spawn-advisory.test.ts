@@ -72,34 +72,46 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			cwd: "/tmp",
 			hasUI: false,
 			suppressSpawnAdvisory: suppress,
-			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": true }),
+			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;
 	}
 
-	async function spawnText(suppress: boolean): Promise<string> {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(
-			async (options): Promise<SingleResult> => ({
-				index: options.index ?? 0,
-				id: options.id ?? "X",
-				agent: "task",
-				agentSource: "bundled",
-				task: "t",
-				assignment: "do the thing",
-				exitCode: 0,
-				output: "done",
-				stderr: "",
-				truncated: false,
-				durationMs: 1,
-				tokens: 0,
-				requests: 1,
+	function sessionWithScoutDisabled(): ToolSession {
+		return {
+			cwd: "/tmp",
+			hasUI: false,
+			// `task.disabledAgents` is what the task tool reads to drop scout from
+			// the rendered description and the appended specialization advisory.
+			settings: Settings.isolated({
+				"task.isolation.enabled": false,
+				"task.batch": true,
+				"task.disabledAgents": ["scout"],
 			}),
-		);
-		const tool = await TaskTool.create(session(suppress));
-		// Both items omit `agent`, so each resolves to the generic spawn-policy
-		// default ("task") — the ≥2-generics condition the advisory gates on.
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		} as unknown as ToolSession;
+	}
+
+	async function spawnTextFor(s: ToolSession): Promise<string> {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => ({
+			index: options.index ?? 0,
+			id: options.id ?? "X",
+			agent: "task",
+			agentSource: "bundled",
+			task: "t",
+			assignment: "do the thing",
+			exitCode: 0,
+			output: "done",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 1,
+		}));
+		const tool = await TaskTool.create(s);
 		const result = await tool.execute("tc", {
 			context: "shared fan-out background",
 			tasks: [
@@ -111,10 +123,14 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 	}
 
 	it("appends the specialization advisory when a batch resolves two generic workers", async () => {
-		expect(await spawnText(false)).toContain('`agent: "scout"`');
+		expect(await spawnTextFor(session(false))).toContain('`agent: "scout"`');
+	});
+
+	it("drops the scout example when scout is disabled", async () => {
+		expect(await spawnTextFor(sessionWithScoutDisabled())).not.toContain("scout");
 	});
 
 	it("omits the advisory entirely when the session suppresses it", async () => {
-		expect(await spawnText(true)).not.toContain('`agent: "scout"`');
+		expect(await spawnTextFor(session(true))).not.toContain('`agent: "scout"`');
 	});
 });

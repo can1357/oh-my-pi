@@ -12,9 +12,9 @@
  *         aborted"; `updateContent` receives the original message ref.
  *   C2b errorMessage = USER_INTERRUPT_LABEL (threaded via AbortController) + aborted
  *       → the threaded reason is preserved verbatim, NOT replaced by the generic.
- *   C3  isTtsrAbortPending = true + aborted
- *       → `updateContent` receives a message with `stopReason: "stop"`;
- *         `errorMessage` is NOT set (TTSR existing behavior unchanged).
+ *   C3  isTtsrAbortPending = true + aborted + SilentAbort flag + rule reason
+ *       → `updateContent` receives a message with `stopReason: "stop"`; the
+ *         persisted reason survives and the shared presentation renders nothing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -22,6 +22,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 
@@ -175,8 +176,16 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 		expect(arg.stopReason).toBe("aborted");
 	});
 
-	it("C3: isTtsrAbortPending=true + aborted -> updateContent stopReason='stop', errorMessage NOT set", async () => {
-		const message = makeAssistantMessage({ stopReason: "aborted", errorMessage: undefined });
+	it("C3: a TTSR abort (SilentAbort flag + rule reason) is suppressed live and on rebuild", async () => {
+		// AgentSession stamps the SilentAbort flag on TTSR aborts while keeping the
+		// rule reason text on the message. The controller must downgrade the display
+		// stopReason without overwriting the persisted reason, and the shared
+		// presentation path (resume, `/tree`, rebuild) must render nothing.
+		const message = makeAssistantMessage({
+			stopReason: "aborted",
+			errorMessage: "TTSR matched rule: no-unwrap",
+			errorId: AIError.create(AIError.Flag.SilentAbort),
+		});
 		const { controller, streamingComponent } = createFixture({
 			streamingMessage: message,
 			isTtsrAbortPending: true,
@@ -184,12 +193,11 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 
 		await controller.handleEvent({ type: "message_end", message });
 
-		// TTSR keeps its existing flag-only render path — `errorMessage` stays undefined,
-		// and the display copy gets `stopReason: "stop"`.
-		expect(message.errorMessage).toBeUndefined();
+		expect(message.errorMessage).toBe("TTSR matched rule: no-unwrap");
 		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
 		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
 		expect(arg.stopReason).toBe("stop");
-		expect(arg.errorMessage).toBeUndefined();
+		// Rebuild path: the persisted aborted message renders no error line.
+		expect(resolveAssistantErrorPresentation(message)).toEqual({ kind: "none" });
 	});
 });

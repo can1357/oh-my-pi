@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
-import * as recorder from "@oh-my-pi/pi-coding-agent/stt/recorder";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -93,16 +93,18 @@ describe("STTController preflight", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.set("stt.modelName", "fast");
-		// Batch path: a non-streaming recorder keeps #start off the live worker.
-		vi.spyOn(recorder, "ensureRecorder").mockResolvedValue({ tool: "sox", bin: "sox" });
-		vi.spyOn(recorder, "detectRecorder").mockReturnValue({ tool: "powershell", bin: "powershell" });
-		vi.spyOn(recorder, "startRecording").mockResolvedValue({ stop: vi.fn().mockResolvedValue(undefined) });
+		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
+			pushAudio: vi.fn(),
+			stop: vi.fn().mockResolvedValue(""),
+			cancel: vi.fn(),
+		});
 	});
 
 	afterEach(() => {
 		controller?.dispose();
 		controller = undefined;
 		restoreSettingsTestState(state);
+		vi.restoreAllMocks();
 	});
 
 	it("cached model: starts recording without awaiting the model load, warming it in the background", async () => {
@@ -112,7 +114,7 @@ describe("STTController preflight", () => {
 		const download = vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
 
 		const editor = makeEditor();
-		controller = new STTController();
+		controller = new STTController(() => ({ stop: vi.fn() }));
 		const options = makeOptions();
 		await controller.toggle(editor, options);
 
@@ -140,7 +142,7 @@ describe("STTController preflight", () => {
 		});
 
 		const editor = makeEditor();
-		controller = new STTController();
+		controller = new STTController(() => ({ stop: vi.fn() }));
 		const options = makeOptions();
 		await controller.toggle(editor, options);
 
@@ -157,7 +159,7 @@ describe("STTController preflight", () => {
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
 
 		const editor = makeEditor();
-		controller = new STTController();
+		controller = new STTController(() => ({ stop: vi.fn() }));
 		await controller.toggle(editor, makeOptions());
 		expect(controller.state).toBe("recording");
 		expect(isCached).toHaveBeenLastCalledWith("fast");
@@ -171,5 +173,25 @@ describe("STTController preflight", () => {
 		expect(controller.state).toBe("recording");
 		// Preflight ran again for the new tier rather than short-circuiting.
 		expect(isCached).toHaveBeenLastCalledWith("turbo");
+	});
+	it("stops recording and surfaces asynchronous microphone failures", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+		const stopCapture = vi.fn();
+		const editor = makeEditor();
+		const options = makeOptions();
+		controller = new STTController(callback => {
+			onAudio = callback;
+			return { stop: stopCapture };
+		});
+		await controller.toggle(editor, options);
+
+		onAudio?.(new Error("Microphone permission denied"), new Float32Array());
+
+		expect(controller.state).toBe("idle");
+		expect(stopCapture).toHaveBeenCalledTimes(1);
+		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
+		expect(options.showWarning).toHaveBeenCalledWith("Microphone permission denied");
 	});
 });

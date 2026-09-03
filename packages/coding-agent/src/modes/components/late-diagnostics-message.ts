@@ -17,7 +17,7 @@ export interface LateDiagnosticsFile {
  */
 export class LateDiagnosticsMessageComponent extends Container {
 	#expanded = false;
-
+	#toolActivityVisible = true;
 	constructor(private readonly files: LateDiagnosticsFile[]) {
 		super();
 		this.#rebuild();
@@ -27,6 +27,17 @@ export class LateDiagnosticsMessageComponent extends Container {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
 		this.#rebuild();
+	}
+
+	setToolActivityVisible(visible: boolean): void {
+		if (this.#toolActivityVisible === visible) return;
+		this.#toolActivityVisible = visible;
+		this.invalidate();
+	}
+
+	override render(width: number): readonly string[] {
+		if (!this.#toolActivityVisible) return [];
+		return super.render(width);
 	}
 
 	override invalidate(): void {

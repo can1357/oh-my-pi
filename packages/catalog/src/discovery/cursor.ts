@@ -1,10 +1,12 @@
 import * as http2 from "node:http2";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
+import { compareRevision, parseRevision } from "../compat/revision";
+import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
-import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-gen/agent_pb";
+import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
+import { create, fromBinary, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
 const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
@@ -14,11 +16,16 @@ const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
 
 /**
- * Model-id families whose native catalogs (anthropic, openai/openai-codex,
- * google) are multimodal. Cursor-only or text-only families (`composer-*`,
- * `grok-code-*`) intentionally stay outside this pattern.
+ * `GetUsableModels` carries no context-window field, so the 1M ceiling is
+ * recovered from the signals Cursor does send:
+ * - display-name labels ("Opus 5 1M", "GPT-5.5 1M High") across families,
+ * - natively 1M families Cursor serves unlabeled (Kimi K3, GLM 5.2+),
+ * - the max-mode flag on Claude/Gemini ids, whose max-mode ceiling is 1M.
  */
-const CURSOR_MULTIMODAL_ID_PATTERN = /claude|gemini|gpt-|codex/;
+const CURSOR_1M_CONTEXT_WINDOW = 1_000_000;
+// residue: a display-name label is the only signal for these rows; ids carry
+// no marker the taxonomy could classify.
+const CURSOR_1M_NAME_PATTERN = /\b1m\b/i;
 
 const OptionalDisplayNameSchema = type("unknown").pipe(raw => (typeof raw === "string" ? raw : undefined));
 const CursorAliasesSchema = type("unknown").pipe(raw => {
@@ -243,6 +250,27 @@ function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array | null {
 	return null;
 }
 
+function isCursorKimiK3(id: string): boolean {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	return identity.class === "kimi" && identity.family === "k3";
+}
+function isCursorVersionedGrok(id: string): boolean {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	if (identity.class !== "xai" || identity.revision === undefined) return false;
+	const revision = parseRevision(identity.revision);
+	const floor = parseRevision("4");
+	return revision !== undefined && floor !== undefined && compareRevision(revision, floor) >= 0;
+}
+
+function isCursorGlm52CodingModel(id: string): boolean {
+	const identity = classifyModel("cursor", id, { lenient: true });
+	if (identity.class !== "glm" || identity.revision === undefined) return false;
+	if (identity.family !== undefined && identity.family !== "air" && identity.family !== "turbo") return false;
+	const revision = parseRevision(identity.revision);
+	const floor = parseRevision("5.2");
+	return revision !== undefined && floor !== undefined && compareRevision(revision, floor) >= 0;
+}
+
 function normalizeCursorModels(
 	models: readonly unknown[] | undefined,
 	baseUrlOverride: string | undefined,
@@ -282,7 +310,16 @@ function normalizeCursorModel(
 
 	const name = pickModelDisplayName(details, id);
 	const reference = references.get(id);
-	const reasoning = Boolean(details.thinkingDetails) || reference?.reasoning === true;
+	// Versioned Cursor Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`)
+	// are reasoning models whose effort rides the per-tier sibling id;
+	// `GetUsableModels` ships no `thinkingDetails` for them and the bundled
+	// references read `reasoning: false`. The `grok-code-fast-*` family
+	// classifies below the 4.x floor and stays out.
+	const reasoning =
+		isCursorKimiK3(id) ||
+		isCursorVersionedGrok(id) ||
+		Boolean(details.thinkingDetails) ||
+		reference?.reasoning === true;
 
 	if (reference) {
 		return {
@@ -291,6 +328,8 @@ function normalizeCursorModel(
 			name,
 			baseUrl: baseUrlOverride ?? reference.baseUrl,
 			reasoning,
+			input: resolveCursorInput(id, reference.input),
+			contextWindow: resolveCursorContextWindow(details, id, reference.contextWindow),
 			cursorMaxMode: details.maxMode,
 		};
 	}
@@ -301,12 +340,44 @@ function normalizeCursorModel(
 		provider: "cursor",
 		baseUrl: baseUrlOverride ?? CURSOR_DEFAULT_BASE_URL,
 		reasoning,
-		input: inferInputFromCursorId(id),
+		input: resolveCursorInput(id),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: DEFAULT_CONTEXT_WINDOW,
+		contextWindow: resolveCursorContextWindow(details, id, DEFAULT_CONTEXT_WINDOW),
 		maxTokens: DEFAULT_MAX_TOKENS,
 		cursorMaxMode: details.maxMode,
 	};
+}
+
+/**
+ * Context window for a discovered Cursor model: the 1M ceiling when any 1M
+ * signal fires (never below a larger bundled reference), else the fallback.
+ */
+function resolveCursorContextWindow(
+	model: CursorModelDetailsValue,
+	id: string,
+	fallback: number | null,
+): number | null {
+	const labeled1M =
+		CURSOR_1M_NAME_PATTERN.test(id) ||
+		[model.displayName, model.displayNameShort, model.displayModelId, ...model.aliases].some(
+			candidate => typeof candidate === "string" && CURSOR_1M_NAME_PATTERN.test(candidate),
+		);
+	const identity = classifyModel("cursor", id, { lenient: true });
+	const maxMode1M = model.maxMode && (identity.class === "anthropic" || identity.class === "gemini");
+	if (labeled1M || isCursorNative1MModelId(id) || maxMode1M) {
+		return Math.max(fallback ?? 0, CURSOR_1M_CONTEXT_WINDOW);
+	}
+	return fallback;
+}
+
+/**
+ * Natively 1M-context families Cursor serves without a "1M" label: GLM 5.2+
+ * base/air/turbo coding SKUs (structured family and revision gates exclude
+ * vision and sub-1M variants). K3 — including Cursor's bare `k3` alias — is
+ * rule-owned via `context-window-floor` in `providers/cursor.kdl`.
+ */
+function isCursorNative1MModelId(id: string): boolean {
+	return isCursorGlm52CodingModel(id);
 }
 
 function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string): string {
@@ -324,15 +395,18 @@ function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string
 }
 
 /**
- * Infers input modalities for Cursor models without a bundled reference.
- *
- * `GetUsableModels` carries no per-model modality metadata, so classification
- * falls back to the model family: families that are multimodal in OMP's own
- * native catalogs accept images, everything else stays text-only. Mirrors
- * `inferInputFromGeminiId` in ./gemini.ts.
+ * Resolves input modalities from a bundled reference when available. The
+ * Cursor-verified families (K3, grok-4, composer-2.5) are rule-owned via
+ * `input-modalities` in `providers/cursor.kdl` and corrected at build time.
+ * Without a reference, families whose native catalogs are multimodal
+ * (anthropic, gemini, openai) fall back to id classification.
  */
-function inferInputFromCursorId(id: string): ("text" | "image")[] {
-	if (CURSOR_MULTIMODAL_ID_PATTERN.test(id.toLowerCase())) {
+export function resolveCursorInput(id: string, referenceInput?: ("text" | "image")[]): ("text" | "image")[] {
+	if (referenceInput) {
+		return referenceInput;
+	}
+	const identity = classifyModel("cursor", id, { lenient: true });
+	if (identity.class === "anthropic" || identity.class === "gemini" || identity.class === "openai") {
 		return ["text", "image"];
 	}
 	return ["text"];

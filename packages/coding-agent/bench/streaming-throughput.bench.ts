@@ -121,5 +121,9 @@ const msPerStep = elapsedMs / totalTicks;
 
 console.log(`METRIC reveal_ms_per_episode=${msPerEpisode.toFixed(4)}`);
 console.log(`METRIC reveal_ms_per_step=${msPerStep.toFixed(5)}`);
-console.log(`ASI graphemes=${graphemes} episodes=${MEASURE_EPISODES} ticks_per_episode=${(totalTicks / MEASURE_EPISODES).toFixed(2)} warmup=${WARMUP_EPISODES}`);
-console.log(`(reveal: ${graphemes} graphemes, ${(totalTicks / MEASURE_EPISODES).toFixed(1)} ticks/episode, ${msPerEpisode.toFixed(3)} ms/episode, ${msPerStep.toFixed(4)} ms/step)`);
+console.log(
+	`ASI graphemes=${graphemes} episodes=${MEASURE_EPISODES} ticks_per_episode=${(totalTicks / MEASURE_EPISODES).toFixed(2)} warmup=${WARMUP_EPISODES}`,
+);
+console.log(
+	`(reveal: ${graphemes} graphemes, ${(totalTicks / MEASURE_EPISODES).toFixed(1)} ticks/episode, ${msPerEpisode.toFixed(3)} ms/episode, ${msPerStep.toFixed(4)} ms/step)`,
+);

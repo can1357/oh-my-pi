@@ -10,10 +10,12 @@
 import * as path from "node:path";
 import { applyEdits } from "./apply";
 import { resolveBlockEdits } from "./block";
+import { hasClipboardEdit } from "./clipboard";
 import { HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX } from "./format";
+import { CLIPBOARD_INTERLEAVED_SECTIONS } from "./messages";
 import { parsePatch, parsePatchStreaming } from "./parser";
 import { Tokenizer } from "./tokenizer";
-import type { ApplyResult, BlockResolver, Edit, FileOp, SplitOptions } from "./types";
+import type { ApplyResult, BlockResolver, Clipboard, Edit, FileOp, SplitOptions } from "./types";
 
 // Pure classification — single shared tokenizer is safe.
 const TOKENIZER = new Tokenizer();
@@ -97,6 +99,14 @@ interface RawSection {
 	path: string;
 	fileHash?: string;
 	diff: string;
+	/**
+	 * True when this section coalesced same-path sections that were NOT
+	 * adjacent in the authored input (another file's section sat between
+	 * them). Merging moves the later ops up to the first occurrence, which
+	 * would silently reorder the clipboard register sequence — so clipboard
+	 * ops are rejected in such sections.
+	 */
+	interleaved?: boolean;
 }
 
 /**
@@ -239,10 +249,13 @@ export class PatchSection {
 	readonly diff: string;
 	#parsed: { edits: Edit[]; fileOp?: FileOp; warnings: string[] } | undefined;
 
+	#interleavedMerge: boolean;
+
 	constructor(raw: RawSection) {
 		this.path = raw.path;
 		this.fileHash = raw.fileHash;
 		this.diff = raw.diff;
+		this.#interleavedMerge = raw.interleaved === true;
 	}
 
 	/**
@@ -253,6 +266,12 @@ export class PatchSection {
 	parse(): { edits: Edit[]; fileOp?: FileOp; warnings: readonly string[] } {
 		this.#parsed ??= parsePatch(this.diff);
 		const parsed = this.#parsed;
+		// Same-path sections merge into their first occurrence; when that merge
+		// crossed another file's section, the authored top-to-bottom register
+		// order is gone, so clipboard ops cannot apply deterministically.
+		if (this.#interleavedMerge && hasClipboardEdit(parsed.edits)) {
+			throw new Error(CLIPBOARD_INTERLEAVED_SECTIONS);
+		}
 		const fileOp =
 			parsed.fileOp === undefined
 				? undefined
@@ -286,9 +305,11 @@ export class PatchSection {
 	 */
 	get hasAnchorScopedEdit(): boolean {
 		return this.edits.some(edit => {
-			if (edit.kind === "delete") return true;
-			// A `replace_block N:` edit is anchored to concrete content on line N.
-			if (edit.kind === "block") return true;
+			if (edit.kind === "delete" || edit.kind === "block" || edit.kind === "cut") return true;
+			if (edit.kind === "paste") {
+				if (edit.at.kind === "span") return true;
+				return edit.at.cursor.kind === "before_anchor" || edit.at.cursor.kind === "after_anchor";
+			}
 			return edit.cursor.kind === "before_anchor" || edit.cursor.kind === "after_anchor";
 		});
 	}
@@ -297,12 +318,20 @@ export class PatchSection {
 	collectAnchorLines(): readonly number[] {
 		const lines = new Set<number>();
 		for (const edit of this.edits) {
-			if (edit.kind === "delete") {
+			if (edit.kind === "delete" || edit.kind === "block") {
 				lines.add(edit.anchor.line);
 				continue;
 			}
-			if (edit.kind === "block") {
-				lines.add(edit.anchor.line);
+			if (edit.kind === "cut") {
+				for (let line = edit.range.start.line; line <= edit.range.end.line; line++) lines.add(line);
+				continue;
+			}
+			if (edit.kind === "paste") {
+				if (edit.at.kind === "span") {
+					for (let line = edit.at.range.start.line; line <= edit.at.range.end.line; line++) lines.add(line);
+				} else if (edit.at.cursor.kind === "before_anchor" || edit.at.cursor.kind === "after_anchor") {
+					lines.add(edit.at.cursor.anchor.line);
+				}
 				continue;
 			}
 			if (edit.cursor.kind === "before_anchor" || edit.cursor.kind === "after_anchor") {
@@ -321,15 +350,18 @@ export class PatchSection {
 	 *
 	 * `blockResolver` resolves any `replace_block N:` edits against `text`; an
 	 * unresolvable block throws (this is the final, authoritative preview path).
+	 *
+	 * `clipboard` is the register shared by `CUT`/`PASTE` ops. Pass one when
+	 * applying several sections so content can move across files.
 	 */
-	applyTo(text: string, blockResolver?: BlockResolver): ApplyResult {
+	applyTo(text: string, blockResolver?: BlockResolver, clipboard?: Clipboard): ApplyResult {
 		const { edits, warnings } = this.parse();
 		const resolveWarnings: string[] = [];
 		const resolved = resolveBlockEdits(edits, text, this.path, blockResolver, {
 			onUnresolved: "throw",
 			onWarning: warning => resolveWarnings.push(warning),
 		});
-		const result = applyEdits(text, resolved);
+		const result = applyEdits(text, resolved, { clipboard: clipboard ?? {}, path: this.path });
 		// Preserve parse warnings so consumers don't need to call `parse()`
 		// separately.
 		const merged = [...warnings, ...resolveWarnings, ...(result.warnings ?? [])];
@@ -347,16 +379,20 @@ export class PatchSection {
 	 *
 	 * `blockResolver` resolves any `replace_block N:` edits against `text`; an
 	 * unresolvable block is silently dropped so a half-written file does not
-	 * throw mid-stream.
+	 * throw mid-stream. A `PASTE` with an empty register is dropped too.
 	 */
-	applyPartialTo(text: string, blockResolver?: BlockResolver): ApplyResult {
+	applyPartialTo(text: string, blockResolver?: BlockResolver, clipboard?: Clipboard): ApplyResult {
 		const { edits, warnings } = parsePatchStreaming(this.diff);
 		const resolveWarnings: string[] = [];
 		const resolved = resolveBlockEdits(edits, text, this.path, blockResolver, {
 			onUnresolved: "drop",
 			onWarning: warning => resolveWarnings.push(warning),
 		});
-		const result = applyEdits(text, resolved);
+		const result = applyEdits(text, resolved, {
+			clipboard: clipboard ?? {},
+			onEmptyPaste: "drop",
+			path: this.path,
+		});
 		const merged = [...warnings, ...resolveWarnings, ...(result.warnings ?? [])];
 		return merged.length > 0
 			? { ...result, warnings: merged }
@@ -374,6 +410,7 @@ export class PatchSection {
 			path,
 			...(this.fileHash !== undefined ? { fileHash: this.fileHash } : {}),
 			diff: this.diff,
+			...(this.#interleavedMerge ? { interleaved: true } : {}),
 		});
 		next.#parsed = this.#parsed;
 		return next;
@@ -432,7 +469,8 @@ export class Patch {
  * fails. Path order is preserved by first occurrence.
  */
 function mergeSamePathSections(sections: RawSection[]): RawSection[] {
-	const byPath = new Map<string, { fileHash?: string; diffs: string[] }>();
+	const byPath = new Map<string, { fileHash?: string; diffs: string[]; interleaved: boolean }>();
+	let previousPath: string | undefined;
 	for (const section of sections) {
 		const existing = byPath.get(section.path);
 		if (existing) {
@@ -446,17 +484,24 @@ function mergeSamePathSections(sections: RawSection[]): RawSection[] {
 				);
 			}
 			if (existing.fileHash === undefined && section.fileHash !== undefined) existing.fileHash = section.fileHash;
+			// Merging across another file's section moves these ops up to the
+			// first occurrence; flag it so clipboard ops can refuse the reorder.
+			if (previousPath !== section.path) existing.interleaved = true;
 			existing.diffs.push(section.diff);
+			previousPath = section.path;
 			continue;
 		}
 		byPath.set(section.path, {
 			...(section.fileHash !== undefined ? { fileHash: section.fileHash } : {}),
 			diffs: [section.diff],
+			interleaved: false,
 		});
+		previousPath = section.path;
 	}
 	return Array.from(byPath, ([sectionPath, entry]) => ({
 		path: sectionPath,
 		...(entry.fileHash !== undefined ? { fileHash: entry.fileHash } : {}),
 		diff: entry.diffs.join("\n"),
+		...(entry.interleaved ? { interleaved: true } : {}),
 	}));
 }

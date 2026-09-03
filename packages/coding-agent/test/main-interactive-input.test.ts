@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyResolvedSystemPromptInputs, submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	applyResolvedSystemPromptInputs,
+	readPipedInput,
+	submitInteractiveInput,
+} from "@oh-my-pi/pi-coding-agent/main";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
@@ -12,6 +16,7 @@ const cleanupDirs: string[] = [];
 
 afterEach(async () => {
 	await Promise.all(cleanupDirs.splice(0).map(dir => removeWithRetries(dir)));
+	vi.restoreAllMocks();
 });
 
 function createInput(overrides: Partial<SubmittedUserInput> = {}): SubmittedUserInput {
@@ -37,6 +42,21 @@ describe("discoverTitleSystemPromptFile", () => {
 	});
 });
 
+describe("readPipedInput", () => {
+	it("reads redirected stdin when Bun reports isTTY as undefined", async () => {
+		const originalIsTTY = process.stdin.isTTY;
+		const readText = vi.spyOn(Bun.stdin, "text").mockResolvedValue("piped prompt\n");
+		Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
+
+		try {
+			expect(await readPipedInput()).toBe("piped prompt\n");
+			expect(readText).toHaveBeenCalledTimes(1);
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		}
+	});
+});
+
 describe("applyResolvedSystemPromptInputs", () => {
 	it("routes SYSTEM.md content through template-aware session options", () => {
 		const options: CreateAgentSessionOptions = {};
@@ -59,7 +79,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
 		};
 		const input = createInput({ text: "resume now", started: true, synthetic: true });
@@ -81,7 +101,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
 		};
 		const input = createInput();
@@ -103,7 +123,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
 		};
 		const input = createInput({ text: "continue goal", customType: "goal-continuation" });
@@ -135,7 +155,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
 		};
 		const input = createInput({ text: "loop prompt" });
@@ -155,7 +175,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: true,
 		};
 		const input = createInput({ text: "interrupt now", streamingBehavior: "steer" });
@@ -178,7 +198,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: true,
 		};
 		const input = createInput({ text: "continue goal", customType: "goal-continuation" });
@@ -208,7 +228,7 @@ describe("submitInteractiveInput", () => {
 		};
 		const session = {
 			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => {}),
+			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: true,
 		};
 		const input = createInput({ text: "loop prompt" });

@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
-	AUTO_HANDOFF_THRESHOLD_FOCUS,
+	createCompactionSummaryMessage,
+	defaultConvertToLlm,
 	generateHandoff,
 	generateHandoffFromContext,
 	renderHandoffPrompt,
@@ -9,7 +11,7 @@ import {
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
-import { Effort, z } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function createAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
@@ -41,7 +43,7 @@ function createAssistantError(errorStatus: number, errorMessage: string): Assist
 	};
 }
 
-const handoffToolSchema = z.object({ note: z.string().optional() });
+const handoffToolSchema = type({ note: type("string").optional() });
 
 function createHandoffTool(): AgentTool<typeof handoffToolSchema> {
 	return {
@@ -65,17 +67,42 @@ function getTestModel(): Model {
 afterEach(() => {
 	vi.restoreAllMocks();
 });
+describe("handoff summary injection", () => {
+	// Regression: without handoff-specific framing the successor misreads the
+	// document's first-person "Next Steps" as fresh user instructions, or tries
+	// to write the handoff again.
+	const document = "## Goal\nContinue the resize fix.\n\n## Next Steps\n1. Run the focused test";
+
+	function convertedText(method: string | undefined): string {
+		const message = createCompactionSummaryMessage(document, 1000, new Date().toISOString(), { method });
+		const [converted] = defaultConvertToLlm([message]);
+		if (!converted || !Array.isArray(converted.content)) throw new Error("Expected converted content blocks");
+		const block = converted.content[0];
+		if (block?.type !== "text") throw new Error("Expected leading text block");
+		return block.text;
+	}
+
+	test("handoff-method summary is framed as the successor's own prior handoff", () => {
+		const text = convertedText("handoff");
+		expect(text).toContain("<handoff>");
+		expect(text).toContain("prior instance");
+		expect(text).toContain("NEVER write another handoff document");
+		expect(text).toContain(document);
+		expect(text).not.toContain("<summary>");
+	});
+
+	test("non-handoff methods keep the generic compaction framing", () => {
+		const text = convertedText("remote");
+		expect(text).toContain("<summary>");
+		expect(text).toContain(document);
+		expect(text).not.toContain("<handoff>");
+	});
+});
 
 describe("handoff helpers", () => {
 	test("renders custom focus into the handoff prompt", () => {
 		const rendered = renderHandoffPrompt("preserve failing test name");
 		expect(rendered).toContain("preserve failing test name");
-	});
-
-	test("exports the threshold focus text used by auto-handoff", () => {
-		expect(AUTO_HANDOFF_THRESHOLD_FOCUS).toBe(
-			"Threshold-triggered maintenance: preserve critical implementation state and immediate next actions.",
-		);
 	});
 
 	test("generates handoff with the live cache prefix and tool use disabled", async () => {

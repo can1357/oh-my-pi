@@ -278,9 +278,11 @@ describe("GrepTool internal URL resolution", () => {
 	});
 
 	it("searches a virtual resource larger than the native grep cap with chunked native RE2 (line mode)", async () => {
-		// >4 MiB of normal-sized lines: native grep skips the whole file, so search chunks it
-		// at line boundaries. An RE2 inline-flag pattern must still match — JS `RegExp` rejects `(?i)`.
-		const content = `${"filler line\n".repeat(380_000)}needle here\n`;
+		// Cross the 4 MiB native cap with a few thousand medium-sized lines instead
+		// of hundreds of thousands of tiny ones. The match still lands in the
+		// second native chunk, while fixture construction and line splitting stay cheap.
+		const fillerLine = `${"x".repeat(2047)}\n`;
+		const content = `${fillerLine.repeat(2049)}needle here\n`;
 		registerVirtualDocs(new Map([["big.md", content]]));
 		const tool = new GrepTool(createSession());
 		const result = await tool.execute("big-virtual", { pattern: "(?i)NEEDLE", path: "virtual://big.md" });
@@ -620,7 +622,7 @@ describe("GrepTool internal URL resolution", () => {
 		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockResolvedValue([]);
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("ssh-dir-search", { pattern: "x", path: "ssh://h/etc" })).rejects.toThrow(
-			/directory listing|cannot recurse/,
+			/grep cannot recurse the directory listing/,
 		);
 		expect(listSpy).not.toHaveBeenCalled();
 	});

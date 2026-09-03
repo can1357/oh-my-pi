@@ -59,6 +59,7 @@ MODELS = {
     "gpt-5.4-mini": (0.75, 4.5),
     "google/gemini-3.5-flash": (0.6, 4.0),
     "moonshotai/kimi-k2.6": (0.68, 3.41),
+    "moonshotai/kimi-k3": (3.00, 15.00),
     "z-ai/glm-4.6v": (0.30, 0.90),
 }
 LENGTHS = (50, 150, 250)

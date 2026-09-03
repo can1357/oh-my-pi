@@ -83,6 +83,7 @@ In `per-project-tagged`, the wrapper is responsible for combining project-local 
 Common environment fallbacks:
 
 - `MNEMOPI_DATA_DIR` / `MNEMOPI_DB_PATH`: default storage location.
+- `MNEMOPI_DB_PAGE_SIZE`: optional SQLite page size for new file-backed databases; use a valid power of two from 512 to 65536 or `os` to request the detected system page size. Unset preserves SQLite's default.
 - `MNEMOPI_NO_EMBEDDINGS=1`: force FTS-only recall.
 - `MNEMOPI_EMBEDDING_MODEL`: defaults to `BAAI/bge-small-en-v1.5`.
 - `MNEMOPI_EMBEDDING_API_URL` and `MNEMOPI_EMBEDDING_API_KEY`: OpenAI-compatible embedding endpoint.

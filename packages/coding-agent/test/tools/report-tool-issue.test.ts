@@ -4,6 +4,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import {
+	__awaitAutoQaRecordPipelineForTests,
 	__resetAutoQaConsentForTests,
 	__resetAutoQaFlushStateForTests,
 	dispatchReportIssueDevice,
@@ -23,6 +24,7 @@ function openTempDb(): Database {
 			version TEXT NOT NULL,
 			tool TEXT NOT NULL,
 			report TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			pushed INTEGER NOT NULL DEFAULT 0
 		);
 	`);
@@ -103,6 +105,22 @@ describe("flushGrievances", () => {
 		Bun.env.PI_AUTO_QA = "1";
 
 		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": false }))).toBe(true);
+	});
+
+	it("enables auto QA by default with consent still unset", () => {
+		expect(isAutoQaEnabled(Settings.isolated())).toBe(true);
+	});
+
+	it("vetoes default-on auto QA once the user denied consent", () => {
+		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqaConsent": "denied" }))).toBe(false);
+	});
+
+	it("keeps explicitly enabled auto QA on despite denied consent", () => {
+		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": true, "dev.autoqaConsent": "denied" }))).toBe(true);
+	});
+
+	it("stays off when explicitly disabled", () => {
+		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": false }))).toBe(false);
 	});
 
 	it("skips network when consent is missing and leaves rows intact", async () => {
@@ -336,12 +354,26 @@ describe("dispatchReportIssueDevice", () => {
 		__resetAutoQaConsentForTests();
 	});
 
+	/** Drain the fire-and-forget consent → insert → flush pipeline. */
+	async function settlePipeline(): Promise<void> {
+		await __awaitAutoQaRecordPipelineForTests();
+	}
+
+	/** Auto QA on, consent already granted, push disabled (empty endpoint). */
+	function consentedSettings(): Settings {
+		return Settings.isolated({
+			"dev.autoqa": true,
+			"dev.autoqaConsent": "granted",
+			"dev.autoqaPush.endpoint": "",
+		});
+	}
+
 	it("records a grievance from `<tool>: <report>` text", async () => {
 		Bun.env.PI_AUTO_QA = "1";
 		const db = openTempDb();
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
-			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+			const session = { settings: consentedSettings() } as ToolSession;
 			const { result, xdev } = await dispatchReportIssueDevice(
 				session,
 				"read: selector parse dropped trailing line",
@@ -350,6 +382,7 @@ describe("dispatchReportIssueDevice", () => {
 			expect(first?.type).toBe("text");
 			if (first?.type === "text") expect(first.text).toBe("Noted, thanks!");
 			expect(xdev.tool).toBe("report_issue");
+			await settlePipeline();
 			expect(selectIds(db)).toHaveLength(1);
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(row).toEqual({ tool: "read", report: "selector parse dropped trailing line" });
@@ -364,11 +397,34 @@ describe("dispatchReportIssueDevice", () => {
 		const db = openTempDb();
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
-			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+			const session = { settings: consentedSettings() } as ToolSession;
 			await dispatchReportIssueDevice(session, "grep\nreported matches include a deleted file");
+			await settlePipeline();
 			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
 			expect(row).toEqual({ tool: "grep", report: "reported matches include a deleted file" });
 		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it("writes nothing while consent is unresolved", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		const originalPush = Bun.env.PI_AUTO_QA_PUSH;
+		delete Bun.env.PI_AUTO_QA_PUSH;
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			// Consent unset and no UI handler registered → resolves to false.
+			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+			const { result } = await dispatchReportIssueDevice(session, "read: selector parse dropped trailing line");
+			const first = result.content[0];
+			if (first?.type === "text") expect(first.text).toBe("Noted, thanks!");
+			await settlePipeline();
+			expect(selectIds(db)).toHaveLength(0);
+		} finally {
+			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
+			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
 			openSpy.mockRestore();
 			db.close();
 		}

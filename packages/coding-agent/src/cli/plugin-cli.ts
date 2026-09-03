@@ -4,8 +4,9 @@
  * Handles `omp plugin <command>` subcommands for plugin lifecycle management.
  */
 
-import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import * as path from "node:path";
+import { APP_NAME, getPluginsNodeModules, getProjectDir } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
 import {
@@ -14,7 +15,9 @@ import {
 	getMarketplacesRegistryPath,
 	getPluginsCacheDir,
 	MarketplaceManager,
+	parsePluginId,
 } from "../extensibility/plugins/marketplace/index.js";
+import type { InstalledPlugin } from "../extensibility/plugins/types";
 import { theme } from "../modes/theme/theme";
 
 // =============================================================================
@@ -464,7 +467,7 @@ async function handleInstall(
 async function handleUninstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; dryRun?: boolean; scope?: "user" | "project" },
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin uninstall <package> ...`));
@@ -474,10 +477,61 @@ async function handleUninstall(
 	// For uninstall, check the installed plugins registry directly.
 	// This works even if the marketplace entry was later removed from marketplaces.json.
 	const mktMgr = await makeMarketplaceManager();
-	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
+	const installedIds = (await mktMgr.listInstalledPlugins()).map(p => p.id);
+	const installedPlugins = new Set(installedIds);
 
-	for (const name of packages) {
-		if (installedPlugins.has(name)) {
+	// Installed marketplace IDs are `name@marketplace`, so a bare name never matches one
+	// exactly. Resolve it when exactly one marketplace supplies that name: without this the
+	// bare form falls through to the npm path, where `bun uninstall` exits 0 for a package
+	// that was never a dependency and the command reports a removal that did not happen.
+	const marketplaceIdsFor = (name: string): string[] =>
+		installedIds.filter(id => id.slice(0, id.lastIndexOf("@")) === name);
+
+	for (const rawName of packages) {
+		let name = rawName;
+		if (!installedPlugins.has(name)) {
+			const candidates = marketplaceIdsFor(name);
+			if (candidates.length === 1) {
+				name = candidates[0] as string;
+			} else if (candidates.length > 1) {
+				console.error(
+					chalk.red(
+						`${theme.status.error} ${rawName} is installed from ${candidates.length} marketplaces. Qualify it: ${candidates.join(", ")}`,
+					),
+				);
+				process.exit(1);
+			}
+		}
+
+		const viaMarketplace = installedPlugins.has(name);
+
+		if (flags.dryRun) {
+			if (viaMarketplace) {
+				try {
+					await mktMgr.uninstallPlugin(name, flags.scope, { dryRun: true });
+				} catch (err) {
+					console.error(chalk.red(`${theme.status.error} Failed to uninstall ${name}: ${err}`));
+					process.exit(1);
+				}
+			}
+
+			// Marketplace dry-runs validate the requested scope before reporting.
+			if (flags.json) {
+				console.log(
+					JSON.stringify({
+						dryRun: true,
+						action: "uninstall",
+						plugin: name,
+						source: viaMarketplace ? "marketplace" : "npm",
+					}),
+				);
+			} else {
+				console.log(chalk.dim(`[dry-run] Would uninstall ${name}`));
+			}
+			continue;
+		}
+
+		if (viaMarketplace) {
 			// Exact match against installed marketplace plugin IDs (name@marketplace)
 			try {
 				await mktMgr.uninstallPlugin(name, flags.scope);
@@ -489,7 +543,14 @@ async function handleUninstall(
 			continue;
 		}
 
-		// npm path
+		// npm path. `bun uninstall` exits 0 for a package that is not a dependency, so an
+		// unknown name would otherwise print a success line having removed nothing.
+		const npmPlugins = await manager.list();
+		if (!npmPlugins.some(p => p.name === name)) {
+			console.error(chalk.red(`${theme.status.error} ${rawName} is not installed`));
+			process.exit(1);
+		}
+
 		try {
 			await manager.uninstall(name);
 			if (flags.json) {
@@ -630,8 +691,7 @@ async function handleFeatures(
 	}
 
 	const pluginName = args[0];
-	const plugins = await manager.list();
-	const plugin = plugins.find(p => p.name === pluginName);
+	const plugin = await manager.getPlugin(pluginName, { path: path.join(getPluginsNodeModules(), pluginName) });
 
 	if (!plugin) {
 		console.error(chalk.red(`Plugin "${pluginName}" not found`));
@@ -735,8 +795,7 @@ async function handleConfig(
 		process.exit(1);
 	}
 
-	const plugins = await manager.list();
-	const plugin = plugins.find(p => p.name === pluginName);
+	const plugin = await manager.getPlugin(pluginName);
 
 	if (!plugin) {
 		console.error(chalk.red(`Plugin "${pluginName}" not found`));
@@ -838,8 +897,32 @@ async function handleConfig(
 	}
 }
 
+/**
+ * Enumerate every installed plugin to validate — npm/link plugins from
+ * {@link PluginManager.list} plus marketplace runtime packages, which `list()`
+ * intentionally omits. Marketplace summaries are resolved through their trusted
+ * install path; deduped by resolved package name using the same active-scope
+ * precedence as runtime loading.
+ */
+async function collectPluginsForValidation(manager: PluginManager): Promise<InstalledPlugin[]> {
+	const byName = new Map<string, InstalledPlugin>();
+	for (const plugin of await manager.list()) {
+		byName.set(plugin.name, plugin);
+	}
+	const mktMgr = await makeMarketplaceManager();
+	for (const summary of await mktMgr.listInstalledPlugins()) {
+		const entry = summary.entries[0];
+		if (!entry) continue;
+		const fallbackName = parsePluginId(summary.id)?.name ?? summary.id;
+		const resolved = await manager.getPlugin(fallbackName, { path: entry.installPath });
+		if (!resolved) continue;
+		byName.set(resolved.name, (await manager.getPlugin(resolved.name)) ?? resolved);
+	}
+	return [...byName.values()];
+}
+
 async function handleConfigValidate(manager: PluginManager, flags: { json?: boolean }): Promise<void> {
-	const plugins = await manager.list();
+	const plugins = await collectPluginsForValidation(manager);
 	const results: Array<{ plugin: string; key: string; error: string }> = [];
 
 	for (const plugin of plugins) {

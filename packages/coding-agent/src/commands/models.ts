@@ -1,13 +1,14 @@
 /**
  * List, search, and refresh available models.
  */
+
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { modelsHelp as commandHelp } from "../cli/command-help";
 import { resolveModelsArgs, runModelsCommand } from "../cli/models-cli";
 
 export default class Models extends Command {
-	static description = "List, search, and refresh available models";
-
+	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
 			description: "ls (default) | find | refresh | <provider>",

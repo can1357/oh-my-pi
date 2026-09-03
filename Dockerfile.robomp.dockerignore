@@ -5,11 +5,23 @@
 # the cost of per-Dockerfile shadows (no shared file to factor common rules
 # into). Keep them roughly in sync.
 
-# Heavy build outputs — must never reach the build context.
-target/
+# Heavy build outputs — must never reach the build context. Depth-agnostic for
+# the same reason as Dockerfile.dockerignore: bare `target/`/`dist/` only match
+# the context root, so nested build dirs (go-port/*/target, packages/*/dist)
+# were shipped on every build.
+**/target/
+bazel-*
 **/node_modules
-dist/
+**/dist/
 runs/
+.xwin-cache/
+packages/coding-agent/binaries/
+packages/natives/npm/
+packages/natives/native/
+**/.cache/
+packages/snapcompact/research/results/
+# The addon comes from PI_BASE; nothing in this context needs one.
+**/*.node
 
 # Per-host scratch the pi codebase uses for parallel agents / worktrees.
 .fallow/
@@ -66,8 +78,12 @@ out.jsonl
 out.html
 pi-*.html
 
-# Secrets. Should never be in the image regardless.
-.env
+# Host virtualenvs — the image installs its own interpreter deps.
+**/.venv/
+
+# Secrets. Should never be in the image regardless. Depth-agnostic: a bare
+# `.env` misses `python/robomp/.env`, which sits next to the copied src tree.
+**/.env
 
 # Robomp-only excludes. Natives + wheel + python + bun + rustup all come
 # from PI_BASE; the web-builder stage only needs root manifests + the
@@ -78,6 +94,5 @@ crates/
 docs/
 assets/
 scripts/
-LICENSE
 AGENTS.md
 README.md

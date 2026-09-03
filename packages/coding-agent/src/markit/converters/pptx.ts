@@ -1,7 +1,7 @@
 // Adapted from markit-ai (MIT). See ../NOTICE.
 import * as path from "node:path";
-import { XMLParser } from "fast-xml-parser";
-import { unzip, unzipText } from "../../utils/zip";
+import { archiveEntryText, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
+import { XMLParser } from "@oh-my-pi/pi-utils/xml";
 import type { ConversionResult, Converter, StreamInfo } from "../types";
 
 const EXTENSIONS = [".pptx"];
@@ -106,7 +106,7 @@ export class PptxConverter implements Converter {
 	}
 
 	async convert(input: Buffer, streamInfo: StreamInfo): Promise<ConversionResult> {
-		const entries = unzip(input);
+		const entries = await readArchiveEntries({ bytes: input, format: "zip" });
 		const parser = new XMLParser({
 			ignoreAttributes: false,
 			attributeNamePrefix: "@_",
@@ -114,13 +114,13 @@ export class PptxConverter implements Converter {
 			processEntities: { maxTotalExpansions: 1_000_000 },
 		});
 		// Get slide order from presentation.xml
-		const presXml = unzipText(entries, "ppt/presentation.xml");
+		const presXml = archiveEntryText(entries, "ppt/presentation.xml");
 		if (!presXml) throw new Error("Invalid PPTX: missing presentation.xml");
 		const pres = parser.parse(presXml) as PresentationDoc;
 		const sldIdList = pres["p:presentation"]?.["p:sldIdLst"]?.["p:sldId"];
 		const sldIds = Array.isArray(sldIdList) ? sldIdList : sldIdList ? [sldIdList] : [];
 		// Get relationship mappings
-		const relsXml = unzipText(entries, "ppt/_rels/presentation.xml.rels");
+		const relsXml = archiveEntryText(entries, "ppt/_rels/presentation.xml.rels");
 		const rels = relsXml ? (parser.parse(relsXml) as RelationshipsDoc) : null;
 		const relList = rels?.Relationships?.Relationship;
 		const relArray = Array.isArray(relList) ? relList : relList ? [relList] : [];
@@ -150,14 +150,14 @@ export class PptxConverter implements Converter {
 		const sections: string[] = [];
 		let imageCount = 0;
 		for (let i = 0; i < slidePaths.length; i++) {
-			const slideXml = unzipText(entries, slidePaths[i]);
+			const slideXml = archiveEntryText(entries, slidePaths[i]);
 			if (!slideXml) continue;
 			const slide = parser.parse(slideXml) as SlideDoc;
 			const spTree = slide["p:sld"]?.["p:cSld"]?.["p:spTree"];
 			if (!spTree) continue;
 			// Parse slide-level rels for image references
 			const slideRelsPath = `${slidePaths[i].replace("slides/slide", "slides/_rels/slide")}.rels`;
-			const slideRelsXml = unzipText(entries, slideRelsPath);
+			const slideRelsXml = archiveEntryText(entries, slideRelsPath);
 			const slideRelMap = new Map<string, string>();
 			if (slideRelsXml) {
 				const slideRels = parser.parse(slideRelsXml) as RelationshipsDoc;
@@ -199,7 +199,7 @@ export class PptxConverter implements Converter {
 						return parts;
 					}, [])
 					.join("/");
-				const buf = entries[normalizedPath];
+				const buf = entries.get(normalizedPath);
 				if (!buf) continue;
 				imageCount++;
 				const name =
@@ -229,7 +229,7 @@ export class PptxConverter implements Converter {
 			}
 			// Slide notes
 			const noteFile = slidePaths[i].replace("slides/slide", "notesSlides/notesSlide");
-			const noteXml = unzipText(entries, noteFile);
+			const noteXml = archiveEntryText(entries, noteFile);
 			if (noteXml) {
 				const note = parser.parse(noteXml) as NotesDoc;
 				const noteSpTree = note["p:notes"]?.["p:cSld"]?.["p:spTree"];

@@ -121,11 +121,11 @@ describe("gemini dialect (Pythonic tool_code)", () => {
 		]);
 	});
 
-	it("renders examples without a fence or print wrapper", () => {
+	it("renders a single call fenced with the default_api prefix", () => {
 		const definition = getDialectDefinition("gemini");
-		expect(definition.renderToolCall(call("read", { path: "a.ts" }), { example: true })).toBe('read(path="a.ts")');
-		expect(definition.renderAssistantToolCalls([call("read", { path: "a.ts" })], { example: true })).toBe(
-			'read(path="a.ts")',
+		expect(definition.renderToolCall(call("read", { path: "a.ts" }))).toBe('default_api.read(path="a.ts")');
+		expect(definition.renderAssistantToolCalls([call("read", { path: "a.ts" })])).toBe(
+			'```tool_code\ndefault_api.read(path="a.ts")\n```',
 		);
 	});
 

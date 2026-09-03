@@ -13,36 +13,31 @@ export const HL_FILE_SUFFIX = "]";
 /** Payload sigil for literal body rows. */
 export const HL_PAYLOAD_REPLACE = "+";
 
-/** Hunk-header keyword for concrete line replacement. */
-export const HL_REPLACE_KEYWORD = "SWAP";
-/** Hunk-header keyword for concrete line deletion. */
-export const HL_DELETE_KEYWORD = "DEL";
-/** Hunk-header keyword for insertion operations. */
-export const HL_INSERT_KEYWORD = "INS";
-/** Insert position keyword for inserting before a concrete line. */
-export const HL_INSERT_BEFORE = "PRE";
-/** Insert position keyword for inserting after a concrete line. */
-export const HL_INSERT_AFTER = "POST";
-/** Insert position keyword for inserting at the start of the file. */
-export const HL_INSERT_HEAD = "HEAD";
-/** Insert position keyword for inserting at the end of the file. */
-export const HL_INSERT_TAIL = "TAIL";
-/** Hunk-header keyword: `SWAP.BLK N:` resolves N to a tree-sitter block range and replaces its span. */
-export const HL_REPLACE_BLOCK_KEYWORD = "SWAP.BLK";
-/** Hunk-header keyword: `DEL.BLK N` resolves N to a tree-sitter block range and deletes its span. */
-export const HL_DELETE_BLOCK_KEYWORD = "DEL.BLK";
-/** Hunk-header keyword: `INS.BLK.POST N:` inserts after the last line of the tree-sitter block at N. */
-export const HL_INSERT_AFTER_BLOCK_KEYWORD = "INS.BLK.POST";
+/** Hunk-header keyword: `PUT` writes content (body rows) or a register at a span or gap. */
+export const HL_PUT_KEYWORD = "PUT";
+/** Hunk-header keyword: `CUT N.=M` / `CUT N*` deletes lines and captures them (anonymous register, or `@name` when given). */
+export const HL_CUT_KEYWORD = "CUT";
 /** File-level keyword: `REM` deletes the whole file named by the section header. */
 export const HL_REM_KEYWORD = "REM";
 /** File-level keyword: `MV DEST` renames/moves the section file to `DEST`. */
 export const HL_MOVE_KEYWORD = "MV";
 export const HL_HEADER_COLON = ":";
 
+/** Gap sigil: `<N` targets the gap before line N (`<1` = head). */
+export const HL_GAP_BEFORE = "<";
+/** Gap sigil: `>N` targets the gap after line N (`>$` = tail). */
+export const HL_GAP_AFTER = ">";
+/** Locator suffix: `N*` extends the anchor to the syntactic block opening at N. */
+export const HL_BLOCK_SUFFIX = "*";
+/** Gap anchor: `$` names the last line, so `>$` is end-of-file. */
+export const HL_EOF_ANCHOR = "$";
+/** Register sigil: `@name` selects a named clipboard register on `PUT`/`CUT`. */
+export const HL_REGISTER_SIGIL = "@";
+
 /** Separator between a hashline file path and its opaque snapshot tag. */
 export const HL_FILE_HASH_SEP = "#";
 
-/** Separator between two line numbers in a range, e.g. `5.=10`. */
+/** Canonical separator between inclusive range endpoints, e.g. `5.=10`. */
 export const HL_RANGE_SEP = ".=";
 
 /** Separator between a line number and displayed line content in hashline mode. */
@@ -58,28 +53,38 @@ export const HL_LINE_RE_RAW = `[1-9]\\d*`;
 /** Capture-group form of {@link HL_LINE_RE_RAW}. */
 export const HL_LINE_CAPTURE_RE_RAW = `(${HL_LINE_RE_RAW})`;
 
-/** Format a concrete replacement hunk header. */
+/** Format a concrete replacement hunk header (`PUT 5.=9:`). */
 export function formatReplaceHeader(start: number, end: number): string {
-	return `${HL_REPLACE_KEYWORD} ${start}${HL_RANGE_SEP}${end}${HL_HEADER_COLON}`;
+	return `${HL_PUT_KEYWORD} ${start}${HL_RANGE_SEP}${end}${HL_HEADER_COLON}`;
 }
 
-/** Format a concrete deletion hunk header. */
-export function formatDeleteHeader(start: number, end = start): string {
-	return start === end ? `${HL_DELETE_KEYWORD} ${start}` : `${HL_DELETE_KEYWORD} ${start}${HL_RANGE_SEP}${end}`;
+/** Format a concrete cut hunk header (`CUT 5.=9`). */
+export function formatCutHeader(start: number, end = start): string {
+	return `${HL_CUT_KEYWORD} ${start}${HL_RANGE_SEP}${end}`;
 }
 
-/** Format an insertion hunk header for a cursor position. */
-export function formatInsertHeader(cursor: Cursor): string {
+/** Format a gap locator for a cursor position (`<5`, `>5`, `<1`, `>$`). */
+export function formatGapLocator(cursor: Cursor): string {
 	switch (cursor.kind) {
 		case "before_anchor":
-			return `${HL_INSERT_KEYWORD}.${HL_INSERT_BEFORE} ${cursor.anchor.line}${HL_HEADER_COLON}`;
+			return `${HL_GAP_BEFORE}${cursor.anchor.line}`;
 		case "after_anchor":
-			return `${HL_INSERT_KEYWORD}.${HL_INSERT_AFTER} ${cursor.anchor.line}${HL_HEADER_COLON}`;
+			return `${HL_GAP_AFTER}${cursor.anchor.line}`;
 		case "bof":
-			return `${HL_INSERT_KEYWORD}.${HL_INSERT_HEAD}${HL_HEADER_COLON}`;
+			return `${HL_GAP_BEFORE}1`;
 		case "eof":
-			return `${HL_INSERT_KEYWORD}.${HL_INSERT_TAIL}${HL_HEADER_COLON}`;
+			return `${HL_GAP_AFTER}${HL_EOF_ANCHOR}`;
 	}
+}
+
+/** Format an insertion hunk header for a cursor position (`PUT <5:`, `PUT >$:`). */
+export function formatInsertHeader(cursor: Cursor): string {
+	return `${HL_PUT_KEYWORD} ${formatGapLocator(cursor)}${HL_HEADER_COLON}`;
+}
+
+/** Format a register reference (`@name`). */
+export function formatRegister(name: string): string {
+	return `${HL_REGISTER_SIGIL}${name}`;
 }
 
 /** Number of hex characters in a content-derived file-hash tag. */
@@ -134,8 +139,20 @@ export function formatNumberedLine(lineNumber: number, line: string): string {
 	return `${lineNumber}${HL_LINE_BODY_SEP}${line}`;
 }
 
+/**
+ * Split LF-delimited file text into lines hashline anchors can address.
+ * A terminal newline terminates the preceding line; it is not content.
+ */
+export function splitAddressableFileLines(text: string): string[] {
+	const lines = text.split("\n");
+	if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+	return lines;
+}
+
 /** Format file text with hashline-mode line-number prefixes for display. */
 export function formatNumberedLines(text: string, startLine = 1): string {
-	const lines = text.split("\n");
-	return lines.map((line, i) => formatNumberedLine(startLine + i, line)).join("\n");
+	return text
+		.split("\n")
+		.map((line, i) => formatNumberedLine(startLine + i, line))
+		.join("\n");
 }

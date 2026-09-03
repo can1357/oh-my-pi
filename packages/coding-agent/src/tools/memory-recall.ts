@@ -1,6 +1,6 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
 import type { ToolSession } from ".";

@@ -85,20 +85,35 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const editorContainer = createEditorSlot();
+	// Records the order of UI-rebuild vs agent-resume so a test can prove the
+	// re-answer continuation is deferred until after the transcript rebuild
+	// (issue #6483).
+	const order: string[] = [];
+	const renderInitialMessages = vi.fn(() => {
+		order.push("render");
+	});
+	const reloadTodos = vi.fn(async () => {
+		order.push("reloadTodos");
+	});
+	const resumeAfterAskReanswer = vi.fn(() => {
+		order.push("resume");
+	});
 	const ctx = {
-		editor: { id: "editor" },
+		editor: { id: "editor", getText: () => "", setText: vi.fn() },
 		editorContainer,
 		sessionManager: {
 			getTree: () => tree,
 			getLeafId: () => leafEntry.id,
 			getEntry: (id: string) => (id === leafEntry.id ? leafEntry : undefined),
 		},
-		session: { navigateTree },
+		session: { navigateTree, resumeAfterAskReanswer },
 		ui: {
 			setFocus: vi.fn(),
 			requestRender: vi.fn(),
 			terminal: { rows: 24 },
 		},
+		renderInitialMessages,
+		reloadTodos,
 		showStatus,
 		showError,
 		// No UI context available in this unit test — forces `#reanswerAsk` to
@@ -109,7 +124,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		// itself (already covered at the session level).
 		getToolUIContext: () => undefined,
 	} as unknown as InteractiveModeContext;
-	return { ctx, editorContainer, navigateTree, showStatus, showError };
+	return { ctx, editorContainer, navigateTree, showStatus, showError, resumeAfterAskReanswer, order };
 }
 
 /** Grabs the `TreeSelectorComponent` mounted by the most recent `showTreeSelector()` call and fires its onSelect as if the user pressed Enter on `entryId`. */
@@ -159,5 +174,37 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		expect(navigateTree).toHaveBeenCalledWith("leaf-ask", expect.objectContaining({ allowAskReopen: true }));
 		expect(showError).toHaveBeenCalledWith("Ask tool UI is not ready");
 		expect(showStatus).toHaveBeenCalledWith("Re-answer cancelled");
+	});
+
+	it("resumes the agent only after rebuilding the transcript when navigateTree reports a committed re-answer", async () => {
+		const entry = plainUserEntry("leaf-user");
+		const { ctx, editorContainer, showStatus, resumeAfterAskReanswer, order } = createCtx(entry, {
+			cancelled: false,
+			askReanswerCommitted: true,
+		});
+		const controller = new SelectorController(ctx);
+
+		controller.showTreeSelector();
+		// A non-current target skips the no-op short-circuit and lands straight on
+		// the success path (navigateTree here returns a committed re-answer).
+		await pickEntry(editorContainer, "some-other-entry");
+
+		expect(showStatus).toHaveBeenCalledWith("Navigated to selected point");
+		expect(resumeAfterAskReanswer).toHaveBeenCalledTimes(1);
+		// The resume must be deferred until after the transcript rebuild so the
+		// resumed turn never renders against the stale pre-rebuild UI (issue #6483).
+		expect(order.indexOf("render")).toBeGreaterThanOrEqual(0);
+		expect(order.indexOf("resume")).toBeGreaterThan(order.indexOf("render"));
+	});
+
+	it("does not resume the agent for a plain navigation without a committed re-answer", async () => {
+		const entry = plainUserEntry("leaf-user");
+		const { ctx, editorContainer, resumeAfterAskReanswer } = createCtx(entry, { cancelled: false });
+		const controller = new SelectorController(ctx);
+
+		controller.showTreeSelector();
+		await pickEntry(editorContainer, "some-other-entry");
+
+		expect(resumeAfterAskReanswer).not.toHaveBeenCalled();
 	});
 });

@@ -1,0 +1,14 @@
+{
+	"manifest_version": 3,
+	"name": "OMP Browser Relay",
+	"version": "0.1.0",
+	"description": "Lets the omp coding agent drive your existing tabs through a local CDP relay.",
+	"permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
+	"background": {
+		"service_worker": "background.js"
+	},
+	"options_page": "options.html",
+	"action": {
+		"default_title": "OMP Browser Relay (click for settings)"
+	}
+}

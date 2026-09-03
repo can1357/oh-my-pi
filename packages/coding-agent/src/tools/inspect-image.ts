@@ -1,26 +1,44 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, completeSimple, type ImageContent, type Model, type ToolExample } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type ImageContent,
+	type Model,
+	type ToolExample,
+	type Usage,
+} from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { extractTextContent } from "../commit/utils";
 
-import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
+import {
+	expandRoleAlias,
+	extractExplicitThinkingSelector,
+	getModelMatchPreferences,
+	resolveModelFromString,
+} from "../config/model-resolver";
 import inspectImageDescription from "../prompts/tools/inspect-image.md" with { type: "text" };
 import inspectImageSystemPromptTemplate from "../prompts/tools/inspect-image-system.md" with { type: "text" };
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import {
 	ImageInputTooLargeError,
 	type LoadedImageInput,
 	loadImageAttachmentInput,
 	loadImageInput,
+	loadSvgImageInput,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
 } from "../utils/image-loading";
 import type { ToolSession } from "./index";
+import { splitPathAndSelPreferringLiteral } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
 const inspectImageSchema = type({
-	path: type("string").describe("image file path, Image #N label, or attachment://N URI"),
+	path: type("string").describe(
+		"image file path, local .svg/.svgz path with :img, Image #N label, or attachment://N URI",
+	),
 	question: type("string").describe("question about image"),
 	"+": "reject",
 });
@@ -80,6 +98,7 @@ export interface InspectImageToolDetails {
 	model: string;
 	imagePath: string;
 	mimeType: string;
+	usage: Usage;
 }
 
 export class InspectImageTool implements AgentTool<typeof inspectImageSchema, InspectImageToolDetails> {
@@ -156,18 +175,26 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		};
 
 		const activeModelPattern = this.session.getActiveModelString?.() ?? this.session.getModelString?.();
-		const model =
-			resolvePattern("@vision") ??
-			resolvePattern("@default") ??
-			resolvePattern(activeModelPattern) ??
-			availableModels[0];
-		if (!model) {
-			throw new ToolError("Unable to resolve a model for inspect_image.");
+		let model: Model<Api> | undefined;
+		let selectedPattern: string | undefined;
+		for (const pattern of ["@vision", "@default", activeModelPattern]) {
+			const resolved = resolvePattern(pattern);
+			if (resolved?.input.includes("image")) {
+				model = resolved;
+				selectedPattern = pattern;
+				break;
+			}
 		}
-
-		if (!model.input.includes("image")) {
+		const activeProvider = resolvePattern(activeModelPattern)?.provider;
+		model ??= availableModels.find(
+			candidate => candidate.provider === activeProvider && candidate.input.includes("image"),
+		);
+		model ??= availableModels.find(candidate => candidate.input.includes("image"));
+		if (!model) {
+			const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
+			if (!textOnly) throw new ToolError("Unable to resolve a model for inspect_image.");
 			throw new ToolError(
-				`Resolved model ${model.provider}/${model.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
+				`Resolved model ${textOnly.provider}/${textOnly.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
 			);
 		}
 
@@ -182,6 +209,10 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		const autoResize = this.session.settings.get("images.autoResize");
 		const excludeWebP = webpExclusionForModel(model);
 		const attachmentReference = parseImageAttachmentReference(params.path);
+		const imageTarget = attachmentReference
+			? undefined
+			: await splitPathAndSelPreferringLiteral(params.path, this.session.cwd);
+		const isSvgImage = imageTarget?.sel?.toLowerCase() === "img";
 		try {
 			if (attachmentReference) {
 				imageInput = await loadAttachmentReferenceInput({
@@ -189,6 +220,14 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 					reference: attachmentReference,
 					attachments: this.session.getImageAttachments?.() ?? [],
 					autoResize,
+					excludeWebP,
+				});
+			} else if (isSvgImage && imageTarget) {
+				imageInput = await loadSvgImageInput({
+					path: imageTarget.path,
+					cwd: this.session.cwd,
+					autoResize,
+					maxBytes: MAX_IMAGE_INPUT_BYTES,
 					excludeWebP,
 				});
 			} else {
@@ -208,36 +247,77 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		}
 
 		if (!imageInput) {
-			throw new ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.");
+			throw new ToolError(
+				isSvgImage
+					? "inspect_image ':img' only supports .svg and .svgz files."
+					: "inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.",
+			);
 		}
 
 		const telemetry = resolveTelemetry(this.session.getTelemetry?.(), this.session.getSessionId?.() ?? undefined);
-		const response = await instrumentedCompleteSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(inspectImageSystemPromptTemplate)],
-				messages: [
-					{
-						role: "user",
-						content: [
-							{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
-							{ type: "text", text: params.question },
-						],
-						timestamp: Date.now(),
-					},
-				],
-			},
-			{
-				apiKey: modelRegistry.resolver(model, this.session.getSessionId?.() ?? undefined),
-				signal,
-			},
-			{ telemetry, oneshotKind: "inspect_image", completeImpl: this.completeImageRequest },
+		const timeoutMs = this.session.settings.get("inspect_image.timeoutMs");
+		const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+		const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
+		const effectiveSignal = timeoutSignal
+			? signal
+				? AbortSignal.any([signal, timeoutSignal])
+				: timeoutSignal
+			: signal;
+		const timedOut = (): boolean => Boolean(timeoutSignal?.aborted) && !signal?.aborted;
+		const formatTimeoutMessage = (): string => {
+			const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
+			return `inspect_image request timed out after ${seconds}s. Increase inspect_image.timeoutMs (currently ${timeoutMs}ms; 0 disables) or check the vision model provider.`;
+		};
+
+		// Honor the thinking effort configured on the resolved model role
+		// (e.g. `modelRoles.vision: <model>:high`). Without it the oneshot sent a
+		// suppressed/zero thinking budget, which thinking-only models (Gemini 3.x)
+		// reject with HTTP 400 ("Budget 0 is invalid. This model only works in
+		// thinking mode.").
+		const configuredThinking = concreteThinkingLevel(
+			extractExplicitThinkingSelector(selectedPattern, this.session.settings, {
+				isLiteralModelId: (provider, id) =>
+					availableModels.some(candidate => candidate.provider === provider && candidate.id === id),
+			}),
 		);
+		const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));
+
+		let response: AssistantMessage;
+		try {
+			response = await instrumentedCompleteSimple(
+				model,
+				{
+					systemPrompt: [prompt.render(inspectImageSystemPromptTemplate)],
+					messages: [
+						{
+							role: "user",
+							content: [
+								{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
+								{ type: "text", text: params.question },
+							],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{
+					apiKey: modelRegistry.resolver(model, this.session.getSessionId?.() ?? undefined),
+					signal: effectiveSignal,
+					reasoning,
+				},
+				{ telemetry, oneshotKind: "inspect_image", completeImpl: this.completeImageRequest },
+			);
+		} catch (error) {
+			if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+				if (timedOut()) throw new ToolError(formatTimeoutMessage());
+			}
+			throw error;
+		}
 
 		if (response.stopReason === "error") {
 			throw new ToolError(response.errorMessage ?? "inspect_image request failed.");
 		}
 		if (response.stopReason === "aborted") {
+			if (timedOut()) throw new ToolError(formatTimeoutMessage());
 			throw new ToolError("inspect_image request aborted.");
 		}
 
@@ -252,6 +332,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 				model: `${model.provider}/${model.id}`,
 				imagePath: imageInput.resolvedPath,
 				mimeType: imageInput.mimeType,
+				usage: response.usage,
 			},
 		};
 	}

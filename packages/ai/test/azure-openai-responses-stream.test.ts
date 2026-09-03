@@ -95,6 +95,36 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
+	it("repairs the orphaned output after dropping a malformed native function call", async () => {
+		const previous = {
+			...createAssistantMessage(""),
+			stopReason: "toolUse" as const,
+			providerPayload: {
+				type: "openaiResponsesHistory" as const,
+				provider: "azure" as const,
+				items: [
+					{
+						type: "function_call",
+						id: "fc_bad",
+						call_id: "call_bad",
+						name: "bash",
+						arguments: '{"command":"unterminated',
+					},
+					{ type: "function_call_output", call_id: "call_bad", output: "durable result" },
+				],
+			},
+		};
+
+		const payload = await captureAzurePayload({
+			messages: [previous, { role: "user", content: "continue", timestamp: Date.now() }],
+		});
+		const input = payload.input as Array<Record<string, unknown>>;
+
+		expect(input).not.toContainEqual(expect.objectContaining({ type: "function_call", call_id: "call_bad" }));
+		expect(input).not.toContainEqual(expect.objectContaining({ type: "function_call_output", call_id: "call_bad" }));
+		expect(JSON.stringify(input)).toContain("durable result");
+	});
+
 	it("sends an async onPayload replacement body", async () => {
 		let capturedBody: Record<string, unknown> | undefined;
 		const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -155,6 +185,22 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
+	it("omits reasoning summaries when model compatibility disables them", async () => {
+		const model: Model<"azure-openai-responses"> = buildModel({
+			...azureModel,
+			reasoning: true,
+			compat: { ...azureModel.compatConfig, supportsReasoningSummary: false },
+		} as ModelSpec<"azure-openai-responses">);
+
+		const payload = await captureAzurePayload(
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			model,
+			{ reasoning: "high", reasoningSummary: "detailed" },
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
 	it("keeps Azure Responses prompt_cache_key separate from Anthropic cache controls", async () => {
 		const payload = await captureAzurePayload(
 			{
@@ -206,6 +252,111 @@ describe("azure openai responses streaming", () => {
 		const tools = payload.tools as Array<{ parameters: { properties: { item: Record<string, unknown> } } }>;
 		expect(tools[0].parameters.properties.item.oneOf).toBeUndefined();
 		expect(Array.isArray(tools[0].parameters.properties.item.anyOf)).toBe(true);
+	});
+
+	it("serializes computer and its forced choice as a function on unsupported models", async () => {
+		const computer: Tool = {
+			name: "computer",
+			description: "Control the desktop",
+			parameters: { type: "object", properties: {} },
+			native: { type: "computer" },
+		};
+		const read: Tool = {
+			name: "read_file",
+			description: "Read a file",
+			parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+		};
+		const payload = await captureAzurePayload(
+			{
+				messages: [{ role: "user", content: "Inspect", timestamp: Date.now() }],
+				tools: [computer, read],
+			},
+			azureModel,
+			{ toolChoice: { type: "computer" } },
+		);
+		expect(payload.tools).toEqual([
+			expect.objectContaining({ type: "function", name: "computer" }),
+			expect.objectContaining({ type: "function", name: "read_file" }),
+		]);
+		expect(JSON.stringify(payload.tools)).not.toContain('{"type":"computer"}');
+		expect(payload.tool_choice).toEqual({ type: "function", name: "computer" });
+	});
+
+	it("serializes native GA computer and forced choice for a supported GPT-5.4 Azure model", async () => {
+		const supportedModel: Model<"azure-openai-responses"> = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: azureModel.baseUrl,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+		const computer: Tool = {
+			name: "computer",
+			description: "Control the desktop",
+			parameters: { type: "object", properties: {} },
+			native: { type: "computer" },
+		};
+		const nativeItem = {
+			type: "message" as const,
+			role: "user" as const,
+			content: [
+				{ type: "input_text" as const, text: "Inspect" },
+				{ type: "input_image" as const, file_id: "file_azure_screen_雪", detail: "auto" as const },
+				{ type: "input_file" as const, file_id: "file_azure_context_电脑" },
+			],
+		};
+		const payload = await captureAzurePayload(
+			{
+				messages: [
+					{
+						role: "user",
+						content: "Inspect",
+						providerPayload: { type: "openaiResponsesHistory", items: [nativeItem], dt: true },
+						timestamp: Date.now(),
+					},
+				],
+				tools: [computer],
+			},
+			supportedModel,
+			{
+				toolChoice: { type: "function", name: "computer" },
+				include: ["computer_call_output.output.image_url", "reasoning.encrypted_content"],
+			},
+		);
+		expect(supportedModel.supportsComputerUse).toBe(true);
+		expect(payload.tools).toEqual([{ type: "computer" }]);
+		expect(payload.tool_choice).toEqual({ type: "computer" });
+		expect(payload.input).toEqual([nativeItem]);
+		expect(payload.include).toEqual(["computer_call_output.output.image_url", "reasoning.encrypted_content"]);
+		expect(JSON.stringify(payload)).not.toContain("display_width");
+		expect(JSON.stringify(payload)).not.toContain("display_height");
+
+		const gatewayPayload = await captureAzurePayload(
+			{
+				messages: [{ role: "user", content: "Inspect", timestamp: Date.now() }],
+				tools: [computer],
+			},
+			supportedModel,
+			{
+				azureBaseUrl: "https://gateway.example/openai/v1",
+				toolChoice: { type: "function", name: "computer" },
+			},
+		);
+		expect(gatewayPayload.tools).toMatchObject([
+			{
+				type: "function",
+				name: "computer",
+				description: "Control the desktop",
+				parameters: { type: "object", properties: {} },
+				strict: false,
+			},
+		]);
+		expect(gatewayPayload.tool_choice).toEqual({ type: "function", name: "computer" });
 	});
 
 	it("surfaces nested response.failed provider errors", async () => {

@@ -19,6 +19,8 @@ import { goalRenderer } from "./tools/goal";
 import { grepRenderer } from "./tools/grep";
 import { hubRenderer } from "./tools/hub";
 import { inspectImageRenderer } from "./tools/inspect-image";
+import { ircRenderer } from "./tools/irc";
+import { jobRenderer } from "./tools/job";
 import { lspRenderer } from "./tools/lsp";
 import { recallRenderer } from "./tools/memory-recall";
 import { reflectRenderer } from "./tools/memory-reflect";
@@ -55,6 +57,11 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	goal: goalRenderer,
 	inspect_image: inspectImageRenderer,
 	hub: hubRenderer,
+	irc: ircRenderer,
+	job: jobRenderer,
+	await: jobRenderer,
+	poll: jobRenderer,
+	cancel_job: jobRenderer,
 	lsp: lspRenderer,
 	recall: recallRenderer,
 	reflect: reflectRenderer,
@@ -62,6 +69,8 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	read: readRenderer,
 	report_tool_issue: reportToolIssueRenderer,
 	resolve: resolveRenderer,
+	reject: resolveRenderer,
+	propose: resolveRenderer,
 	grep: grepRenderer,
 	search: grepRenderer,
 	task: taskRenderer,

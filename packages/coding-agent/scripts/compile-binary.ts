@@ -16,6 +16,8 @@ export interface CodingAgentCompileOptions {
 	readonly transformersVersion: string;
 	/** Optional cross-compilation runtime target. */
 	readonly target?: Bun.Build.CompileTarget;
+	/** Optional unmodified Bun executable used as the standalone runtime template. */
+	readonly executablePath?: string;
 	/** Match release builds that minify identifiers while retaining names. */
 	readonly minifyIdentifiers?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
@@ -47,7 +49,11 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			},
 			plugins: [await createLegacyPiVirtualModulePlugin()],
 			compile: {
-				...(options.target ? { target: options.target } : {}),
+				...(options.executablePath
+					? { executablePath: options.executablePath }
+					: options.target
+						? { target: options.target }
+						: {}),
 				outfile: options.outfile,
 				autoloadBunfig: false,
 				autoloadDotenv: false,

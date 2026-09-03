@@ -7,6 +7,8 @@ import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/code
 
 function makeSseResponse(): string {
 	return [
+		`data: ${JSON.stringify({ type: "response.web_search_call.completed", item_id: "ws_test" })}`,
+		"",
 		`data: ${JSON.stringify({
 			type: "response.output_item.done",
 			item: {

@@ -855,7 +855,6 @@ export function replaceText(content: string, oldText: string, newText: string, o
 	let normalizedContent = normalizeToLF(content);
 	const normalizedOldText = normalizeToLF(oldText);
 	const normalizedNewText = normalizeToLF(newText);
-	let count = 0;
 
 	if (options.all) {
 		// Check for exact matches first
@@ -867,11 +866,13 @@ export function replaceText(content: string, oldText: string, newText: string, o
 			};
 		}
 
-		// No exact matches - try fuzzy matching iteratively
+		// Match against the immutable source so inserted replacement text cannot become a later candidate.
+		const replacements: Array<{ startIndex: number; endIndex: number; text: string }> = [];
 		while (true) {
 			const matchOutcome = findMatch(normalizedContent, normalizedOldText, {
 				allowFuzzy: options.fuzzy,
 				threshold,
+				excludedRanges: replacements,
 			});
 
 			const shouldUseClosest =
@@ -888,14 +889,22 @@ export function replaceText(content: string, oldText: string, newText: string, o
 			if (adjustedNewText === match.actualText) {
 				break;
 			}
-			normalizedContent =
-				normalizedContent.substring(0, match.startIndex) +
-				adjustedNewText +
-				normalizedContent.substring(match.startIndex + match.actualText.length);
-			count++;
+			replacements.push({
+				startIndex: match.startIndex,
+				endIndex: match.startIndex + Math.max(match.actualText.length, 1),
+				text: adjustedNewText,
+			});
 		}
 
-		return { content: normalizedContent, count };
+		replacements.sort((a, b) => a.startIndex - b.startIndex);
+		const parts: string[] = [];
+		let sourceIndex = 0;
+		for (const replacement of replacements) {
+			parts.push(normalizedContent.substring(sourceIndex, replacement.startIndex), replacement.text);
+			sourceIndex = replacement.endIndex;
+		}
+		parts.push(normalizedContent.substring(sourceIndex));
+		return { content: parts.join(""), count: replacements.length };
 	}
 
 	// Single replacement mode

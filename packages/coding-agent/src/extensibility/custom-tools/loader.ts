@@ -1,14 +1,14 @@
 /**
  * Custom tool loader - loads TypeScript tool modules using native Bun import.
  *
- * Dependencies (the zod-backed typebox shim and pi-coding-agent) are injected via the
- * CustomToolAPI to avoid import resolution issues with custom tools loaded from user directories.
+ * Dependencies are injected through CustomToolAPI so tools loaded from user
+ * directories do not depend on workspace module resolution.
  */
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import * as zod from "@oh-my-pi/omptype/zod";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
-import * as zodModule from "zod/v4";
 import { toolCapability } from "../../capability/tool";
 import { type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
@@ -17,7 +17,7 @@ import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
-import * as typebox from "../typebox";
+import * as typebox from "../legacy-typebox";
 import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
 
@@ -149,7 +149,7 @@ export class CustomToolLoader {
 			logger,
 			typebox,
 			arktype: type,
-			zod: zodModule,
+			zod,
 			pi,
 			pushPendingAction: action => {
 				if (!pushPendingAction) {

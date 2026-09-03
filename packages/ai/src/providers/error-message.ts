@@ -1,9 +1,11 @@
 import type { Api, Model } from "../types";
 
 export function createProviderErrorMessage(model: Model<Api>, err: unknown) {
+	const errorMessage = err instanceof Error ? err.message : String(err);
 	return {
 		role: "assistant" as const,
-		content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }],
+		content: [],
+		errorMessage,
 		api: model.api,
 		provider: model.provider,
 		model: model.id,

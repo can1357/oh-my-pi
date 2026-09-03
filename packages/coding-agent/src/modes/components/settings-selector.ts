@@ -35,6 +35,7 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "../../config/settings";
 import type {
+	ContextLineMode,
 	SettingTab,
 	StatusLinePreset,
 	StatusLineSegmentId,
@@ -44,6 +45,8 @@ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
+import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
+import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
@@ -65,6 +68,7 @@ class TextInputSubmenu extends Container {
 		label: string,
 		description: string,
 		currentValue: string,
+		secret: boolean,
 		private readonly onSubmit: (value: string) => void,
 		private readonly onCancel: () => void,
 	) {
@@ -78,6 +82,7 @@ class TextInputSubmenu extends Container {
 		this.addChild(new Spacer(1));
 
 		this.#input = new Input();
+		this.#input.mask = secret;
 		if (currentValue) {
 			this.#input.setValue(currentValue);
 		}
@@ -219,6 +224,181 @@ class SelectSubmenu extends Container {
 	}
 }
 
+/**
+ * Submenu for array-of-enum settings: every option is a toggle row. Enter or
+ * Space flips membership; ordered lists render 1-based positions and reorder
+ * the highlighted member with ←/→. Changes apply live; Esc goes back.
+ */
+class MultiSelectSubmenu extends Container {
+	#selectList!: SelectList;
+	#value: string[];
+	#cursor = 0;
+	#selectListLineOffset = 0;
+	#pressedItemId: string | undefined;
+	#dropItemId: string | undefined;
+	constructor(
+		private readonly title: string,
+		private readonly description: string,
+		private readonly options: ReadonlyArray<SelectItem>,
+		initial: readonly string[],
+		private readonly ordered: boolean,
+		private readonly onApply: (value: string[]) => void,
+		private readonly onClose: () => void,
+	) {
+		super();
+		// Drop stale ids (renamed/removed providers) so positions stay contiguous.
+		this.#value = initial.filter(id => options.some(option => option.value === id));
+		this.#rebuild();
+	}
+
+	#rebuild(): void {
+		this.clear();
+		this.addChild(new Text(theme.bold(theme.fg("accent", this.title)), 0, 0));
+		if (this.description) {
+			this.addChild(new Spacer(1));
+			this.addChild(new Text(theme.fg("muted", this.description), 0, 0));
+		}
+		this.addChild(new Spacer(1));
+
+		const items = this.options.map((option): SelectItem => {
+			const position = this.#value.indexOf(option.value);
+			const mark =
+				position === -1
+					? theme.fg("dim", this.ordered ? " · " : " ○ ")
+					: this.ordered
+						? theme.fg("accent", `${String(position + 1).padStart(2)}.`)
+						: theme.fg("accent", " ● ");
+			return { value: option.value, label: `${mark} ${option.label}`, description: option.description };
+		});
+		this.#selectList = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
+		this.#selectList.setSelectedIndex(this.#cursor);
+		this.#selectList.onSelect = item => this.#toggle(item.value);
+		this.#selectList.onSelectionChange = item => {
+			this.#cursor = this.options.findIndex(option => option.value === item.value);
+		};
+		this.#selectList.onCancel = this.onClose;
+		this.addChild(this.#selectList);
+
+		this.addChild(new Spacer(1));
+		const hint = this.ordered
+			? "  Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back"
+			: "  Click/Enter/Space to toggle · Esc to go back";
+		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
+	}
+
+	#apply(next: string[]): void {
+		this.#value = next;
+		this.onApply([...next]);
+		this.#rebuild();
+	}
+
+	#toggle(id: string): void {
+		const next = this.#value.includes(id) ? this.#value.filter(v => v !== id) : [...this.#value, id];
+		this.#apply(next);
+	}
+
+	#move(id: string, delta: -1 | 1): void {
+		const from = this.#value.indexOf(id);
+		if (from === -1) return;
+		const to = from + delta;
+		if (to < 0 || to >= this.#value.length) return;
+		const next = [...this.#value];
+		next[from] = next[to]!;
+		next[to] = id;
+		this.#apply(next);
+	}
+
+	/** Move a selected item before another selected item, retaining every other preference. */
+	#moveBefore(id: string, beforeId: string): void {
+		if (id === beforeId) return;
+		const next = this.#value.filter(value => value !== id);
+		const target = next.indexOf(beforeId);
+		if (target === -1) return;
+		next.splice(target, 0, id);
+		this.#apply(next);
+	}
+
+	/** Splice the option into the 1-based `position` of the selection (adding it if unselected). */
+	#placeAt(id: string, position: number): void {
+		const next = this.#value.filter(v => v !== id);
+		next.splice(Math.min(position - 1, next.length), 0, id);
+		this.#apply(next);
+	}
+
+	/** Concatenate children, recording the select list's line offset for mouse routing. */
+	override render(width: number): readonly string[] {
+		const lines: string[] = [];
+		for (const child of this.children) {
+			const childLines = child.render(Math.max(1, width));
+			if (child === this.#selectList) {
+				this.#selectListLineOffset = lines.length;
+			}
+			lines.push(...childLines);
+		}
+		return lines;
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		const itemIndex = this.#selectList.hitTest(line - this.#selectListLineOffset);
+		if (event.wheel !== null) {
+			routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
+			return;
+		}
+		if (event.motion) {
+			this.#selectList.setHoverIndex(itemIndex ?? null);
+			const target = itemIndex === undefined ? undefined : this.options[itemIndex]?.value;
+			if (
+				this.ordered &&
+				this.#pressedItemId !== undefined &&
+				target !== undefined &&
+				target !== this.#pressedItemId &&
+				this.#value.includes(target)
+			) {
+				this.#dropItemId = target;
+			}
+			return;
+		}
+		if (event.leftClick && itemIndex !== undefined) {
+			const item = this.options[itemIndex];
+			if (!item) return;
+			this.#cursor = itemIndex;
+			this.#selectList.setSelectedIndex(itemIndex);
+			this.#pressedItemId = item.value;
+			this.#dropItemId = item.value;
+			return;
+		}
+		if (!event.release) return;
+
+		const pressedItemId = this.#pressedItemId;
+		const dropItemId = this.#dropItemId;
+		this.#pressedItemId = undefined;
+		this.#dropItemId = undefined;
+		if (!pressedItemId) return;
+		if (this.ordered && dropItemId !== undefined && dropItemId !== pressedItemId) {
+			this.#moveBefore(pressedItemId, dropItemId);
+			return;
+		}
+		this.#toggle(pressedItemId);
+	}
+
+	handleInput(data: string): void {
+		const current = this.options[this.#cursor]?.value;
+		if (data === " " && current !== undefined) {
+			this.#toggle(current);
+			return;
+		}
+		if (this.ordered && current !== undefined && (data === "\x1b[D" || data === "\x1b[C")) {
+			this.#move(current, data === "\x1b[D" ? -1 : 1);
+			return;
+		}
+		if (this.ordered && current !== undefined && data.length === 1 && data >= "1" && data <= "9") {
+			this.#placeAt(current, Number(data));
+			return;
+		}
+		this.#selectList.handleInput(data);
+	}
+}
+
 class ProviderLimitsSubmenu extends Container {
 	#selectList: SelectList | undefined;
 
@@ -293,6 +473,7 @@ class ProviderLimitsSubmenu extends Container {
 				`Max In-Flight Requests: ${provider}`,
 				"Enter a positive number. Decimals round down. Clear the field to make this provider unlimited.",
 				limits[provider]?.toString() ?? "",
+				false,
 				value => {
 					const next = { ...limits };
 					const trimmed = value.trim();
@@ -377,11 +558,14 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
+	/** Live status renderer for composer-shape previews (the session's status line). */
+	composerPreviewStatus?: ComposerPreviewStatusSource;
 }
 
 /** Status line settings subset for preview */
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
+	contextLine?: ContextLineMode;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
@@ -614,12 +798,13 @@ export class SettingsSelectorComponent implements Component {
 			return true;
 		}
 		if (overContent && list) {
-			const id = list.hitTest(contentLine, innerCol);
+			const itemId = list.hoverTest(contentLine, innerCol);
+			const id = itemId ?? list.hitTest(contentLine, innerCol);
 			if (id !== undefined) {
 				const wasSelected = list.getSelectedItem()?.id === id;
 				list.selectItem(id);
-				// Click-again activates: toggle booleans, open submenus.
-				if (wasSelected) list.handleInput("\n");
+				// Only repeated setting-row clicks activate. Sidebar section clicks navigate.
+				if (wasSelected && itemId !== undefined) list.handleInput("\n");
 			}
 		}
 		return true;
@@ -799,57 +984,47 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const currentValue = this.#getCurrentValue(def);
-		const changed = this.#isChanged(def, currentValue);
+		const item = {
+			id: def.path,
+			label: def.label,
+			description: def.description,
+			warning: def.warning,
+			changed: this.#isChanged(def, currentValue),
+		};
 
 		switch (def.type) {
 			case "boolean":
-				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
-					currentValue: currentValue ? "true" : "false",
-					values: ["true", "false"],
-					changed,
-				};
+				return { ...item, currentValue: currentValue ? "true" : "false", values: ["true", "false"] };
 
 			case "enum":
-				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
-					currentValue: String(currentValue ?? ""),
-					values: [...def.values],
-					changed,
-				};
+				return { ...item, currentValue: String(currentValue ?? ""), values: [...def.values] };
 
 			case "submenu":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
 					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
-					changed,
 				};
 
 			case "text":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
-					currentValue: this.#formatTextInputValue(def.path, currentValue),
+					...item,
+					currentValue: this.#formatTextInputValue(def, currentValue),
 					submenu: (cv, done) => this.#createTextInput(def, cv, done),
-					changed,
 				};
 
 			case "providerLimits":
 				return {
-					id: def.path,
-					label: def.label,
-					description: def.description,
+					...item,
 					currentValue: this.#formatProviderLimitsValue(currentValue),
 					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
-					changed,
+				};
+
+			case "multiselect":
+				return {
+					...item,
+					currentValue: this.#formatMultiSelectValue(def, currentValue),
+					submenu: (_cv, done) => this.#createMultiSelect(def, done),
 				};
 		}
 	}
@@ -862,7 +1037,14 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#isChanged(def: SettingDef, currentValue: unknown): boolean {
-		return !Object.is(currentValue, getDefault(def.path));
+		const defaultValue: unknown = getDefault(def.path);
+		if (Array.isArray(currentValue) && Array.isArray(defaultValue)) {
+			return (
+				currentValue.length !== defaultValue.length ||
+				currentValue.some((entry, index) => entry !== defaultValue[index])
+			);
+		}
+		return !Object.is(currentValue, defaultValue);
 	}
 
 	#getSubmenuCurrentValue(path: SettingPath, value: unknown): string {
@@ -896,8 +1078,9 @@ export class SettingsSelectorComponent implements Component {
 			});
 		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
+		} else if (def.path === "composer.shape") {
+			options = getComposerShapeOptions();
 		}
-
 		// Preview handlers
 		let onPreview: ((value: string) => void | Promise<void>) | undefined;
 		let onPreviewCancel: (() => void) | undefined;
@@ -941,6 +1124,13 @@ export class SettingsSelectorComponent implements Component {
 				const separator = settings.get("statusLine.separator");
 				this.callbacks.onStatusLinePreview?.({ separator });
 			};
+		} else if (def.path === "statusLine.contextLine") {
+			onPreview = value => {
+				this.callbacks.onStatusLinePreview?.({ contextLine: value as ContextLineMode });
+			};
+			onPreviewCancel = () => {
+				this.callbacks.onStatusLinePreview?.({ contextLine: settings.get("statusLine.contextLine") });
+			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
 				model: this.context.model,
@@ -949,8 +1139,14 @@ export class SettingsSelectorComponent implements Component {
 			});
 			onPreview = value => shapePreview.setValue(value);
 			footer = shapePreview;
+		} else if (def.path === "composer.shape") {
+			const shapePreview = new ComposerShapePreview(String(currentValue ?? "band"), {
+				requestRender: this.context.requestRender,
+				status: this.context.composerPreviewStatus,
+			});
+			onPreview = value => shapePreview.setValue(value);
+			footer = shapePreview;
 		}
-
 		// Provide status line preview for theme selection
 		const isThemeSetting = def.path === "theme.dark" || def.path === "theme.light";
 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
@@ -992,12 +1188,13 @@ export class SettingsSelectorComponent implements Component {
 			def.label,
 			def.description,
 			this.#formatTextInputEditValue(def.path, settings.get(def.path)),
+			def.secret,
 			value => {
 				// Empty string clears the setting; undefined-typed string settings
 				// store "" which the browser.ts expandPath ignores (no-op fallback).
 				this.#setSettingValue(def.path, value);
 				this.callbacks.onChange(def.path, settings.get(def.path));
-				wrappedDone(this.#formatTextInputValue(def.path, settings.get(def.path)));
+				wrappedDone(this.#formatTextInputValue(def, settings.get(def.path)));
 			},
 			() => wrappedDone(),
 		);
@@ -1022,9 +1219,49 @@ export class SettingsSelectorComponent implements Component {
 		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
 	}
 
-	#formatTextInputValue(path: SettingPath, value: unknown): string {
-		if (path === "providers.maxInFlightRequests") return this.#formatProviderLimitsValue(value);
-		return this.#formatTextInputEditValue(path, value);
+	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {
+		if (def.path !== "providers.webSearchOrder") return def.options;
+		const excluded: unknown = settings.get("providers.webSearchExclude");
+		if (!Array.isArray(excluded)) return def.options;
+		return def.options.filter(option => !excluded.includes(option.value));
+	}
+
+	#createMultiSelect(def: SettingDef & { type: "multiselect" }, done: (value?: string) => void): Container {
+		const options = this.#getMultiSelectOptions(def);
+		const current: unknown = settings.get(def.path);
+		const initial = Array.isArray(current)
+			? current.filter((entry): entry is string => typeof entry === "string")
+			: [];
+		return new MultiSelectSubmenu(
+			def.label,
+			def.description,
+			options,
+			initial,
+			def.ordered,
+			value => {
+				settings.set(def.path, value as never);
+				this.callbacks.onChange(def.path, value);
+			},
+			() => done(this.#formatMultiSelectValue(def, settings.get(def.path))),
+		);
+	}
+
+	#formatMultiSelectValue(def: SettingDef & { type: "multiselect" }, value: unknown): string {
+		const options = this.#getMultiSelectOptions(def);
+		const labels = Array.isArray(value)
+			? value.flatMap(entry => {
+					if (typeof entry !== "string") return [];
+					const option = options.find(candidate => candidate.value === entry);
+					return option ? [option.label] : [];
+				})
+			: [];
+		if (labels.length === 0) return def.ordered ? "default" : "none";
+		return def.ordered ? labels.join(" → ") : labels.join(", ");
+	}
+
+	#formatTextInputValue(def: SettingDef & { type: "text" }, value: unknown): string {
+		if (def.secret) return value ? "••••••••" : "";
+		return this.#formatTextInputEditValue(def.path, value);
 	}
 
 	#formatTextInputEditValue(_path: SettingPath, value: unknown): string {
@@ -1170,6 +1407,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#pluginComponent = new PluginSettingsComponent(this.context.cwd, {
 			onClose: () => this.callbacks.onCancel(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
+			requestRender: this.context.requestRender,
 		});
 	}
 

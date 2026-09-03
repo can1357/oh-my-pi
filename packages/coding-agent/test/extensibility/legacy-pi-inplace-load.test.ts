@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import {
+	__collectLegacyPiExtensionSourcesForTests,
 	__rewriteLegacyExtensionSourceForTests,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
@@ -36,92 +37,100 @@ async function writePackage(files: Record<string, string>): Promise<string> {
 }
 
 describe("legacy-pi in-place module loading (issue #1674)", () => {
-	it("reads __dirname-relative HTML assets from the real extension directory", async () => {
+	it("loads in place with ESM-to-CommonJS default, named, and require interop", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "asset-ext", version: "1.0.0" }),
 			"ui.html": "<html>PLAN-UI</html>",
+			"config.js": 'module.exports = { value: "required-cjs-ok" };\n',
+			"consumer.js": [
+				'import { createRequire } from "node:module";',
+				"const require = createRequire(import.meta.url);",
+				'export const requiredValue = require("./config.js").value;',
+			].join("\n"),
+			"helper.js": "module.exports = { value: 42 };\n",
+			"named-helper.cjs": 'module.exports = { namedValue: "named-cjs-ok" };\n',
 			"index.ts": [
 				'import { readFileSync } from "node:fs";',
 				'import { fileURLToPath } from "node:url";',
 				'import * as path from "node:path";',
+				'import { requiredValue } from "./consumer.js";',
+				'import helper from "./helper.js";',
+				'import { namedValue } from "./named-helper.cjs";',
 				"const here = path.dirname(fileURLToPath(import.meta.url));",
 				"export const dirName = here;",
 				'export const html = readFileSync(path.join(here, "ui.html"), "utf8");',
+				"export const defaultValue = helper.value;",
+				"export { namedValue, requiredValue };",
 				"export default function (pi) { void pi; }",
 			].join("\n"),
 		});
 
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { dirName: string; html: string };
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			defaultValue: number;
+			dirName: string;
+			html: string;
+			namedValue: string;
+			requiredValue: string;
+		};
 
-		// The asset resolves because the module runs in place — its computed
-		// __dirname is the extension's real directory, not a mirror temp root.
-		// (Bun realpaths loaded modules, so compare against the realpath.)
+		// Bun realpaths loaded modules, so the in-place path is compared to the fixture's real path.
 		expect(mod.dirName).toBe(await fs.realpath(dir));
 		expect(mod.html).toBe("<html>PLAN-UI</html>");
+		expect(mod.requiredValue).toBe("required-cjs-ok");
+		expect(mod.defaultValue).toBe(42);
+		expect(mod.namedValue).toBe("named-cjs-ok");
 	});
 
-	it("loads CommonJS helpers required by an ES module extension", async () => {
+	it("remaps legacy Pi requires in graph-owned CommonJS packages to the host shim", async () => {
 		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "cjs-helper-ext", version: "1.0.0" }),
-			"config.js": 'module.exports = { value: "config-ok" };\n',
-			"index.js": [
-				'import { createRequire } from "node:module";',
-				"const require = createRequire(import.meta.url);",
-				'const { value } = require("./config.js");',
-				"export { value };",
+			"package.json": JSON.stringify({ name: "cjs-legacy-pi-require-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js": 'module.exports = require("@mariozechner/pi-ai").Type;\n',
+			"index.ts": [
+				'import { Type } from "@oh-my-pi/pi-ai";',
+				'import requiredType from "direct";',
+				"export const sharesHostType = requiredType === Type;",
 				"export default function (pi) { void pi; }",
 			].join("\n"),
 		});
 
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.js"))) as { value: string };
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { sharesHostType: boolean };
 
-		expect(mod.value).toBe("config-ok");
+		expect(mod.sharesHostType).toBe(true);
 	});
 
-	it("loads a default import from linkedom's CommonJS canvas fallback", async () => {
+	it("loads a default import from an ESM package's CommonJS canvas fallback", async () => {
 		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "linkedom-consumer", version: "1.0.0", type: "module" }),
-			"index.js": 'export { canvasValue } from "linkedom";\n',
-			"node_modules/linkedom/package.json": JSON.stringify({
-				name: "linkedom",
-				version: "0.18.12",
+			"package.json": JSON.stringify({ name: "esm-canvas-consumer", version: "1.0.0", type: "module" }),
+			"index.js": 'export { canvasValue } from "esm-canvas-package";\n',
+			"node_modules/esm-canvas-package/package.json": JSON.stringify({
+				name: "esm-canvas-package",
+				version: "1.0.0",
 				type: "module",
 				exports: "./index.js",
 			}),
-			"node_modules/linkedom/index.js": [
+			"node_modules/esm-canvas-package/index.js": [
 				'import Canvas from "./commonjs/canvas.cjs";',
 				"export const canvasValue = Canvas.createCanvas();",
 			].join("\n"),
-			"node_modules/linkedom/commonjs/canvas.cjs": [
+			"node_modules/esm-canvas-package/commonjs/canvas.cjs": [
 				"try {",
 				'  module.exports = require("canvas");',
 				"} catch {",
 				'  module.exports = require("./canvas-shim.cjs");',
 				"}",
 			].join("\n"),
-			"node_modules/linkedom/commonjs/canvas-shim.cjs":
-				'module.exports = { createCanvas: () => "linkedom-canvas-shim" };\n',
+			"node_modules/esm-canvas-package/commonjs/canvas-shim.cjs":
+				'module.exports = { createCanvas: () => "canvas-shim" };\n',
 		});
 
 		const mod = await loadLegacyPiModule(path.join(dir, "index.js"));
 
-		expect(Reflect.get(Object(mod), "canvasValue")).toBe("linkedom-canvas-shim");
-	});
-
-	it("preserves named ESM imports from CommonJS helpers", async () => {
-		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "named-cjs-ext", version: "1.0.0", type: "module" }),
-			"index.js": [
-				'import { value } from "./helper.cjs";',
-				"export { value };",
-				"export default function (pi) { void pi; }",
-			].join("\n"),
-			"helper.cjs": 'module.exports = { value: "named-cjs-ok" };\n',
-		});
-
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.js"))) as { value: string };
-
-		expect(mod.value).toBe("named-cjs-ok");
+		expect(Reflect.get(Object(mod), "canvasValue")).toBe("canvas-shim");
 	});
 
 	it("reads a lazy CommonJS helper at import time", async () => {
@@ -330,6 +339,308 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		expect(second.depValue).toBe("dep-v2");
 	});
 
+	it("keeps transitive bare dependency importer paths query-free", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "transitive-bare-dep-ext", version: "1.0.0", type: "module" }),
+			"node_modules/directdep/package.json": JSON.stringify({
+				name: "directdep",
+				version: "1.0.0",
+				type: "module",
+				exports: "./index.js",
+			}),
+			"node_modules/directdep/index.js": 'export { nestedUrl } from "nesteddep";\n',
+			"node_modules/nesteddep/package.json": JSON.stringify({
+				name: "nesteddep",
+				version: "1.0.0",
+				type: "module",
+				exports: "./index.js",
+			}),
+			"node_modules/nesteddep/index.js": "export const nestedUrl = import.meta.url;\n",
+			"index.ts": 'export { nestedUrl } from "directdep";\nexport default function (pi) { void pi; }\n',
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { nestedUrl: string };
+		const expectedNestedUrl = url.pathToFileURL(
+			await fs.realpath(path.join(dir, "node_modules/nesteddep/index.js")),
+		).href;
+
+		expect(mod.nestedUrl).toBe(expectedNestedUrl);
+	});
+
+	it("preserves named re-exports from relative ESM children in a no-type dual package", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "dual-package-ext", version: "1.0.0", type: "module" }),
+			"node_modules/dual-package/package.json": JSON.stringify({
+				name: "dual-package",
+				version: "1.0.0",
+				main: "lib/commonjs/index.js",
+				module: "lib/es/index.js",
+			}),
+			"node_modules/dual-package/lib/commonjs/index.js": `exports.stringify = value => \`cjs:\${value}\`;\n`,
+			"node_modules/dual-package/lib/es/index.js":
+				'import "./setup.js";\nexport { stringify } from "./stringify.js";\n',
+			"node_modules/dual-package/lib/es/stringify.js": `export const stringify = value => \`esm:\${value}\`;\n`,
+			"node_modules/dual-package/lib/es/setup.js": "await Promise.resolve();\n",
+			"index.ts": [
+				'import { stringify } from "dual-package";',
+				'export const result = stringify("value");',
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { result: string };
+
+		expect(mod.result).toBe("esm:value");
+	});
+
+	it("keeps a syntax-ambiguous conditional import target on its ESM branch", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "conditional-esm-ext", version: "1.0.0", type: "module" }),
+			"node_modules/conditional/package.json": JSON.stringify({
+				name: "conditional",
+				version: "1.0.0",
+				exports: {
+					".": {
+						import: "./esm.js",
+						require: "./cjs.js",
+					},
+				},
+			}),
+			"node_modules/conditional/esm.js": "await Promise.resolve();\n",
+			"node_modules/conditional/cjs.js": 'throw new Error("require branch loaded");\n',
+			"index.ts": [
+				'import "conditional";',
+				"export const loaded = true;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { loaded: boolean };
+
+		expect(mod.loaded).toBe(true);
+	});
+
+	it("reloads a hoisted CommonJS dependency required by a relative CommonJS child", async () => {
+		const entrySource = (version: string): string =>
+			[
+				'import dependency from "directdep";',
+				"export const dependencyValue = dependency.value;",
+				`export const entryVersion = ${JSON.stringify(version)};`,
+				"export default function (pi) { void pi; }",
+			].join("\n");
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "relative-transitive-cjs-ext", version: "1.0.0", type: "module" }),
+			"node_modules/directdep/package.json": JSON.stringify({
+				name: "directdep",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/directdep/index.js": 'module.exports = require("./child.js");\n',
+			"node_modules/directdep/child.js": [
+				"void 'export { ignored } from \"ignored\";';",
+				'// import ignored from "ignored";',
+				'module.exports = require("transitive-dependency");',
+			].join("\n"),
+			"node_modules/transitive-dependency/package.json": JSON.stringify({
+				name: "transitive-dependency",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/transitive-dependency/index.js": 'module.exports = { value: "dep-v1" };\n',
+			"index.ts": entrySource("v1"),
+		});
+		const entry = path.join(dir, "index.ts");
+		const transitiveDependency = path.join(dir, "node_modules", "transitive-dependency", "index.js");
+
+		const first = (await loadLegacyPiModule(entry)) as { entryVersion: string; dependencyValue: string };
+		expect(first.entryVersion).toBe("v1");
+		expect(first.dependencyValue).toBe("dep-v1");
+
+		const firstEntryStat = await fs.stat(entry);
+		const firstDependencyStat = await fs.stat(transitiveDependency);
+		await fs.writeFile(entry, entrySource("v2"), "utf8");
+		await fs.writeFile(transitiveDependency, 'module.exports = { value: "dep-v2" };\n', "utf8");
+		const bumpedEntryMtime = new Date(Math.ceil(firstEntryStat.mtimeMs) + 2_000);
+		const bumpedDependencyMtime = new Date(Math.ceil(firstDependencyStat.mtimeMs) + 2_000);
+		await fs.utimes(entry, bumpedEntryMtime, bumpedEntryMtime);
+		await fs.utimes(transitiveDependency, bumpedDependencyMtime, bumpedDependencyMtime);
+
+		const second = (await loadLegacyPiModule(entry)) as { entryVersion: string; dependencyValue: string };
+		expect(second.entryVersion).toBe("v2");
+		expect(second.dependencyValue).toBe("dep-v2");
+	});
+
+	it("preserves named imports through CommonJS package re-exports", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "named-cjs-reexport-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js": 'module.exports = require("middle");\n',
+			"node_modules/middle/package.json": JSON.stringify({
+				name: "middle",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/middle/index.js": 'module.exports = require("leaf");\n',
+			"node_modules/leaf/package.json": JSON.stringify({
+				name: "leaf",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/leaf/index.js": [
+				'module.exports = require("direct");',
+				'module.exports.value = "named-reexport-ok";',
+			].join("\n"),
+			"index.ts": [
+				'import { value } from "direct";',
+				"export { value };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { value: string };
+
+		expect(mod.value).toBe("named-reexport-ok");
+	});
+
+	it("preserves named imports from CommonJS defineProperty and exportStar patterns", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "cjs-export-helper-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js": [
+				'Object.defineProperty(exports, "local", { enumerable: true, get: () => "local-ok" });',
+				"const __exportStar = (mod, target) => {",
+				"  for (const key in mod) {",
+				'    if (key !== "default" && !Object.prototype.hasOwnProperty.call(target, key)) {',
+				"      Object.defineProperty(target, key, { enumerable: true, get: () => mod[key] });",
+				"    }",
+				"  }",
+				"};",
+				'__exportStar(require("leaf"), exports);',
+			].join("\n"),
+			"node_modules/leaf/package.json": JSON.stringify({
+				name: "leaf",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/leaf/index.js": 'module.exports = { value: "star-ok" };\n',
+			"index.ts": [
+				'import { local, value } from "direct";',
+				"export { local, value };",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			local: string;
+			value: string;
+		};
+
+		expect(mod.local).toBe("local-ok");
+		expect(mod.value).toBe("star-ok");
+	});
+
+	it("keeps dynamic-import children of a CommonJS package on its CommonJS branch", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "dynamic-cjs-child-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js":
+				'module.exports = { load: () => import("./child.js").then(mod => mod.default.value) };\n',
+			"node_modules/direct/child.js": 'module.exports = { value: "dynamic-child-ok" };\n',
+			"index.ts": [
+				'import direct from "direct";',
+				"export const result = await direct.load();",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { result: string };
+
+		expect(mod.result).toBe("dynamic-child-ok");
+	});
+
+	it("preserves default imports from CommonJS objects with non-identifier keys", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "hyphenated-cjs-export-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js": 'module.exports = { "foo-bar": true, value: "default-ok" };\n',
+			"index.ts": [
+				'import direct from "direct";',
+				"export const result = direct.value;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { result: string };
+
+		expect(mod.result).toBe("default-ok");
+	});
+
+	it("reloads a lazily imported CommonJS package re-export", async () => {
+		const entrySource = (version: string): string =>
+			[
+				'export const loadValue = () => import("direct").then(mod => mod.default.value);',
+				`export const entryVersion = ${JSON.stringify(version)};`,
+				"export default function (pi) { void pi; }",
+			].join("\n");
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "lazy-cjs-reexport-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/direct/index.js": 'module.exports = require("leaf");\n',
+			"node_modules/leaf/package.json": JSON.stringify({
+				name: "leaf",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/leaf/index.js": 'module.exports = { value: "lazy-v1" };\n',
+			"index.ts": entrySource("v1"),
+		});
+		const entry = path.join(dir, "index.ts");
+		const leaf = path.join(dir, "node_modules", "leaf", "index.js");
+
+		const first = (await loadLegacyPiModule(entry)) as {
+			entryVersion: string;
+			loadValue(): Promise<string>;
+		};
+		expect(first.entryVersion).toBe("v1");
+		expect(await first.loadValue()).toBe("lazy-v1");
+
+		const firstEntryStat = await fs.stat(entry);
+		const firstLeafStat = await fs.stat(leaf);
+		await fs.writeFile(entry, entrySource("v2"), "utf8");
+		await fs.writeFile(leaf, 'module.exports = { value: "lazy-v2" };\n', "utf8");
+		const bumpedEntryMtime = new Date(Math.ceil(firstEntryStat.mtimeMs) + 2_000);
+		const bumpedLeafMtime = new Date(Math.ceil(firstLeafStat.mtimeMs) + 2_000);
+		await fs.utimes(entry, bumpedEntryMtime, bumpedEntryMtime);
+		await fs.utimes(leaf, bumpedLeafMtime, bumpedLeafMtime);
+
+		const second = (await loadLegacyPiModule(entry)) as {
+			entryVersion: string;
+			loadValue(): Promise<string>;
+		};
+		expect(second.entryVersion).toBe("v2");
+		expect(await second.loadValue()).toBe("lazy-v2");
+	});
+
 	it("reloads modules added to the relative import graph after the first load", async () => {
 		const entrySource = (version: string, includeHelper: boolean): string =>
 			[
@@ -440,20 +751,19 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 				// `@earendil-works/*` is a fork alias with no real published package,
 				// so a working import proves the load-time rewrite fired rather than
 				// a coincidental native resolution against a cached package.
-				'import { z } from "@earendil-works/pi-ai";',
+				'import { Effort } from "@earendil-works/pi-ai";',
 				"export const depValue = cjs.value;",
-				'export const hasZod = typeof z?.object === "function";',
+				'export const hasAi = typeof Effort === "object";',
 				"export default function (pi) { void pi; }",
 			].join("\n"),
 		});
 
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { depValue: string; hasZod: boolean };
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { depValue: string; hasAi: boolean };
 
 		// CJS dep under node_modules keeps Bun's native resolution (it is excluded
-		// from the rewrite onLoad), and the legacy pi import is remapped to the
-		// bundled Zod-backed shim.
+		// from the rewrite onLoad), and the legacy pi import is remapped.
 		expect(mod.depValue).toBe("cjs-native");
-		expect(mod.hasZod).toBe(true);
+		expect(mod.hasAi).toBe(true);
 	});
 
 	it("exposes legacy root tool factories used by pi-lean-ctx", async () => {
@@ -507,6 +817,45 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 			language: "typescript",
 			highlighted: 1,
 			truncated: true,
+		});
+	});
+
+	it("exposes a fresh legacy extension runtime through the package root", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "legacy-extension-runtime-ext", version: "1.0.0" }),
+			"index.ts": [
+				'import { createExtensionRuntime } from "@earendil-works/pi-coding-agent";',
+				"const first = createExtensionRuntime();",
+				"const second = createExtensionRuntime();",
+				"first.flagValues.set('sprite', true);",
+				"let initializationError;",
+				"try {",
+				"  first.getActiveTools();",
+				"} catch (error) {",
+				"  initializationError = error instanceof Error ? error.message : String(error);",
+				"}",
+				"export const runtimeContract = {",
+				"  firstFlag: first.flagValues.get('sprite'),",
+				"  secondHasFlag: second.flagValues.has('sprite'),",
+				"  initializationError,",
+				"};",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			runtimeContract: {
+				firstFlag: boolean;
+				secondHasFlag: boolean;
+				initializationError: string;
+			};
+		};
+
+		expect(mod.runtimeContract).toEqual({
+			firstFlag: true,
+			secondHasFlag: false,
+			initializationError:
+				"Extension runtime not initialized. Action methods cannot be called during extension loading.",
 		});
 	});
 
@@ -607,7 +956,7 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 			[
 				'import * as path from "node:path";',
 				'import { value } from "esmdep/value";',
-				'import { rootValue } from "rootdep";',
+				'import{rootValue}from"rootdep";',
 				"export const loaded = value + rootValue;",
 			].join("\n"),
 			importer,
@@ -626,9 +975,395 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		expect(rewritten).toContain('from "node:path"');
 	});
 
-	it("pins native-addon package requires to absolute extension paths", async () => {
+	it("pre-rewrites a nested ESM cluster required by CommonJS", async () => {
 		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "native-require-ext", version: "1.0.0" }),
+			"package.json": JSON.stringify({ name: "nested-esm-ext", version: "1.0.0", type: "module" }),
+			"node_modules/cjs-parent/package.json": JSON.stringify({
+				name: "cjs-parent",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/index.js": 'module.exports = require("nested-esm");',
+			"node_modules/cjs-parent/node_modules/nested-esm/package.json": JSON.stringify({
+				name: "nested-esm",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/node_modules/nested-esm/index.js":
+				'import { value } from "nested-leaf"; export default value;',
+			"node_modules/cjs-parent/node_modules/nested-leaf/package.json": JSON.stringify({
+				name: "nested-leaf",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/node_modules/nested-leaf/index.js": 'export const value = "nested-ok";',
+			"index.js": 'import value from "cjs-parent"; export { value };',
+		});
+		const entry = path.join(dir, "index.js");
+		const nestedEntry = await fs.realpath(path.join(dir, "node_modules/cjs-parent/node_modules/nested-esm/index.js"));
+		const nestedLeaf = await fs.realpath(path.join(dir, "node_modules/cjs-parent/node_modules/nested-leaf/index.js"));
+
+		const sources = await __collectLegacyPiExtensionSourcesForTests(entry);
+
+		expect(sources.has(nestedEntry)).toBe(true);
+		expect(sources.get(nestedEntry)).toContain(url.pathToFileURL(nestedLeaf).href);
+	});
+
+	it("loads a nested ESM cluster required after the extension import settles", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "lazy-nested-esm-ext", version: "1.0.0", type: "module" }),
+			"node_modules/cjs-parent/package.json": JSON.stringify({
+				name: "cjs-parent",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/index.js": 'module.exports = { load: () => require("nested-esm").default };',
+			"node_modules/cjs-parent/node_modules/nested-esm/package.json": JSON.stringify({
+				name: "nested-esm",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/node_modules/nested-esm/index.js":
+				'import { value } from "nested-leaf"; export default value;',
+			"node_modules/cjs-parent/node_modules/nested-leaf/package.json": JSON.stringify({
+				name: "nested-leaf",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/node_modules/nested-leaf/index.js": 'export const value = "lazy-nested-ok";',
+			"index.js": [
+				'import parent from "cjs-parent";',
+				"export const loadValue = parent.load;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = await loadLegacyPiModule(path.join(dir, "index.js"));
+		const loadValue = Reflect.get(Object(mod), "loadValue");
+		if (typeof loadValue !== "function") {
+			throw new Error("lazy nested ESM fixture did not export loadValue");
+		}
+
+		expect(loadValue()).toBe("lazy-nested-ok");
+	});
+
+	it("rewalks an ESM graph when a later require upgrades it to synchronous loading", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "sync-upgrade-ext", version: "1.0.0", type: "module" }),
+			"node_modules/cjs-parent/package.json": JSON.stringify({
+				name: "cjs-parent",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/index.js": 'module.exports = { load: () => require("shared").default };',
+			"node_modules/shared/package.json": JSON.stringify({
+				name: "shared",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/shared/index.js": 'import { value } from "shared-leaf"; export default value;',
+			"node_modules/shared-leaf/package.json": JSON.stringify({
+				name: "shared-leaf",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/shared-leaf/index.js": 'export const value = "sync-upgrade-ok";',
+			"index.ts": [
+				'import parent from "cjs-parent";',
+				'import type { Marker } from "shared";',
+				"export const loadValue = parent.load;",
+				"export type SharedMarker = Marker;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+
+		const mod = await loadLegacyPiModule(path.join(dir, "index.ts"));
+		const loadValue = Reflect.get(Object(mod), "loadValue");
+		if (typeof loadValue !== "function") {
+			throw new Error("sync-upgrade fixture did not export loadValue");
+		}
+
+		expect(loadValue()).toBe("sync-upgrade-ok");
+	});
+
+	it("serves an async-hooked module synchronously after a reload adds a require edge", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "reload-upgrade-ext", version: "1.0.0", type: "module" }),
+			"node_modules/cjs-parent/package.json": JSON.stringify({
+				name: "cjs-parent",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/index.js": 'module.exports = { load: () => require("shared").default };',
+			"node_modules/shared/package.json": JSON.stringify({
+				name: "shared",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/shared/index.js": 'import { value } from "shared-leaf"; export default value;',
+			"node_modules/shared-leaf/package.json": JSON.stringify({
+				name: "shared-leaf",
+				version: "1.0.0",
+				type: "module",
+				main: "index.js",
+			}),
+			"node_modules/shared-leaf/index.js": 'export const value = "reload-upgrade-ok";',
+			// v1 reaches `shared` through `import` only, so the first load
+			// registers it with the async rewrite hook.
+			"index.js": [
+				'import shared from "shared";',
+				"export const loadValue = () => shared;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+		const entry = path.join(dir, "index.js");
+
+		const first = await loadLegacyPiModule(entry);
+		const firstLoad = Reflect.get(Object(first), "loadValue");
+		if (typeof firstLoad !== "function") {
+			throw new Error("reload-upgrade fixture v1 did not export loadValue");
+		}
+		expect(firstLoad()).toBe("reload-upgrade-ok");
+
+		// v2 upgrades `shared` to synchronous loading via a new require() edge.
+		// The async hook from the first load still owns the path, so it must
+		// serve the pre-rewritten synchronous source inline.
+		await fs.writeFile(
+			entry,
+			[
+				'import parent from "cjs-parent";',
+				"export const loadValue = parent.load;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"utf8",
+		);
+
+		const second = await loadLegacyPiModule(entry);
+		const secondLoad = Reflect.get(Object(second), "loadValue");
+		if (typeof secondLoad !== "function") {
+			throw new Error("reload-upgrade fixture v2 did not export loadValue");
+		}
+		expect(secondLoad()).toBe("reload-upgrade-ok");
+	});
+
+	it("serves fresh source after a reload drops a module's require edge", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "reload-downgrade-ext", version: "1.0.0", type: "module" }),
+			"node_modules/cjs-parent/package.json": JSON.stringify({
+				name: "cjs-parent",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/cjs-parent/index.js": 'module.exports = { load: () => require("../../lib.js").value };',
+			// v1 reaches `lib.js` through a require() edge, so the first load
+			// flags it synchronous and snapshots its pre-rewritten source.
+			"lib.js": 'export const value = "downgrade-v1";',
+			"index.js": [
+				'import parent from "cjs-parent";',
+				"export const loadValue = parent.load;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+		const entry = path.join(dir, "index.js");
+
+		const first = await loadLegacyPiModule(entry);
+		const firstLoad = Reflect.get(Object(first), "loadValue");
+		if (typeof firstLoad !== "function") {
+			throw new Error("reload-downgrade fixture v1 did not export loadValue");
+		}
+		expect(firstLoad()).toBe("downgrade-v1");
+
+		// v2 drops the require edge and edits lib.js. The permanent hooks still
+		// serve the path from the synchronous snapshot, so the reload walk must
+		// refresh it instead of replaying the v1 bytes.
+		await fs.writeFile(path.join(dir, "lib.js"), 'export const value = "downgrade-v2";', "utf8");
+		await fs.writeFile(
+			entry,
+			[
+				'import { value } from "./lib.js";',
+				"export const loadValue = () => value;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+			"utf8",
+		);
+
+		const second = await loadLegacyPiModule(entry);
+		const secondLoad = Reflect.get(Object(second), "loadValue");
+		if (typeof secondLoad !== "function") {
+			throw new Error("reload-downgrade fixture v2 did not export loadValue");
+		}
+		expect(secondLoad()).toBe("downgrade-v2");
+	});
+
+	it("chooses the ESM branch when dual package graphs converge", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "dual-convergence-ext", version: "1.0.0", type: "module" }),
+			"node_modules/dual/package.json": JSON.stringify({
+				name: "dual",
+				version: "1.0.0",
+				exports: { import: "./esm.js", require: "./cjs.js" },
+			}),
+			"node_modules/dual/esm.js": 'import "./shared.js"; export const mode = "esm";',
+			"node_modules/dual/cjs.js": 'if (false) require("./shared.js"); module.exports = { mode: "cjs" };',
+			"node_modules/dual/shared.js": "globalThis.__ompDualGraphLoaded = true;",
+			"node_modules/dual-consumer/package.json": JSON.stringify({
+				name: "dual-consumer",
+				version: "1.0.0",
+				main: "index.js",
+			}),
+			"node_modules/dual-consumer/index.js": 'module.exports = require("dual");',
+			"index.js": 'import "dual"; import "dual-consumer";',
+		});
+		const shared = await fs.realpath(path.join(dir, "node_modules/dual/shared.js"));
+
+		const sources = await __collectLegacyPiExtensionSourcesForTests(path.join(dir, "index.js"));
+
+		expect(sources.has(shared)).toBe(true);
+	});
+
+	it("rewrites directory and builtin-named package requires through package main", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "directory-require-ext", version: "1.0.0" }),
+			"node_modules/directory-package/package.json": JSON.stringify({
+				name: "directory-package",
+				version: "1.0.0",
+				main: "lib/plumbing.js",
+			}),
+			"node_modules/directory-package/lib/plumbing.js": 'module.exports = "directory-ok";',
+			"node_modules/directory-package/configure/request.js": "",
+			"node_modules/punycode/package.json": JSON.stringify({
+				name: "punycode",
+				version: "1.0.0",
+				main: "punycode.js",
+			}),
+			"node_modules/punycode/punycode.js": 'module.exports = "punycode-ok";',
+			"index.js": "",
+		});
+		const importer = path.join(dir, "node_modules/directory-package/configure/request.js");
+		const rewritten = await __rewriteLegacyExtensionSourceForTests(
+			'const directory = require("../"); const punycode = require("punycode/");',
+			importer,
+		);
+		const directoryEntry = (
+			await fs.realpath(path.join(dir, "node_modules/directory-package/lib/plumbing.js"))
+		).replaceAll("\\", "/");
+		const punycodeEntry = (await fs.realpath(path.join(dir, "node_modules/punycode/punycode.js"))).replaceAll(
+			"\\",
+			"/",
+		);
+
+		expect(rewritten).toContain(`require("${directoryEntry}")`);
+		expect(rewritten).toContain(`require("${punycodeEntry}")`);
+	});
+
+	it("honors export pattern specificity and package encapsulation", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "exports-contract-ext", version: "1.0.0", type: "module" }),
+			"node_modules/pattern-dep/package.json": JSON.stringify({
+				name: "pattern-dep",
+				version: "1.0.0",
+				type: "module",
+				exports: { "./*": "./fallback/*.js", "./feature/*": "./features/*.js" },
+			}),
+			"node_modules/pattern-dep/fallback/feature/x.js": "export const selected = 'fallback';",
+			"node_modules/pattern-dep/features/x.js": "export const selected = 'specific';",
+			"node_modules/blocked-dep/package.json": JSON.stringify({
+				name: "blocked-dep",
+				version: "1.0.0",
+				main: "./legacy.cjs",
+				exports: { ".": { import: "./esm.js" }, "./private": null },
+			}),
+			"node_modules/blocked-dep/esm.js": "export default {};",
+			"node_modules/blocked-dep/legacy.cjs": "module.exports = {};",
+			"node_modules/blocked-dep/private.js": "export default {};",
+			"index.ts": "",
+		});
+		const importer = path.join(dir, "index.ts");
+		const rewritten = await __rewriteLegacyExtensionSourceForTests(
+			[
+				'import { selected } from "pattern-dep/feature/x";',
+				'import privateValue from "blocked-dep/private";',
+				'const privateRequire = require("blocked-dep/private");',
+				'const rootRequire = require("blocked-dep");',
+			].join("\n"),
+			importer,
+		);
+
+		const specificUrl = url.pathToFileURL(
+			await fs.realpath(path.join(dir, "node_modules/pattern-dep/features/x.js")),
+		).href;
+		expect(rewritten).toContain(specificUrl);
+		expect(rewritten).not.toContain("fallback/feature/x.js");
+		expect(rewritten).toContain('from "blocked-dep/private"');
+		expect(rewritten).toContain('require("blocked-dep/private")');
+		expect(rewritten).toContain('require("blocked-dep")');
+	});
+
+	it("rejects package resolutions that escape the package root", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "package-boundary-ext", version: "1.0.0", type: "module" }),
+			"node_modules/main-escape/package.json": JSON.stringify({
+				name: "main-escape",
+				version: "1.0.0",
+				main: "../outside/index.js",
+			}),
+			"node_modules/exports-escape/package.json": JSON.stringify({
+				name: "exports-escape",
+				version: "1.0.0",
+				exports: { "./*": "./../outside/*.js" },
+			}),
+			"node_modules/subpath-escape/package.json": JSON.stringify({
+				name: "subpath-escape",
+				version: "1.0.0",
+			}),
+			"node_modules/native-escape/package.json": JSON.stringify({
+				name: "native-escape",
+				version: "1.0.0",
+			}),
+			"node_modules/outside/index.js": "export default {};",
+			"node_modules/outside/value.js": "export default {};",
+			"node_modules/outside/addon.node": "native fixture",
+			"index.ts": "",
+			"node_modules/symlink-escape/package.json": JSON.stringify({
+				name: "symlink-escape",
+				version: "1.0.0",
+				exports: { "./value": "./link.js" },
+			}),
+		});
+		await fs.symlink(
+			path.join(dir, "node_modules", "outside", "value.js"),
+			path.join(dir, "node_modules", "symlink-escape", "link.js"),
+		);
+		const importer = path.join(dir, "index.ts");
+		const rewritten = await __rewriteLegacyExtensionSourceForTests(
+			[
+				'import mainEscape from "main-escape";',
+				'import exportsEscape from "exports-escape/value";',
+				'import subpathEscape from "subpath-escape/../outside";',
+				'import symlinkEscape from "symlink-escape/value";',
+				'const nativeEscape = require("native-escape/../outside/addon.node");',
+				"export { exportsEscape, mainEscape, nativeEscape, subpathEscape, symlinkEscape };",
+			].join("\n"),
+			importer,
+		);
+
+		expect(rewritten).toContain('from "main-escape"');
+		expect(rewritten).toContain('from "exports-escape/value"');
+		expect(rewritten).toContain('from "subpath-escape/../outside"');
+		expect(rewritten).toContain('require("native-escape/../outside/addon.node")');
+		expect(rewritten).toContain('from "symlink-escape/value"');
+	});
+
+	it("pins bare package requires to absolute extension paths", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "bare-require-ext", version: "1.0.0" }),
 			"node_modules/@fixture/native-platform/package.json": JSON.stringify({
 				name: "@fixture/native-platform",
 				version: "1.0.0",
@@ -641,6 +1376,13 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 				main: "index.js",
 			}),
 			"node_modules/plain-dep/index.js": "module.exports = {};",
+			"node_modules/condition-dep/package.json": JSON.stringify({
+				name: "condition-dep",
+				version: "1.0.0",
+				exports: { import: "./esm.js", require: "./cjs.cjs" },
+			}),
+			"node_modules/condition-dep/esm.js": "export default {};",
+			"node_modules/condition-dep/cjs.cjs": "module.exports = {};",
 			"index.ts": "",
 		});
 		const importer = path.join(dir, "index.ts");
@@ -648,16 +1390,30 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 			[
 				'const binding = require("@fixture/native-platform");',
 				'const plain = require("plain-dep");',
+				'const conditional = require("condition-dep");',
+				'import conditionalEquals = require("condition-dep");',
 				'const local = require("./local.node");',
-				"export { binding, plain, local };",
+				'const member = loader.require("plain-dep");',
+				'const importText = `from"plain-dep"`;',
+				'const importPattern = /from"typebox"/;',
+				'function shadowed(require) { return require("plain-dep"); }',
+				"export { binding, conditional, conditionalEquals, importPattern, importText, local, member, plain, shadowed };",
 			].join("\n"),
 			importer,
 		);
 
 		const addon = await fs.realpath(path.join(dir, "node_modules/@fixture/native-platform/binding.node"));
+		const plainDep = await fs.realpath(path.join(dir, "node_modules/plain-dep/index.js"));
+		const conditionalDep = await fs.realpath(path.join(dir, "node_modules/condition-dep/cjs.cjs"));
 		expect(rewritten).toContain(`require("${addon.replaceAll("\\", "/")}")`);
-		expect(rewritten).toContain('require("plain-dep")');
+		expect(rewritten).toContain(`require("${plainDep.replaceAll("\\", "/")}")`);
+		expect(rewritten).toContain(`require("${conditionalDep.replaceAll("\\", "/")}")`);
+		expect(rewritten).toContain(`import conditionalEquals = require("${conditionalDep.replaceAll("\\", "/")}")`);
 		expect(rewritten).toContain('require("./local.node")');
+		expect(rewritten).toContain('loader.require("plain-dep")');
+		expect(rewritten).toContain('`from"plain-dep"`');
+		expect(rewritten).toContain('/from"typebox"/');
+		expect(rewritten).toContain('function shadowed(require) { return require("plain-dep"); }');
 	});
 
 	it("preserves native-addon rewrites inside wrapped CommonJS dependencies", async () => {
@@ -697,20 +1453,20 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 			"package.json": JSON.stringify({ name: "legacy-oauth-ext", version: "1.0.0" }),
 			"index.ts": [
 				'import { registerOAuthProvider } from "@mariozechner/pi-ai/utils/oauth";',
-				'import { refreshAnthropicToken } from "@mariozechner/pi-ai/utils/oauth/anthropic";',
+				'import { fetchAnthropicBootstrapIdentity } from "@mariozechner/pi-ai/utils/oauth/anthropic";',
 				'export const hasRegisterOAuthProvider = typeof registerOAuthProvider === "function";',
-				'export const hasRefreshAnthropicToken = typeof refreshAnthropicToken === "function";',
+				'export const hasFetchAnthropicBootstrapIdentity = typeof fetchAnthropicBootstrapIdentity === "function";',
 				"export default function (pi) { void pi; }",
 			].join("\n"),
 		});
 
 		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
 			hasRegisterOAuthProvider: boolean;
-			hasRefreshAnthropicToken: boolean;
+			hasFetchAnthropicBootstrapIdentity: boolean;
 		};
 
 		expect(mod.hasRegisterOAuthProvider).toBe(true);
-		expect(mod.hasRefreshAnthropicToken).toBe(true);
+		expect(mod.hasFetchAnthropicBootstrapIdentity).toBe(true);
 	});
 
 	it("rewrites legacy imports in ../src modules reached through relative imports", async () => {
@@ -742,8 +1498,8 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 			// `@earendil-works/*` only resolves via the rewrite, so an un-rewritten
 			// import fails — proving the hook did not over-reach to this sibling.
 			"unrelated.ts": [
-				'import { z } from "@earendil-works/pi-ai";',
-				'export const hasZod = typeof z?.object === "function";',
+				'import { Effort } from "@earendil-works/pi-ai";',
+				'export const hasAi = typeof Effort === "object";',
 			].join("\n"),
 		});
 

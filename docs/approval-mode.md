@@ -1,14 +1,15 @@
 # Tool approval mode
 
-Tool approval has two independent inputs:
+Tool approval has three inputs:
 
 1. **Tool declaration** — every tool may declare an `approval` tier:
    - `read`: reads data or updates UI-only session metadata.
    - `write`: mutates workspace/session state but does not execute arbitrary code.
    - `exec`: executes code, shells out, drives a browser, spawns agents, or performs similarly broad actions.
-2. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the mode for that tool unless a non-yolo safety override forces a prompt.
+2. **Tool policy** — object-form declarations may set `policy: allow | deny | prompt`, optionally with `override` and a reason. This is used for argument-dependent safety/pattern rules.
+3. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the active mode, but cannot bypass a tool's own deny/prompt policy or a non-yolo safety override.
 
-Tools without an `approval` declaration are treated as `exec`. This is the safe default for unknown custom tools. MCP server tools declare `write`.
+Tools without an `approval` declaration, and malformed approval decisions, are treated as `exec`. This is the safe default for unknown custom tools. MCP server tools declare `write`.
 
 ## Modes
 
@@ -32,17 +33,25 @@ tools:
   approval:
     bash: prompt
     read: allow
-    mcp__filesystem__delete: deny
+    mcp__filesystem_delete: deny
 ```
+
+For MCP tools, key the policy by the exact final registered name. The ordinary form is
+`mcp__<sanitized_server>_<sanitized_tool>`. A redundant `<server>_` prefix is removed from the tool name,
+so server `echo` tool `echo_it` is registered as `mcp__echo_it`. Names longer than 64 characters are
+capped with a deterministic hash suffix; use the final capped name rather than the uncapped pattern. See
+[MCP tool naming](./mcp-server-tool-authoring.md#naming-and-collision-domain).
 
 Resolution per tool call:
 
-1. Compute the tool's approval decision from `tool.approval(args)`; omitted means `exec`.
-2. Normalize `tools.approval.<tool>` if present; invalid values are ignored.
-3. In `yolo` mode, the user policy is used when present; otherwise the call is allowed. Safety `override` reasons do not force a prompt in `yolo`.
-4. In non-yolo modes, if the tool sets `override: true`, `deny` is blocked and all other cases prompt, even if user policy says `allow`.
-5. Otherwise, a valid user policy wins.
-6. Otherwise, the active mode auto-approves or prompts by tier.
+1. Evaluate `tool.approval(args)`; omitted/malformed decisions default to tier `exec`.
+2. A tool-declared `policy: deny` always denies. A user `deny` is checked next and also always denies.
+3. In `yolo`, an explicit tool `allow`/`prompt` policy wins; otherwise the valid user policy wins, or the call is allowed. The `override` flag alone does not force a prompt in `yolo`.
+4. In non-yolo modes, an `override: true` decision allows only an accompanying tool `policy: allow`; every other non-denied case prompts.
+5. Without an override, an explicit tool `allow`/`prompt` policy wins, then a valid user policy wins.
+6. With no explicit policy, the active mode auto-approves or prompts by tier.
+
+Policy strings are trimmed and case-normalized. Invalid user values are ignored.
 
 ## Safety overrides
 
@@ -52,7 +61,22 @@ A tool can force a prompt with object-form approval:
 approval: { tier: "exec", override: true, reason: "Critical pattern detected" }
 ```
 
-`bash` uses this for critical destructive patterns such as `rm -rf /`, fork bombs, remote-fetch-then-execute, writes to `/etc/passwd`, and host shutdown commands. These surface as `reason` in the approval prompt, but in `yolo` mode they are auto-approved unless a user policy for the tool is set to `prompt` or `deny`.
+`bash` uses this for critical destructive patterns such as `rm -rf /`, fork bombs, remote-fetch-then-execute, writes to `/etc/passwd`, and host shutdown commands. It also supports configured `bash.patterns` rules: `deny` is absolute, `prompt` forces a prompt, and `allow` explicitly allows the matching call at the `write` tier. Reasons appear in the approval prompt. In `yolo`, a bare critical override is ignored, but an explicit tool/user `prompt` or `deny` policy is still enforced.
+
+`bash.patterns` only feeds the `bash` tool's approval decision. The `eval` tool declares the `exec` tier and can spawn a shell via subprocess, so a `bash.patterns` `deny` rule does not apply to the same command run through `eval` — under `yolo`, that `exec` call resolves to `allow`. To gate the shell `eval` can reach, add a `tools.approval.eval` policy (`prompt` or `deny`) alongside `bash.patterns`.
+
+### Computer safety
+
+The disabled-by-default [`computer` tool](./computer-use.md) chooses its tier from the call's `read_only` declaration:
+
+- `read_only: true` uses `read`;
+- `read_only: false`, a missing field, malformed arguments, or any other value uses `exec`.
+
+The approval prompt shows `read-only` when applicable, followed by the submitted JavaScript (truncated to 2,000 characters by the standard formatter). `read_only` is a trust declaration enforced by the approval tier, not static analysis of the script.
+
+Separately, provider-originated computer-use calls may carry `pendingSafetyChecks` metadata. Any pending check forces an interactive prompt regardless of yolo, per-tool `allow`, or an already approved `xd://` dispatch. The prompt lists each safety-check code, message, and sanitized/truncated data. Without an interactive UI, the call fails closed with `pending provider safety checks but no interactive UI is available`.
+
+Tool approval does not authorize the underlying real-world action. On-screen text is untrusted and cannot override direct user instructions. Consequential actions still require point-of-risk confirmation of the exact target, scope, and values unless the user's direct message already authorized them.
 
 ## Per-tool prompt details
 
@@ -69,7 +93,14 @@ Built-in and custom tools share the same shape:
 
 ```ts
 export type ToolTier = "read" | "write" | "exec";
-export type ToolApprovalDecision = ToolTier | { tier: ToolTier; reason?: string; override?: boolean };
+export type ToolApprovalDecision =
+  | ToolTier
+  | {
+      tier: ToolTier;
+      reason?: string;
+      override?: boolean;
+      policy?: "allow" | "deny" | "prompt";
+    };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
 
 approval?: ToolApproval;
@@ -87,6 +118,11 @@ approval: (args) =>
   isCritical(args.command)
     ? { tier: "exec", override: true, reason: "Critical pattern detected" }
     : "exec";
+
+approval: (args) =>
+  isForbidden(args)
+    ? { tier: "exec", policy: "deny", reason: "Blocked by tool policy" }
+    : "write";
 ```
 
 ## ACP sessions
@@ -117,4 +153,4 @@ When ACP approval is required, OMP routes it through the ACP client instead of t
 
 ## Subagents
 
-Subagents run headless with `tools.approvalMode: yolo` so they do not stall waiting for UI. The parent `task` approval is the authorization boundary. User `tools.approval.<tool>` settings continue to control whether a tool is allowed, prompted, or blocked.
+Subagents run headless with `tools.approvalMode: yolo` so ordinary tier-based prompts do not stall them. The parent `task` approval is the authorization boundary. User `tools.approval.<tool>` settings remain authoritative: `deny` blocks the tool, `allow` permits it, and `prompt` cannot be satisfied in a headless subagent and rejects the call.

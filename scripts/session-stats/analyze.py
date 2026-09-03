@@ -569,41 +569,88 @@ def classify_edit_result(text: str, is_error: int | None = None) -> str:
 _ANCHOR_BARE = re.compile(r"^[a-zA-Z]?[0-9]+[a-z]{2}$")
 
 
+_LINE_LOCATOR = r"[1-9]\d*"
+_RANGE_SEPARATOR = r"(?:\.=|-|\.|…|\s+)"
+_RANGE_LOCATOR = rf"{_LINE_LOCATOR}(?:{_RANGE_SEPARATOR}{_LINE_LOCATOR})?"
+_REGISTER = r"@[A-Za-z0-9_-]{1,64}"
+
+# Current S3 headers. Match the whole row: prefix-only matching used to count
+# recovered body text such as `replace this value` as an edit operation.
 _HASHLINE_OP = re.compile(
-    r"^(SWAP\.BLK|SWAP|XCHG\.BLK|XCHG|DEL\.BLK|DEL|INS\.PRE|INS\.POST|INS\.HEAD|INS\.TAIL|"
-    r"replace_block|replace block|replace|delete_block|delete block|delete|"
-    r"insert_after_block|insert after block|insert before|insert after|insert head|insert tail)\b",
-    re.I,
+    rf"""
+    ^\s*(?:
+        (?P<put>PUT)\s+
+            (?:
+                {_RANGE_LOCATOR}
+                |{_LINE_LOCATOR}\*
+                |[<>]\s*{_LINE_LOCATOR}\*?
+                |>\s*\$
+            )
+            (?:\s+{_REGISTER})?\s*:?
+        |(?P<cut>CUT)\s+(?:{_RANGE_LOCATOR}|{_LINE_LOCATOR}\*)(?:\s+{_REGISTER})?\s*:?
+        |(?P<mv>MV)\s+\S(?:.*\S)?\s*
+        |(?P<rem>REM)\s*
+    )$
+    """,
+    re.I | re.X,
+)
+
+# Retain syntactically shaped pre-S3 rows so stored sessions remain useful for
+# historical reporting. These labels intentionally remain historical rather
+# than being folded into PUT/CUT.
+_HISTORICAL_HASHLINE_OP = re.compile(
+    rf"""
+    ^\s*(?P<op>
+        SWAP\.BLK|SWAP|XCHG\.BLK|XCHG|DEL\.BLK|DEL|CUT\.BLK
+        |PASTE\.BLK\.POST|PASTE\.PRE|PASTE\.POST|PASTE\.HEAD|PASTE\.TAIL
+        |INS\.BLK\.POST|INS\.PRE|INS\.POST|INS\.HEAD|INS\.TAIL
+        |replace_block|replace\ block|replace
+        |delete_block|delete\ block|delete
+        |insert_after_block|insert\ after\ block|insert\ before|insert\ after
+        |insert\ head|insert\ tail
+    )
+    (?:
+        \s+(?:{_RANGE_LOCATOR}|{_LINE_LOCATOR}\.={_LINE_LOCATOR}|{_LINE_LOCATOR})
+        \s*:?
+    )?
+    \s*$
+    """,
+    re.I | re.X,
 )
 
 
 _HASHLINE_OP_ALIASES = {
-    "replace block": "SWAP.BLK",
-    "replace_block": "SWAP.BLK",
-    "replace": "SWAP",
-    "xchg.blk": "SWAP.BLK",
-    "xchg": "SWAP",
-    "delete block": "DEL.BLK",
-    "delete_block": "DEL.BLK",
-    "delete": "DEL",
-    "insert before": "INS.PRE",
-    "insert after": "INS.POST",
-    "insert head": "INS.HEAD",
-    "insert tail": "INS.TAIL",
-    "insert after block": "INS.BLK.POST",
-    "insert_after_block": "INS.BLK.POST",
+    "REPLACE BLOCK": "SWAP.BLK",
+    "REPLACE_BLOCK": "SWAP.BLK",
+    "REPLACE": "SWAP",
+    "XCHG.BLK": "SWAP.BLK",
+    "XCHG": "SWAP",
+    "DELETE BLOCK": "DEL.BLK",
+    "DELETE_BLOCK": "DEL.BLK",
+    "DELETE": "DEL",
+    "INSERT BEFORE": "INS.PRE",
+    "INSERT AFTER": "INS.POST",
+    "INSERT HEAD": "INS.HEAD",
+    "INSERT TAIL": "INS.TAIL",
+    "INSERT AFTER BLOCK": "INS.BLK.POST",
+    "INSERT_AFTER_BLOCK": "INS.BLK.POST",
 }
 
 
 def _hashline_ops(inp: str) -> list[str]:
-    """Op kinds in a hashline edit `input` payload (skips `+` body rows)."""
+    """Op kinds in a hashline edit `input`, excluding body/recovery rows."""
     ops: list[str] = []
     for line in inp.splitlines():
-        if not line or line[0] == "+":
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("+"):
             continue
-        m = _HASHLINE_OP.match(line.lstrip())
-        if m:
-            op = m.group(1).lower()
+        match = _HASHLINE_OP.fullmatch(line)
+        if match:
+            ops.append(next(name.upper() for name, value in match.groupdict().items() if value))
+            continue
+        match = _HISTORICAL_HASHLINE_OP.fullmatch(line)
+        if match:
+            op = match.group("op").upper()
             ops.append(_HASHLINE_OP_ALIASES.get(op, op))
     return ops
 

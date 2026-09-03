@@ -1,12 +1,8 @@
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
+import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
 import type { ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
-import {
-	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
-	collapseEffortVariants,
-	type VariantCollapseTable,
-} from "../variant-collapse";
-import { getAntigravityUserAgent } from "../wire/gemini-headers";
+import { ensureAntigravityVersion, getAntigravityUserAgent } from "../wire/gemini-headers";
 
 export const ANTIGRAVITY_PRIMARY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -161,6 +157,10 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 export async function fetchAntigravityDiscoveryModels(
 	options: FetchAntigravityDiscoveryModelsOptions,
 ): Promise<ModelSpec<"google-gemini-cli">[] | null> {
+	if (options.userAgent === undefined) {
+		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
+	}
+
 	const fetcher = discoveryFetch(options.fetcher);
 	const endpoints = options.endpoint
 		? [trimTrailingSlashes(options.endpoint)]
@@ -232,7 +232,10 @@ export async function fetchAntigravityDiscoveryModels(
 		// Collapse effort-tier variants at the source so runtime discovery,
 		// the gemini-cli re-provision, and the catalog generator all see
 		// logical ids only.
-		const collapsed = collapseEffortVariants(models, options.collapseTable ?? ANTIGRAVITY_VARIANT_COLLAPSE_TABLE);
+		const collapsed = collapseVariants(
+			models,
+			options.collapseTable === undefined ? undefined : { table: options.collapseTable },
+		);
 		collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 		return collapsed;
 	}

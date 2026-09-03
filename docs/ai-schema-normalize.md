@@ -21,8 +21,9 @@ All exports live under `@oh-my-pi/pi-ai/utils/schema`:
   custom-tool registry. `tool-bridge.ts` runs every MCP `inputSchema` through
   this dispatcher.
 - `sanitizeSchemaForOpenAIResponses(schema)` (alias
-  `normalizeSchemaForOpenAIResponses`) — rewrites `oneOf` → `anyOf` for the
-  Responses family.
+  `normalizeSchemaForOpenAIResponses`) — recursively rewrites `oneOf` →
+  `anyOf`, adds empty `properties` to object schemas, and removes regex
+  lookarounds that the Responses API rejects.
 - `sanitizeSchemaForStrictMode(schema)` and
   `enforceStrictSchema(schema)` / `tryEnforceStrictSchema(schema)` — the
   OpenAI strict-mode pipeline (sanitize → enforce). All three are exported
@@ -31,27 +32,37 @@ All exports live under `@oh-my-pi/pi-ai/utils/schema`:
   upgrades draft-07 inputs to 2020-12 and wraps `tryEnforceStrictSchema` for
   provider call sites. `./adapt` also exports the `NO_STRICT` global-bypass
   flag (env `PI_NO_STRICT`) honored by every provider that emits `strict: true`.
+- `normalizeSchemaForMoonshot(value)` — Moonshot/Kimi's MFJS subset.
+- `sanitizeSchemaForOllama(schema)` — rewrites boolean subschemas, type
+  arrays, and boolean object-openness keywords for Ollama's Go schema parser.
+- `sanitizeSchemaForGrammar(schema)` — widens boolean subschemas for
+  grammar-constrained OpenAI-compatible backends while preserving boolean
+  `additionalProperties` / `unevaluatedProperties`.
 
 Removed in the unified-flow refactor:
 
 - `strict-mode.ts` (merged into `normalize.ts`).
 - `sanitize-google.ts` and `normalize-cca.ts` (replaced by
   `normalizeSchemaFor*` dispatchers).
-- `StringEnum` helper — use `z.enum([...])` directly; Zod's emitted JSON
-  Schema is already wire-compatible with Google and other providers.
+- `StringEnum` helper — use `type.enumerated(...)`; omptype emits
+  provider-compatible JSON Schema.
 - `sanitizeSchemaFor{Google,CCA,MCP}` / `prepareSchemaForCCA` — renamed to
   `normalizeSchemaFor{Google,CCA,MCP}`.
 
 ## Dispatcher mapping
 
-| Provider transport(s)                                              | Dispatcher                                  |
-| ------------------------------------------------------------------ | ------------------------------------------- |
-| `openai-completions`, `openai-responses`, `openai-codex-responses` | `adaptSchemaForStrict` (sanitize + enforce) |
-| `openai-responses` family (`oneOf` → `anyOf` only)                 | `normalizeSchemaForOpenAIResponses`         |
-| `google-generative-ai`, `google-vertex`, Gemini CLI                | `normalizeSchemaForGoogle`                  |
-| Cloud Code Assist Claude (Antigravity + GCA, `claude-*` model ids) | `normalizeSchemaForCCA`                     |
-| MCP `inputSchema` ingestion                                        | `normalizeSchemaForMCP`                     |
-| `anthropic-messages` (native, not CCA)                             | per-provider whitelist in `anthropic.ts`    |
+| Provider transport(s)                                              | Dispatcher                                                                   |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `openai-completions`                                               | `adaptSchemaForStrict` (sanitize + enforce when strict mode is enabled)      |
+| `openai-responses`, `openai-codex-responses`                       | `sanitizeSchemaForOpenAIResponses` before strict-mode adaptation             |
+| `azure-openai-responses`                                           | `sanitizeSchemaForOpenAIResponses`; emits `strict: false` without adaptation |
+| Moonshot/Kimi native hosts using MFJS (`toolSchemaFlavor: "moonshot-mfjs"`) | `normalizeSchemaForMoonshot`                                |
+| Grammar-flavored OpenAI-compatible hosts (`toolSchemaFlavor: "grammar"`) | `sanitizeSchemaForGrammar`                                     |
+| `ollama` / `ollama-cloud` tool parameters                          | `toolWireSchema` → `sanitizeSchemaForOllama`                                 |
+| `google-generative-ai`, `google-vertex`, Gemini CLI                | `normalizeSchemaForGoogle`                                                   |
+| Cloud Code Assist Claude (Antigravity + GCA, `claude-*` model ids) | `normalizeSchemaForCCA`                                                      |
+| MCP `inputSchema` ingestion                                        | `normalizeSchemaForMCP`                                                      |
+| `anthropic-messages` (native, not CCA)                             | per-provider whitelist in `anthropic.ts`                                     |
 
 Gemini CLI / Antigravity CCA MUST run the full `normalizeSchemaForCCA`
 pipeline (not just the first keyword-stripping pass) to keep parity with the
@@ -59,9 +70,8 @@ shared Google Claude path.
 
 ## Walk semantics
 
-`normalizeSchema` first detoxifies serialized Zod-instance-shaped inputs, upgrades them to
-JSON Schema 2020-12, dereferences the tree, then walks it with the option set
-pinned by the dispatcher. Each node:
+`normalizeSchema` upgrades inputs to JSON Schema 2020-12, dereferences the tree,
+then walks it with the option set pinned by the dispatcher. Each node:
 
 1. Renames `snake_case` combinator/property keys to camelCase
    (`any_of` → `anyOf`, etc.; collisions follow python-genai
@@ -140,26 +150,23 @@ so callers MUST emit `strict: true` only when enforcement actually succeeded.
 `resolveProviderModels` in `packages/catalog/src/model-manager.ts` and
 `readModelCache`/`writeModelCache` in `packages/catalog/src/model-cache.ts`
 cooperate via a `static_fingerprint` column on the `model_cache` SQLite
-table (current cache schema version 6).
+table (current cache schema version 12).
 
-- `fingerprintStatic(staticModels)` hashes the static catalog slice
-  (`Bun.hash(JSON.stringify(models))` in base36) and memoizes the result
-  by tagging the array with a symbol property. Multiple cold-start arms
-  calling `resolveProviderModels` with the same `staticModels` array pay
-  the JSON+hash cost once.
-- On cache read, if the network fetch is being skipped, the cached row is
-  fresh + authoritative, and the cached `static_fingerprint` matches the
-  current one, `resolveProviderModels` returns the cached models verbatim
-  — the cache already incorporates the same static state, so re-running
-  `mergeDynamicModels(static, cache)` would just rebuild the same objects.
-- `mergeModelSources` and `mergeDynamicModels` short-circuit on
-  empty-source inputs (the common shape after `(static, [])` or for
-  providers without a static catalog), avoiding Map churn entirely.
+- `fingerprintStatic(staticModels, dynamicModelsAuthoritative)` hashes the
+  static catalog slice (`Bun.hash(JSON.stringify(models))` in base36), prefixes
+  the fingerprint format/version and authoritative mode, and memoizes the
+  non-authoritative result by tagging the array with a symbol property.
+  Endpoint-migration drop IDs are also folded into cache identity.
+- When network fetching is skipped, the cache is fresh and authoritative,
+  restored headers are complete, and the static fingerprint matches,
+  `resolveProviderModels` returns the restored cached models without rebuilding
+  the static/dynamic merge.
+- `mergeModelSources` and `mergeDynamicModels` short-circuit empty-source
+  inputs, avoiding unnecessary `Map` construction.
 
-Cache rows written before the current schema version are dropped by the
-cache-version check; the column defaults to `''` for any row that survives
-a version upgrade so the fingerprint-equality check naturally fails closed
-and the full merge re-runs.
+Rows from every older cache schema version are deleted. Newly added cache
+columns use conservative defaults, but a row is reused only when its stored
+version is exactly the current version.
 
 ## Related
 

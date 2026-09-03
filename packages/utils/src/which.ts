@@ -183,8 +183,8 @@ export interface WhichOptions extends Bun.WhichOptions {
 
 // Darwin-specific "which" shim: consult Xcode/CLT toolchain directories after $PATH.
 // Uses cached directory listings instead of per-command existsSync or xcrun subprocesses.
-function darwinWhich(command: string, _options?: Bun.WhichOptions): string | null {
-	const regular = Bun.which(command);
+function darwinWhich(command: string, options?: Bun.WhichOptions): string | null {
+	const regular = Bun.which(command, options);
 	if (regular) return regular;
 	if (isXcodeBin(command)) {
 		return getMacosToolPaths().get(command) ?? null;
@@ -214,17 +214,19 @@ function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
  */
 export function $which(command: string, options?: WhichOptions): string | null {
 	const cachePolicy = options?.cache ?? WhichCachePolicy.Cached;
+	const lookupOptions =
+		options?.PATH !== undefined || process.env.PATH === undefined ? options : { ...options, PATH: process.env.PATH };
 	let key: CacheKey | undefined;
 
 	if (cachePolicy !== WhichCachePolicy.Bypass) {
-		key = cacheKey(command, options);
+		key = cacheKey(command, lookupOptions);
 		if (cachePolicy !== WhichCachePolicy.Fresh) {
 			const cached = toolCache.get(key);
 			if (cached !== undefined) return cached;
 		}
 	}
 
-	const result = whichFresh(command, options);
+	const result = whichFresh(command, lookupOptions);
 	if (key != null && cachePolicy !== WhichCachePolicy.ReadOnly) {
 		toolCache.set(key, result);
 	}

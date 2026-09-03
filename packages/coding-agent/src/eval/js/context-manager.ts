@@ -8,6 +8,8 @@ import {
 import type { ToolSession } from "../../tools";
 import { ToolAbortError, ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
+import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
+import { attachSessionOwner, resolveOwnerScopedSessionKey, type SessionOwners } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 import { WorkerCore } from "./worker-core";
@@ -47,6 +49,26 @@ interface PendingRun {
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
+	/**
+	 * Host calls currently inside a `deferExternalAbort` phase — `agent()`
+	 * isolation worktree setup and merge/cherry-pick, which ignore their abort
+	 * once started. Settling the run while one is live would return the cell on
+	 * top of a git operation still rewriting the repo, so the abort path drains
+	 * this first. Mirrors the Python bridge's shielded-signal contract.
+	 */
+	deferDepth: number;
+	/** Resolves once {@link deferDepth} falls back to zero. */
+	deferDrained?: PromiseWithResolvers<void>;
+	/** Set once the turn was cancelled; blocks new bridge calls during the drain. */
+	aborted: boolean;
+	/**
+	 * A worker `result` withheld because the cell still has bridge calls in
+	 * flight. `#runOne` reports a finished run without awaiting its pending
+	 * tools, so a floated or caught `agent()` would otherwise settle the run —
+	 * tearing down the abort listener — while the subagent kept going with
+	 * nothing left able to cancel it. Delivered once the last call drains.
+	 */
+	heldResult?: Extract<WorkerOutbound, { type: "result" }>;
 	settled: boolean;
 }
 
@@ -57,10 +79,16 @@ interface JsSession {
 	worker: WorkerHandle;
 	state: "alive" | "dead";
 	pending: Map<string, PendingRun>;
+	ownerIds: Set<string>;
+	hasFallbackOwner: boolean;
+}
+
+interface StartingJsSession extends SessionOwners {
+	promise: Promise<JsSession>;
 }
 
 const sessions = new Map<string, JsSession>();
-const startingSessions = new Map<string, Promise<JsSession>>();
+const startingSessions = new Map<string, StartingJsSession>();
 const resettingSessions = new Map<string, Promise<void>>();
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
@@ -99,6 +127,8 @@ export function setJsEvalWorkerThreadForTests(enabled: boolean): boolean {
 export async function executeInVmContext(options: {
 	sessionKey: string;
 	sessionId: string;
+	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
+	ownerId?: string;
 	cwd: string;
 	session: ToolSession;
 	localRoots?: Record<string, string>;
@@ -108,56 +138,103 @@ export async function executeInVmContext(options: {
 	timeoutMs?: number;
 	runState: VmRunState;
 }): Promise<{ value: unknown }> {
+	const sessionKey = resolveOwnerScopedSessionKey({
+		baseKey: options.sessionKey,
+		ownerId: options.ownerId,
+		reset: options.reset === true,
+		hasSession: key => sessions.has(key) || startingSessions.has(key),
+		getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+	});
 	if (options.reset) {
 		// Coalesce concurrent resets: an existing in-flight reset already
 		// produces a fresh context, so a follow-up `reset: true` cell should
 		// just wait for it rather than failing the user-visible call.
-		const inFlight = resettingSessions.get(options.sessionKey);
+		const inFlight = resettingSessions.get(sessionKey);
 		if (inFlight) await inFlight.catch(() => undefined);
 		else {
-			const resetPromise = resetVmContext(options.sessionKey);
+			const resetPromise = resetVmContext(sessionKey);
 			resettingSessions.set(
-				options.sessionKey,
+				sessionKey,
 				resetPromise.then(() => undefined),
 			);
 			try {
 				await resetPromise;
 			} finally {
-				resettingSessions.delete(options.sessionKey);
+				resettingSessions.delete(sessionKey);
 			}
 		}
 	} else {
 		// Internal coordination: wait for any in-flight reset to settle and
 		// then run on the freshly-rebuilt context.
-		const inFlight = resettingSessions.get(options.sessionKey);
+		const inFlight = resettingSessions.get(sessionKey);
 		if (inFlight) await inFlight.catch(() => undefined);
 	}
 	const session = await acquireSession(
-		options.sessionKey,
+		sessionKey,
 		{ cwd: options.cwd, sessionId: options.sessionId, localRoots: options.localRoots },
 		options.timeoutMs,
+		options.ownerId,
 	);
 	return await runOnce(session, options);
 }
 
 export async function resetVmContext(sessionKey: string): Promise<void> {
-	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.catch(() => undefined));
+	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
 	sessions.delete(sessionKey);
 	await killSession(session, new ToolError("JS context reset"), { force: false });
 }
 
 export async function disposeAllVmContexts(): Promise<void> {
-	const pending = [...startingSessions.values()];
+	const pending = [...startingSessions.values()].map(starting => starting.promise);
 	startingSessions.clear();
 	const started = await Promise.allSettled(pending);
-	const all = [...sessions.values()];
+	const all = Array.from(sessions.values());
 	for (const result of started) {
 		if (result.status !== "fulfilled") continue;
 		if (!all.includes(result.value)) all.push(result.value);
 	}
 	sessions.clear();
 	await Promise.all(all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })));
+}
+
+/**
+ * Shut down retained JS contexts owned solely by `ownerId` (e.g. a subagent's
+ * private fork); shared contexts just drop the owner registration.
+ */
+export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
+	const toKill: JsSession[] = [];
+	for (const session of Array.from(sessions.values())) {
+		if (!session.ownerIds.has(ownerId)) continue;
+		if (session.ownerIds.size === 1) {
+			toKill.push(session);
+			continue;
+		}
+		session.ownerIds.delete(ownerId);
+	}
+	const startingToKill: StartingJsSession[] = [];
+	for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
+		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+		if (starting.ownerIds.size === 1) {
+			startingSessions.delete(sessionKey);
+			startingToKill.push(starting);
+			continue;
+		}
+		starting.ownerIds.delete(ownerId);
+	}
+	for (const session of toKill) {
+		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+	}
+	const started = await Promise.allSettled(startingToKill.map(starting => starting.promise));
+	for (const result of started) {
+		if (result.status !== "fulfilled") continue;
+		const session = result.value;
+		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+		toKill.push(session);
+	}
+	await Promise.all(
+		toKill.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })),
+	);
 }
 
 /**
@@ -177,6 +254,8 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		worker,
 		state: "alive",
 		pending: new Map(),
+		ownerIds: new Set(),
+		hasFallbackOwner: false,
 	};
 	try {
 		await initWorker(session, { cwd: process.cwd(), sessionId: "smoke" }, WORKER_INIT_TIMEOUT_MS);
@@ -209,6 +288,8 @@ async function runOnce(
 		resolve,
 		reject,
 		toolCalls: new Map(),
+		deferDepth: 0,
+		aborted: false,
 		settled: false,
 	};
 	session.pending.set(runId, pending);
@@ -216,9 +297,21 @@ async function runOnce(
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
 		const abortError = reasonToError(reason, "Execution aborted");
-		// Cancel any in-flight tool calls first.
+		// Stop delegated work at once — this is what kills spawned subagents —
+		// and refuse further bridge calls so the drain below stays bounded to
+		// phases that had already started.
+		pending.aborted = true;
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(abortError);
-		// Hard-kill the worker — only way to interrupt synchronous user code.
+		// A critical host phase ignores its abort once started (isolation
+		// worktree setup, merge/cherry-pick). Killing the worker now would
+		// settle the cell on top of a git operation still in progress, so wait
+		// for it. Hard-kill is still the only way to interrupt synchronous user
+		// code, hence it stays the terminal step either way.
+		const drained = pending.deferDepth > 0 ? pending.deferDrained?.promise : undefined;
+		if (drained) {
+			void drained.then(() => killSessionFor(session, abortError, { force: true }));
+			return;
+		}
 		void killSessionFor(session, abortError, { force: true });
 	};
 
@@ -243,15 +336,26 @@ async function runOnce(
 	}
 }
 
-async function acquireSession(sessionKey: string, snapshot: SessionSnapshot, timeoutMs?: number): Promise<JsSession> {
+async function acquireSession(
+	sessionKey: string,
+	snapshot: SessionSnapshot,
+	timeoutMs?: number,
+	ownerId?: string,
+): Promise<JsSession> {
 	const existing = sessions.get(sessionKey);
 	if (existing && existing.state === "alive") {
 		existing.sessionId = snapshot.sessionId;
 		existing.cwd = snapshot.cwd;
+		attachSessionOwner(existing, snapshot.sessionId, ownerId);
 		return existing;
 	}
 	const starting = startingSessions.get(sessionKey);
-	if (starting) return await starting;
+	if (starting) {
+		attachSessionOwner(starting, snapshot.sessionId, ownerId);
+		return await starting.promise;
+	}
+	// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
+	let startingSession!: StartingJsSession;
 
 	const startup = (async (): Promise<JsSession> => {
 		// Attach the message listener before sending init. Both Bun Worker messages
@@ -264,6 +368,8 @@ async function acquireSession(sessionKey: string, snapshot: SessionSnapshot, tim
 			worker,
 			state: "alive",
 			pending: new Map(),
+			ownerIds: new Set(),
+			hasFallbackOwner: false,
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.
@@ -293,14 +399,27 @@ async function acquireSession(sessionKey: string, snapshot: SessionSnapshot, tim
 				session.state = "alive";
 			}
 		}
-		sessions.set(sessionKey, session);
+		session.ownerIds = new Set(startingSession.ownerIds);
+		session.hasFallbackOwner = startingSession.hasFallbackOwner;
+		// Publish only while this startup still owns the key: owner disposal or
+		// a concurrent dispose-all may have already reaped the starting record,
+		// and publishing here would resurrect a context that was just torn down.
+		if (startingSessions.get(sessionKey) === startingSession) {
+			sessions.set(sessionKey, session);
+		}
 		return session;
 	})();
-	startingSessions.set(sessionKey, startup);
+	startingSession = {
+		ownerIds: new Set(),
+		hasFallbackOwner: false,
+		promise: startup,
+	};
+	attachSessionOwner(startingSession, snapshot.sessionId, ownerId);
+	startingSessions.set(sessionKey, startingSession);
 	try {
 		return await startup;
 	} finally {
-		if (startingSessions.get(sessionKey) === startup) startingSessions.delete(sessionKey);
+		if (startingSessions.get(sessionKey) === startingSession) startingSessions.delete(sessionKey);
 	}
 }
 
@@ -375,6 +494,25 @@ function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 	}
 }
 
+/**
+ * Maintain {@link PendingRun.deferDepth} from the bridge's pause/resume status
+ * events so an abort can wait out a critical `agent()` phase instead of
+ * settling the cell over a half-applied merge.
+ */
+function trackDeferPhase(pending: PendingRun, event: JsStatusEvent): void {
+	if (event.deferExternalAbort !== true) return;
+	if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
+		pending.deferDepth++;
+		pending.deferDrained ??= Promise.withResolvers<void>();
+		return;
+	}
+	if (event.op !== EVAL_TIMEOUT_RESUME_OP || pending.deferDepth === 0) return;
+	pending.deferDepth--;
+	if (pending.deferDepth > 0) return;
+	pending.deferDrained?.resolve();
+	pending.deferDrained = undefined;
+}
+
 async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, { type: "tool-call" }>): Promise<void> {
 	const pending = session.pending.get(msg.runId);
 	if (!pending) {
@@ -385,31 +523,65 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		});
 		return;
 	}
+	if (pending.aborted) {
+		safeSend(session, {
+			type: "tool-reply",
+			id: msg.id,
+			reply: { ok: false, error: { message: "Run was interrupted" } },
+		});
+		return;
+	}
 	const ctrl = new AbortController();
 	pending.toolCalls.set(msg.id, ctrl);
 	try {
 		const value = await callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
 			signal: ctrl.signal,
-			emitStatus: (event: JsStatusEvent) => pending.runState.onDisplay?.({ type: "status", event }),
+			emitStatus: (event: JsStatusEvent) => {
+				trackDeferPhase(pending, event);
+				pending.runState.onDisplay?.({ type: "status", event });
+			},
 		});
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
 	} finally {
 		pending.toolCalls.delete(msg.id);
+		// Last call of a run whose worker result was withheld: settle it now.
+		const held = pending.heldResult;
+		if (held && !pending.settled && !pending.aborted && pending.toolCalls.size === 0) {
+			finishPending(pending, held);
+		}
 	}
 }
 
-function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: "result" }>): void {
-	const pending = session.pending.get(msg.runId);
-	if (!pending || pending.settled) return;
+/** Deliver a worker `result` to the waiting {@link runOnce}. */
+function finishPending(pending: PendingRun, msg: Extract<WorkerOutbound, { type: "result" }>): void {
 	pending.settled = true;
+	pending.heldResult = undefined;
 	if (msg.ok) {
 		pending.resolve({ value: undefined });
 		return;
 	}
 	pending.reject(errorFromPayload(msg.error));
+}
+
+function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: "result" }>): void {
+	const pending = session.pending.get(msg.runId);
+	if (!pending || pending.settled) return;
+	// Once the turn is cancelled the scheduled kill is the sole settler, so a
+	// late worker result can't cut the abort drain short.
+	if (pending.aborted) return;
+	// A cell owns every bridge call it starts. The worker finishes a run without
+	// awaiting its outstanding tool calls, so `agent(...)` that is floated or
+	// caught would settle the run here — `runOnce` then drops the abort listener
+	// and the pending entry, leaving the subagent running with nothing able to
+	// cancel it. Hold the result until the last call drains.
+	if (pending.toolCalls.size > 0) {
+		pending.heldResult = msg;
+		return;
+	}
+	finishPending(pending, msg);
 }
 
 async function killSessionFor(session: JsSession, error: Error, options: { force: boolean }): Promise<void> {
@@ -547,7 +719,6 @@ function spawnJsProcess(): WorkerHandle {
 		async close() {
 			const { promise, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -560,7 +731,7 @@ function spawnJsProcess(): WorkerHandle {
 				if (message.type !== "closed") return;
 				void base.terminate().finally(() => finish(true));
 			});
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			base.send({ type: "close" });
 			return await promise;
 		},
@@ -598,7 +769,6 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 			let settled = false;
 			let sawClosedAck = false;
 			let sawWorkerExit = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -621,7 +791,7 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 				finishIfClosed();
 			});
 			worker.addEventListener("close", onClose);
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			worker.postMessage({ type: "close" } satisfies WorkerInbound);
 			return await closed;
 		},
@@ -674,7 +844,6 @@ function spawnInlineWorker(): WorkerHandle {
 		async close() {
 			const { promise: closed, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -689,7 +858,7 @@ function spawnInlineWorker(): WorkerHandle {
 				if (msg.type === "closed") finish(true);
 			});
 			this.send({ type: "close" });
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			return await closed;
 		},
 		async terminate() {

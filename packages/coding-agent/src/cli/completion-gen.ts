@@ -14,7 +14,7 @@
  * — see `commands/complete.ts`. The flag→source mapping below is the only manual
  * knob and is keyed by flag name so it stays stable as flags are added.
  */
-import type { ArgDescriptor, CliConfig, CommandCtor, FlagDescriptor } from "@oh-my-pi/pi-utils/cli";
+import type { ArgDescriptor, CliConfig, CommandMetadata, FlagDescriptor } from "@oh-my-pi/pi-utils/cli";
 import { BUILTIN_TOOL_NAMES } from "../tools/builtin-names";
 
 export type Shell = "bash" | "zsh" | "fish";
@@ -88,9 +88,9 @@ function argValue(desc: ArgDescriptor): ValueSource {
 	return { kind: "file" };
 }
 
-function buildFlags(Cmd: CommandCtor): CompletionFlag[] {
+function buildFlags(command: CommandMetadata): CompletionFlag[] {
 	const out: CompletionFlag[] = [];
-	const flags = Cmd.flags ?? {};
+	const flags = command.flags ?? {};
 	for (const name in flags) {
 		const desc = flags[name];
 		out.push({
@@ -104,9 +104,9 @@ function buildFlags(Cmd: CommandCtor): CompletionFlag[] {
 	return out;
 }
 
-function buildArgs(Cmd: CommandCtor): CompletionArg[] {
+function buildArgs(command: CommandMetadata): CompletionArg[] {
 	const out: CompletionArg[] = [];
-	const args = Cmd.args ?? {};
+	const args = command.args ?? {};
 	for (const name in args) {
 		const desc = args[name];
 		out.push({ name, description: desc.description ?? "", value: argValue(desc) });

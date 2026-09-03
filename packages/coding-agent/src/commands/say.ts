@@ -8,9 +8,11 @@
  * streamed segments into one WAV. The first run downloads the configured local
  * model into the worker's cache.
  */
+
 import { getProjectDir } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import chalk from "chalk";
+import { sayHelp as commandHelp } from "../cli/command-help";
 import { Settings, settings } from "../config/settings";
 import { TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { SpeakableStream } from "../tts/speakable";
@@ -19,8 +21,7 @@ import { shutdownTtsClient, ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 
 export default class Say extends Command {
-	static description = "Synthesize text with the local TTS engine and play it through the speakers";
-
+	static description = commandHelp.description;
 	static args = {
 		text: Args.string({ description: "Text to speak (or use --file)" }),
 	};

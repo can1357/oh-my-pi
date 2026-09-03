@@ -4,6 +4,7 @@ import {
 	createUnavailableWorker,
 	createWorkerHandle,
 	createWorkerSubprocess,
+	inferenceWorkerEnv,
 	logWorkerMessage,
 	type RefCountedWorkerHandle,
 	resolveWorkerSpawnCmd,
@@ -11,7 +12,6 @@ import {
 	type SpawnedSubprocess,
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
-	workerEnvFromParent,
 } from "../subprocess/worker-client";
 import { safeSend } from "../utils/ipc";
 import { tinyModelDeviceSettingToEnv } from "./device";
@@ -48,6 +48,12 @@ export interface TinyTitleDownloadOptions {
  * callers that customize automatic session-title generation.
  */
 export interface TinyTitleGenerateOptions {
+	signal?: AbortSignal;
+	systemPrompt?: string;
+}
+
+export interface TinyModelCompletionOptions {
+	maxTokens?: number;
 	signal?: AbortSignal;
 	systemPrompt?: string;
 }
@@ -110,7 +116,7 @@ export function tinyWorkerEnvOverlay(
  * subprocess).
  */
 export function tinyWorkerEnv(): Record<string, string> {
-	return workerEnvFromParent(
+	return inferenceWorkerEnv(
 		tinyWorkerEnvOverlay(
 			$env,
 			readTinyModelSetting("providers.tinyModelDevice"),
@@ -196,6 +202,28 @@ export class TinyTitleClient {
 		return () => this.#progressListeners.delete(listener);
 	}
 
+	/**
+	 * Spawn the tiny-model worker ahead of first use without loading any model.
+	 * Called from idle TUI startup so the first {@link generate} reuses a live,
+	 * unref'd subprocess instead of paying subprocess-spawn latency on the submit
+	 * hot path (issue #6462). No-ops for online / non-local keys and for models
+	 * already marked failed. A no-op `ping` round-trips the transport to fault in
+	 * the worker's module graph; no pending request is registered, so
+	 * {@link #syncWorkerRef} leaves the worker unref'd and idle sessions still exit.
+	 */
+	prewarm(modelKey: string): void {
+		if (!isTinyTitleLocalModelKey(modelKey) || this.#failedModels.has(modelKey)) return;
+		try {
+			const worker = this.#ensureWorker();
+			worker.send({ type: "ping", id: String(++this.#nextRequestId) });
+		} catch (error) {
+			logger.debug("tiny-title: prewarm failed", {
+				modelKey,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	async generate(modelKey: string, message: string, signal?: AbortSignal): Promise<string | null>;
 	async generate(modelKey: string, message: string, options?: TinyTitleGenerateOptions): Promise<string | null>;
 	async generate(
@@ -238,11 +266,7 @@ export class TinyTitleClient {
 		}
 	}
 
-	async complete(
-		modelKey: string,
-		prompt: string,
-		options: { maxTokens?: number; signal?: AbortSignal } = {},
-	): Promise<string | null> {
+	async complete(modelKey: string, prompt: string, options: TinyModelCompletionOptions = {}): Promise<string | null> {
 		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
 		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
 
@@ -259,7 +283,14 @@ export class TinyTitleClient {
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
 			try {
-				worker.send({ type: "complete", id, modelKey, prompt, maxTokens: options.maxTokens });
+				worker.send({
+					type: "complete",
+					id,
+					modelKey,
+					prompt,
+					maxTokens: options.maxTokens,
+					systemPrompt: options.systemPrompt,
+				});
 				return await promise;
 			} finally {
 				options.signal?.removeEventListener("abort", abort);

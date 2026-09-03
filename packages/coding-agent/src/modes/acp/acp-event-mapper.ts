@@ -5,10 +5,10 @@ import type {
 	ToolCallContent,
 	ToolCallLocation,
 	ToolKind,
-} from "@agentclientprotocol/sdk";
+} from "@oh-my-pi/pi-utils/acp";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd } from "../../tools/path-utils";
+import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 
@@ -141,6 +141,39 @@ function xdevDispatchDevice(toolName: string, args: unknown): string | undefined
 	return parseXdUrl(path)?.name ?? undefined;
 }
 
+/** Whether a Hub call carries peer-to-peer coordination rather than process control. */
+function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
+	let hubArgs = args;
+	if (toolName !== "hub") {
+		if (xdevDispatchDevice(toolName, args) !== "hub" || typeof args !== "object" || args === null) {
+			return false;
+		}
+		const content = Reflect.get(args, "content");
+		if (typeof content !== "string") return false;
+		try {
+			hubArgs = JSON.parse(content);
+		} catch {
+			return false;
+		}
+	}
+	if (typeof hubArgs !== "object" || hubArgs === null) return false;
+	const op = Reflect.get(hubArgs, "op");
+	switch (op) {
+		case "list":
+		case "inbox":
+			return true;
+		case "send":
+			return typeof Reflect.get(hubArgs, "to") === "string";
+		case "wait":
+			// A bare wait or an `ids` wait settles on background-job delivery,
+			// whose snapshot IS the job result (hub.md) — keep those visible.
+			// Only a peer-scoped wait (`from`, no jobs) is internal messaging.
+			return typeof Reflect.get(hubArgs, "from") === "string" && Reflect.get(hubArgs, "ids") === undefined;
+		default:
+			return false;
+	}
+}
+
 export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 	// An xd:// device write executes the mounted tool — "edit" would make ACP
 	// clients render it as a file modification to a nonexistent path (and
@@ -186,6 +219,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
+			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -196,6 +230,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
+			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
 				extractToolCallContent(event.partialResult, options),
@@ -209,21 +244,20 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			if (content.length > 0) {
 				update.content = content;
 			}
-			const locations = extractToolLocations(event.args, options.cwd);
+			const locations = extractToolLocations(event.args, options.cwd, event.toolName);
 			if (locations.length > 0) {
 				update.locations = locations;
 			}
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_end": {
+			const args = getToolExecutionEndArgs(event, options);
+			if (isInternalHubMessageTool(event.toolName, args)) return [];
 			const resultContent = [
 				...extractDiffToolCallContent(event.result),
 				...extractToolCallContent(event.result, options),
 			];
-			const content = mergeToolUpdateContent(
-				buildToolStartContent(event.toolName, getToolExecutionEndArgs(event, options)),
-				resultContent,
-			);
+			const content = mergeToolUpdateContent(buildToolStartContent(event.toolName, args), resultContent);
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
@@ -369,6 +403,7 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	in_progress: "in_progress",
 	completed: "completed",
 	abandoned: "completed",
+	blocked: "pending",
 };
 
 function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "completed" {
@@ -432,7 +467,13 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 }
 
 function isTodoStatus(status: unknown): status is TodoStatus {
-	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
+	return (
+		status === "pending" ||
+		status === "in_progress" ||
+		status === "completed" ||
+		status === "abandoned" ||
+		status === "blocked"
+	);
 }
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
@@ -454,7 +495,7 @@ export function buildToolCallStartUpdate(input: {
 	if (content.length > 0) {
 		update.content = content;
 	}
-	const locations = extractToolLocations(input.args, input.cwd);
+	const locations = extractToolLocations(input.args, input.cwd, input.toolName);
 	if (locations.length > 0) {
 		update.locations = locations;
 	}
@@ -601,7 +642,26 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
+/**
+ * For the `read` tool, peel a trailing read selector (`:1-20`, `:raw`,
+ * `:1-20:raw`, comma-separated ranges) off the filesystem path so the ACP
+ * location names the file actually accessed rather than the selector-bearing
+ * expression — Zed Follow otherwise treats the selector as part of the
+ * filename and opens an empty buffer. Literal POSIX filenames that legitimately
+ * end in selector-shaped text (e.g. `report:1-20`) are preserved via the same
+ * literal-path precedence the read tool uses. Non-read tools and internal URLs
+ * pass through unchanged — colons in write/edit targets are valid filenames.
+ */
+function readLocationBasePath(
+	raw: string | undefined,
+	cwd: string | undefined,
+	toolName: string | undefined,
+): string | undefined {
+	if (raw === undefined || toolName !== "read" || INTERNAL_URL_SUBJECT.test(raw)) return raw;
+	return cwd ? splitPathAndSelPreferringLiteralSync(raw, cwd).path : splitPathAndSel(raw).path;
+}
+
+function extractToolLocations(args: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
@@ -612,7 +672,7 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 		locations.push({ path });
 	};
 
-	pushPath(extractStringProperty<PathContainer>(args, "path"));
+	pushPath(readLocationBasePath(extractStringProperty<PathContainer>(args, "path"), cwd, toolName));
 	pushPath(extractStringProperty<OldPathContainer>(args, "oldPath"));
 	pushPath(extractStringProperty<NewPathContainer>(args, "newPath"));
 
@@ -938,9 +998,12 @@ function extractReadableText(value: unknown): string | undefined {
 		if (text.length > 0) {
 			return normalizeText(text);
 		}
-		if (hasBinaryContentBlock(contentBlocks)) {
-			return undefined;
-		}
+		// A structured result envelope (`{ content: [...] }`) whose blocks carry no
+		// plain text has nothing readable to surface, and its data already rides the
+		// ACP frame as `rawOutput`. Serializing the whole envelope to JSON would just
+		// render a raw blob as the tool row (e.g. hub wait progress, issue #9511), so
+		// stop here instead of falling through to the JSON fallback.
+		return undefined;
 	}
 	if (extractDetailsImages(value)) {
 		return undefined;
@@ -991,13 +1054,6 @@ function getContentType(value: unknown): string | undefined {
 	}
 	const type = (value as TypedValue).type;
 	return typeof type === "string" ? type : undefined;
-}
-
-function hasBinaryContentBlock(blocks: unknown[]): boolean {
-	return blocks.some(block => {
-		const type = getContentType(block);
-		return type === "image" || type === "audio";
-	});
 }
 
 function extractStringProperty<T extends object>(value: unknown, key: keyof T): string | undefined {

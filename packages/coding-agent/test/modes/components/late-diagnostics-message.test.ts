@@ -91,4 +91,21 @@ describe("LateDiagnosticsMessageComponent", () => {
 		]);
 		expect(plain(component).trim()).toBe("");
 	});
+
+	it("hides and restores diagnostics without discarding the rendered block", () => {
+		const component = new LateDiagnosticsMessageComponent([
+			{
+				path: "/abs/src/foo.ts",
+				summary: "1 error(s)",
+				errored: true,
+				messages: ["src/foo.ts:1:1 [error] [typescript] bad (2322)"],
+			},
+		]);
+
+		expect(plain(component)).toContain("Late diagnostics");
+		component.setToolActivityVisible(false);
+		expect(plain(component)).toBe("");
+		component.setToolActivityVisible(true);
+		expect(plain(component)).toContain("Late diagnostics");
+	});
 });

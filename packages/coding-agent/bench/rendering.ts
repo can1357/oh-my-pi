@@ -1,18 +1,22 @@
-import { initTheme } from "../src/modes/theme/theme";
-import { truncateToVisualLines } from "../src/modes/components/visual-truncate";
-import { WelcomeComponent } from "../src/modes/components/welcome";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { Editor } from "@oh-my-pi/pi-tui";
-import { AssistantMessageComponent } from "../src/modes/components/assistant-message";
-import { TranscriptContainer } from "../src/modes/components/transcript-container";
-import { Settings } from "../src/config/settings";
-import { getEditorTheme } from "../src/modes/theme/theme";
-import { BlockUnitCounter, buildDisplayMessage, nextStep, visibleUnits } from "../src/modes/controllers/streaming-reveal";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as fs from "node:fs";
-import { ReadTool } from "../src/tools/read";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { Editor } from "@oh-my-pi/pi-tui";
+import { Settings } from "../src/config/settings";
+import { AssistantMessageComponent } from "../src/modes/components/assistant-message";
+import { TranscriptContainer } from "../src/modes/components/transcript-container";
+import { truncateToVisualLines } from "../src/modes/components/visual-truncate";
+import { WelcomeComponent } from "../src/modes/components/welcome";
+import {
+	BlockUnitCounter,
+	buildDisplayMessage,
+	nextStep,
+	visibleUnits,
+} from "../src/modes/controllers/streaming-reveal";
+import { getEditorTheme, initTheme } from "../src/modes/theme/theme";
 import type { ToolSession } from "../src/tools";
+import { ReadTool } from "../src/tools/read";
 
 const ITERATIONS = 500;
 const WIDTH = 100;
@@ -41,13 +45,19 @@ bench("truncateToVisualLines", () => {
 	truncateToVisualLines(longText, 20, WIDTH, 1);
 });
 
-const welcome = new WelcomeComponent("8.12.3", "claude-3.7", "anthropic",	[
-	{ name: "Test session", timeAgo: "2m" },
-	{ name: "Another session", timeAgo: "1h" },
-], [
-	{ name: "tsserver", status: "ready", fileTypes: ["ts", "tsx", "js"] },
-	{ name: "rust-analyzer", status: "connecting", fileTypes: ["rs"] },
-]);
+const welcome = new WelcomeComponent(
+	"8.12.3",
+	"claude-3.7",
+	"anthropic",
+	[
+		{ name: "Test session", timeAgo: "2m" },
+		{ name: "Another session", timeAgo: "1h" },
+	],
+	[
+		{ name: "tsserver", status: "ready", fileTypes: ["ts", "tsx", "js"] },
+		{ name: "rust-analyzer", status: "connecting", fileTypes: ["rs"] },
+	],
+);
 
 bench("WelcomeComponent.render", () => {
 	welcome.render(WIDTH);
@@ -83,7 +93,14 @@ function makeTextMessage(text: string): AssistantMessage {
 		api: "anthropic-messages",
 		provider: "anthropic",
 		model: "bench",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
 		stopReason: "stop",
 		timestamp: 0,
 	};
@@ -152,7 +169,13 @@ try {
 // text block — the shape C2 targets. Current code re-lexes BOTH every tick;
 // after C2 the finalized thinking block stays L1-cached and only the tail re-lexes.
 function makeThinkingPlusText(thinking: string, text: string): AssistantMessage {
-	return { ...makeTextMessage(text), content: [{ type: "thinking", thinking }, { type: "text", text }] };
+	return {
+		...makeTextMessage(text),
+		content: [
+			{ type: "thinking", thinking },
+			{ type: "text", text },
+		],
+	};
 }
 console.log("\nstreamingRevealMultiBlock (C2: finalized thinking block + growing text):");
 try {
@@ -174,7 +197,9 @@ try {
 			steps++;
 		}
 		const ms = (Bun.nanoseconds() - start) / 1e6;
-		console.log(`  text=${n} (+2500 thinking): ${ms.toFixed(2)}ms total over ${steps} steps (${(ms / steps).toFixed(4)}ms/step)`);
+		console.log(
+			`  text=${n} (+2500 thinking): ${ms.toFixed(2)}ms total over ${steps} steps (${(ms / steps).toFixed(4)}ms/step)`,
+		);
 	}
 } catch (err) {
 	console.log(`  (skipped: ${(err as Error).message})`);

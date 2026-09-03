@@ -1,21 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { sanitizeWithOptionalSixelPassthrough } from "@oh-my-pi/pi-coding-agent/utils/sixel";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 const SIXEL = "\x1bPqabc\x1b\\";
+let darkTheme: Theme;
+
+beforeAll(async () => {
+	const loaded = await getThemeByName("dark");
+	expect(loaded).toBeDefined();
+	darkTheme = loaded!;
+});
 
 describe("BashExecutionComponent SIXEL sanitization", () => {
 	const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
 	const originalAllowPassthrough = Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 
-	beforeEach(async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		setThemeInstance(theme!);
+	beforeEach(() => {
+		setThemeInstance(darkTheme);
 	});
 	afterEach(() => {
 		if (originalForceProtocol === undefined) delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -83,10 +88,8 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 describe("BashExecutionComponent streaming throttle", () => {
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 
-	beforeEach(async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		setThemeInstance(theme!);
+	beforeEach(() => {
+		setThemeInstance(darkTheme);
 	});
 
 	it("caps stored lines during streaming", () => {
@@ -106,23 +109,26 @@ describe("BashExecutionComponent streaming throttle", () => {
 		expect(output).not.toContain("line0\n");
 	});
 
-	it("gate drops rapid chunks", async () => {
-		const component = new BashExecutionComponent("test", ui, false);
+	it("gate drops rapid chunks", () => {
+		vi.useFakeTimers();
+		try {
+			const component = new BashExecutionComponent("test", ui, false);
 
-		// Send 100 chunks rapidly (all in same tick, before setTimeout fires)
-		for (let i = 0; i < 100; i++) {
-			component.appendOutput(`chunk${i}\n`);
+			// Send 100 chunks rapidly (all in same tick, before the gate fires).
+			for (let i = 0; i < 100; i++) {
+				component.appendOutput(`chunk${i}\n`);
+			}
+
+			const output = component.getOutput();
+			expect(output).toContain("chunk0");
+			expect(output).not.toContain("chunk99");
+
+			vi.advanceTimersByTime(50);
+			component.appendOutput("after_gate\n");
+			expect(component.getOutput()).toContain("after_gate");
+		} finally {
+			vi.useRealTimers();
 		}
-
-		// Only the first chunk should have been processed (gate blocks the rest)
-		const output = component.getOutput();
-		expect(output).toContain("chunk0");
-		expect(output).not.toContain("chunk99");
-
-		// After the gate timer expires, the next chunk is accepted
-		await Bun.sleep(60); // CHUNK_THROTTLE_MS is 50
-		component.appendOutput("after_gate\n");
-		expect(component.getOutput()).toContain("after_gate");
 	});
 
 	it("setComplete replaces streaming output with final output", () => {
@@ -145,10 +151,8 @@ describe("BashExecutionComponent streaming throttle", () => {
 describe("BashExecutionComponent expand footer", () => {
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 
-	beforeEach(async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		setThemeInstance(theme!);
+	beforeEach(() => {
+		setThemeInstance(darkTheme);
 	});
 
 	// PREVIEW_LINES is 20: 27 lines leaves 7 hidden in the collapsed preview.

@@ -5,24 +5,23 @@ use std::collections::HashSet;
 use std::{
 	collections::HashMap,
 	fs,
-	io::{self, Write},
+	io::{self},
 	str,
 	sync::Arc,
 	time::Duration,
 };
 
 use anyhow::{Error, Result};
-use brush_builtins::{BuiltinSet, default_builtins};
 use brush_core::{
-	ExecutionContext, ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
+	ExecutionControlFlow, ExecutionExitCode, ExecutionParameters, ExecutionResult,
 	ProcessGroupPolicy, ProfileLoadBehavior, RcLoadBehavior, Shell as BrushShell, ShellValue,
-	ShellVariable, SourceInfo, SpawnObserver, builtins,
+	ShellVariable, SourceInfo, SpawnObserver,
 	env::EnvironmentScope,
 	openfiles::{self, OpenFile, OpenFiles},
 };
 use bytes::Bytes;
-use clap::Parser;
 use flume::Sender;
+use pi_builtins::{BuiltinSet, default_builtins};
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
 use tokio::{sync::Mutex as TokioMutex, time};
@@ -37,6 +36,12 @@ use crate::{
 
 struct ShellSessionCore {
 	shell: BrushShell,
+}
+
+impl Drop for ShellSessionCore {
+	fn drop(&mut self) {
+		terminate_internal_background_jobs(&mut self.shell);
+	}
 }
 
 #[derive(Clone, Default)]
@@ -582,107 +587,37 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 	create_session_for_run(config, None, None).await
 }
 
-async fn create_session_for_run(
-	config: &ShellConfig,
-	spawn_registry: Option<Arc<process::SpawnRegistry>>,
-	cancel_token: Option<CancellationToken>,
-) -> Result<ShellSessionCore> {
-	let mut shell = BrushShell::builder()
-		.do_not_inherit_env(true)
-		.profile(ProfileLoadBehavior::Skip)
-		.rc(RcLoadBehavior::Skip)
-		.builtins(default_builtins(BuiltinSet::BashMode))
-		.build()
-		.await
-		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
-
-	if let Some(exec_builtin) = shell.builtin_mut("exec") {
-		exec_builtin.disabled = true;
-	}
-	if let Some(suspend_builtin) = shell.builtin_mut("suspend") {
-		suspend_builtin.disabled = true;
-	}
-	shell.register_builtin("sleep", builtins::builtin::<SleepCommand, _>());
-	shell.register_builtin("timeout", builtins::builtin::<TimeoutCommand, _>());
-	// In-process uutils-backed builtins (vendored + patched): consistent,
-	// cross-platform implementations that run without spawning a process and
-	// resolve paths against the shell working directory. The whole set can be
-	// disabled (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS;
-	// the destructive pair additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE.
-	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
-		shell.register_builtin("mkdir", crate::coreutils::mkdir_builtin());
-		shell.register_builtin("head", crate::coreutils::head_builtin());
-		shell.register_builtin("tail", crate::coreutils::tail_builtin());
-		shell.register_builtin("wc", crate::coreutils::wc_builtin());
-		shell.register_builtin("sort", crate::coreutils::sort_builtin());
-		shell.register_builtin("ls", crate::coreutils::ls_builtin());
-		shell.register_builtin("find", crate::coreutils::find_builtin());
-		shell.register_builtin("grep", crate::coreutils::grep_builtin());
-		shell.register_builtin("rg", crate::coreutils::rg_builtin());
-		shell.register_builtin("fd", crate::fd::fd_builtin());
-		shell.register_builtin("cat", crate::coreutils::cat_builtin());
-		shell.register_builtin("uniq", crate::coreutils::uniq_builtin());
-		shell.register_builtin("base64", crate::coreutils::base64_builtin());
-		shell.register_builtin("md5sum", crate::coreutils::md5sum_builtin());
-		shell.register_builtin("sha1sum", crate::coreutils::sha1sum_builtin());
-		shell.register_builtin("sha224sum", crate::coreutils::sha224sum_builtin());
-		shell.register_builtin("sha256sum", crate::coreutils::sha256sum_builtin());
-		shell.register_builtin("sha384sum", crate::coreutils::sha384sum_builtin());
-		shell.register_builtin("sha512sum", crate::coreutils::sha512sum_builtin());
-		shell.register_builtin("b2sum", crate::coreutils::b2sum_builtin());
-		shell.register_builtin("basename", crate::coreutils::basename_builtin());
-		shell.register_builtin("dirname", crate::coreutils::dirname_builtin());
-		shell.register_builtin("readlink", crate::coreutils::readlink_builtin());
-		shell.register_builtin("realpath", crate::coreutils::realpath_builtin());
-		shell.register_builtin("touch", crate::coreutils::touch_builtin());
-		shell.register_builtin("stat", crate::coreutils::stat_builtin());
-		shell.register_builtin("date", crate::coreutils::date_builtin());
-		shell.register_builtin("mktemp", crate::coreutils::mktemp_builtin());
-		shell.register_builtin("seq", crate::coreutils::seq_builtin());
-		shell.register_builtin("yes", crate::coreutils::yes_builtin());
-		shell.register_builtin("printenv", crate::coreutils::printenv_builtin());
-		shell.register_builtin("truncate", crate::coreutils::truncate_builtin());
-		shell.register_builtin("tac", crate::coreutils::tac_builtin());
-		shell.register_builtin("nproc", crate::coreutils::nproc_builtin());
-		shell.register_builtin("uname", crate::coreutils::uname_builtin());
-		shell.register_builtin("whoami", crate::coreutils::whoami_builtin());
-		shell.register_builtin("hostname", crate::coreutils::hostname_builtin());
-		shell.register_builtin("which", crate::which::which_builtin());
-		shell.register_builtin("diff", crate::coreutils::diff_builtin());
-		shell.register_builtin("cut", crate::coreutils::cut_builtin());
-		shell.register_builtin("tee", crate::coreutils::tee_builtin());
-		shell.register_builtin("tr", crate::coreutils::tr_builtin());
-		shell.register_builtin("paste", crate::coreutils::paste_builtin());
-		shell.register_builtin("comm", crate::coreutils::comm_builtin());
-		shell.register_builtin("sed", crate::coreutils::sed_builtin());
-		shell.register_builtin("xargs", crate::coreutils::xargs_builtin());
-		shell.register_builtin("jq", crate::coreutils::jq_builtin());
-		if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE") {
-			if !uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN") {
-				shell.register_builtin("rm", crate::coreutils::rm_builtin());
-			}
-			if !uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN") {
-				shell.register_builtin("mv", crate::coreutils::mv_builtin());
-			}
-			// ln can clobber existing files via -f; gate it with the destructive set.
-			shell.register_builtin("ln", crate::coreutils::ln_builtin());
-		}
-	}
-
+/// Copies the host environment into `shell`, merging duplicate `PATH` values
+/// and registering the merged `PATH` last.
+///
+/// Entries whose key or value is not valid Unicode are skipped: a corrupt
+/// entry carries no usable meaning, and `std::env::vars()` — the naive way to
+/// read the host environment — panics on the first one before any command can
+/// run. `vars_os()` yields the raw entries without panicking, leaving the
+/// skip decision here.
+fn copy_env_into_shell(
+	shell: &mut BrushShell,
+	env: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<()> {
 	let mut merged_path: Option<String> = None;
-	for (key, value) in std::env::vars() {
-		let normalized_key = normalize_env_key(&key);
+	for (key, value) in env {
+		// A key or value that cannot be decoded as Unicode is unusable; drop
+		// it rather than panicking startup for a corrupt host environment.
+		let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+			continue;
+		};
+		let normalized_key = normalize_env_key(key);
 		if should_skip_env_var(normalized_key) {
 			continue;
 		}
 		if normalized_key == "PATH" {
 			merged_path = Some(match merged_path {
-				Some(existing) => merge_path_values(&existing, &value),
-				None => value,
+				Some(existing) => merge_path_values(&existing, value),
+				None => value.to_string(),
 			});
 			continue;
 		}
-		let mut var = ShellVariable::new(ShellValue::String(value));
+		let mut var = ShellVariable::new(ShellValue::String(value.to_string()));
 		var.export();
 		shell
 			.env_mut()
@@ -706,6 +641,67 @@ async fn create_session_for_run(
 			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
 	}
 
+	Ok(())
+}
+
+async fn create_session_for_run(
+	config: &ShellConfig,
+	spawn_registry: Option<Arc<process::SpawnRegistry>>,
+	cancel_token: Option<CancellationToken>,
+) -> Result<ShellSessionCore> {
+	let mut shell = BrushShell::builder()
+		.do_not_inherit_env(true)
+		.profile(ProfileLoadBehavior::Skip)
+		.rc(RcLoadBehavior::Skip)
+		.builtins(default_builtins(BuiltinSet::BashMode))
+		.build()
+		.await
+		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
+
+	if let Some(exec_builtin) = shell.builtin_mut("exec") {
+		exec_builtin.disabled = true;
+	}
+	if let Some(suspend_builtin) = shell.builtin_mut("suspend") {
+		suspend_builtin.disabled = true;
+	}
+	// Process inspection and control (see `pi_builtins::process_builtins`).
+	// `nohup` is withheld when PI_DISABLE_NOHUP_BUILTIN asks for the system one;
+	// `kill` already comes from the default set, where our richer implementation
+	// replaced brush's.
+	for (name, registration) in pi_builtins::process_builtins() {
+		if name == "nohup" && nohup_builtin_disabled(config) {
+			continue;
+		}
+		shell.register_builtin(name, registration);
+	}
+	// In-process command-line utility builtins (see
+	// `pi_builtins::utility_builtins`): consistent, cross-platform implementations
+	// that run without spawning a process and resolve paths against the shell
+	// working directory. The whole set can be disabled (falling back to system
+	// binaries) via PI_DISABLE_UUTILS_BUILTINS; the destructive trio additionally
+	// honors PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
+	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
+		let destructive_disabled = uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
+		let rm_disabled =
+			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN");
+		let mv_disabled =
+			destructive_disabled || uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN");
+		for (name, registration) in pi_builtins::utility_builtins() {
+			let disabled = match name {
+				"rm" => rm_disabled,
+				"mv" => mv_disabled,
+				// ln can clobber existing files via -f; gate it with the destructive set.
+				"ln" => destructive_disabled,
+				_ => false,
+			};
+			if !disabled {
+				shell.register_builtin(name, registration);
+			}
+		}
+	}
+
+	copy_env_into_shell(&mut shell, std::env::vars_os())?;
+
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
 			let normalized_key = normalize_env_key(key);
@@ -721,27 +717,7 @@ async fn create_session_for_run(
 		}
 	}
 	apply_env_fallback(&mut shell)?;
-	// The nohup builtin detaches its operand into a new session (see
-	// NohupCommand) so a backgrounded server survives this embedded shell's
-	// kill-on-drop teardown. It therefore shadows any system `nohup` (which does
-	// NOT escape the process-group kill) — unless explicitly opted out via
-	// PI_DISABLE_NOHUP_BUILTIN (session env or process env), in which case bare
-	// `nohup` resolves to the real coreutils binary.
-	let nohup_builtin_disabled = {
-		let raw = config
-			.session_env
-			.as_ref()
-			.and_then(|env| env.get("PI_DISABLE_NOHUP_BUILTIN").cloned())
-			.or_else(|| std::env::var("PI_DISABLE_NOHUP_BUILTIN").ok());
-		matches!(raw.as_deref(), Some(v) if !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
-	};
-	let should_register_nohup = !nohup_builtin_disabled;
-	if should_register_nohup {
-		shell.register_builtin(
-			"nohup",
-			builtins::builtin::<NohupCommand, _>().transparent_background_wrapper(),
-		);
-	}
+	// `nohup` is registered above, with the rest of the process builtins.
 
 	#[cfg(windows)]
 	configure_windows_path(&mut shell)?;
@@ -1460,10 +1436,16 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_background_jobs(shell: &mut BrushShell) {
-	let mut targets = process::TerminationTargets::new();
+fn terminate_internal_background_jobs(shell: &mut BrushShell) {
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
+	}
+}
+
+fn terminate_background_jobs(shell: &mut BrushShell) {
+	let mut targets = process::TerminationTargets::new();
+	terminate_internal_background_jobs(shell);
+	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
 		}
@@ -1938,217 +1920,14 @@ fn pipe_to_files(label: &str) -> Result<(fs::File, fs::File)> {
 	Ok((r, w))
 }
 
-#[derive(Parser)]
-#[command(disable_help_flag = true)]
-struct SleepCommand {
-	#[arg(required = true)]
-	durations: Vec<String>,
-}
-
-impl builtins::Command for SleepCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let durations = self.durations.clone();
-		async move {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			let mut total = Duration::from_millis(0);
-			for duration in &durations {
-				let Some(parsed) = parse_duration(duration) else {
-					let _ = writeln!(context.stderr(), "sleep: invalid time interval '{duration}'");
-					return Ok(ExecutionResult::new(1));
-				};
-				total += parsed;
-			}
-			let sleep = time::sleep(total);
-			tokio::pin!(sleep);
-			if let Some(cancel_token) = context.cancel_token() {
-				tokio::select! {
-					() = &mut sleep => Ok(ExecutionResult::success()),
-					() = cancel_token.cancelled() => Ok(ExecutionExitCode::Interrupted.into()),
-				}
-			} else {
-				sleep.await;
-				Ok(ExecutionResult::success())
-			}
-		}
-	}
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true)]
-struct TimeoutCommand {
-	#[arg(required = true)]
-	duration: String,
-	#[arg(required = true, num_args = 1.., trailing_var_arg = true)]
-	command:  Vec<String>,
-}
-
-impl builtins::Command for TimeoutCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let duration = self.duration.clone();
-		let command = self.command.clone();
-		async move {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			let Some(timeout) = parse_duration(&duration) else {
-				let _ = writeln!(context.stderr(), "timeout: invalid time interval '{duration}'");
-				return Ok(ExecutionResult::new(125));
-			};
-			if command.is_empty() {
-				let _ = writeln!(context.stderr(), "timeout: missing command");
-				return Ok(ExecutionResult::new(125));
-			}
-
-			let child_cancel = CancellationToken::new();
-			let mut params = context.params.clone();
-			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-			params.set_cancel_token(child_cancel.clone());
-
-			let mut command_line = String::new();
-			for (idx, arg) in command.iter().enumerate() {
-				if idx > 0 {
-					command_line.push(' ');
-				}
-				command_line.push_str(&quote_arg(arg));
-			}
-
-			let cancel_token = context.cancel_token();
-			let source_info = SourceInfo::from("pi-natives:timeout");
-			let run_future = context
-				.shell
-				.run_string(command_line, &source_info, &params);
-			tokio::pin!(run_future);
-
-			if let Some(cancel_token) = cancel_token {
-				tokio::select! {
-					result = &mut run_future => result,
-					() = time::sleep(timeout) => {
-						child_cancel.cancel();
-						// Wait briefly for the child to exit after cancellation.
-						let _ = time::timeout(Duration::from_secs(2), &mut run_future).await;
-						Ok(ExecutionResult::new(124))
-					},
-					() = cancel_token.cancelled() => {
-						child_cancel.cancel();
-						Ok(ExecutionExitCode::Interrupted.into())
-					},
-				}
-			} else {
-				tokio::select! {
-					result = &mut run_future => result,
-					() = time::sleep(timeout) => {
-						child_cancel.cancel();
-						// Wait briefly for the child to exit after cancellation.
-						let _ = time::timeout(Duration::from_secs(2), &mut run_future).await;
-						Ok(ExecutionResult::new(124))
-					},
-				}
-			}
-		}
-	}
-}
-
-#[derive(Parser)]
-#[command(disable_help_flag = true)]
-struct NohupCommand {
-	#[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
-	command: Vec<String>,
-}
-
-impl builtins::Command for NohupCommand {
-	type Error = brush_core::Error;
-
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let command = self.command.clone();
-		async move {
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
-			}
-			// coreutils `nohup` with no operand fails with exit code 125.
-			if command.is_empty() {
-				let _ = writeln!(context.stderr(), "nohup: missing operand");
-				return Ok(ExecutionResult::new(125));
-			}
-
-			// `nohup <cmd>` (foreground) runs the operand directly and surfaces its
-			// exit status — the contract pinned by
-			// `nohup_builtin_propagates_command_exit_code`. Persistence across the
-			// host's teardown is a *background* concern that never reaches this
-			// builtin: the agent writes `nohup <server> &`, and brush's
-			// `transparent_background_wrapper` unwraps that to spawn the operand
-			// directly with `detach_reparent`, double-forking it out of the shell's
-			// descendant tree (see `execute_external_command` / `detach_session_reparent`).
-			// Like coreutils, we run the operand here; we only differ by not masking
-			// SIGHUP (see `nohup_builtin_does_not_mask_sighup`).
-			let mut command_line = String::new();
-			for (idx, arg) in command.iter().enumerate() {
-				if idx > 0 {
-					command_line.push(' ');
-				}
-				command_line.push_str(&quote_arg(arg));
-			}
-
-			let mut params = context.params.clone();
-			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-			let source_info = SourceInfo::from("pi-natives:nohup");
-			context
-				.shell
-				.run_string(command_line, &source_info, &params)
-				.await
-		}
-	}
-}
-fn parse_duration(input: &str) -> Option<Duration> {
-	let trimmed = input.trim();
-	if trimmed.is_empty() {
-		return None;
-	}
-	let (number, multiplier) = match trimmed.chars().last()? {
-		's' => (&trimmed[..trimmed.len() - 1], 1.0),
-		'm' => (&trimmed[..trimmed.len() - 1], 60.0),
-		'h' => (&trimmed[..trimmed.len() - 1], 3600.0),
-		'd' => (&trimmed[..trimmed.len() - 1], 86400.0),
-		ch if ch.is_ascii_alphabetic() => return None,
-		_ => (trimmed, 1.0),
-	};
-	let value = number.parse::<f64>().ok()?;
-	if value.is_sign_negative() {
-		return None;
-	}
-	let millis = value * multiplier * 1000.0;
-	if !millis.is_finite() || millis < 0.0 {
-		return None;
-	}
-	Some(Duration::from_millis(millis.round() as u64))
-}
-
-fn quote_arg(arg: &str) -> String {
-	if arg.is_empty() {
-		return "''".to_string();
-	}
-	let safe = arg
-		.chars()
-		.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '+'));
-	if safe {
-		return arg.to_string();
-	}
-	let escaped = arg.replace('\'', "'\"'\"'");
-	format!("'{escaped}'")
+/// Whether the `nohup` builtin should stand aside for the system binary.
+///
+/// The builtin detaches its operand into a new session so a backgrounded server
+/// survives this embedded shell's kill-on-drop teardown, which a system `nohup`
+/// does not do. It therefore shadows the real one unless
+/// `PI_DISABLE_NOHUP_BUILTIN` (session env or process env) asks otherwise.
+fn nohup_builtin_disabled(config: &ShellConfig) -> bool {
+	uutils_env_disabled(config, "PI_DISABLE_NOHUP_BUILTIN")
 }
 
 /// Reads a boolean "disable" flag for the uutils builtins from the session
@@ -2165,7 +1944,1268 @@ fn uutils_env_disabled(config: &ShellConfig, key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+	#[cfg(unix)]
+	use std::os::unix::process::ExitStatusExt as _;
+
+	#[cfg(unix)]
+	use tokio::process::Command;
+
 	use super::*;
+
+	#[cfg(unix)]
+	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let session = create_session(&config).await.expect("create_session");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		(session, params)
+	}
+
+	/// Shell-quotes an argument when building a command string for a test.
+	///
+	/// Mirrors what the `timeout`/`nohup` builtins do when they rebuild a
+	/// command line; kept local because it exists only to construct these
+	/// fixtures.
+	fn quote_arg(arg: &str) -> String {
+		if arg.is_empty() {
+			return "''".to_string();
+		}
+		if arg
+			.chars()
+			.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '+'))
+		{
+			return arg.to_string();
+		}
+		let escaped = arg.replace('\'', "'\"'\"'");
+		format!("'{escaped}'")
+	}
+
+	async fn execute_captured(command: String) -> (ShellExecuteResult, String) {
+		let (tx, rx) = flume::unbounded();
+		let result = execute_shell(
+			ShellExecuteOptions { command, ..Default::default() },
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("shell execution");
+		let output = rx.try_iter().collect();
+		(result, output)
+	}
+
+	/// Regression for issue #8925: a host env entry whose key or value is not
+	/// valid Unicode must be skipped, not fatal. `std::env::vars()` panics on
+	/// the first one (e.g. the corrupt `GHOSTTY_BIN_DIR` cmux/Ghostty stages,
+	/// bytes `9d d9 50`) before any command runs; `copy_env_into_shell` reads
+	/// via `vars_os()` and drops corrupt entries while still copying the rest
+	/// and merging duplicate `PATH` values.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn copy_env_skips_non_utf8_entries_and_merges_path() {
+		use std::os::unix::ffi::OsStringExt;
+
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("build shell");
+
+		// GHOSTTY_BIN_DIR with the corrupt bytes, a normal var, a corrupt key,
+		// and a duplicate PATH — in host-env iteration order.
+		let entries = vec![
+			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/usr/bin:/bin")),
+			(
+				std::ffi::OsString::from("GHOSTTY_BIN_DIR"),
+				std::ffi::OsString::from_vec(vec![0x9d, 0xd9, 0x50]),
+			),
+			(std::ffi::OsString::from("HOME"), std::ffi::OsString::from("/home/tester")),
+			(
+				std::ffi::OsString::from_vec(vec![0xff, b'B', b'A', b'D']),
+				std::ffi::OsString::from("x"),
+			),
+			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/opt/bin")),
+		];
+		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
+
+		let value = |name: &str| {
+			shell
+				.env()
+				.get(name)
+				.and_then(|(_, var)| match var.value() {
+					ShellValue::String(value) => Some(value.clone()),
+					_ => None,
+				})
+		};
+		assert_eq!(value("PATH").as_deref(), Some("/opt/bin"), "PATH is merged/preserved");
+		assert_eq!(value("HOME").as_deref(), Some("/home/tester"), "valid entry copied");
+		assert!(value("GHOSTTY_BIN_DIR").is_none(), "non-UTF-8 value must be skipped");
+		assert!(value("BAD").is_none(), "non-UTF-8 key must be skipped");
+	}
+
+	#[cfg(unix)]
+	async fn wait_for_process_name(pid: i32, expected: &str) {
+		time::timeout(Duration::from_secs(2), async {
+			loop {
+				if pi_builtins::ProcInfo::all().into_iter().any(|process| {
+					process.pid() == pid
+						&& process.match_name() == expected
+						&& process.status() == pi_builtins::ProcessStatus::Running
+				}) {
+					return;
+				}
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("child did not enter expected executable");
+	}
+
+	#[cfg(unix)]
+	fn test_executable(name: &str) -> std::path::PathBuf {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		std::env::var_os("PATH")
+			.and_then(|path| {
+				std::env::split_paths(&path)
+					.map(|directory| directory.join(name))
+					.find(|candidate| {
+						candidate.metadata().is_ok_and(|metadata| {
+							metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+						})
+					})
+			})
+			.unwrap_or_else(|| panic!("{name} executable on PATH"))
+	}
+
+	#[cfg(unix)]
+	fn process_test_command(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+		let dir = tempfile::tempdir().expect("process test directory");
+		let name = format!("{prefix}{}", std::process::id());
+		let command = dir.path().join(&name);
+		let test_binary = std::env::current_exe().expect("current test executable");
+		std::os::unix::fs::symlink(test_binary, &command).expect("test executable symlink");
+		(dir, command, name)
+	}
+
+	#[cfg(unix)]
+	fn process_test_child(command: &std::path::Path, duration: Duration) -> Command {
+		let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
+		let mut child = Command::new(command);
+		child
+			.args(["--ignored", "--exact", "shell::tests::process_test_sleeper"])
+			.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null());
+		child
+	}
+
+	#[cfg(unix)]
+	#[test]
+	#[ignore = "spawned by process-control tests"]
+	fn process_test_sleeper() {
+		let Ok(duration_ms) = std::env::var("PI_SHELL_PROCESS_TEST_SLEEP_MS") else {
+			return;
+		};
+		let duration_ms = duration_ms
+			.parse()
+			.expect("valid process test sleep duration");
+		std::thread::sleep(Duration::from_millis(duration_ms));
+	}
+
+	#[cfg(unix)]
+	struct PidfileProcessCleanup(Vec<std::path::PathBuf>);
+
+	#[cfg(unix)]
+	impl Drop for PidfileProcessCleanup {
+		fn drop(&mut self) {
+			for pidfile in &self.0 {
+				if let Some(process) = fs::read_to_string(pidfile)
+					.ok()
+					.and_then(|pid| pid.trim().parse::<i32>().ok())
+					.and_then(process::Process::from_pid)
+				{
+					let _ = process.kill_tree(Some(libc::SIGKILL));
+				}
+			}
+		}
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pgrep_matches_name_and_pkills_signal_probe() {
+		let (_dir, command, name) = process_test_command("opg");
+		let mut child = process_test_child(&command, Duration::from_secs(30))
+			.spawn()
+			.expect("matching process");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		wait_for_process_name(pid, &name).await;
+
+		let (pgrep_result, output) = execute_captured(format!("pgrep -x -p {pid} {name}")).await;
+		let (pkill_result, pkill_output) =
+			execute_captured(format!("pkill -0 -x -p {pid} {name}")).await;
+
+		let still_running = child.try_wait().expect("probe child status").is_none();
+		let _ = child.start_kill();
+		let _ = child.wait().await;
+		assert_eq!(pgrep_result.exit_code, Some(0));
+		assert_eq!(output, format!("{pid}\n"));
+		assert_eq!(pkill_result.exit_code, Some(0));
+		assert_eq!(pkill_output, "");
+		assert!(still_running, "signal 0 must not terminate a matching process");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pkill_accepts_platform_signal_names() {
+		#[cfg(target_os = "macos")]
+		let signal = "INFO";
+		#[cfg(not(target_os = "macos"))]
+		let signal = "WINCH";
+		let dir = tempfile::tempdir().expect("signal test directory");
+		let ready = dir.path().join("ready");
+		let script = format!("trap '' {signal}; : > \"$1\"; while :; do sleep 0.05; done");
+		let mut command = Command::new("sh");
+		command
+			.args(["-c", &script, "sh", ready.to_str().expect("utf8 ready path")])
+			.kill_on_drop(true);
+		let mut child = command.spawn().expect("signal test process");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		time::timeout(Duration::from_secs(2), async {
+			while !ready.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("signal trap was not installed");
+
+		let (result, _) = execute_captured(format!("pkill -{signal} -p {pid}")).await;
+		let still_running = child.try_wait().expect("signal child status").is_none();
+		let _ = child.start_kill();
+		let _ = child.wait().await;
+		assert_eq!(result.exit_code, Some(0));
+		assert!(still_running, "{signal} should be ignored by the test process");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pkill_queue_option_consumes_its_value() {
+		let (_dir, command, name) = process_test_command("opq");
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
+		let mut child = command.spawn().expect("queue test process");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		wait_for_process_name(pid, &name).await;
+
+		let (result, output) = execute_captured(format!("pkill -0 -q 37 -x -p {pid} {name}")).await;
+		let still_running = child.try_wait().expect("queue child status").is_none();
+		let _ = child.start_kill();
+		let _ = child.wait().await;
+		assert_eq!(result.exit_code, Some(0));
+		assert!(output.is_empty());
+		assert!(still_running, "queued signal 0 must only probe the process");
+	}
+
+	#[cfg(target_os = "macos")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pkill_interactive_prompt_honors_cancellation() {
+		let (_dir, command, name) = process_test_command("opi");
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
+		let mut child = command.spawn().expect("interactive target");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		wait_for_process_name(pid, &name).await;
+
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let execution = tokio::spawn(execute_shell(
+			ShellExecuteOptions {
+				command: format!("sleep 30 | pkill -I -x -p {pid} {name}"),
+				..Default::default()
+			},
+			None,
+			cancel,
+		));
+		time::sleep(Duration::from_millis(100)).await;
+		abort.abort(crate::cancel::AbortReason::User);
+		let result = time::timeout(Duration::from_secs(2), execution)
+			.await
+			.expect("interactive pkill remained blocked after cancellation")
+			.expect("interactive execution task")
+			.expect("interactive shell execution");
+		let still_running = child
+			.try_wait()
+			.expect("interactive target status")
+			.is_none();
+		let _ = child.start_kill();
+		let _ = child.wait().await;
+		assert_ne!(result.exit_code, Some(0));
+		assert!(still_running, "cancelled pkill must not signal its pending target");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pgrep_reads_pidfile_from_standard_input() {
+		let (_dir, command, name) = process_test_command("opf");
+		let mut child = process_test_child(&command, Duration::from_secs(30))
+			.spawn()
+			.expect("pidfile process");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		wait_for_process_name(pid, &name).await;
+
+		let (result, output) =
+			execute_captured(format!("printf '%s\\n' {pid} | pgrep -F - -x {name}")).await;
+		let _ = child.start_kill();
+		let _ = child.wait().await;
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output, format!("{pid}\n"));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pgrep_requires_an_externally_locked_pidfile() {
+		let python = Command::new("python3").arg("--version").output().await;
+		if !python.is_ok_and(|output| output.status.success()) {
+			eprintln!("skipping pgrep_requires_an_externally_locked_pidfile: python3 unavailable");
+			return;
+		}
+
+		let (_dir, command, name) = process_test_command("opl");
+		let mut child = process_test_child(&command, Duration::from_secs(30))
+			.spawn()
+			.expect("locked pidfile process");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		wait_for_process_name(pid, &name).await;
+
+		let files = tempfile::tempdir().expect("pidfile directory");
+		let pidfile = files.path().join("service.pid");
+		let ready = files.path().join("locked");
+		let pid_arg = pid.to_string();
+		let mut locker = Command::new("python3")
+			.args([
+				"-c",
+				"import fcntl,pathlib,sys,time; f=open(sys.argv[1],'w'); f.write(sys.argv[2]+'\\n'); \
+				 f.flush(); fcntl.lockf(f,fcntl.LOCK_EX); pathlib.Path(sys.argv[3]).touch(); \
+				 time.sleep(30)",
+				pidfile.to_str().expect("utf8 pidfile"),
+				&pid_arg,
+				ready.to_str().expect("utf8 ready path"),
+			])
+			.spawn()
+			.expect("pidfile locker");
+		let ready_result = time::timeout(Duration::from_secs(2), async {
+			while !ready.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		if ready_result.is_err() {
+			let _ = locker.start_kill();
+			let _ = child.start_kill();
+			let _ = locker.wait().await;
+			let _ = child.wait().await;
+			panic!("pidfile locker did not become ready");
+		}
+
+		let command =
+			format!("pgrep -L -F {} -x {name}", quote_arg(pidfile.to_str().expect("utf8 pidfile")));
+		let (locked_result, locked_output) = execute_captured(command.clone()).await;
+		let _ = locker.start_kill();
+		let _ = locker.wait().await;
+		let (unlocked_result, unlocked_output) = execute_captured(command).await;
+		let _ = child.start_kill();
+		let _ = child.wait().await;
+
+		assert_eq!(locked_result.exit_code, Some(0));
+		assert_eq!(locked_output, format!("{pid}\n"));
+		assert_eq!(unlocked_result.exit_code, Some(3));
+		assert!(unlocked_output.contains("is not locked"), "{unlocked_output:?}");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pkill_signals_every_matching_process() {
+		let (_dir, command, name) = process_test_command("opk");
+		let mut first = process_test_child(&command, Duration::from_secs(30))
+			.spawn()
+			.expect("first matching process");
+		let mut second = process_test_child(&command, Duration::from_secs(30))
+			.spawn()
+			.expect("second matching process");
+		let first_pid = i32::try_from(first.id().expect("first pid")).expect("pid fits i32");
+		let second_pid = i32::try_from(second.id().expect("second pid")).expect("pid fits i32");
+		wait_for_process_name(first_pid, &name).await;
+		wait_for_process_name(second_pid, &name).await;
+
+		let (result, output) = execute_captured(format!("pkill -TERM -x {name}")).await;
+		let statuses =
+			time::timeout(Duration::from_secs(2), async { tokio::join!(first.wait(), second.wait()) })
+				.await;
+		if statuses.is_err() {
+			let _ = first.start_kill();
+			let _ = second.start_kill();
+			let _ = first.wait().await;
+			let _ = second.wait().await;
+		}
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output, "");
+		assert!(statuses.is_ok(), "pkill did not signal every matching process");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pidwait_returns_after_the_matching_process_exits() {
+		let (_dir, command, name) = process_test_command("opw");
+		let mut child = process_test_child(&command, Duration::from_millis(250))
+			.spawn()
+			.expect("waited process");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
+		wait_for_process_name(pid, &name).await;
+
+		let (result, output) = execute_captured(format!("pidwait -x -p {pid} {name}")).await;
+		let status = child.try_wait().expect("waited child status");
+		if status.is_none() {
+			let _ = child.start_kill();
+			let _ = child.wait().await;
+		}
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output, "");
+		assert!(status.is_some(), "pidwait returned while its matching process was still running");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_supports_common_bsd_and_posix_forms() {
+		let pid = std::process::id();
+		let (custom_result, custom) =
+			execute_captured(format!("ps -p {pid} -o pid=,ppid=,stat=,comm=")).await;
+		let (posix_result, posix) = execute_captured(format!("ps -ef -p {pid}")).await;
+		let (bsd_result, bsd) = execute_captured(format!("ps aux -p {pid}")).await;
+
+		assert_eq!(custom_result.exit_code, Some(0));
+		assert_eq!(custom.lines().count(), 1);
+		let mut fields = custom.split_whitespace();
+		assert_eq!(fields.next(), Some(pid.to_string().as_str()));
+		assert!(
+			fields
+				.next()
+				.and_then(|value| value.parse::<i32>().ok())
+				.is_some()
+		);
+		assert!(fields.next().is_some_and(|value| !value.is_empty()));
+		assert!(fields.next().is_some_and(|value| !value.is_empty()));
+
+		assert_eq!(posix_result.exit_code, Some(0));
+		assert!(
+			posix
+				.lines()
+				.next()
+				.is_some_and(|line| line.contains("PPID"))
+		);
+		assert!(posix.lines().skip(1).any(|line| {
+			line
+				.split_whitespace()
+				.any(|value| value == pid.to_string())
+		}));
+
+		assert_eq!(bsd_result.exit_code, Some(0));
+		assert!(bsd.lines().next().is_some_and(|line| line.contains("%CPU")));
+		assert!(bsd.lines().skip(1).any(|line| {
+			line
+				.split_whitespace()
+				.any(|value| value == pid.to_string())
+		}));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_formats_parseable_long_start_without_a_header() {
+		let pid = std::process::id();
+		let (result, output) = execute_captured(format!("ps -p {pid} -o lstart=")).await;
+		assert_eq!(result.exit_code, Some(0));
+		assert!(
+			jiff::fmt::strtime::parse("%a %b %e %H:%M:%S %Y", output.trim()).is_ok(),
+			"{output:?}"
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_supports_extended_format_specifiers() {
+		let pid = std::process::id();
+		let (result, output) = execute_captured(format!(
+			"ps -p {pid} -o \
+			 pid=,tpgid=,ruid=,rgid=,egid=,pri=,f=,min_flt=,maj_flt=,times=,sz=,s=,ruser=,rgroup=,\
+			 tgid="
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let fields: Vec<&str> = output.split_whitespace().collect();
+		assert_eq!(fields.len(), 15, "{output:?}");
+		assert_eq!(fields[0], pid.to_string());
+		assert_eq!(fields[14], pid.to_string(), "tgid aliases pid");
+		#[cfg(unix)]
+		{
+			// tpgid is an integer; -1 without a controlling terminal.
+			assert!(fields[1].parse::<i32>().is_ok(), "tpgid: {:?}", fields[1]);
+			for (index, name) in [(2, "ruid"), (3, "rgid"), (4, "egid")] {
+				assert!(fields[index].parse::<u32>().is_ok(), "{name}: {:?}", fields[index]);
+			}
+			assert!(fields[5].parse::<i64>().is_ok(), "pri: {:?}", fields[5]);
+			assert!(u64::from_str_radix(fields[6], 16).is_ok(), "flags: {:?}", fields[6]);
+			assert!(fields[7].parse::<u64>().is_ok(), "min_flt: {:?}", fields[7]);
+			assert!(fields[8].parse::<u64>().is_ok(), "maj_flt: {:?}", fields[8]);
+			assert!(fields[9].parse::<u64>().is_ok(), "times: {:?}", fields[9]);
+			assert!(fields[10].parse::<u64>().is_ok(), "sz: {:?}", fields[10]);
+			assert_eq!(fields[11].chars().count(), 1, "state: {:?}", fields[11]);
+			assert_ne!(fields[12], "?", "ruser should resolve to a name");
+			assert_ne!(fields[13], "?", "rgroup should resolve to a name");
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn ps_builtin_accepts_tpgid_alongside_job_control_columns() {
+		// Exact form from the field report that failed with
+		// "unknown output format specifier 'tpgid'".
+		let pid = std::process::id();
+		let (result, output) =
+			execute_captured(format!("ps -o pid,ppid,pgid,tpgid,sess,stat,tty,command -p {pid}"))
+				.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		let header = output.lines().next().unwrap_or_default();
+		for label in ["PID", "PPID", "PGID", "TPGID", "SID", "STAT", "TTY", "COMMAND"] {
+			assert!(header.contains(label), "missing {label} in {header:?}");
+		}
+		assert!(output.lines().skip(1).any(|line| {
+			line
+				.split_whitespace()
+				.next()
+				.is_some_and(|value| value == pid.to_string())
+		}));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn top_builtin_emits_one_finite_snapshot() {
+		#[cfg(target_os = "macos")]
+		let command = "top -l 1 -n 3";
+		#[cfg(not(target_os = "macos"))]
+		let command = "top -b -n 1 -r 3";
+		let (result, output) = execute_captured(command.to_string()).await;
+		assert_eq!(result.exit_code, Some(0));
+		assert!(output.contains("top - snapshot 1"));
+		assert!(output.contains("PID"));
+		assert!(output.contains("COMMAND"));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn top_builtin_stops_when_its_output_pipe_closes() {
+		#[cfg(target_os = "macos")]
+		let command = "top -s 0 | head -n 1";
+		#[cfg(not(target_os = "macos"))]
+		let command = "top -d 0 | head -n 1";
+		let execution = time::timeout(Duration::from_secs(2), execute_captured(command.to_string()))
+			.await
+			.expect("top kept sampling after its output pipe closed");
+		assert_eq!(execution.0.exit_code, Some(0));
+		assert!(execution.1.contains("top - snapshot 1"), "{:?}", execution.1);
+	}
+
+	/// Regression: builtin tail upstream of an early-exiting consumer printed
+	/// "tail: Broken pipe" and failed (`tail -c N big.jsonl | jq …` with jq
+	/// aborting on a parse error). Real tail dies silently from SIGPIPE; the
+	/// builtin must exit 141 with no diagnostic. `pipefail` exposes tail's own
+	/// status, so rc=141 proves the broken pipe actually fired (head closed
+	/// the pipe early) and was mapped to the silent SIGPIPE exit, not 1.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn tail_builtin_is_silent_when_downstream_closes_pipe() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let file = dir.path().join("big.txt");
+		// ~589 KiB: forces the seekable bounded_tail path, and the 400 KB tail
+		// overflows the OS pipe buffer so tail is still writing when head exits.
+		let command = format!(
+			"seq 1 100000 > '{file}'; set -o pipefail; tail -c 400000 '{file}' | head -c 10 > \
+			 /dev/null; echo rc=$?",
+			file = file.display()
+		);
+		let (result, output) = execute_captured(command).await;
+		assert_eq!(result.exit_code, Some(0));
+		assert!(output.contains("rc=141"), "{output:?}");
+		assert!(!output.contains("Broken pipe"), "{output:?}");
+	}
+
+	/// The kill builtin accepts a numeric signal and applies it to every process
+	/// operand.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_accepts_numeric_signal_for_multiple_processes() {
+		let mut first = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("first sleep");
+		let mut second = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("second sleep");
+		let first_pid = first.id().expect("first pid");
+		let second_pid = second.id().expect("second pid");
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let result = session
+			.shell
+			.run_string(format!("kill -9 {first_pid} {second_pid}"), &source_info, &params)
+			.await
+			.expect("kill command");
+		let code = exit_code(&result);
+		if code != 0 {
+			let _ = first.kill().await;
+			let _ = second.kill().await;
+			let _ = first.wait().await;
+			let _ = second.wait().await;
+			assert_eq!(code, 0, "numeric multi-process kill should succeed");
+		}
+
+		let statuses =
+			time::timeout(Duration::from_secs(5), async { tokio::join!(first.wait(), second.wait()) })
+				.await;
+		if statuses.is_err() {
+			let _ = first.kill().await;
+			let _ = second.kill().await;
+			let _ = first.wait().await;
+			let _ = second.wait().await;
+			panic!("kill must signal every process operand");
+		}
+		let (first_status, second_status) = statuses.expect("checked timeout");
+		assert_eq!(first_status.expect("first wait").signal(), Some(libc::SIGKILL));
+		assert_eq!(second_status.expect("second wait").signal(), Some(libc::SIGKILL));
+	}
+
+	/// The kill builtin defaults to SIGTERM so processes can shut down
+	/// gracefully.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_defaults_to_sigterm() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let ready = dir.path().join("ready");
+		let mut child = Command::new("sh")
+			.args([
+				"-c",
+				"trap 'exit 42' TERM; : > \"$1\"; while :; do :; done",
+				"sh",
+				ready.to_str().expect("utf8 path"),
+			])
+			.spawn()
+			.expect("trapping child");
+		let pid = child.id().expect("child pid");
+		let ready_result = time::timeout(Duration::from_secs(5), async {
+			while !ready.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		if ready_result.is_err() {
+			let _ = child.kill().await;
+			let _ = child.wait().await;
+			panic!("child did not install its SIGTERM trap");
+		}
+
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		let result = session
+			.shell
+			.run_string(format!("kill {pid}"), &source_info, &params)
+			.await
+			.expect("kill command");
+		let code = exit_code(&result);
+
+		let status = time::timeout(Duration::from_secs(5), child.wait()).await;
+		if status.is_err() {
+			let _ = child.kill().await;
+			let _ = child.wait().await;
+			panic!("default kill signal did not terminate the child");
+		}
+		assert_eq!(code, 0, "default kill should succeed");
+		assert_eq!(status.expect("checked timeout").expect("child wait").code(), Some(42));
+	}
+
+	/// A negative PID after `--` targets a process group per `kill(2)` instead
+	/// of being parsed as a numeric signal, and a plain PID in the same command
+	/// is still signaled.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_preserves_negative_pid_process_group_operands() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let group_ready = dir.path().join("group-ready");
+		let plain_ready = dir.path().join("plain-ready");
+		let spawn_trapping = |ready: &std::path::Path, own_group: bool| {
+			let mut cmd = Command::new("sh");
+			cmd.args([
+				"-c",
+				"trap 'exit 42' TERM; : > \"$1\"; while :; do sleep 0.05; done",
+				"sh",
+				ready.to_str().expect("utf8 path"),
+			]);
+			if own_group {
+				// pgid becomes this child's own pid, so `-pid` addresses the group.
+				cmd.process_group(0);
+			}
+			cmd.spawn().expect("trapping child")
+		};
+
+		let mut group_child = spawn_trapping(&group_ready, true);
+		let mut plain_child = spawn_trapping(&plain_ready, false);
+		let group_pid = group_child.id().expect("group pid");
+		let plain_pid = plain_child.id().expect("plain pid");
+
+		let ready_result = time::timeout(Duration::from_secs(5), async {
+			while !group_ready.exists() || !plain_ready.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		if ready_result.is_err() {
+			let _ = group_child.start_kill();
+			let _ = plain_child.start_kill();
+			let _ = group_child.wait().await;
+			let _ = plain_child.wait().await;
+			panic!("children did not install their SIGTERM traps");
+		}
+
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		let result = session
+			.shell
+			.run_string(format!("kill -TERM -- -{group_pid} {plain_pid}"), &source_info, &params)
+			.await
+			.expect("kill command");
+		let code = exit_code(&result);
+
+		let statuses = time::timeout(Duration::from_secs(5), async {
+			tokio::join!(group_child.wait(), plain_child.wait())
+		})
+		.await;
+		if statuses.is_err() {
+			let _ = group_child.start_kill();
+			let _ = plain_child.start_kill();
+			let _ = group_child.wait().await;
+			let _ = plain_child.wait().await;
+			panic!("negative-PID kill must signal the process group and the plain PID");
+		}
+		let (group_status, plain_status) = statuses.expect("checked timeout");
+		assert_eq!(code, 0, "negative-PID kill should succeed");
+		assert_eq!(group_status.expect("group wait").code(), Some(42));
+		assert_eq!(plain_status.expect("plain wait").code(), Some(42));
+	}
+
+	/// When clap consumes the `--` marker before `execute` (the default-signal
+	/// and `-s SIG` forms), a following negative PID is still an operand, not a
+	/// signal: `kill -- -<pgid>` defaults to SIGTERM for the group, and
+	/// `kill -s TERM -- -<pgid>` sends the named signal to the group.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_signals_group_when_marker_precedes_negative_pid() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let default_ready = dir.path().join("default-ready");
+		let named_ready = dir.path().join("named-ready");
+		let spawn_group_leader = |ready: &std::path::Path| {
+			Command::new("sh")
+				.args([
+					"-c",
+					"trap 'exit 42' TERM; : > \"$1\"; while :; do sleep 0.05; done",
+					"sh",
+					ready.to_str().expect("utf8 path"),
+				])
+				.process_group(0)
+				.spawn()
+				.expect("group leader")
+		};
+
+		let mut default_child = spawn_group_leader(&default_ready);
+		let mut named_child = spawn_group_leader(&named_ready);
+		let default_pid = default_child.id().expect("default pid");
+		let named_pid = named_child.id().expect("named pid");
+
+		let ready_result = time::timeout(Duration::from_secs(5), async {
+			while !default_ready.exists() || !named_ready.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		if ready_result.is_err() {
+			let _ = default_child.start_kill();
+			let _ = named_child.start_kill();
+			let _ = default_child.wait().await;
+			let _ = named_child.wait().await;
+			panic!("group leaders did not install their SIGTERM traps");
+		}
+
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		// Default signal (SIGTERM) with the marker consumed by clap.
+		let default_result = session
+			.shell
+			.run_string(format!("kill -- -{default_pid}"), &source_info, &params)
+			.await
+			.expect("default kill command");
+		// Named signal via -s, marker consumed by clap.
+		let named_result = session
+			.shell
+			.run_string(format!("kill -s TERM -- -{named_pid}"), &source_info, &params)
+			.await
+			.expect("named kill command");
+
+		let statuses = time::timeout(Duration::from_secs(5), async {
+			tokio::join!(default_child.wait(), named_child.wait())
+		})
+		.await;
+		if statuses.is_err() {
+			let _ = default_child.start_kill();
+			let _ = named_child.start_kill();
+			let _ = default_child.wait().await;
+			let _ = named_child.wait().await;
+			panic!("marker-preceded negative PID must signal the process group");
+		}
+		let (default_status, named_status) = statuses.expect("checked timeout");
+		assert_eq!(exit_code(&default_result), 0, "`kill -- -<pgid>` should succeed");
+		assert_eq!(exit_code(&named_result), 0, "`kill -s TERM -- -<pgid>` should succeed");
+		assert_eq!(default_status.expect("default wait").code(), Some(42));
+		assert_eq!(named_status.expect("named wait").code(), Some(42));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
+		const MARKER: &str = "PI_SHELL_TEST_KILL_JOBSPEC_PIPELINE";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::kill_builtin_signals_every_process_in_a_jobspec_pipeline",
+				MARKER,
+				true,
+			)
+			.await;
+			return;
+		}
+
+		let dir = tempfile::tempdir().expect("jobspec directory");
+		let first_pidfile = dir.path().join("first.pid");
+		let second_pidfile = dir.path().join("second.pid");
+		let _cleanup = PidfileProcessCleanup(vec![first_pidfile.clone(), second_pidfile.clone()]);
+		let first_ready = dir.path().join("first.ready");
+		let second_ready = dir.path().join("second.ready");
+		let first_script = "trap 'exit 42' TERM; echo $$ > \"$1\"; : > \"$2\"; kill -STOP $$; while \
+		                    :; do sleep 0.05; done";
+		let second_script = "trap 'exit 43' TERM; echo $$ > \"$1\"; : > \"$2\"; kill -STOP $$; \
+		                     while :; do sleep 0.05; done";
+		let command = format!(
+			"sh -c {} sh {} {} | sh -c {} sh {} {}",
+			quote_arg(first_script),
+			quote_arg(first_pidfile.to_str().expect("utf8 first pidfile")),
+			quote_arg(first_ready.to_str().expect("utf8 first ready path")),
+			quote_arg(second_script),
+			quote_arg(second_pidfile.to_str().expect("utf8 second pidfile")),
+			quote_arg(second_ready.to_str().expect("utf8 second ready path")),
+		);
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		time::timeout(
+			Duration::from_secs(5),
+			session.shell.run_string(command, &source_info, &params),
+		)
+		.await
+		.expect("pipeline did not stop")
+		.expect("stopped pipeline");
+		time::timeout(Duration::from_secs(5), async {
+			while !first_ready.exists() || !second_ready.exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("pipeline processes did not become ready");
+		assert_eq!(
+			session
+				.shell
+				.jobs()
+				.current_job()
+				.expect("stopped pipeline job")
+				.process_ids()
+				.count(),
+			2,
+			"jobspec must retain every external pipeline process",
+		);
+		let pids = [&first_pidfile, &second_pidfile].map(|pidfile| {
+			fs::read_to_string(pidfile)
+				.expect("pipeline pidfile")
+				.trim()
+				.parse::<i32>()
+				.expect("pipeline pid")
+		});
+
+		let killed = session
+			.shell
+			.run_string("kill -CONT %1; kill %1", &source_info, &params)
+			.await
+			.expect("kill jobspec");
+		assert_eq!(exit_code(&killed), 0, "`kill %1` should signal every pipeline process");
+		let _ = session
+			.shell
+			.run_string("wait %1", &source_info, &params)
+			.await
+			.expect("reap jobspec");
+		for pid in pids {
+			assert!(process::Process::from_pid(pid).is_none(), "pipeline process {pid} survived");
+		}
+	}
+
+	/// A failed target makes `kill` return non-zero without preventing later
+	/// process operands from receiving the selected signal.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_continues_after_target_failure() {
+		let mut first = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("first sleep");
+		let mut second = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("second sleep");
+		let mut stale = Command::new("true").spawn().expect("stale process");
+		let first_pid = first.id().expect("first pid");
+		let second_pid = second.id().expect("second pid");
+		let stale_pid = stale.id().expect("stale pid");
+		stale.wait().await.expect("stale wait");
+
+		let (mut session, params) = kill_test_context().await;
+		let source_info = SourceInfo::from("pi-natives:test");
+		let result = session
+			.shell
+			.run_string(
+				format!("kill -KILL {first_pid} {stale_pid} {second_pid}"),
+				&source_info,
+				&params,
+			)
+			.await
+			.expect("kill command");
+		let code = exit_code(&result);
+
+		let statuses =
+			time::timeout(Duration::from_secs(5), async { tokio::join!(first.wait(), second.wait()) })
+				.await;
+		if statuses.is_err() {
+			let _ = first.start_kill();
+			let _ = second.start_kill();
+			let _ = first.wait().await;
+			let _ = second.wait().await;
+			panic!("kill must continue signaling after an intermediate target fails");
+		}
+		let (first_status, second_status) = statuses.expect("checked timeout");
+		assert_ne!(code, 0, "a failed target should make kill return non-zero");
+		assert_eq!(first_status.expect("first wait").signal(), Some(libc::SIGKILL));
+		assert_eq!(second_status.expect("second wait").signal(), Some(libc::SIGKILL));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_translates_signal_names_and_numbers() {
+		let (result, output) = execute_captured("kill -l KILL; kill -l 9".to_string()).await;
+		assert_eq!(result.exit_code, Some(0));
+		assert_eq!(output, "9\nKILL\n");
+	}
+
+	async fn run_isolated_kill_test(test_name: &str, marker: &str, own_process_group: bool) {
+		let mut command =
+			tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
+		command.args(["--exact", test_name]).env(marker, "1");
+		#[cfg(unix)]
+		if own_process_group {
+			command.process_group(0);
+		}
+		#[cfg(not(unix))]
+		let _ = own_process_group;
+		let status = command.status().await.expect("isolated test process");
+		assert!(status.success(), "isolated kill test failed: {status}");
+	}
+
+	/// `kill -0` can probe the shell, but a nonzero signal aimed at its PID is
+	/// refused without terminating command execution.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_refuses_own_pid() {
+		const MARKER: &str = "PI_SHELL_TEST_KILL_OWN_PID";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test("shell::tests::kill_builtin_refuses_own_pid", MARKER, false).await;
+			return;
+		}
+
+		let pid = std::process::id();
+		let (probe, _) = execute_captured(format!("kill -0 {pid}")).await;
+		assert_eq!(probe.exit_code, Some(0), "signal 0 should probe the shell process");
+		let (result, output) = execute_captured(format!(
+			"kill -KILL {pid}; status=$?; printf 'status=%s survived\\n' \"$status\"; test \
+			 \"$status\" -ne 0"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "the shell must survive a direct kill attempt");
+		assert!(output.contains("refusing to signal the shell process"), "{output:?}");
+		assert!(output.contains("survived"), "{output:?}");
+	}
+
+	/// A process-group operand that contains the shell is rejected before the
+	/// `kill(2)` group operation can signal any member.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_refuses_own_process_group() {
+		const MARKER: &str = "PI_SHELL_TEST_KILL_OWN_GROUP";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test(
+				"shell::tests::kill_builtin_refuses_own_process_group",
+				MARKER,
+				true,
+			)
+			.await;
+			return;
+		}
+
+		let (result, output) = execute_captured(
+			"kill -KILL -- 0; status=$?; printf 'status=%s survived\\n' \"$status\"; test \
+			 \"$status\" -ne 0"
+				.to_string(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "the shell must survive a group kill attempt");
+		assert!(output.contains("refusing to signal the shell process"), "{output:?}");
+		assert!(output.contains("survived"), "{output:?}");
+	}
+
+	/// An agent that runs `kill <terminal pid>` or `pkill <terminal>` must not
+	/// be able to take down the terminal the session lives in. Self-kill was
+	/// already refused, but an ancestor is a different process in a different
+	/// process group and session, so it slipped straight through.
+	///
+	/// Uses `CONT` rather than a lethal signal: the guard runs for any real
+	/// signal (only `-0` is exempt), so `CONT` exercises exactly the same code
+	/// path while staying harmless if the guard ever regresses. A lethal signal
+	/// here could terminate the test harness. `TERM` appears once, aimed only
+	/// at a child this test spawned, to prove the guard has not over-blocked
+	/// into uselessness.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_builtin_refuses_ancestors_but_not_unrelated_processes() {
+		let sleep = test_executable("sleep");
+		let command = format!(
+			"parent=$(ps -o ppid= -p $$ | tr -d ' ')\nkill -CONT \"$parent\"; printf \
+			 'ancestor=%s\\n' \"$?\"\n{} 30 &\nchild=$!\nkill -TERM \"$child\"; printf 'child=%s\\n' \
+			 \"$?\"\nprintf 'survived\\n'",
+			quote_arg(sleep.to_str().expect("utf8 sleep path"))
+		);
+		let (result, output) = execute_captured(command).await;
+		assert_eq!(result.exit_code, Some(0), "the shell must survive: {output:?}");
+		assert!(output.contains("survived"), "{output:?}");
+		assert!(
+			output.contains("refusing to signal the shell process"),
+			"signalling an ancestor must be refused: {output:?}"
+		);
+		assert!(output.contains("ancestor=1"), "the ancestor kill must report failure: {output:?}");
+		// The same guard must leave a process outside our ancestry alone, or `kill`
+		// would be useless.
+		assert!(output.contains("child=0"), "an unrelated child must remain signallable: {output:?}");
+	}
+
+	/// `pkill` removes the shell PID from the candidate set before sending the
+	/// selected signal, even when that PID is requested explicitly.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn pkill_builtin_excludes_own_pid() {
+		const MARKER: &str = "PI_SHELL_TEST_PKILL_OWN_PID";
+		if std::env::var_os(MARKER).is_none() {
+			run_isolated_kill_test("shell::tests::pkill_builtin_excludes_own_pid", MARKER, false)
+				.await;
+			return;
+		}
+
+		let pid = std::process::id();
+		let (result, output) = execute_captured(format!(
+			"pkill -KILL -p {pid}; status=$?; printf 'status=%s survived\\n' \"$status\"; test \
+			 \"$status\" -eq 1"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "the shell must survive an explicit pkill");
+		assert!(output.contains("survived"), "{output:?}");
+	}
+
+	/// `cmp` remains available with no executable search path, proving the shell
+	/// dispatches the in-process builtin rather than a platform binary.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cmp_is_registered_as_an_in_process_builtin() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
+		std::fs::write(root.join("a"), b"same").expect("write a");
+		std::fs::write(root.join("b"), b"same").expect("write b");
+		std::fs::write(root.join("c"), b"different").expect("write c");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(root.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let equal = session
+			.shell
+			.run_string("PATH=/definitely-missing cmp -s a b", &source_info, &params)
+			.await
+			.expect("equal cmp");
+		assert_eq!(exit_code(&equal), 0);
+
+		let different = session
+			.shell
+			.run_string("PATH=/definitely-missing cmp -s a c", &source_info, &params)
+			.await
+			.expect("different cmp");
+		assert_eq!(exit_code(&different), 1);
+	}
+
+	/// The moreutils-style builtins (`ts`, `sponge`, `isutf8`, `combine`,
+	/// `ifne`, `errno`) dispatch in-process: the script runs with no usable
+	/// executable search path, and the `ts | sponge` pipeline must land its
+	/// output in the shell's working directory.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn moreutils_builtins_are_registered_in_process() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let root = std::fs::canonicalize(dir.path()).expect("canonical temp dir");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(root.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let script = "PATH=/definitely-missing\necho x | ts -s '%H:%M:%S' | sponge out || exit \
+		              10\nisutf8 out || exit 11\necho x | combine - and out || exit 12\nifne \
+		              /definitely-missing/tool || exit 13";
+		let result = session
+			.shell
+			.run_string(script, &source_info, &params)
+			.await
+			.expect("moreutils script");
+		assert_eq!(exit_code(&result), 0);
+
+		// `ts -s` stamps the first line with zero elapsed time: `HH:MM:SS x`.
+		let out = std::fs::read_to_string(root.join("out")).expect("sponge output");
+		assert!(out.len() == 11 && out.ends_with(" x\n"), "unexpected ts+sponge output: {out:?}");
+
+		#[cfg(unix)]
+		{
+			let errno = session
+				.shell
+				.run_string("errno ENOENT", &source_info, &params)
+				.await
+				.expect("errno lookup");
+			assert_eq!(exit_code(&errno), 0);
+		}
+	}
+
+	/// `sort --compress-program` spawns real children from inside the
+	/// external-sort temp-file machinery. Those children must inherit the
+	/// *shell's* context, not the host process's: the program is resolved
+	/// against the shell's exported `PATH` (here a directory that exists only
+	/// there), it runs in the shell working directory, and its stderr is
+	/// forwarded to the command's own fd 2 instead of being inherited — an
+	/// inherited fd 2 belongs to the TUI and would corrupt the rendered frame.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_sort_compress_program_uses_shell_path_and_stderr() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let tmp = std::env::temp_dir().join(format!("pi-sort-compress-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		let bin = tmp.join("bin");
+		std::fs::create_dir_all(&bin).expect("bin dir");
+
+		// An identity "compressor" that also proves it was started with the
+		// shell's working directory and reaches the command's stderr.
+		let shim = bin.join("pi-test-compress");
+		let shell = test_executable("sh");
+		let cat = test_executable("cat");
+		let shim_source = format!(
+			"#!{}\nprintf 'compressor cwd=%s\\n' \"$PWD\" >&2\nexec {}\n",
+			shell.display(),
+			quote_arg(cat.to_str().expect("utf8 cat path"))
+		);
+		std::fs::write(&shim, shim_source).expect("write shim");
+		std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod shim");
+
+		// Enough distinct lines that the 1K buffer forces spilling through the
+		// compressor rather than sorting entirely in memory.
+		let mut input = String::new();
+		for n in (0..400).rev() {
+			use std::fmt::Write as _;
+			let _ = writeln!(input, "line{n:04}");
+		}
+		std::fs::write(tmp.join("in.txt"), &input).expect("write input");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// `PATH` holds only the shim directory, so the compressor is reachable
+		// solely through the shell's exported environment.
+		let script = format!(
+			"export PATH={}\nsort -S 1K --compress-program=pi-test-compress in.txt > out.txt 2> \
+			 err.txt",
+			bin.to_str().expect("utf8 bin path")
+		);
+		let exec = session
+			.shell
+			.run_string(script, &source_info, &params)
+			.await
+			.expect("run sort");
+		assert_eq!(exit_code(&exec), 0, "sort --compress-program failed");
+
+		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
+		let mut expected: Vec<&str> = input.lines().collect();
+		expected.sort_unstable();
+		assert_eq!(out.lines().collect::<Vec<_>>(), expected, "compressed external sort misordered");
+
+		// The compressor really ran (so the spill path was exercised), its
+		// stderr reached the command's redirected fd 2, and it started in the
+		// shell working directory.
+		let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
+		assert!(
+			err.contains("compressor cwd="),
+			"compressor stderr never reached the command's fd 2: {err:?}"
+		);
+		// The shell reports the working directory as it was set; macOS also
+		// exposes it under `/private`, so accept either spelling.
+		let canonical = std::fs::canonicalize(&tmp).expect("canonical tmp");
+		assert!(
+			err.contains(&format!("cwd={}\n", tmp.display()))
+				|| err.contains(&format!("cwd={}\n", canonical.display())),
+			"compressor did not start in the shell working directory ({}): {err:?}",
+			tmp.display()
+		);
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
 
 	/// The uutils-backed `mkdir` builtin must (1) create directories under the
 	/// shell's working directory rather than the host process cwd, (2) route
@@ -2206,6 +3246,255 @@ mod tests {
 		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
 		assert!(out.contains("'rel'"), "verbose output missing operand `rel`: {out:?}");
 		assert!(!out.contains(tmp_str), "verbose output leaked absolute path: {out:?}");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `command -v`/`-V` must iterate over every operand like bash/zsh, printing
+	/// one line per name that resolves and skipping the misses, rather than
+	/// honoring only the first operand. Regression test for silently dropped
+	/// operands in `command -v a b c` (issue #10544).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn command_v_iterates_all_operands() {
+		let tmp = std::env::temp_dir().join(format!("pi-command-v-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Three always-registered builtins plus a name that never resolves. bash
+		// prints one line per resolved builtin and skips the miss, exiting 0.
+		let exec = session
+			.shell
+			.run_string("command -v true false pwd nope-xyz-10544 > out.txt", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert_eq!(exit_code(&exec), 0, "command -v exit code with a resolvable name");
+
+		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
+		let lines: Vec<&str> = out.lines().collect();
+		assert_eq!(
+			lines,
+			vec!["true", "false", "pwd"],
+			"command -v must print one line per resolved operand and skip misses: {out:?}"
+		);
+
+		// When no operand resolves, the exit status is a general error.
+		let exec = session
+			.shell
+			.run_string("command -v nope-a-10544 nope-b-10544", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert_eq!(exit_code(&exec), 1, "command -v exit code when nothing resolves");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Every utility `pi-builtins` offers must actually be dispatchable in
+	/// process, under the name it is registered as.
+	///
+	/// The registry (`pi_builtins::utility_builtins`) maps a name to a
+	/// `Registration`, and each registration renders its help from its own
+	/// `clap` command. Wiring a name to the wrong module — easy to do, since the
+	/// mapping is written by hand — still compiles and still runs; the only
+	/// visible symptom is that `NAME --help` describes some other utility. With
+	/// `PATH` emptied there is no binary to fall back on, so this also proves
+	/// the whole set resolves as builtins rather than as system commands.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_utility_builtin_is_registered_under_its_own_name() {
+		let tmp = std::env::temp_dir().join(format!("pi-utility-help-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Pin the registry contents rather than iterating whatever it happens to
+		// contain: a loop over the registry cannot notice a name missing from it.
+		// Adding a utility is expected to update this list.
+		let expected = [
+			"b2sum",
+			"base32",
+			"base64",
+			"basename",
+			"cat",
+			"cksum",
+			"cmp",
+			"combine",
+			"comm",
+			"cut",
+			"date",
+			"diff",
+			"dirname",
+			"errno",
+			"fd",
+			"find",
+			"grep",
+			"head",
+			"hostname",
+			"ifne",
+			"isutf8",
+			"jq",
+			"ln",
+			"ls",
+			"md5sum",
+			"mkdir",
+			"mktemp",
+			"mv",
+			"nproc",
+			"paste",
+			"printenv",
+			"readlink",
+			"realpath",
+			"rg",
+			"rm",
+			"sed",
+			"seq",
+			"sha1sum",
+			"sha224sum",
+			"sha256sum",
+			"sha384sum",
+			"sha512sum",
+			"sort",
+			"sponge",
+			"stat",
+			"tac",
+			"tail",
+			"tee",
+			"touch",
+			"tr",
+			"truncate",
+			"ts",
+			"uname",
+			"uniq",
+			"wc",
+			"which",
+			"whoami",
+			"xargs",
+			"yes",
+		];
+		let mut names: Vec<&'static str> =
+			pi_builtins::utility_builtins::<brush_core::extensions::DefaultShellExtensions>()
+				.into_iter()
+				.map(|(name, _)| name)
+				.collect();
+		names.sort_unstable();
+		assert_eq!(names, expected, "the utility builtin registry changed");
+
+		for name in names {
+			let exec = session
+				.shell
+				.run_string(format!("PATH= {name} --help > help.txt 2> err.txt"), &source_info, &params)
+				.await
+				.unwrap_or_else(|err| panic!("{name} --help failed to run: {err}"));
+			assert_eq!(exit_code(&exec), 0, "{name} --help exited nonzero");
+
+			let help = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
+			let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
+			assert!(err.is_empty(), "{name} --help wrote to stderr: {err:?}");
+			// Two builtins are registered under the familiar command name but keep
+			// their implementation's own help text, exactly as the standalone
+			// versions did: `rg` is ripgrep, `jq` is jaq.
+			let expected = match name {
+				"rg" => "ripgrep",
+				"jq" => "jaq",
+				other => other,
+			};
+			assert!(
+				help.contains(expected),
+				"{name} --help does not mention {expected:?}, so it is wired to the wrong utility: \
+				 {help:.200?}"
+			);
+		}
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Every process builtin `pi-builtins` offers must be installed and
+	/// dispatch in process.
+	///
+	/// `factory.rs` maps each name to a struct by hand, so a mis-wire compiles
+	/// and runs — and with `PATH` emptied there is no binary to silently fall
+	/// back to, which is the failure this catches. Each command gets an
+	/// invocation that is benign but must reach the builtin: exit 127 means the
+	/// name never resolved.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn every_process_builtin_is_installed_and_dispatches() {
+		let tmp = std::env::temp_dir().join(format!("pi-process-builtins-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session
+			.shell
+			.set_working_dir(tmp.to_str().expect("utf8 temp path"))
+			.expect("set cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Bounded, side-effect-free invocations. `pgrep`/`pkill`/`pidwait` render
+		// their own help; `sleep`/`timeout`/`top` are given the smallest amount of
+		// work that still exercises dispatch; `nohup` with no operand is a usage
+		// error, which is still the builtin answering.
+		let probes = [
+			("nohup", "nohup"),
+			("pgrep", "pgrep --help"),
+			("pidwait", "pidwait --help"),
+			("pkill", "pkill --help"),
+			("ps", "ps --help"),
+			("sleep", "sleep 0"),
+			("timeout", "timeout 1 true"),
+			("top", "top -n 0"),
+		];
+
+		// Pin the registry contents rather than deriving the probe list from it:
+		// a test that skips whatever the registry omits cannot notice an omission.
+		let mut registered: Vec<&'static str> =
+			pi_builtins::process_builtins::<brush_core::extensions::DefaultShellExtensions>()
+				.into_iter()
+				.map(|(name, _)| name)
+				.collect();
+		registered.sort_unstable();
+		let expected: Vec<&'static str> = probes.iter().map(|(name, _)| *name).collect();
+		assert_eq!(registered, expected, "the process builtin registry changed");
+
+		// `kill` comes from the default builtin set, where our implementation
+		// replaced brush's, so it is checked alongside but not listed above.
+		for (name, command) in probes.iter().copied().chain([("kill", "kill -l")]) {
+			let exec = session
+				.shell
+				.run_string(format!("PATH= {command}"), &source_info, &params)
+				.await
+				.unwrap_or_else(|err| panic!("{name} failed to run: {err}"));
+			assert_ne!(
+				exit_code(&exec),
+				127,
+				"{name} resolved to nothing: it is not registered as a builtin"
+			);
+		}
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
@@ -2385,11 +3674,7 @@ mod tests {
 			.await
 			.expect("run_string head bad flag");
 		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		assert!(
-			!std::fs::read_to_string(tmp.join("err.txt"))
-				.expect("err.txt")
-				.is_empty()
-		);
+		assert_ne!(std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt"), "");
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
@@ -2931,6 +4216,25 @@ mod tests {
 			"-exec {{}} should be operand-relative and run in the shell cwd"
 		);
 
+		// -exec children must write through the scope streams — an inherited
+		// process stdout would bypass the shell redirect and spam the host
+		// TUI's terminal — and must see the shell's exported environment.
+		session
+			.shell
+			.run_string(
+				"export PI_EXEC_ENV=zed; find . -name keep.log -exec sh -c 'echo \"$PI_EXEC_ENV $1\"' \
+				 sh {} ';' > cap.txt",
+				&si,
+				&params,
+			)
+			.await
+			.expect("exec capture");
+		assert_eq!(
+			read("cap.txt"),
+			"zed ./keep.log\n",
+			"-exec child stdout must flow through the shell redirect with the shell's exported env"
+		);
+
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
 
@@ -3275,7 +4579,7 @@ mod tests {
 		.expect("process substitution should not hang");
 
 		assert_eq!(result.exit_code, Some(1));
-		assert!(output.contains("-a\n+b\n"), "diff output missing changed lines: {output:?}");
+		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
 	#[cfg(unix)]
@@ -3302,13 +4606,40 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		}
 	}
 
+	#[tokio::test(flavor = "multi_thread")]
+	async fn one_shot_completion_aborts_internal_background_jobs() {
+		let marker = tempfile::NamedTempFile::new().expect("marker file");
+		let marker_path = marker.path().to_string_lossy();
+		std::fs::remove_file(marker.path()).expect("remove initial marker");
+		let command = format!("{{ sleep 1; echo leaked > {}; }} &", quote_arg(&marker_path));
+
+		execute_shell(
+			ShellExecuteOptions { command, ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("one-shot shell execution");
+		// `execute_shell` returns after its short post-exit idle drain (~250ms),
+		// while the background job cannot write the marker until its 1s sleep
+		// elapses. Wait well past that delay so a job that outlived the dropped
+		// session has demonstrably had its chance to run — the pre-fix leak fires
+		// at ~1s and is caught here; the fixed path aborts the task on drop and the
+		// marker never appears.
+		time::sleep(Duration::from_millis(2000)).await;
+
+		assert!(
+			!marker.path().exists(),
+			"an internal background job outlived its one-shot shell session"
+		);
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
 	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
-	/// Path-qualified `/bin/sleep` is used so it spawns a real external process
-	/// (the bare `sleep` builtin runs in-process and is intentionally not
-	/// counted).
+	/// `sh -c` forces an external process because the bare `sleep` builtin runs
+	/// in-process and is intentionally not counted.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn live_background_job_count_tracks_external_background_jobs() {
@@ -3332,7 +4663,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		// An external background process is tracked while it runs.
 		shell
 			.run(
-				ShellRunOptions { command: "/bin/sleep 30 &".into(), ..Default::default() },
+				ShellRunOptions { command: "sh -c 'sleep 30' &".into(), ..Default::default() },
 				None,
 				CancelToken::default(),
 			)
@@ -3371,20 +4702,17 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 	async fn segmented_false_semicolon_printf_continues_and_returns_last_code() {
 		let root = unique_temp_dir("false-semi");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"false ; printf 'hello\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
+		let expected = "hello\n".repeat(200);
+		let command = format!("false ; printf '{}'", "hello\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
 		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("minimized result");
+		let minimized = result.minimized.expect("long output should be minimized");
 		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "hello\n");
+		assert_eq!(output, expected);
 		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.original_text, "hello\n");
-		assert_eq!(minimized.text, "HI\n");
+		assert_eq!(minimized.original_text, expected);
+		assert_eq!(minimized.text, "HI\n".repeat(200));
 	}
 
 	#[cfg(unix)]
@@ -3416,12 +4744,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			run_command_capture("cd tmp && pwd", Some(&root), Some(minimizer), CancelToken::default())
 				.await;
 		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("minimized result");
+		assert!(result.minimized.is_none(), "short pwd output must not be minimized");
 		assert_eq!(result.exit_code, Some(0));
 		assert_eq!(output, expected);
-		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.text, "PWD\n");
-		assert_eq!(minimized.original_text, expected);
 	}
 
 	#[cfg(unix)]
@@ -3447,22 +4772,21 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn segmented_printf_chain_preserves_raw_original_text() {
 		let root = unique_temp_dir("minimizer");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"printf 'hello\n' ; printf 'world\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
+		let hello = "hello\n".repeat(200);
+		let world = "world\n".repeat(200);
+		let command =
+			format!("printf '{}' ; printf '{}'", "hello\\n".repeat(200), "world\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
 		let _ = std::fs::remove_dir_all(&root);
-		let minimized = result.minimized.expect("minimized result");
+		let minimized = result.minimized.expect("long output should be minimized");
 		assert_eq!(result.exit_code, Some(0));
-		assert_eq!(output, "hello\nworld\n");
+		assert_eq!(output, format!("{hello}{world}"));
 		assert_eq!(minimized.filter, "chain");
-		assert_eq!(minimized.original_text, "hello\nworld\n");
-		assert_eq!(minimized.text, "HI\nworld\n");
-		assert_eq!(minimized.input_bytes, 12);
-		assert_eq!(minimized.output_bytes, 9);
+		assert_eq!(minimized.original_text, format!("{hello}{world}"));
+		assert_eq!(minimized.text, format!("{}{}", "HI\n".repeat(200), world));
+		assert_eq!(minimized.input_bytes, (hello.len() + world.len()) as u32);
+		assert_eq!(minimized.output_bytes, ("HI\n".repeat(200).len() + world.len()) as u32);
 	}
 
 	/// Regression: a quoted here-doc followed by another command must execute
@@ -3477,7 +4801,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let root = unique_temp_dir("heredoc-chain");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
 		let (result, output) = run_command_capture(
-			"/bin/cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
+			"cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
 			None,
 			Some(minimizer),
 			CancelToken::default(),
@@ -3520,35 +4844,30 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 	/// A segment that carries a file redirect is still segmented, and the brush
 	/// `Display` reconstruction the runner executes must round-trip through
-	/// brush's own parser **without losing the redirect**. `echo hidden
-	/// >/dev/null` suppresses its own stdout: if the reconstruction dropped the
-	/// redirect, `hidden` would leak into the captured output. Proves the
-	/// reconstruction path is semantically sound for the redirect-bearing
-	/// shapes the per-stage whitelist accepts (not just syntactically
-	/// parseable).
+	/// brush's own parser **without losing the redirect**.
+	/// `echo hidden >/dev/null` suppresses its own stdout: if the reconstruction
+	/// dropped the redirect, `hidden` would leak into the captured output.
+	/// Proves the reconstruction path is semantically sound for the
+	/// redirect-bearing shapes the per-stage whitelist accepts (not just
+	/// syntactically parseable).
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn segmented_chain_with_redirect_executes_correctly() {
 		let root = unique_temp_dir("redirect-chain");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
-		let (result, output) = run_command_capture(
-			"echo hidden >/dev/null && printf 'hello\\n'",
-			None,
-			Some(minimizer),
-			CancelToken::default(),
-		)
-		.await;
+		let expected = "hello\n".repeat(200);
+		let command = format!("echo hidden >/dev/null && printf '{}'", "hello\\n".repeat(200));
+		let (result, output) =
+			run_command_capture(&command, None, Some(minimizer), CancelToken::default()).await;
 		let _ = std::fs::remove_dir_all(&root);
 		assert_eq!(result.exit_code, Some(0));
 		// The redirect survived reconstruction: segment 1's stdout went to
 		// /dev/null, so only segment 2's output is captured.
 		assert!(!output.contains("hidden"), "redirect must suppress segment-1 stdout");
-		assert_eq!(output, "hello\n");
-		let minimized = result
-			.minimized
-			.expect("redirect chain should be minimized");
-		assert_eq!(minimized.original_text, "hello\n");
-		assert_eq!(minimized.text, "HI\n");
+		assert_eq!(output, expected);
+		let minimized = result.minimized.expect("long output should be minimized");
+		assert_eq!(minimized.original_text, expected);
+		assert_eq!(minimized.text, "HI\n".repeat(200));
 		assert!(!output.contains("syntax error"));
 	}
 
@@ -3687,7 +5006,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			// `printf '%d\n' "$$"` then `sleep 0.5`. Long enough for our `getsid`.
 			let exec = session
 				.shell
-				.run_string("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
+				.run_string("sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
 				.await
 				.expect("run_string");
 			drop(params);
@@ -3752,7 +5071,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			shell_b
 				.run(
 					ShellRunOptions {
-						command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+						command: "sh -c 'printf \"ready\\n\"; sleep 30'".into(),
 						..Default::default()
 					},
 					Some(tx_b),
@@ -3784,7 +5103,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			shell_a
 				.run(
 					ShellRunOptions {
-						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
+						command: "sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
 						..Default::default()
 					},
 					Some(tx_a),
@@ -3845,9 +5164,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
 		std::fs::write(
 			&snapshot_path,
-			format!(
-				"/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"
-			),
+			format!("sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
 		)
 		.expect("write snapshot file");
 
@@ -3900,7 +5217,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let child_dead = time::timeout(Duration::from_secs(5), async {
 			loop {
-				// SAFETY: `child_pid` came from the foreground `/bin/sh` spawned by the
+				// SAFETY: `child_pid` came from the foreground `sh` spawned by the
 				// snapshot; `kill(pid, 0)` only probes whether that process still exists.
 				let kill_result = unsafe { libc::kill(child_pid, 0) };
 				if kill_result == -1 {
@@ -3990,14 +5307,14 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let shell_handle = tokio::spawn(async move {
 			let source_info = SourceInfo::from("pi-natives:test");
-			// First stage prints its own PID and sleeps; `cat` forwards the PID
-			// line to our reader and exits on EOF. The first stage leads the
-			// pipeline's process group, the second (`cat`) is the join-or-detach
-			// stage that would EPERM without the wiring fix.
+			// First stage prints its own PID and sleeps; `sh -c cat` forwards
+			// the PID line to our reader and exits on EOF. The first stage
+			// leads the pipeline's process group, while the second stage is the
+			// join-or-detach process that would EPERM without the wiring fix.
 			let exec = session
 				.shell
 				.run_string(
-					"/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | /bin/cat",
+					"sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | sh -c cat",
 					&source_info,
 					&params,
 				)
@@ -4052,7 +5369,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_accepts_last_background_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
+			command: "sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
 			..Default::default()
 		};
 
@@ -4069,9 +5386,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_n_p_records_completed_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'sleep 0.2; exit 42' & slow=$!; /bin/sh -c 'exit 13' & fast=$!; \
-			          wait -n -p hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" \
-			          -eq 13 ] && [ \"$hit\" = \"$fast\" ]"
+			command: "sh -c 'sleep 0.2; exit 42' & slow=$!; sh -c 'exit 13' & fast=$!; wait -n -p \
+			          hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" -eq 13 ] && \
+			          [ \"$hit\" = \"$fast\" ]"
 				.to_string(),
 			..Default::default()
 		};
@@ -4089,7 +5406,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_f_accepts_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
+			command: "sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
 			..Default::default()
 		};
 
@@ -4232,13 +5549,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn quoted_heredoc_without_trailing_newline_runs() {
-		let (result, output) = run_command_capture(
-			"/bin/cat <<'PY'\nhello $USER\nPY",
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await;
+		let (result, output) =
+			run_command_capture("cat <<'PY'\nhello $USER\nPY", None, None, CancelToken::default())
+				.await;
 
 		assert_eq!(result.exit_code, Some(0));
 		assert_eq!(output, "hello $USER\n");
@@ -4279,7 +5592,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let command = if cfg!(windows) {
 			"nohup cmd /C exit 7"
 		} else {
-			"nohup /bin/sh -c 'exit 7'"
+			"nohup sh -c 'exit 7'"
 		};
 		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
 		let result = execute_shell(options, None, CancelToken::default())
@@ -4297,8 +5610,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn nohup_background_captures_operand_pid() {
 		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
-			command: "nohup /bin/sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \
-			          \"$pid\"; test -n \"$pid\""
+			command: "nohup sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \"$pid\"; \
+			          test -n \"$pid\""
 				.to_string(),
 			..Default::default()
 		};

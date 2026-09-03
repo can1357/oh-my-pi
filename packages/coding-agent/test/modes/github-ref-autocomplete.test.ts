@@ -2,10 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { KeybindingsManager as AppKeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { getGithubRefContext, getGithubRefSuggestions } from "@oh-my-pi/pi-coding-agent/modes/github-ref-autocomplete";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
+import type { SlashCommand } from "@oh-my-pi/pi-tui";
 
-function makeProvider() {
+function makeProvider(commands: SlashCommand[] = []) {
 	return createPromptActionAutocompleteProvider({
-		commands: [],
+		commands,
 		basePath: "/tmp",
 		keybindings: AppKeybindingsManager.inMemory({}),
 		copyCurrentLine: () => {},
@@ -117,6 +118,21 @@ describe("github-ref autocomplete — provider integration", () => {
 
 		const issueResult = provider.applyCompletion(["review #3164"], 0, 12, issue, suggestions!.prefix);
 		expect(issueResult.lines).toEqual(["review issue://3164 "]);
+	});
+
+	it("offers GitHub references inside prompt-bearing skill command arguments", async () => {
+		const provider = makeProvider([{ name: "skill:code-review", description: "Review code", allowArgs: true }]);
+		const line = "/skill:code-review inspect #123";
+
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+
+		expect(suggestions).toEqual({
+			prefix: "#123",
+			items: [
+				{ value: "pr://123", label: "PR #123", description: "GitHub pull request" },
+				{ value: "issue://123", label: "Issue #123", description: "GitHub issue" },
+			],
+		});
 	});
 
 	it("constrains to the named type and consumes the qualifier on accept", async () => {

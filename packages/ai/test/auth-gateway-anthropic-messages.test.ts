@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
+import type {
+	ToolSearchServerToolUseBlockParam,
+	ToolSearchToolResultBlockParam,
+	WebSearchServerToolUseBlockParam,
+	WebSearchToolResultBlockParam,
+} from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -169,6 +175,52 @@ describe("anthropic-messages parseRequest", () => {
 		expect(msgs[4]).toMatchObject({ role: "user", content: "and another result coming" });
 	});
 
+	it("preserves thinking binding and mid-conversation controls", () => {
+		const parsed = parseRequest({
+			model: "claude-fable-5-1",
+			max_tokens: 1024,
+			thinking: {
+				type: "adaptive",
+				block_binding: { prefix_mismatch_behavior: "drop_block" },
+			},
+			tools: [
+				{
+					name: "lookup",
+					description: "find a thing",
+					input_schema: { type: "object", properties: {} },
+					defer_loading: true,
+				},
+			],
+			messages: [
+				{ role: "user", content: "hi" },
+				{
+					role: "system",
+					clear_at: "next_user_message",
+					output_config: { effort: "low" },
+					content: [
+						{ type: "text", text: "Use fewer tokens." },
+						{
+							type: "tool_addition",
+							tool: { type: "tool_reference", name: "lookup" },
+						},
+					],
+				},
+			],
+		});
+
+		expect(parsed.options.anthropicPrefixMismatchBehavior).toBe("drop_block");
+		expect(parsed.context.tools?.[0]?.deferLoading).toBe(true);
+		const system = parsed.context.messages[1];
+		if (system?.role !== "developer") throw new Error("expected developer message");
+		expect(system.content).toEqual([{ type: "text", text: "Use fewer tokens." }]);
+		expect(system.providerPayload).toEqual({
+			type: "anthropicMessage",
+			clearAt: "next_user_message",
+			effort: "low",
+			toolChanges: [{ type: "tool_addition", name: "lookup" }],
+		});
+	});
+
 	it("maps tool_choice variants and suppresses user wrappers that hold only tool_result", () => {
 		const auto = parseRequest({
 			model: "m",
@@ -294,6 +346,149 @@ describe("anthropic-messages parseRequest", () => {
 			],
 		});
 		expect(unknown.context.messages).toHaveLength(1);
+	});
+
+	it("preserves inbound assistant web-search call/result blocks verbatim", () => {
+		const serverToolUse: WebSearchServerToolUseBlockParam = {
+			type: "server_tool_use",
+			id: "srvtoolu_1",
+			name: "web_search",
+			input: { query: "weather" },
+		};
+		const searchResult: WebSearchToolResultBlockParam = {
+			type: "web_search_tool_result",
+			tool_use_id: "srvtoolu_1",
+			content: [
+				{
+					type: "web_search_result",
+					url: "https://example.com/weather",
+					title: "Weather",
+					encrypted_content: "encrypted-result",
+				},
+			],
+		};
+		const parsed = parseRequest({
+			model: "claude-opus-4-7",
+			max_tokens: 8,
+			messages: [
+				{ role: "user", content: "weather?" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "search", signature: "sig-1" },
+						serverToolUse,
+						searchResult,
+						{ type: "text", text: "forecast ready" },
+					],
+				},
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		expect(assistant?.content).toEqual([
+			{ type: "thinking", thinking: "search", thinkingSignature: "sig-1" },
+			{ type: "anthropicServerTool", block: serverToolUse },
+			{ type: "anthropicServerTool", block: searchResult },
+			{ type: "text", text: "forecast ready" },
+		]);
+	});
+
+	it("preserves inbound assistant tool-search call/result blocks verbatim", () => {
+		const serverToolUse: ToolSearchServerToolUseBlockParam = {
+			type: "server_tool_use",
+			id: "srvtoolu_search",
+			name: "tool_search_tool_regex",
+			input: { pattern: "read" },
+		};
+		const searchResult: ToolSearchToolResultBlockParam = {
+			type: "tool_search_tool_result",
+			tool_use_id: "srvtoolu_search",
+			content: {
+				type: "tool_search_tool_search_result",
+				tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+			},
+		};
+		const parsed = parseRequest({
+			model: "claude-opus-4-7",
+			max_tokens: 8,
+			messages: [
+				{ role: "user", content: "read notes" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "find read", signature: "sig-1" },
+						serverToolUse,
+						searchResult,
+						{ type: "text", text: "tool loaded" },
+					],
+				},
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+
+		expect(assistant?.content).toEqual([
+			{ type: "thinking", thinking: "find read", thinkingSignature: "sig-1" },
+			{ type: "anthropicServerTool", block: serverToolUse },
+			{ type: "anthropicServerTool", block: searchResult },
+			{ type: "text", text: "tool loaded" },
+		]);
+	});
+
+	it("flattens malformed web-search history blocks instead of preserving invalid replay state", () => {
+		const parsed = parseRequest({
+			model: "claude-opus-4-7",
+			max_tokens: 8,
+			messages: [
+				{ role: "user", content: "weather?" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "server_tool_use", name: "web_search" },
+						{ type: "web_search_tool_result", tool_use_id: "srvtoolu_1" },
+						{ type: "web_search_tool_result", content: [] },
+					],
+				},
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		expect(assistant?.content).toHaveLength(3);
+		expect(assistant?.content.every(block => block.type === "text")).toBe(true);
+		expect(assistant?.content.some(block => block.type === "anthropicServerTool")).toBe(false);
+	});
+
+	it("does not retain a partial code-execution server-tool history", () => {
+		const parsed = parseRequest({
+			model: "claude-opus-4-7",
+			max_tokens: 8,
+			messages: [
+				{ role: "user", content: "run code" },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "server_tool_use",
+							id: "srvtoolu_code",
+							name: "bash_code_execution",
+							input: { command: "printf ok" },
+						},
+						{
+							type: "bash_code_execution_tool_result",
+							tool_use_id: "srvtoolu_code",
+							content: {
+								type: "bash_code_execution_result",
+								stdout: "ok",
+								stderr: "",
+								return_code: 0,
+								content: [],
+							},
+						},
+					],
+				},
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+		expect(assistant?.content).toHaveLength(2);
+		expect(assistant?.content.every(block => block.type === "text")).toBe(true);
+		expect(assistant?.content.some(block => block.type === "anthropicServerTool")).toBe(false);
 	});
 });
 
@@ -501,6 +696,99 @@ describe("anthropic-messages encodeStream", () => {
 		});
 
 		expect(sse[14]!.data).toEqual({ type: "message_stop" });
+	});
+
+	it("emits persisted server-tool blocks before the next streamed content block", async () => {
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "search first", thinkingSignature: "SIG" },
+				{
+					type: "anthropicServerTool",
+					block: {
+						type: "server_tool_use",
+						id: "srvtoolu_1",
+						name: "web_search",
+						input: { query: "weather" },
+					},
+				},
+				{
+					type: "anthropicServerTool",
+					block: {
+						type: "web_search_tool_result",
+						tool_use_id: "srvtoolu_1",
+						content: [
+							{
+								type: "web_search_result",
+								url: "https://example.com/weather",
+								title: "Weather",
+								encrypted_content: "encrypted-result",
+							},
+						],
+					},
+				},
+				{ type: "text", text: "forecast ready" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus-4-7",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "thinking_start", contentIndex: 0, partial: finalMessage },
+			{ type: "thinking_delta", contentIndex: 0, delta: "search first", partial: finalMessage },
+			{ type: "thinking_end", contentIndex: 0, content: "search first", partial: finalMessage },
+			{ type: "text_start", contentIndex: 3, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 3, delta: "forecast ready", partial: finalMessage },
+			{ type: "text_end", contentIndex: 3, content: "forecast ready", partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+
+		const sse = await collectSse(encodeStream(makeStream(events), "claude-opus-4-7"));
+		expect(sse.filter(event => event.event === "content_block_start").map(event => event.data)).toEqual([
+			{
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "thinking", thinking: "" },
+			},
+			{
+				type: "content_block_start",
+				index: 1,
+				content_block: {
+					type: "server_tool_use",
+					id: "srvtoolu_1",
+					name: "web_search",
+					input: { query: "weather" },
+				},
+			},
+			{
+				type: "content_block_start",
+				index: 2,
+				content_block: {
+					type: "web_search_tool_result",
+					tool_use_id: "srvtoolu_1",
+					content: [
+						{
+							type: "web_search_result",
+							url: "https://example.com/weather",
+							title: "Weather",
+							encrypted_content: "encrypted-result",
+						},
+					],
+				},
+			},
+			{
+				type: "content_block_start",
+				index: 3,
+				content_block: { type: "text", text: "" },
+			},
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([
+			0, 1, 2, 3,
+		]);
 	});
 
 	it("emits an error event when the upstream stream errors", async () => {

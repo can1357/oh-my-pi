@@ -8,7 +8,6 @@ import {
 	registerOAuthProvider,
 	unregisterOAuthProviders,
 } from "@oh-my-pi/pi-ai/registry/oauth";
-import * as anthropicOauth from "@oh-my-pi/pi-ai/registry/oauth/anthropic";
 import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 
@@ -47,7 +46,7 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("umans")).toBe("umans-env");
 		Bun.env.LLAMA_CPP_API_KEY = "llama-env";
 		expect(getEnvApiKey("llama.cpp")).toBe("llama-env");
-		// Legacy search-tool key preserved (not a registry provider def).
+		// Exa is derived from the provider registry's `envKeys` definition.
 		expect(getEnvApiKey("exa")).toBe("exa-env");
 	});
 
@@ -65,6 +64,7 @@ describe("provider registry auth surface", () => {
 		const ids = getOAuthProviders().map(provider => provider.id);
 		expect(ids).toContain("zenmux");
 		expect(ids).toContain("kagi");
+		expect(ids).toContain("exa");
 		expect(ids).toContain("umans");
 		expect(ids).toContain("llama.cpp");
 		// openai has no interactive login flow.
@@ -81,6 +81,8 @@ describe("provider registry auth surface", () => {
 				"google-antigravity",
 				"google-gemini-cli",
 				"openai-codex",
+				"openrouter",
+				"zai-coding-plan",
 			].sort(),
 		);
 		expect(PASTE_CODE_LOGIN_PROVIDERS.has("zenmux")).toBe(false);
@@ -91,10 +93,21 @@ describe("provider registry auth surface", () => {
 		// zenmux has no refresher → returned as-is.
 		expect(await refreshOAuthToken("zenmux", creds)).toBe(creds);
 
-		const refreshed: OAuthCredentials = { refresh: "r2", access: "a2", expires: Date.now() + 120_000 };
-		const spy = vi.spyOn(anthropicOauth, "refreshAnthropicToken").mockResolvedValue(refreshed);
-		expect(await refreshOAuthToken("anthropic", creds)).toBe(refreshed);
-		expect(spy).toHaveBeenCalledWith("r");
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					access_token: "a2",
+					refresh_token: "r2",
+					expires_in: 120,
+					account: { uuid: "account", email_address: "user@example.com" },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		);
+		const refreshed = await refreshOAuthToken("anthropic", creds);
+		expect(refreshed.access).toBe("a2");
+		expect(refreshed.refresh).toBe("r2");
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 
 		await expect(refreshOAuthToken("nonexistent-provider" as OAuthProvider, creds)).rejects.toThrow(
 			"Unknown OAuth provider",

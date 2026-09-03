@@ -18,9 +18,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { AgentRegistry } from "../registry/agent-registry";
+import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { applyQuery, pathToQuery } from "./json-query";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /**
  * Handler for agent:// URLs.
@@ -32,7 +34,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	readonly scheme = "agent";
 	readonly immutable = true;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
@@ -47,7 +49,21 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("agent:// URL cannot combine path extraction with ?q=");
 		}
 
-		const dirs = artifactsDirsFromRegistry();
+		const registry = AgentRegistry.global();
+		const rootSessionFile = context?.sessionFile
+			? await ensurePersistedRoster(registry, context.sessionFile)
+			: undefined;
+		// The caller root's canonical artifact directory (its session file minus
+		// the `.jsonl` suffix) is scanned FIRST, ahead of every process-global
+		// registry dir. The roster ref this refresh installs for the caller's
+		// parked id contributes only its nested child dir, not the root dir that
+		// actually holds `<id>.md` — and with two coexisting roots the global
+		// `Main` ref can belong to the other root, whose dir would otherwise win
+		// the first-hit id map for a shared id. No caller session file: keep the
+		// pre-existing global scan untouched.
+		const dirs = artifactsDirsFromRegistry(
+			rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined,
+		);
 		if (dirs.length === 0) {
 			throw new Error("No session - agent outputs unavailable");
 		}

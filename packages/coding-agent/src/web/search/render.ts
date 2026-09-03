@@ -20,7 +20,7 @@ import {
 	truncateToWidth,
 } from "../../tools/render-utils";
 import { renderStatusLine, renderTreeList, urlHyperlink } from "../../tui";
-import { CachedOutputBlock, markFramedBlockComponent } from "../../tui/output-block";
+import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../../tui/output-block";
 import { getSearchProviderLabel } from "./provider";
 import type { SearchResponse } from "./types";
 
@@ -159,7 +159,7 @@ export function renderSearchResult(
 			const { expanded } = options;
 
 			// Answer lines: full markdown when expanded, capped markdown preview when collapsed.
-			const answerWidth = Math.max(20, width - 3);
+			const answerWidth = outputBlockContentWidth(width);
 			const renderedAnswer = answerMarkdown ? answerMarkdown.render(answerWidth) : [];
 			let answerLines: readonly string[];
 			if (renderedAnswer.length === 0) {

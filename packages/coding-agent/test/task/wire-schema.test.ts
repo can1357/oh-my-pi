@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema, oneLineLabel } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type } from "arktype";
 
 // Contract: the task tool's wire shape is flat `{ name?, agent?, task, isolated? }`
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
@@ -107,14 +107,14 @@ describe("task approval details surface the dispatch", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function makeTool(): Promise<TaskTool> {
+	async function makeTool(spawns = "*"): Promise<TaskTool> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 		return TaskTool.create({
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": false }),
+			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
 			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
+			getSessionSpawns: () => spawns,
 		} as unknown as ToolSession);
 	}
 
@@ -130,16 +130,39 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines).toContain("Task:\naudit the auth module");
 	});
 
-	it("surfaces the first batch item and the remainder count", async () => {
-		const tool = await makeTool();
+	it("summarizes a homogeneous batch whose agents use the session default", async () => {
+		const tool = await makeTool("scout,reviewer");
 		const lines = tool.formatApprovalDetails({
 			context: "shared background",
-			tasks: [{ name: "DbMigrator", agent: "sonic", task: "migrate the schema" }, { task: "second item" }],
+			tasks: [
+				{
+					name: "DbMigrator",
+					task: "migrate the schema",
+				},
+				{ task: "second item" },
+			],
 		});
 		expect(lines).toContain("Context:\nshared background");
+		expect(lines).toContain("Batch agents: scout ×2");
 		expect(lines).toContain("Name: DbMigrator");
-		expect(lines).toContain("Agent: sonic");
+		expect(lines).toContain("Agent: scout");
 		expect(lines).toContain("Task:\nmigrate the schema");
 		expect(lines).toContain("+1 more task");
+	});
+
+	it("summarizes mixed effective agents and safely renders partial batch items", async () => {
+		const tool = await makeTool("scout,reviewer");
+		const lines = tool.formatApprovalDetails({
+			tasks: [
+				{ name: "DefaultScout", task: "map the flow" },
+				{ agent: " reviewer ", task: "review it" },
+			],
+		});
+		expect(lines).toContain("Batch agents: scout ×1, reviewer ×1");
+		expect(lines).toContain("Name: DefaultScout");
+		expect(lines).toContain("Agent: scout");
+		expect(lines.join("\n")).not.toContain("undefined");
+
+		expect(() => tool.formatApprovalDetails({ tasks: [undefined, { agent: "reviewer" }] })).not.toThrow();
 	});
 });

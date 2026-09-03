@@ -39,6 +39,16 @@ export function isSkillReadToolResult(context: ProtectedToolContext): boolean {
 	return getReadToolPath(context)?.startsWith(SKILL_INTERNAL_URL_PREFIX) ?? false;
 }
 
+const ARTIFACT_INTERNAL_URL_PREFIX = "artifact://";
+
+/** Recovery reads of session artifacts — eliding one only mints another artifact and can repeat indefinitely. */
+export function isArtifactRecoveryToolResult(context: ProtectedToolContext): boolean {
+	if (getReadToolPath(context)?.startsWith(ARTIFACT_INTERNAL_URL_PREFIX)) return true;
+	const meta = (context.toolResult.details as { meta?: { source?: { type?: string; value?: string } } } | undefined)
+		?.meta;
+	return meta?.source?.type === "internal" && (meta.source.value?.startsWith(ARTIFACT_INTERNAL_URL_PREFIX) ?? false);
+}
+
 export function isProtectedToolResult(
 	toolResult: ToolResultMessage,
 	toolCall: AgentToolCall | undefined,

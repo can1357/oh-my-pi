@@ -5,8 +5,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 
-describe("/clear slash command alias", () => {
-	it("ranks the new-session action above fuzzy description matches", async () => {
+describe("/clear slash command", () => {
+	it("resolves /clear to the context reset command and removed /clear alias from /new", async () => {
 		const provider = new CombinedAutocompleteProvider(
 			[...BUILTIN_SLASH_COMMANDS, { name: "autoresearch", description: "Clear stale research results" }],
 			process.cwd(),
@@ -16,8 +16,10 @@ describe("/clear slash command alias", () => {
 
 		expect(suggestions?.items[0]).toMatchObject({
 			value: "clear",
-			description: "Start a new session",
+			description: "Clear the conversation context in place, keeping the session",
 		});
-		expect(lookupBuiltinSlashCommand("clear")?.name).toBe("new");
+		expect(lookupBuiltinSlashCommand("clear")?.name).toBe("clear");
+		expect(lookupBuiltinSlashCommand("new")?.aliases).toBeUndefined();
+		expect(lookupBuiltinSlashCommand("reset")).toBeUndefined();
 	});
 });

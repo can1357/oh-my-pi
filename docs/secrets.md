@@ -1,6 +1,6 @@
 # Secret Obfuscation
 
-Prevents sensitive values (API keys, tokens, passwords) from being sent to LLM providers. When enabled, secrets are replaced before outbound text content leaves the process. Reversible obfuscation placeholders are restored when session context is rebuilt for display or resume.
+Prevents sensitive values (API keys, tokens, passwords) from being sent to LLM providers. When enabled, configured secrets and built-in credential-shaped token patterns are replaced before provider-visible text leaves the process. Reversible placeholders are restored in model-authored tool arguments before execution and when local session context is rebuilt for display or resume.
 
 ## Enabling
 
@@ -13,20 +13,23 @@ secrets:
 
 ## How it works
 
-1. On session startup, secrets are collected from two sources:
-   - **Environment variables** whose names match common secret patterns (`KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASS`, `AUTH`, `CREDENTIAL`, `PRIVATE`, `OAUTH`) with values >= 8 characters
+1. On session startup, secrets are collected from:
+   - **Environment variables** whose names match common secret patterns (`KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASS`, `AUTH`, `CREDENTIAL`, `PRIVATE`, `OAUTH`) with values at least 8 characters long
    - **`secrets.yml` files** (see below)
+   - A built-in reversible regex for common GitHub-, GitLab-, and OpenAI-style credential tokens that appear only in session content or tool results
 
-2. Outbound text messages to the LLM have secret values replaced with deterministic placeholders like `#AB12#`.
+2. Provider-visible text has matching values replaced with deterministic placeholders such as `$$3P8W5JH1TK2Q$$`, `$$3P8W5JH1TK2Q:L$$`, or `$$GITHUBTOKEN_3P8W5JH1TK2Q:L$$`.
 
-3. Session context is deep-walked and obfuscation placeholders are restored when building display/resume context. Replace-mode substitutions are one-way and are not restored.
+3. Live model-authored tool arguments are deep-walked and placeholders are restored before the tool executes. Session context restores placeholders for local display/resume and re-obfuscates it before provider replay. Replace-mode substitutions are one-way and are not restored.
 
 Two modes control what happens to each secret:
 
-| Mode                  | Behavior                                                | Reversible                                   |
-| --------------------- | ------------------------------------------------------- | -------------------------------------------- |
-| `obfuscate` (default) | Replaced with deterministic placeholder `#[A-Z0-9]{4}#` | Yes (deobfuscated in display/resume context) |
-| `replace`             | Replaced with deterministic same-length string          | No (one-way)                                 |
+| Mode                  | Behavior                                                                                      | Reversible |
+| --------------------- | --------------------------------------------------------------------------------------------- | ---------- |
+| `obfuscate` (default) | Replaced with a deterministic `$$HASH(:hint)$$` or `$$FRIENDLY_HASH(:hint)$$` placeholder     | Yes        |
+| `replace`             | Replaced with the configured `replacement`, or a deterministic same-length value when omitted | No         |
+
+Obfuscate-mode plain values and regex matches shorter than 8 characters are ignored to avoid redacting ordinary short words. Replace mode can handle short values; a replace-mode regex with no custom replacement is rejected only when every possible 1–2 character match would be impossible to redact to a distinct stable value.
 
 ## secrets.yml
 
@@ -43,13 +46,14 @@ Project entries override global entries with matching `content`.
 
 Each entry in the array has these fields:
 
-| Field         | Type                         | Required | Description                                       |
-| ------------- | ---------------------------- | -------- | ------------------------------------------------- |
-| `type`        | `"plain"` or `"regex"`       | Yes      | Match strategy                                    |
-| `content`     | string                       | Yes      | The secret value (plain) or regex pattern (regex) |
-| `mode`        | `"obfuscate"` or `"replace"` | No       | Default: `"obfuscate"`                            |
-| `replacement` | string                       | No       | Custom replacement (replace mode only)            |
-| `flags`       | string                       | No       | Regex flags (regex type only)                     |
+| Field          | Type                         | Required | Description                                                   |
+| -------------- | ---------------------------- | -------- | ------------------------------------------------------------- |
+| `type`         | `"plain"` or `"regex"`       | Yes      | Match strategy                                                |
+| `content`      | string                       | Yes      | The secret value (plain) or regex pattern (regex)             |
+| `mode`         | `"obfuscate"` or `"replace"` | No       | Default: `"obfuscate"`                                        |
+| `replacement`  | string                       | No       | Custom replacement (replace mode only)                        |
+| `flags`        | string                       | No       | Regex flags (regex type only)                                 |
+| `friendlyName` | string                       | No       | Sanitized model-visible label for obfuscate-mode placeholders |
 
 ### Examples
 
@@ -66,6 +70,29 @@ Each entry in the array has these fields:
   mode: replace
   replacement: "********"
 ```
+
+#### Friendly names
+
+`friendlyName` adds semantic context to reversible obfuscation placeholders without exposing the secret value:
+
+```yaml
+- type: plain
+  content: github_pat_abc123def456
+  friendlyName: GitHub Token
+```
+
+This produces placeholders shaped like `$$GITHUBTOKEN_3P8W5JH1TK2Q:L$$`. The friendly name is sanitized to uppercase letters and digits, capped at 32 characters, and omitted if it sanitizes to an empty value. Invalid optional `friendlyName` metadata does not disable the secret entry; the secret still obfuscates with an unlabeled placeholder. A label is also dropped for a particular placeholder if it would expose a configured literal secret or match a configured secret regex.
+
+The 12-character hash base is an HMAC of the exact secret under a private per-install key (stored at `~/.omp/agent/secret-placeholder.key`, or `$XDG_STATE_HOME/omp/secret-placeholder.key` on XDG-enabled installs, never sent to a model). This prevents a transcript reader from dictionary-hashing a placeholder back to its secret. Secrets that differ only by case receive independent bases, so seeing one placeholder does not let a provider synthesize another by changing the case hint. If the key cannot be persisted on the lazy built-in-token path, the session warns and uses a process-ephemeral key; obfuscation remains reversible within that process but placeholders are not stable across restarts. A case-hint suffix labels the casing of the redacted value:
+
+| Hint | Meaning                                        |
+| ---- | ---------------------------------------------- |
+| `:U` | all cased ASCII letters are uppercase          |
+| `:L` | all cased ASCII letters are lowercase          |
+| `:C` | first cased ASCII letter uppercase, rest lower |
+| `:M` | mixed ASCII casing                             |
+
+`friendlyName` on regex entries labels the configured regex entry, not the matched value. Keep regex labels broad enough to be true for every match.
 
 #### Regex secrets
 
@@ -96,9 +123,16 @@ Regex entries always scan globally (the `g` flag is enforced automatically). The
   replacement: "postgres://***"
 ```
 
-## Interaction with env var detection
+## Invalid entries and files
 
-Environment variables are collected first, then file-defined entries are appended. File entries can cover secrets that don't live in env vars (config files, hardcoded values, etc.). Env and file entries are not deduplicated against each other, so a plain value present in both is registered twice; both placeholders restore to the same secret, so deobfuscation is unaffected.
+- A missing `secrets.yml` is treated as no entries.
+- A parse failure or non-array document is ignored with a warning.
+- Invalid entries are skipped individually with a warning. `type` must be `plain` or `regex`; `content` must be a non-empty string; `mode`, `replacement`, `flags`, and regex syntax are validated as shown above.
+- Invalid optional `friendlyName` metadata is dropped without dropping an otherwise valid entry.
+
+## Interaction with automatic detection
+
+Environment variables are collected first, file-defined entries follow, and the built-in credential regex runs last so configured entries see matching content before the generic detector. Duplicate environment values are collapsed within the environment scan. Environment and file entries are not deduplicated against each other, so a plain value present in both is registered twice; both placeholders restore to the same secret, so deobfuscation is unaffected.
 
 ## Key files
 

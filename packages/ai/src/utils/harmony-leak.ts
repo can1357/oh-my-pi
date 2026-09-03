@@ -14,6 +14,49 @@ import type { AssistantMessage, Model, ToolCall } from "../types";
 const MARKER_RE = /\bto=functions\.[A-Za-z_]\w*/g;
 const HARMONY_RE = /<\|(start|end|channel|message|call|return)\|>/g;
 
+// Reserved Harmony control-token spellings. Escaping these to their inert
+// backslash form lets untrusted data (user text, tool results) reach
+// harmony-server models (gpt-5.x) without the provider's prompt validator
+// rejecting the whole request (invalid_prompt / "Request blocked"). `constrain`
+// is escaped too — it is a real control token even though it is not a leak
+// signal on its own.
+const HARMONY_CONTROL_TOKEN_ESCAPE_RE = /<\|(start|end|message|channel|constrain|return|call)\|>/g;
+
+/**
+ * Escape reserved Harmony control tokens in arbitrary text so it can be
+ * transported as data to a harmony-dialect model. Returns the input unchanged
+ * when it carries no reserved spelling.
+ *
+ * Callers MUST gate on a harmony target and escape only the transport copy —
+ * the persisted transcript keeps the byte-for-byte original.
+ */
+export function escapeHarmonyControlTokens(text: string): string {
+	return text.replace(HARMONY_CONTROL_TOKEN_ESCAPE_RE, "<\\|$1\\|>");
+}
+
+/**
+ * Escape reserved Harmony control tokens inside a JSON document string (e.g.
+ * `function_call.arguments`). Doubles the backslash so the document remains
+ * valid JSON whose *decoded* strings carry the inert `<\|token\|>` spelling.
+ * `<|` cannot occur outside a string literal in valid JSON, so the blanket
+ * replace never corrupts structure; malformed documents are escaped
+ * best-effort.
+ */
+export function escapeHarmonyControlTokensInJson(text: string): string {
+	return text.replace(HARMONY_CONTROL_TOKEN_ESCAPE_RE, "<\\\\|$1\\\\|>");
+}
+
+/**
+ * Whether requests to `model` are served by a Harmony-dialect backend
+ * (gpt-5.x / gpt-oss), which rejects reserved control-token spellings appearing
+ * as data in the request. Resolves the wire model id (`requestModelId ?? id`)
+ * so deployment/catalog aliases — e.g. an Azure alias whose `requestModelId` is
+ * `gpt-5.4` — are detected even when the local id is opaque.
+ */
+export function isHarmonyDialectModel(model: Model): boolean {
+	return model.identity.class === "gpt-oss";
+}
+
 // Channel-word adjacency (`C`): channel/role name appearing immediately before the marker.
 const CHANNEL_WORD_RE = /\b(?:analysis|commentary|assistant|user|system|developer|tool)\s+to=functions\./;
 
@@ -104,13 +147,14 @@ export interface HarmonyRecoveredToolCall {
 }
 
 /**
- * Whether to run leak detection on responses from this model. We default-on
- * for every openai-codex model rather than enumerating ids, so a future
- * gpt-5.6 (or whatever) doesn't silently bypass the mitigation. Detection
- * itself is cheap; the cost of missing a leak on a new model is not.
+ * Whether to run leak detection on responses from this model. The default-on policy
+ * lives on the harmony-leak-mitigation axis in providers/openai-codex.kdl.
+ * It targets the provider rather than enumerating model ids so future models
+ * do not silently bypass this cheap mitigation.
  */
 export function isHarmonyLeakMitigationTarget(model: Model): boolean {
-	return model.provider === "openai-codex";
+	const compat = model.compat;
+	return compat !== undefined && "harmonyLeakMitigation" in compat && compat.harmonyLeakMitigation === true;
 }
 
 export function signalListLabel(signals: readonly HarmonySignal[]): string {
@@ -441,7 +485,7 @@ const PREVIEW_TOKEN_RE =
 function redactedJunkPreview(text: string): string {
 	const source = text.slice(0, 64);
 	let out = "";
-	for (let i = 0; i < source.length; ) {
+	for (let i = 0; i < source.length;) {
 		const tok = PREVIEW_TOKEN_RE.exec(source.slice(i));
 		if (tok) {
 			out += tok[0];

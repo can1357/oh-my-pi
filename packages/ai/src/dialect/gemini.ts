@@ -2,7 +2,13 @@ import type { Message, ToolCall } from "../types";
 import { mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import { FencedThinkingScanner } from "./fenced-thinking";
 import dialectPrompt from "./gemini.md" with { type: "text" };
-import { assistantTranscriptParts, collectToolResultRun, joinUserBodies, messageContentText } from "./rendering";
+import {
+	assistantTranscriptParts,
+	collectToolResultRun,
+	joinUserBodies,
+	messageContentText,
+	pyValue,
+} from "./rendering";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -494,11 +500,15 @@ function topLevelIndexOf(text: string, ch: string): number {
 	return -1;
 }
 
-function renderToolCall(call: ToolCall, options: DialectRenderOptions = {}): string {
-	const kwargs = Object.entries(call.arguments)
-		.map(([key, value]) => `${key}=${pyValue(value)}`)
-		.join(", ");
-	return options.example ? `${call.name}(${kwargs})` : `default_api.${call.name}(${kwargs})`;
+function renderToolCall(call: ToolCall, _options: DialectRenderOptions = {}): string {
+	// Always escaped single-line literals: the scanner round-trips this wire
+	// form through unescapePythonString, so pyCall's verbatim `"""` example
+	// blocks would corrupt backslash-bearing content.
+	let kwargs = "";
+	for (const key in call.arguments) {
+		kwargs += `${kwargs ? ", " : ""}${key}=${pyValue(call.arguments[key])}`;
+	}
+	return `default_api.${call.name}(${kwargs})`;
 }
 
 function renderAssistantToolCalls(calls: readonly ToolCall[], options: DialectRenderOptions = {}): string {
@@ -507,8 +517,7 @@ function renderAssistantToolCalls(calls: readonly ToolCall[], options: DialectRe
 		calls.length === 1
 			? renderToolCall(calls[0]!, options)
 			: `[${calls.map(call => renderToolCall(call, options)).join(", ")}]`;
-	// Examples show the bare call; the live wire form fences it as `tool_code`.
-	return options.example ? body : `${CODE_OPEN}\n${body}\n${FENCE}`;
+	return `${CODE_OPEN}\n${body}\n${FENCE}`;
 }
 
 function renderToolResults(results: readonly DialectToolResult[]): string {
@@ -524,7 +533,7 @@ function renderTranscript(messages: readonly Message[], options: DialectRenderOp
 	if (messages.length === 0) return "";
 	let out = "<bos>";
 	let pendingUserPreamble = "";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "developer") {
 			pendingUserPreamble = joinUserBodies(pendingUserPreamble, messageContentText(message.content));
@@ -558,29 +567,6 @@ function renderTranscript(messages: readonly Message[], options: DialectRenderOp
 
 function geminiTurn(role: "model" | "user", body: string): string {
 	return `<start_of_turn>${role}\n${body}<end_of_turn>\n`;
-}
-
-function pyValue(value: unknown): string {
-	if (value === null || value === undefined) return "None";
-	if (typeof value === "boolean") return value ? "True" : "False";
-	if (typeof value === "number") return Number.isFinite(value) ? String(value) : pyString(String(value));
-	if (typeof value === "string") return pyString(value);
-	if (Array.isArray(value)) return `[${value.map(pyValue).join(", ")}]`;
-	if (typeof value === "object") {
-		const entries = Object.entries(value as Record<string, unknown>);
-		return `{${entries.map(([key, val]) => `${pyString(key)}: ${pyValue(val)}`).join(", ")}}`;
-	}
-	return pyString(String(value));
-}
-
-function pyString(value: string): string {
-	const escaped = value
-		.replaceAll("\\", "\\\\")
-		.replaceAll('"', '\\"')
-		.replaceAll("\n", "\\n")
-		.replaceAll("\r", "\\r")
-		.replaceAll("\t", "\\t");
-	return `"${escaped}"`;
 }
 
 const definition: DialectDefinition = {

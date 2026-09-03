@@ -18,10 +18,11 @@
  * (the `/usage reset` command + auto-redeem) and any out-of-band tooling can
  * share one wire contract.
  */
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
-import { toNumber } from "./shared";
 
 const RESET_CREDITS_PATH = "wham/rate-limit-reset-credits";
 const RESET_CREDITS_CONSUME_PATH = "wham/rate-limit-reset-credits/consume";
@@ -89,7 +90,7 @@ function buildUrl(baseUrl: string | undefined, routePath: string): string {
 function buildHeaders(auth: CodexResetAuth, json: boolean): Record<string, string> {
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${auth.accessToken}`,
-		"User-Agent": "OpenCode-Status-Plugin/1.0",
+		"User-Agent": USER_AGENT,
 	};
 	if (auth.accountId) headers["ChatGPT-Account-Id"] = auth.accountId;
 	if (json) headers["Content-Type"] = "application/json";
@@ -144,6 +145,33 @@ export async function listCodexResetCredits(auth: CodexResetAuth): Promise<Codex
 			? Math.max(0, Math.trunc(reported))
 			: credits.filter(c => (c.status ?? "available") === "available").length;
 	return { credits, availableCount };
+}
+
+/**
+ * Pick the credit to spend: the available one that expires soonest.
+ *
+ * Credits are perishable, so spending in expiry order maximizes the bank's
+ * lifetime value. Available credits without a parseable `expiresAt` rank after
+ * dated ones; when nothing is available the first credit is returned unchanged
+ * (the consume then surfaces the backend's business outcome verbatim).
+ */
+export function pickSoonestExpiringCredit(credits: readonly CodexResetCredit[]): CodexResetCredit | undefined {
+	let best: CodexResetCredit | undefined;
+	let bestExpiry = Number.POSITIVE_INFINITY;
+	let undated: CodexResetCredit | undefined;
+	for (const credit of credits) {
+		if ((credit.status ?? "available") !== "available") continue;
+		const expiry = credit.expiresAt ? Date.parse(credit.expiresAt) : Number.NaN;
+		if (Number.isNaN(expiry)) {
+			undated ??= credit;
+			continue;
+		}
+		if (expiry < bestExpiry) {
+			best = credit;
+			bestExpiry = expiry;
+		}
+	}
+	return best ?? undated ?? credits[0];
 }
 
 /**

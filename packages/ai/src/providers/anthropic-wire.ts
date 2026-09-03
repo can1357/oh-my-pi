@@ -11,9 +11,13 @@
  * `scope`, tool `strict`/`eager_input_streaming`, mid-conversation `system`
  * role) are first-class here instead of being patched in via casts.
  */
-import type { TokenTaskBudget } from "../types";
+import type { ProviderInputTransformation, TokenTaskBudget } from "../types";
+import { isRecord } from "../utils";
 
 // ─── Cache control ──────────────────────────────────────────────────────────
+
+/** Beta enabling preserved-thinking block controls and transformation reports. */
+export const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 
 /** Ephemeral prefix-cache breakpoint marker. */
 export type CacheControlEphemeral = {
@@ -65,6 +69,82 @@ export type ToolResultBlockParam = {
 	cache_control?: CacheControlEphemeral | null;
 };
 
+/** Anthropic-executed server tool call replayed inside an assistant turn. */
+export type ServerToolUseBlockParam = {
+	type: "server_tool_use";
+	id: string;
+	name: string;
+	input?: Record<string, unknown> | null;
+	[key: string]: unknown;
+};
+
+/** Web-search server-tool call whose matching result is replayable by omp. */
+export type WebSearchServerToolUseBlockParam = ServerToolUseBlockParam & { name: "web_search" };
+
+/** Tool-search server-tool call whose matching result is replayable by omp. */
+export type ToolSearchServerToolUseBlockParam = ServerToolUseBlockParam & {
+	name: "tool_search_tool_regex" | "tool_search_tool_bm25";
+};
+
+/** Native web-search result replayed inside an assistant turn. */
+export type WebSearchToolResultBlockParam = {
+	type: "web_search_tool_result";
+	tool_use_id: string;
+	content: unknown;
+	[key: string]: unknown;
+};
+
+/** Native tool-search result replayed inside an assistant turn. */
+export type ToolSearchToolResultBlockParam = {
+	type: "tool_search_tool_result";
+	tool_use_id: string;
+	content: unknown;
+	[key: string]: unknown;
+};
+
+export type ToolChangeReferenceParam = {
+	type: "tool_reference";
+	name: string;
+};
+
+export type ToolAdditionBlockParam = {
+	type: "tool_addition";
+	tool: ToolChangeReferenceParam;
+};
+
+export type ToolRemovalBlockParam = {
+	type: "tool_removal";
+	tool: ToolChangeReferenceParam;
+};
+
+/** Anthropic server-tool history variants omp can replay atomically. */
+export type AnthropicServerToolHistoryBlockParam =
+	| WebSearchServerToolUseBlockParam
+	| WebSearchToolResultBlockParam
+	| ToolSearchServerToolUseBlockParam
+	| ToolSearchToolResultBlockParam;
+
+/** True when a block is complete Anthropic server-tool history omp can replay. */
+export function isAnthropicServerToolHistoryBlock(block: {
+	type: string;
+	name?: unknown;
+	id?: unknown;
+	tool_use_id?: unknown;
+	content?: unknown;
+}): block is AnthropicServerToolHistoryBlockParam {
+	if (block.type === "server_tool_use") {
+		const supportedName =
+			block.name === "web_search" ||
+			block.name === "tool_search_tool_regex" ||
+			block.name === "tool_search_tool_bm25";
+		return supportedName && typeof block.id === "string" && block.id.length > 0;
+	}
+	if (block.type === "web_search_tool_result" || block.type === "tool_search_tool_result") {
+		return typeof block.tool_use_id === "string" && block.tool_use_id.length > 0 && Object.hasOwn(block, "content");
+	}
+	return false;
+}
+
 export type ThinkingBlockParam = {
 	type: "thinking";
 	thinking: string;
@@ -93,6 +173,11 @@ export type ContentBlockParam =
 	| ImageBlockParam
 	| ToolUseBlockParam
 	| ToolResultBlockParam
+	| ServerToolUseBlockParam
+	| WebSearchToolResultBlockParam
+	| ToolSearchToolResultBlockParam
+	| ToolAdditionBlockParam
+	| ToolRemovalBlockParam
 	| ThinkingBlockParam
 	| RedactedThinkingBlockParam
 	| FallbackBlockParam;
@@ -107,6 +192,10 @@ export type ContentBlockParam =
 export type MessageParam = {
 	role: "user" | "assistant" | "system";
 	content: string | ContentBlockParam[];
+	/** Turn-scoped system-message lifetime. */
+	clear_at?: "never" | "next_user_message";
+	/** Per-message effort override. */
+	output_config?: OutputConfig;
 };
 
 // ─── Tools ──────────────────────────────────────────────────────────────────
@@ -127,6 +216,8 @@ export type Tool = {
 	strict?: boolean;
 	/** Fine-grained tool streaming beta: stream tool input as it is generated. */
 	eager_input_streaming?: boolean;
+	/** Withhold this tool until a later `tool_addition` block references it. */
+	defer_loading?: boolean;
 };
 
 export type ToolChoiceAuto = { type: "auto"; disable_parallel_tool_use?: boolean };
@@ -140,11 +231,17 @@ export type ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolC
 
 export type Metadata = { user_id?: string | null };
 
+export type ThinkingBlockBinding = {
+	prefix_mismatch_behavior: "drop_block" | "error";
+};
+
 export type ThinkingConfigEnabled = {
 	type: "enabled";
 	budget_tokens: number;
 	/** Opus 4.7+ reasoning display mode. */
 	display?: "summarized" | "omitted";
+	/** Preserved-thinking prefix mismatch policy. */
+	block_binding?: ThinkingBlockBinding;
 };
 
 export type ThinkingConfigDisabled = { type: "disabled" };
@@ -153,6 +250,8 @@ export type ThinkingConfigAdaptive = {
 	type: "adaptive";
 	/** Opus 4.7+ reasoning display mode. */
 	display?: "summarized" | "omitted";
+	/** Preserved-thinking prefix mismatch policy. */
+	block_binding?: ThinkingBlockBinding;
 };
 
 export type ThinkingConfigParam = ThinkingConfigEnabled | ThinkingConfigDisabled | ThinkingConfigAdaptive;
@@ -201,6 +300,8 @@ export type MessageCreateParams = {
 	speed?: "fast";
 	/** Claude Code context-management beta. */
 	context_management?: ContextManagement;
+	/** Google Cloud rawPredict carries Anthropic beta names in the body. */
+	anthropic_beta?: string[];
 	/**
 	 * Server-side fallback beta chain — up to three fallback models the API
 	 * retries when a classifier blocks the primary. Required companion beta
@@ -259,6 +360,24 @@ export type Usage = {
 };
 
 /** The `message` envelope carried by `message_start`. */
+export type InputTransformation = {
+	type: string;
+	path?: string;
+	reason?: string;
+	[key: string]: unknown;
+};
+
+/** Parse Anthropic's forward-compatible input transformation list. */
+export function parseAnthropicInputTransformations(value: unknown): ProviderInputTransformation[] {
+	if (!Array.isArray(value)) return [];
+	const transformations: ProviderInputTransformation[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || typeof entry.type !== "string") continue;
+		transformations.push({ ...entry, type: entry.type });
+	}
+	return transformations;
+}
+
 export type ResponseMessage = {
 	id: string;
 	type?: "message";
@@ -267,6 +386,7 @@ export type ResponseMessage = {
 	content?: unknown[];
 	stop_reason?: StopReason | null;
 	stop_sequence?: string | null;
+	input_transformations?: InputTransformation[];
 	usage: Usage;
 };
 
@@ -278,6 +398,9 @@ export type ResponseContentBlock =
 	| { type: "thinking"; thinking: string; signature?: string }
 	| { type: "redacted_thinking"; data: string }
 	| { type: "tool_use"; id: string; name: string; input?: Record<string, unknown> | null }
+	| ServerToolUseBlockParam
+	| WebSearchToolResultBlockParam
+	| ToolSearchToolResultBlockParam
 	| { type: "fallback"; from: { model: string }; to: { model: string } };
 
 export type ContentBlockDelta =
@@ -306,7 +429,12 @@ export type RawContentBlockStartEvent = {
 };
 export type RawContentBlockDeltaEvent = { type: "content_block_delta"; index: number; delta: ContentBlockDelta };
 export type RawContentBlockStopEvent = { type: "content_block_stop"; index: number };
-export type RawMessageDeltaEvent = { type: "message_delta"; delta: MessageDelta; usage: Usage };
+export type RawMessageDeltaEvent = {
+	type: "message_delta";
+	delta: MessageDelta;
+	usage: Usage;
+	input_transformations?: InputTransformation[];
+};
 export type RawMessageStopEvent = { type: "message_stop" };
 
 export type RawMessageStreamEvent =

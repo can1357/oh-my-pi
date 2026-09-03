@@ -33,7 +33,7 @@ export interface SessionStartEvent {
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
 	/** Reason for the switch */
-	reason: "new" | "resume" | "fork" | "handoff";
+	reason: "new" | "resume" | "fork";
 	/** Session file we're switching to (only for "resume") */
 	targetSessionFile?: string;
 }
@@ -42,7 +42,7 @@ export interface SessionBeforeSwitchEvent {
 export interface SessionSwitchEvent {
 	type: "session_switch";
 	/** Reason for the switch */
-	reason: "new" | "resume" | "fork" | "handoff";
+	reason: "new" | "resume" | "fork";
 	/** Session file we came from */
 	previousSessionFile: string | undefined;
 }
@@ -102,6 +102,8 @@ export interface SessionStopEvent {
 	session_id: string;
 	session_file?: string;
 	stop_hook_active: boolean;
+	/** Cancels handler waiting when the active settle pass is aborted. */
+	signal: AbortSignal;
 }
 
 /** Preparation data for tree navigation (used by session_before_tree event) */
@@ -222,13 +224,13 @@ export interface TurnEndEvent {
 export interface AutoCompactionStartEvent {
 	type: "auto_compaction_start";
 	reason: "threshold" | "overflow" | "idle" | "incomplete";
-	action: "context-full" | "handoff" | "shake" | "snapcompact";
+	action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 }
 
 /** Fired when auto-compaction ends */
 export interface AutoCompactionEndEvent {
 	type: "auto_compaction_end";
-	action: "context-full" | "handoff" | "shake" | "snapcompact";
+	action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 	result: CompactionResult | undefined;
 	aborted: boolean;
 	willRetry: boolean;
@@ -247,7 +249,8 @@ export interface AutoRetryStartEvent {
 	errorId?: number;
 }
 
-export interface RecoveredRetryError {
+/** Persisted retry error whose transcript presentation changed when the retry saga settled. */
+export interface RetryErrorUpdate {
 	entryId: string;
 	persistenceKey?: string;
 	note: string;
@@ -260,7 +263,22 @@ export interface AutoRetryEndEvent {
 	success: boolean;
 	attempt: number;
 	finalError?: string;
-	recoveredErrors?: RecoveredRetryError[];
+	retryErrors?: RetryErrorUpdate[];
+}
+
+/** Fired when auto-retry switches to a configured fallback model/provider. */
+export interface RetryFallbackAppliedEvent {
+	type: "retry_fallback_applied";
+	from: string;
+	to: string;
+	role: string;
+}
+
+/** Fired when a request succeeds on the fallback model applied by auto-retry. */
+export interface RetryFallbackSucceededEvent {
+	type: "retry_fallback_succeeded";
+	model: string;
+	role: string;
 }
 
 // ============================================================================
@@ -287,13 +305,30 @@ export interface TodoReminderEvent {
 
 /**
  * Return type for `tool_call` handlers.
- * Allows handlers to block tool execution.
+ * Allows handlers to block tool execution or revise the input the tool runs with.
  */
 export interface ToolCallEventResult {
 	/** If true, block the tool from executing */
 	block?: boolean;
 	/** Reason for blocking (returned to LLM as error) */
 	reason?: string;
+	/**
+	 * Replacement input the tool executes with, instead of the original arguments. Ignored when
+	 * `block` is true. This is the raw execution input passed to the tool's `execute` (the handler
+	 * owns its correctness) — not the normalized `event.input` view, which may carry derived
+	 * gate-only fields (e.g. hashline `edit` `path`/`paths`) that are not real parameters. When
+	 * multiple handlers set `input`, the last one wins; handlers do not observe each other's
+	 * revisions (each sees the original `event.input`). Not applied to `computer` tool calls.
+	 *
+	 * For model-issued tool calls the event fires at arg-prep time in the agent loop, before
+	 * concurrency scheduling, `tool_execution_start`, and the approval gate: the revision is
+	 * revalidated against the tool schema and becomes what the loop schedules, displays, persists,
+	 * and executes — the user always approves what actually runs. For dispatches the loop never
+	 * sees (nested `write xd://` device calls, Cursor direct execution) the tool wrapper applies
+	 * the revision before its own approval gate; a revised nested xd:// input forfeits the outer
+	 * write gate's approval and faces the full prompt again.
+	 */
+	input?: Record<string, unknown>;
 }
 
 /**

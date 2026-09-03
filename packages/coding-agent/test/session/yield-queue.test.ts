@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ASIDE_MESSAGE_COMMIT } from "@oh-my-pi/pi-agent-core";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 
 type Entry = {
@@ -68,6 +68,46 @@ describe("YieldQueue", () => {
 		expect(harness.streamingMessages.map(messageText)).toEqual(["a"]);
 	});
 
+	test("requested idle flush waits for an explicit stream-settlement retry", async () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.queue.enqueue("items", { id: "late" });
+		harness.queue.requestIdleFlush();
+		expect(harness.scheduledFlushes).toHaveLength(1);
+
+		await harness.scheduledFlushes[0]!();
+		expect(harness.scheduledFlushes).toHaveLength(1);
+		expect(harness.idleBatches).toHaveLength(0);
+
+		harness.setStreaming(false);
+		harness.queue.requestIdleFlush();
+		await harness.scheduledFlushes[1]!();
+
+		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["late"]);
+	});
+	test("requested idle flush preserves skip-only entries", async () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.register<Entry>("completion", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.queue.enqueue("advisor", { id: "advice" });
+		harness.queue.requestIdleFlush();
+		expect(harness.scheduledFlushes).toHaveLength(0);
+
+		harness.queue.enqueue("completion", { id: "done" });
+		harness.queue.requestIdleFlush();
+		harness.setStreaming(false);
+		await harness.scheduledFlushes[0]!();
+
+		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["done"]);
+		expect(harness.queue.has("advisor")).toBe(true);
+	});
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {
@@ -84,6 +124,59 @@ describe("YieldQueue", () => {
 
 		expect(harness.idleBatches).toHaveLength(1);
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["a,b"]);
+	});
+
+	test("resolves delivery receipts only after idle injection succeeds", async () => {
+		const injected = Promise.withResolvers<void>();
+		const scheduledFlushes: Array<() => Promise<void>> = [];
+		const queue = new YieldQueue({
+			isStreaming: () => false,
+			injectIdle: async () => injected.promise,
+			scheduleIdleFlush: run => scheduledFlushes.push(run),
+		});
+		queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		let delivered = false;
+		const receipt = queue.enqueueWithReceipt("items", { id: "durable" }).then(() => {
+			delivered = true;
+		});
+
+		const flush = scheduledFlushes[0]!();
+		await Promise.resolve();
+		expect(delivered).toBe(false);
+		injected.resolve();
+		await flush;
+		await receipt;
+		expect(delivered).toBe(true);
+	});
+
+	test("resolves an idle receipt when injection commits before the turn finishes", async () => {
+		const finishTurn = Promise.withResolvers<void>();
+		const scheduledFlushes: Array<() => Promise<void>> = [];
+		const queue = new YieldQueue({
+			isStreaming: () => false,
+			injectIdle: async messages => {
+				(messages[0] as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
+				await finishTurn.promise;
+			},
+			scheduleIdleFlush: run => scheduledFlushes.push(run),
+		});
+		queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		const receipt = queue.enqueueWithReceipt("items", { id: "idle-commit" });
+
+		const flush = scheduledFlushes[0]!();
+		await receipt;
+		let flushFinished = false;
+		void flush.then(() => {
+			flushFinished = true;
+		});
+		await Promise.resolve();
+		expect(flushFinished).toBe(false);
+		finishTurn.resolve();
+		await flush;
 	});
 
 	test("isStale drops stale entries and keeps survivors", async () => {

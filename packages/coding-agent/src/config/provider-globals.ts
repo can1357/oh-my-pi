@@ -1,10 +1,10 @@
-import * as imageGen from "../tools/image-gen";
+import { setImageProviderOrder } from "../tools/image-gen";
 import * as webSearch from "../web/search";
 
 interface ProviderGlobalSettings {
+	get(path: "providers.webSearchOrder"): unknown;
 	get(path: "providers.webSearchExclude"): unknown;
-	get(path: "providers.webSearch"): unknown;
-	get(path: "providers.image"): unknown;
+	get(path: "providers.imageOrder"): unknown;
 }
 
 export function applyProviderGlobalsFromSettings(settings: ProviderGlobalSettings): void {
@@ -13,13 +13,13 @@ export function applyProviderGlobalsFromSettings(settings: ProviderGlobalSetting
 		webSearch.setExcludedSearchProviders(excludedWebSearchProviders.filter(webSearch.isSearchProviderId));
 	}
 
-	const webSearchProvider = settings.get("providers.webSearch");
-	if (typeof webSearchProvider === "string" && webSearch.isSearchProviderPreference(webSearchProvider)) {
-		webSearch.setPreferredSearchProvider(webSearchProvider);
+	const orderedWebSearchProviders = settings.get("providers.webSearchOrder");
+	if (Array.isArray(orderedWebSearchProviders)) {
+		webSearch.setSearchProviderOrder(orderedWebSearchProviders.filter(webSearch.isSearchProviderId));
 	}
 
-	const imageProvider = settings.get("providers.image");
-	if (imageGen.isImageProviderPreference(imageProvider)) {
-		imageGen.setPreferredImageProvider(imageProvider);
+	const orderedImageProviders = settings.get("providers.imageOrder");
+	if (Array.isArray(orderedImageProviders)) {
+		setImageProviderOrder(orderedImageProviders.filter((entry): entry is string => typeof entry === "string"));
 	}
 }

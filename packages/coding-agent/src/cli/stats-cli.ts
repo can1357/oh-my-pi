@@ -5,8 +5,8 @@
  */
 
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
-import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { openPath } from "../utils/open";
 
 /**
@@ -57,43 +57,9 @@ function shortenSessionFile(p: string): string {
 
 export interface StatsCommandArgs {
 	port: number;
+	host: string;
 	json: boolean;
 	summary: boolean;
-}
-
-// =============================================================================
-// Argument Parser
-// =============================================================================
-
-/**
- * Parse stats subcommand arguments.
- * Returns undefined if not a stats command.
- */
-export function parseStatsArgs(args: string[]): StatsCommandArgs | undefined {
-	if (args.length === 0 || args[0] !== "stats") {
-		return undefined;
-	}
-
-	const result: StatsCommandArgs = {
-		port: 3847,
-		json: false,
-		summary: false,
-	};
-
-	for (let i = 1; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--json" || arg === "-j") {
-			result.json = true;
-		} else if (arg === "--summary" || arg === "-s") {
-			result.summary = true;
-		} else if ((arg === "--port" || arg === "-p") && i + 1 < args.length) {
-			result.port = parseInt(args[++i], 10);
-		} else if (arg.startsWith("--port=")) {
-			result.port = parseInt(arg.split("=")[1], 10);
-		}
-	}
-
-	return result;
 }
 
 function formatCost(n: number): string {
@@ -112,9 +78,8 @@ function normalizePremiumRequests(n: number): number {
 
 export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	// Lazy import to avoid loading stats module when not needed
-	const { getDashboardStats, syncAllSessions, getTotalMessageCount, startServer, closeDb } = await import(
-		"@oh-my-pi/omp-stats"
-	);
+	const { closeDb, formatStatsDashboardUrl, getDashboardStats, getTotalMessageCount, startServer, syncAllSessions } =
+		await import("@oh-my-pi/omp-stats");
 
 	// Sync session files first
 	const progress = createSyncProgressReporter();
@@ -136,11 +101,11 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	}
 
 	// Start the dashboard server
-	const { port } = await startServer(cmd.port);
-	console.log(chalk.green(`Dashboard available at: http://localhost:${port}`));
+	const { hostname, port } = await startServer(cmd.port, cmd.host);
+	const url = formatStatsDashboardUrl(hostname, port);
+	console.log(chalk.green(`Dashboard available at: ${url}`));
 
 	// Open browser
-	const url = `http://localhost:${port}`;
 	openPath(url);
 
 	console.log("Press Ctrl+C to stop\n");
@@ -170,6 +135,7 @@ async function printStatsSummary(): Promise<void> {
 	console.log(`  Input Tokens: ${formatNumber(overall.totalInputTokens)}`);
 	console.log(`  Output Tokens: ${formatNumber(overall.totalOutputTokens)}`);
 	console.log(`  Cache Rate: ${formatPercent(overall.cacheRate)}`);
+	console.log(`  Cache Savings: ${formatPercent(overall.cacheSavings)}`);
 	console.log(`  Total Cost: ${formatCost(overall.totalCost)}`);
 	console.log(`  Premium Requests: ${formatNumber(normalizePremiumRequests(overall.totalPremiumRequests ?? 0))}`);
 	console.log(`  Avg Duration: ${overall.avgDuration !== null ? formatDuration(overall.avgDuration) : "-"}`);
@@ -182,7 +148,7 @@ async function printStatsSummary(): Promise<void> {
 		console.log(chalk.bold("\nBy Model:"));
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
-				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache`,
+				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache rate, ${formatPercent(m.cacheSavings)} cache savings`,
 			);
 		}
 	}
@@ -195,35 +161,4 @@ async function printStatsSummary(): Promise<void> {
 	}
 
 	console.log("");
-}
-
-// =============================================================================
-// Help
-// =============================================================================
-
-export function printStatsHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} stats`)} - AI Usage Statistics Dashboard
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} stats [options]
-
-${chalk.bold("Options:")}
-  -p, --port <port>  Port for the dashboard server (default: 3847)
-  -j, --json         Output stats as JSON and exit
-  -s, --summary      Print summary to console and exit
-  -h, --help         Show this help message
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} stats              # Start dashboard server
-  ${APP_NAME} stats --json       # Print stats as JSON
-  ${APP_NAME} stats --summary    # Print summary to console
-  ${APP_NAME} stats --port 8080  # Start on custom port
-
-${chalk.bold("Metrics:")}
-  - Total requests and error rate
-  - Token usage (input, output, cache)
-  - Cost breakdown
-  - Average duration and time to first token (TTFT)
-  - Tokens per second throughput
-`);
 }

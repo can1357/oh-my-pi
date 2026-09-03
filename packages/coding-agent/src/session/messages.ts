@@ -23,8 +23,10 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
+import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
 export {
 	type BranchSummaryMessage,
@@ -36,13 +38,287 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import { titleTextFromSkillPrompt } from "./skill-title-input";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
+export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
+
+/** Custom message type for the transient Vibe mode directive. */
+export const VIBE_MODE_CONTEXT_MESSAGE_TYPE = "vibe-mode-context";
+
+/**
+ * Logs provider-error turns so their actual cause is available outside the
+ * session transcript. No-op for non-error stop reasons.
+ */
+export function logProviderTurnError(msg: AssistantMessage): void {
+	if (msg.stopReason !== "error") return;
+	logger.warn("agent turn ended with provider error", {
+		provider: msg.provider,
+		model: msg.model,
+		errorMessage: msg.errorMessage,
+		errorStatus: msg.errorStatus,
+		errorId: msg.errorId,
+	});
+}
+
+const EPHEMERAL_REPLY_MAX_BYTES = 4096;
+const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+
+/**
+ * Removes replay-bound provider state before reparenting an assistant message
+ * under a different user turn.
+ */
+export function sanitizeAssistantForReparentedHistory(message: AssistantMessage): AssistantMessage {
+	const content: AssistantMessage["content"] = [];
+	for (const block of message.content) {
+		if (block.type === "redactedThinking" || block.type === "anthropicServerTool") continue;
+		if (block.type === "thinking") {
+			content.push({ type: "thinking", thinking: block.thinking });
+			continue;
+		}
+		content.push(block);
+	}
+	return { ...message, content, providerPayload: undefined };
+}
+
+/**
+ * Collapses degenerate repeated lines and bounds an ephemeral side-channel
+ * reply to 4 KiB.
+ */
+export function dedupeEphemeralReply(text: string): string {
+	if (!text) return text;
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		let j = i + 1;
+		while (j < lines.length && lines[j] === lines[i]) j++;
+		const runLen = j - i;
+		if (runLen > 3) {
+			out.push(lines[i], `[…${runLen}×]`);
+		} else {
+			for (let k = 0; k < runLen; k++) out.push(lines[i]);
+		}
+		i = j;
+	}
+	let result = out.join("\n");
+	if (Buffer.byteLength(result, "utf8") > EPHEMERAL_REPLY_MAX_BYTES) {
+		const suffix = "\n[…truncated]";
+		const budget = EPHEMERAL_REPLY_MAX_BYTES - Buffer.byteLength(suffix, "utf8");
+		while (Buffer.byteLength(result, "utf8") > budget) {
+			result = result.slice(0, -1);
+		}
+		result += suffix;
+	}
+	return result;
+}
+
+/** Builds the recent user/assistant context supplied to title regeneration. */
+export function buildReplanTitleContext(messages: AgentMessage[]): string {
+	const turns: TitleConversationTurn[] = [];
+	for (let i = messages.length - 1; i >= 0 && turns.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
+		const message = messages[i];
+		if (!message) continue;
+		const turn = titleConversationTurnFromMessage(message);
+		if (turn) turns.push(turn);
+	}
+	turns.reverse();
+	return formatTitleConversationContext(turns);
+}
+
+/**
+ * Compares session messages by provider-replay semantics, ignoring runtime-only
+ * fields that do not change a restored request.
+ */
+export function didSessionMessagesChange(previousMessages: AgentMessage[], nextMessages: AgentMessage[]): boolean {
+	if (previousMessages.length !== nextMessages.length) return true;
+	return previousMessages.some(
+		(message, i) =>
+			!Bun.deepEquals(
+				normalizeSessionMessageForProviderReplay(message),
+				normalizeSessionMessageForProviderReplay(nextMessages[i]),
+			),
+	);
+}
+
+function textFromContent(content: unknown): string {
+	if (typeof content === "string") return content.trim();
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const block of content) {
+		if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+		const text = block.text.trim();
+		if (text) parts.push(text);
+	}
+	return parts.join("\n\n");
+}
+
+function thinkingFromContent(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const block of content) {
+		if (!isRecord(block) || block.type !== "thinking" || typeof block.thinking !== "string") continue;
+		const thinking = block.thinking.trim();
+		if (thinking) parts.push(thinking);
+	}
+	return parts.join("\n\n");
+}
+
+function titleConversationTurnFromMessage(message: AgentMessage): TitleConversationTurn | undefined {
+	if (message.role === "custom") {
+		const text = titleTextFromSkillPrompt(message);
+		if (!text) return undefined;
+		return { role: "user", text };
+	}
+	if (message.role !== "user" && message.role !== "assistant") return undefined;
+	const text = textFromContent(message.content);
+	const thinking = message.role === "assistant" ? thinkingFromContent(message.content) : undefined;
+	if (!text && !thinking) return undefined;
+	return { role: message.role, ...(text ? { text } : {}), ...(thinking ? { thinking } : {}) };
+}
+
+function normalizeProviderReplayValue(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(normalizeProviderReplayValue);
+	}
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, entryValue]) => [key, normalizeProviderReplayValue(entryValue)]),
+		);
+	}
+	return value;
+}
+
+function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknown {
+	switch (message.role) {
+		case "user":
+		case "developer":
+			return {
+				role: message.role,
+				content: normalizeProviderReplayValue(message.content),
+				providerPayload: message.providerPayload,
+			};
+		case "assistant": {
+			const isResponsesFamilyMessage =
+				message.api === "openai-responses" || message.api === "openai-codex-responses";
+			return {
+				role: message.role,
+				content:
+					isResponsesFamilyMessage && Array.isArray(message.content)
+						? message.content.flatMap(block => {
+								if (block.type === "thinking") {
+									return [];
+								}
+								if (block.type === "toolCall") {
+									return [
+										{
+											type: block.type,
+											id: block.id,
+											name: block.name,
+											arguments: block.arguments,
+										},
+									];
+								}
+								if (block.type === "text") {
+									return [{ type: block.type, text: block.text, textSignature: block.textSignature }];
+								}
+								return [normalizeProviderReplayValue(block)];
+							})
+						: normalizeProviderReplayValue(message.content),
+				api: message.api,
+				provider: message.provider,
+				model: message.model,
+				stopReason: message.stopReason,
+				errorMessage: message.errorMessage,
+				providerPayload: isResponsesFamilyMessage ? undefined : message.providerPayload,
+			};
+		}
+		case "toolResult":
+			return {
+				role: message.role,
+				toolName: message.toolName,
+				toolCallId: message.toolCallId,
+				isError: message.isError,
+				content: normalizeProviderReplayValue(message.content),
+			};
+		case "bashExecution":
+			return {
+				role: message.role,
+				command: message.command,
+				output: message.output,
+				exitCode: message.exitCode,
+				cancelled: message.cancelled,
+				meta: message.meta
+					? {
+							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							limits: normalizeProviderReplayValue(message.meta.limits),
+							diagnostics: message.meta.diagnostics
+								? normalizeProviderReplayValue({
+										summary: message.meta.diagnostics.summary,
+										messages: message.meta.diagnostics.messages,
+									})
+								: undefined,
+						}
+					: undefined,
+				excludeFromContext: message.excludeFromContext,
+			};
+		case "pythonExecution":
+			return {
+				role: message.role,
+				code: message.code,
+				output: message.output,
+				exitCode: message.exitCode,
+				cancelled: message.cancelled,
+				meta: message.meta
+					? {
+							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							limits: normalizeProviderReplayValue(message.meta.limits),
+							diagnostics: message.meta.diagnostics
+								? normalizeProviderReplayValue({
+										summary: message.meta.diagnostics.summary,
+										messages: message.meta.diagnostics.messages,
+									})
+								: undefined,
+						}
+					: undefined,
+				excludeFromContext: message.excludeFromContext,
+			};
+		case "custom":
+		case "hookMessage":
+			return {
+				role: message.role,
+				customType: message.customType,
+				content: normalizeProviderReplayValue(message.content),
+			};
+		case "branchSummary":
+			return { role: message.role, summary: message.summary };
+		case "compactionSummary":
+			return {
+				role: message.role,
+				summary: message.summary,
+				providerPayload: message.providerPayload,
+			};
+		case "fileMention":
+			return {
+				role: message.role,
+				files: message.files.map(file => ({
+					path: file.path,
+					content: file.content,
+					image: file.image,
+				})),
+			};
+		default:
+			return normalizeProviderReplayValue(message);
+	}
+}
 
 /** Fallback type for extension-injected messages that omit a custom type. */
 export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
+
+/** Custom message carrying a coding request delegated by the live voice model. */
+export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | ImageContent)[];
@@ -60,6 +336,9 @@ export type NormalizedCustomMessagePayload<T = unknown> = Pick<
 
 /** Custom message type for hidden interrupted-thinking continuity context. */
 export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
+
+/** Custom message type for the transient checkpoint-active reminder. */
+export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
 
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {
@@ -139,11 +418,7 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 	return next !== undefined && next.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE;
 }
 
-/**
- * Drop the demoted trailing thinking run from an assistant message for the LLM
- * view only. The run is incomplete and unsigned, so providers reject it; the
- * continuity message that follows carries the reasoning instead.
- */
+/** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
@@ -229,6 +504,76 @@ export function isEmptyErrorTurn(message: Pick<AssistantMessage, "stopReason" | 
 				return true;
 		}
 	});
+}
+
+/** Non-whitespace text. Tolerates malformed blocks: transcripts replayed off
+ *  disk predate current shapes, and a missing field must not throw. */
+function hasText(content: { text?: unknown }): boolean {
+	return typeof content.text === "string" && content.text.trim().length > 0;
+}
+
+/**
+ * A block that is real output from the model.
+ *
+ * Everything the assistant can emit counts except two: unsigned thinking, which
+ * is not provider-authenticated and not actionable, and Anthropic's `fallback`
+ * marker, which records that the request was routed elsewhere rather than
+ * carrying any output. A native image response often arrives with no text and
+ * no tool call at all, so recognising only those would call it nothing.
+ */
+function isActionableContent(content: AssistantMessage["content"][number] | undefined): boolean {
+	switch (content?.type) {
+		case "toolCall":
+		case "image":
+		case "redactedThinking":
+		case "anthropicServerTool":
+			return true;
+		case "text":
+			return hasText(content);
+		case "thinking":
+			return typeof content.thinkingSignature === "string" && content.thinkingSignature.trim().length > 0;
+		default:
+			return false;
+	}
+}
+
+/** A `stop`/`toolUse` turn that produced nothing actionable. Any other stop
+ *  reason is not an "empty stop": an `error`/`aborted` turn is a failure rather
+ *  than an empty completion, and a `length` stop was cut off mid-output. */
+export function isEmptyAssistantStop(message: Pick<AssistantMessage, "stopReason" | "content">): boolean {
+	switch (message.stopReason) {
+		case "stop":
+			return !message.content.some(isActionableContent);
+		case "toolUse":
+			// An orphaned toolUse stop (no tool_use block) corrupts Anthropic history:
+			// a later tool_result has nothing to anchor to. Thinking alone cannot anchor
+			// a tool_result, so it does not rescue a toolUse stop here.
+			return !message.content.some(
+				content => content?.type === "toolCall" || (content?.type === "text" && hasText(content)),
+			);
+		default:
+			return false;
+	}
+}
+
+/**
+ * True when this assistant turn actually produced output, making its model the
+ * one that served the run.
+ *
+ * Attribution asks this from two places that MUST reach the same verdict: the
+ * live session, which flips a fallback to "served", and the offline walk
+ * replaying a transcript. `error` and `aborted` are both failures — a stalled or
+ * dropped stream is finalized as `aborted` with its partial block still
+ * attached, so a stop reason alone is not proof.
+ *
+ * Actionable content is required on top of the empty-stop rule, which only
+ * inspects `stop`/`toolUse`. A `length` stop burns the whole output budget
+ * without necessarily emitting anything usable, and every other stop reason
+ * bypasses that rule entirely.
+ */
+export function assistantTurnProducedOutput(message: Pick<AssistantMessage, "stopReason" | "content">): boolean {
+	if (message.stopReason === "error" || message.stopReason === "aborted") return false;
+	return !isEmptyAssistantStop(message) && message.content.some(isActionableContent);
 }
 
 /** Sentinel `errorMessage` the agent stamps on any abort that carried no custom
@@ -349,8 +694,18 @@ export function normalizeCustomMessagePayload<T = unknown>(
 	};
 }
 
-function isSteeringUserMessage(message: AgentMessage | undefined): message is UserMessage & { steering: true } {
-	return message?.role === "user" && message.steering === true;
+type SteeringUserMessage =
+	| (UserMessage & { steering: true })
+	| (CustomMessage & {
+			customType: typeof COLLAB_PROMPT_MESSAGE_TYPE;
+			attribution: "user";
+	  });
+
+function isSteeringUserMessage(message: AgentMessage | undefined): message is SteeringUserMessage {
+	if (message?.role === "user") return message.steering === true;
+	return (
+		message?.role === "custom" && message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user"
+	);
 }
 
 function userMessageWithoutSteering(message: UserMessage): UserMessage {
@@ -390,17 +745,26 @@ function getArrayContentImages(content: (TextContent | ImageContent)[]): ImageCo
 	return images ?? [];
 }
 
-function wrapSteeringUserMessage(message: UserMessage): UserMessage {
+function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
+	const userMessage: UserMessage =
+		message.role === "user"
+			? userMessageWithoutSteering(message)
+			: {
+					role: "user",
+					content: message.content,
+					attribution: "user",
+					timestamp: message.timestamp,
+				};
 	if (typeof message.content === "string") {
-		if (message.content.length === 0) return message;
-		return { ...userMessageWithoutSteering(message), content: renderSteeringEnvelope(message.content) };
+		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
+		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
 	}
 
 	const text = getArrayContentText(message.content);
-	if (text.length === 0) return message;
+	if (text.length === 0) return message.role === "user" ? message : userMessage;
 	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
 	content.push(...getArrayContentImages(message.content));
-	return { ...userMessageWithoutSteering(message), content };
+	return { ...userMessage, content };
 }
 
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
@@ -733,8 +1097,21 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
-function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
+/** True for a `/skill:<name>` prompt the user invoked directly (attribution `user`), as opposed to an agent/autoload injection. */
+export function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
 	return message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user";
+}
+
+/**
+ * True for a custom message that initiates a user-attributed turn: a directly
+ * invoked `/skill:` prompt or a writable-collab peer's prompt. Agent redirects,
+ * reminders, and auto-continues are not turn starts.
+ */
+export function isUserTurnInitiator(message: CustomMessage): boolean {
+	return (
+		isUserInvokedSkillPrompt(message) ||
+		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")
+	);
 }
 
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {
@@ -795,17 +1172,16 @@ const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
 // The tail-identity guard on exact-repeat catches the streaming snapshot swap
 // (partial → trailing is a fresh identity), so a settled tail is never served
 // from a stale mid-stream fragment.
+interface ConvertArrayMemo {
+	generation: number;
+	length: number;
+	output: Message[];
+	tail: AgentMessage | undefined;
+	prefixOutputLen: number;
+}
+
 let convertGeneration = 0;
-let lastConvertInput: AgentMessage[] | undefined;
-let lastConvertLength = 0;
-let lastConvertOutput: Message[] | undefined;
-let lastConvertGeneration = -1;
-let lastConvertTail: AgentMessage | undefined;
-// Output-message count contributed by messages[0 .. lastConvertLength-1), i.e.
-// every message except the last. The last message is neighbor-sensitive (its LLM
-// view drops the trailing thinking run only while an interrupted-thinking marker
-// follows), so growth reconverts it rather than reusing its old fragment.
-let lastConvertPrefixOutputLen = 0;
+const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
 
 registerMessageCacheInvalidator(message => {
 	convertCache.delete(message);
@@ -881,6 +1257,10 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 		}
 		case "custom": {
 			if (!isCustomMessageContent(m.content)) return [];
+			if (isSteeringUserMessage(m)) {
+				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
+				return converted ? [converted] : [];
+			}
 			if (isUserInvokedSkillPrompt(m)) {
 				return [
 					{
@@ -904,12 +1284,12 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			return converted ? [converted] : [];
 		}
 		case "assistant": {
-			// A user-interrupted turn keeps its trailing thinking run on the
-			// persisted/displayed message so reload and Ctrl+L rebuilds still
-			// show it. That run is incomplete/unsigned and gets rejected on
-			// resend, so strip it here — LLM path only — when the hidden
-			// interrupted-thinking continuity message follows.
-			const source = interruptedNext ? stripDemotedThinkingForLlm(m) : m;
+			// Persisted/displayed messages retain interrupted thinking. Signed or
+			// encrypted blocks replay natively; incomplete unsigned runs are
+			// stripped whether or not they were long enough for a continuity note.
+			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
+			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
+			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
 			const converted = convertMessageToLlm(source);
 			return converted ? [converted] : [];
 		}
@@ -956,15 +1336,16 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
-	const sameArray = messages === lastConvertInput && lastConvertGeneration === convertGeneration;
+	const memo = convertArrayCache.get(messages);
+	const sameGeneration = memo !== undefined && memo.generation === convertGeneration;
 	const tail = len > 0 ? messages[len - 1] : undefined;
 
 	// Exact-repeat: same array, same length, same trailing identity → reuse the
 	// outer array. The tail-identity check rejects the streaming snapshot swap
 	// (partial → settled trailing keeps array identity/length but mints a fresh
 	// tail), so a settled tail never reads a stale mid-stream fragment.
-	if (sameArray && lastConvertOutput !== undefined && len === lastConvertLength && tail === lastConvertTail) {
-		return lastConvertOutput;
+	if (sameGeneration && memo.length === len && tail === memo.tail) {
+		return memo.output;
 	}
 
 	// Slice-on-growth: same array grew by append. Every interior message is
@@ -977,15 +1358,14 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let out: Message[];
 	let start: number;
 	if (
-		sameArray &&
-		lastConvertOutput !== undefined &&
-		len > lastConvertLength &&
-		lastConvertLength > 0 &&
-		messages[lastConvertLength - 1] === lastConvertTail &&
-		lastConvertPrefixOutputLen <= lastConvertOutput.length
+		sameGeneration &&
+		len > memo.length &&
+		memo.length > 0 &&
+		messages[memo.length - 1] === memo.tail &&
+		memo.prefixOutputLen <= memo.output.length
 	) {
-		out = lastConvertOutput.slice(0, lastConvertPrefixOutputLen);
-		start = lastConvertLength - 1;
+		out = memo.output.slice(0, memo.prefixOutputLen);
+		start = memo.length - 1;
 	} else {
 		out = [];
 		start = 0;
@@ -1004,12 +1384,13 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	if (len === 0) prefixOutputLen = 0;
 
 	// Record for the next call's shortcuts. `out` is a fresh array (slice or new),
-	// so a prior caller holding the previous `lastConvertOutput` never sees it grow.
-	lastConvertInput = messages;
-	lastConvertLength = len;
-	lastConvertOutput = out;
-	lastConvertGeneration = convertGeneration;
-	lastConvertTail = tail;
-	lastConvertPrefixOutputLen = prefixOutputLen;
+	// so a prior caller holding the previous memo output never sees it grow.
+	convertArrayCache.set(messages, {
+		generation: convertGeneration,
+		length: len,
+		output: out,
+		tail,
+		prefixOutputLen,
+	});
 	return out;
 }

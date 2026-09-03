@@ -59,6 +59,25 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(state.model?.id).toBe("claude-sonnet-4-5");
 		expect(state.isStreaming).toBe(false);
 		expect(state.messageCount).toBe(0);
+		expect(state.tokensPerSecond).toBeNull();
+	}, 30000);
+
+	test("should set fast mode and expose enabled/active state", async () => {
+		await client.start();
+
+		const enabled = await client.setFastMode(true);
+		expect(enabled).toEqual({ enabled: true, active: true });
+
+		const stateWhileEnabled = await client.getState();
+		expect(stateWhileEnabled.fastModeEnabled).toBe(true);
+		expect(stateWhileEnabled.fastModeActive).toBe(true);
+
+		const disabled = await client.setFastMode(false);
+		expect(disabled).toEqual({ enabled: false, active: false });
+
+		const stateWhileDisabled = await client.getState();
+		expect(stateWhileDisabled.fastModeEnabled).toBe(false);
+		expect(stateWhileDisabled.fastModeActive).toBe(false);
 	}, 30000);
 
 	test("should save messages to session file", async () => {
@@ -71,8 +90,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		const messageEndEvents = events.filter(e => e.type === "message_end");
 		expect(messageEndEvents.length).toBeGreaterThanOrEqual(2); // user + assistant
 
-		// Wait for file writes
-		await Bun.sleep(200);
+		// SessionManager appends each JSONL entry synchronously before the RPC response completes.
 
 		// Verify session file
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -111,8 +129,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(result.summary).toBeDefined();
 		expect(result.tokensBefore).toBeGreaterThan(0);
 
-		// Wait for file writes
-		await Bun.sleep(200);
+		// Compaction persistence is synchronous with the completed RPC command.
 
 		// Verify compaction in session file
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -146,8 +163,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		const uniqueValue = `test-${Snowflake.next()}`;
 		await client.bash(`echo ${uniqueValue}`);
 
-		// Wait for file writes
-		await Bun.sleep(200);
+		// Bash context persistence is synchronous with the completed RPC command.
 
 		// Verify bash message in session
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -295,4 +311,46 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		text = await client.getLastAssistantText();
 		expect(text).toContain("test123");
 	}, 90000);
+});
+
+describe("RPC fast mode with unsupported Fireworks model and priority tier", () => {
+	let client: RpcClient;
+	let sessionDir: string;
+
+	beforeEach(async () => {
+		sessionDir = path.join(os.tmpdir(), `omp-rpc-fast-mode-test-${Snowflake.next()}`);
+		await Bun.write(path.join(sessionDir, "config.yml"), ["providers:", "  fireworksTier: priority", ""].join("\n"));
+		client = new RpcClient({
+			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
+			cwd: path.join(import.meta.dir, ".."),
+			env: {
+				PI_CODING_AGENT_DIR: sessionDir,
+				FIREWORKS_API_KEY: "test-fireworks-key",
+			},
+			provider: "fireworks",
+			model: "deepseek-v4-flash",
+		});
+	});
+
+	afterEach(async () => {
+		await client.stop();
+		if (sessionDir && fs.existsSync(sessionDir)) {
+			removeSyncWithRetries(sessionDir);
+		}
+	});
+
+	test("rejects enable but disable preserves Fireworks priority activity", async () => {
+		await client.start();
+
+		await expect(client.setFastMode(true)).rejects.toMatchObject({
+			message: "Fast mode is unavailable for the current model.",
+		});
+
+		const disabled = await client.setFastMode(false);
+		expect(disabled).toEqual({ enabled: false, active: true });
+
+		const state = await client.getState();
+		expect(state.fastModeEnabled).toBe(false);
+		expect(state.fastModeActive).toBe(true);
+	}, 30000);
 });

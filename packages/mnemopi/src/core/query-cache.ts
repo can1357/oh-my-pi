@@ -1,7 +1,6 @@
-import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import type { Database } from "bun:sqlite";
 import { type Env, enhancedRecallEnabled } from "../config";
+import { openDatabase } from "../db";
 import { cosineSimilarity } from "./vector-math";
 
 export type QueryCacheResult = Record<string, unknown>;
@@ -80,8 +79,7 @@ export class QueryCache {
 	}
 
 	#initDb(dbPath: string): void {
-		if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
-		const db = new Database(dbPath, { create: true, readwrite: true, strict: true });
+		const db = openDatabase(dbPath, { pragmas: false });
 		this.#conn = db;
 		if (dbPath !== ":memory:") db.exec("PRAGMA journal_mode=WAL");
 		db.exec(`

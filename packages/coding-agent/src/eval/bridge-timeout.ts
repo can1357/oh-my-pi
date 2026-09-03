@@ -29,8 +29,11 @@ export function isEvalTimeoutControlEvent(event: JsStatusEvent): boolean {
 /** Optional behavior for a timeout pause around a host bridge call. */
 export interface BridgeTimeoutPauseOptions {
 	/**
-	 * Marks the pause as an `agent()` call whose already-started work must finish
-	 * before an external eval abort reaches the kernel.
+	 * Holds an external eval abort back from the *kernel* until this bridge call
+	 * settles, so the runtime is never torn down mid-phase (`agent()` isolation
+	 * worktree setup and merge/cherry-pick). It does not shield the delegated
+	 * work itself: the bridge hands subagents the caller's real signal, so a
+	 * turn cancel still stops them immediately.
 	 */
 	deferExternalAbort?: boolean;
 }

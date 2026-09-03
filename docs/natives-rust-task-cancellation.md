@@ -35,11 +35,12 @@ This document describes how `crates/pi-natives` schedules native work and how ca
    - Records a profiling sample through `profile_region(tag)`.
 
 3. `CancelToken` / `AbortToken` / `AbortReason`
-   - `CancelToken::new(timeout_ms, signal)` combines an optional deadline and optional JS `AbortSignal` converted from `Unknown`.
+   - `CancelToken::new(timeout_ms, signal)` wraps the shared `pi_shell::cancel::CancelToken`, adding an optional JS `AbortSignal` bridge.
    - `CancelToken::heartbeat()` is cooperative cancellation for blocking loops.
    - `CancelToken::wait()` asynchronously waits for signal or timeout.
-   - `CancelToken::emplace_abort_token()` lazily installs the shared abort flag (when the token has none) and returns an `AbortToken`; `CancelToken::new` uses it to bridge a JS `AbortSignal` to `AbortReason::Signal`.
-   - `AbortToken::abort(reason)` lets external code request abort.
+   - `CancelToken::abort_token()` returns an abort handle backed by the shared flag when one already exists; without a flag, the handle is inert. `emplace_abort_token()` lazily installs the flag and returns a live handle. `CancelToken::new` uses the latter to bridge a JS `AbortSignal` to `AbortReason::Signal`.
+   - `CancelToken::aborted()` provides a non-blocking signal/deadline check, and `into_core()` transfers the token to `pi-shell`.
+   - `AbortToken::abort(reason)` lets external code request abort. Reasons are `Unknown`, `Timeout`, `Signal`, and `User`.
 
 ## `blocking` vs `future`: execution model and selection
 
@@ -73,21 +74,23 @@ Behavior:
 
 ## JS API ↔ Rust export mapping (task/cancel relevant)
 
-| JS-facing API                           | Rust export                 | Scheduler                                                      | Cancellation hookup                                                                                                                  |
-| --------------------------------------- | --------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `grep(options, onMatch?)`               | `grep`                      | `task::blocking("grep", ct, ...)`                              | `CancelToken::new(options.timeoutMs, options.signal)` + heartbeat checks                                                             |
-| `glob(options, onMatch?)`               | `glob`                      | `task::blocking("glob", ct, ...)`                              | `CancelToken::new(...)` + heartbeat checks                                                                                           |
-| `fuzzyFind(options)`                    | `fuzzy_find`                | `task::blocking("fuzzy_find", ct, ...)`                        | `CancelToken::new(...)` + heartbeat checks                                                                                           |
+| JS-facing API                                                 | Rust export                 | Scheduler                                                      | Cancellation hookup                                                                                                                  |
+| ------------------------------------------------------------- | --------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `grep(options, onMatch?)`                                     | `grep`                      | `task::blocking("grep", ct, ...)`                              | `CancelToken::new(options.timeoutMs, options.signal)` + heartbeat checks                                                             |
+| `glob(options, onMatch?)`                                     | `glob`                      | `task::blocking("glob", ct, ...)`                              | `CancelToken::new(...)` + heartbeat checks                                                                                           |
+| `fuzzyFind(options)`                                          | `fuzzy_find`                | `task::blocking("fuzzy_find", ct, ...)`                        | `CancelToken::new(...)` + heartbeat checks                                                                                           |
 | `astGrep(options)` / `astMatch(options)` / `astEdit(options)` | ast exports                 | blocking worker path                                           | timeout/signal fields are accepted by options and checked cooperatively in worker loops                                              |
-| `listWorkspace(options)`                | `list_workspace`            | `task::blocking("listWorkspace", ct, ...)`                     | `CancelToken::new(options.timeoutMs, options.signal)` + heartbeat checks                                                             |
-| `Shell#run(options, onChunk?)`          | `Shell::run`                | `task::future(env, "shell.run", ...)`                          | JS `CancelToken` is converted into `pi_shell::cancel::CancelToken`; shell races it against command completion and descendant cleanup |
-| `executeShell(options, onChunk?)`       | `execute_shell`             | `task::future(env, "shell.execute", ...)`                      | same cancel race and 2s graceful window                                                                                              |
-| `PtySession#start(options, onChunk?)`   | `PtySession::start`         | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | `CancelToken` checked in sync PTY loop via `heartbeat()`                                                                             |
-| `htmlToMarkdown(html, options?)`        | `html_to_markdown`          | `task::blocking("html_to_markdown", (), ...)`                  | none (`()` token)                                                                                                                    |
-| `encodeSixel(...)`                      | `encode_sixel`              | synchronous native function                                    | none                                                                                                                                 |
-| `readImageFromClipboard()`              | `read_image_from_clipboard` | `task::blocking("clipboard.read_image", (), ...)`              | none (`()` token)                                                                                                                    |
+| `listWorkspace(options)`                                      | `list_workspace`            | `task::blocking("listWorkspace", ct, ...)`                     | `CancelToken::new(options.timeoutMs, options.signal)` + heartbeat checks                                                             |
+| `Shell#run(options, onChunk?)`                                | `Shell::run`                | `task::future(env, "shell.run", ...)`                          | JS `CancelToken` is converted into `pi_shell::cancel::CancelToken`; shell races it against command completion and descendant cleanup |
+| `executeShell(options, onChunk?)`                             | `execute_shell`             | `task::future(env, "shell.execute", ...)`                      | same cancellation race and 2s graceful window                                                                                        |
+| `Process#terminate(options?)`                                 | `Process::terminate`        | `task::future(env, "process.terminate", ...)`                  | optional signal cancels termination waits; grace and hard-kill timeouts are process policy rather than `CancelToken` deadlines       |
+| `Process#waitForExit(options?)`                               | `Process::wait_for_exit`    | `task::future(env, "process.wait_for_exit", ...)`              | optional signal is bridged through `CancelToken`; `timeoutMs` is the wait operation's typed `false` timeout                          |
+| `PtySession#start(...)` / `startArgv(...)`                    | PTY methods                 | `task::future(env, "pty.start", ...)` + inner `spawn_blocking` | `CancelToken` checked in sync PTY loop via `heartbeat()`                                                                             |
+| `htmlToMarkdown(html, options?)`                              | `html_to_markdown`          | `task::blocking("html_to_markdown", (), ...)`                  | none (`()` token)                                                                                                                    |
+| `encodeSixel(...)`                                            | `encode_sixel`              | synchronous native function                                    | none                                                                                                                                 |
+| `readImageFromClipboard()`                                    | `read_image_from_clipboard` | `task::blocking("clipboard.read_image", (), ...)`              | none (`()` token)                                                                                                                    |
 
-`text.rs`, `tokens.rs`, `keys.rs`, most `ps.rs` functions, SIXEL encoding, and synchronous utility exports do not use `task::blocking`/`task::future` cancellation and therefore do not participate in this cancellation path.
+`text.rs`, `tokens.rs`, `keys.rs`, most synchronous `ps.rs` functions, SIXEL encoding, and synchronous utility exports do not use `task::blocking`/`task::future` cancellation. The async `Process.terminate()` and `Process.waitForExit()` methods do.
 
 ## Cancellation lifecycle and state transitions
 
@@ -105,7 +108,7 @@ Running
   └─ no abort                         -> continue
 
 Aborted
-  └─ flag stores first observed cause for waiters; heartbeat formats it as "Aborted: <reason>"
+  └─ shared flag wakes waiters; a later abort call can replace the stored reason, while a deadline is evaluated independently
 ```
 
 ### Before-start vs mid-execution cancellation
@@ -126,11 +129,10 @@ Aborted
 
 Observed patterns:
 
-- `glob` filtering checks entries during scan/filter work.
-- `fd` scoring checks scanned candidates.
-- `grep` checks before/during expensive search and passes tokens into shared scan/cache helpers.
+- `glob` and `fuzzyFind` pass heartbeat callbacks into `pi-walker` traversal and also check result-processing loops.
+- `grep` checks before and during expensive search and passes the token through its scan/search workers.
 - `run_pty_sync` checks every loop tick with a maximum 16ms wait cadence.
-- `listWorkspace` checks before the parallel walk and per directory visit during traversal.
+- `listWorkspace` checks during traversal.
 
 Practical rule: no loop over external-size input should exceed a short bounded interval without a heartbeat.
 

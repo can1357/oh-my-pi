@@ -2,6 +2,73 @@
 
 ## [Unreleased]
 
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed working-memory recall returning too few or no results after matching memories were invalidated.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed working-memory search returning too few or no results when the most relevant matches had been superseded, ensuring valid older entries are still returned.
+
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed false-positive location extraction in episodic gists by properly enforcing capitalization constraints for proper nouns.
+- Improved episodic gist participant extraction with Unicode support to properly capture names in non-Latin scripts (e.g., Cyrillic, Greek).
+
+## [17.3.8] - 2026-08-19
+
+### Added
+
+- Added optional task metadata to the runtime LLM completion interface so hosts can tell an extraction call from a consolidation call and choose the matching prompt
+
+## [17.3.5] - 2026-08-16
+
+### Fixed
+
+- Fixed an issue where transient provider failures (such as Anthropic overload or rate limit errors) were incorrectly treated as empty responses; these failures are now retried automatically before falling back.
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed `recall()` silently dropping `scope='global'` rows whenever a `channelId` filter was active: `buildWhere()` appended a redundant hard `channel_id = ?` clause on top of the `(session_id = ? OR scope = 'global' OR channel_id = ?)` visibility clause, so global rows whose `channel_id` didn't match (e.g. imported rows with `channel_id NULL`) were excluded. Channel isolation is preserved by the visibility clause alone. This made imported/global episodic memory permanently unrecallable through callers that always pass a channel (such as the coding-agent memory backend). ([#8525](https://github.com/can1357/oh-my-pi/issues/8525))
+
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Fixed an issue where an interrupted local embedding model download could permanently corrupt the cache and silently disable semantic recall. The system now automatically detects incomplete model files, clears the corrupted cache, and retries the download.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Updated internal LRU cache implementation.
+
+## [17.2.6] - 2026-08-03
+
+### Added
+
+- Added opt-in SQLite page-size configuration for file-backed databases, configurable via the `MNEMOPI_DB_PAGE_SIZE` environment variable or the `pageSize` option in `openDatabase`. Existing databases retain their original page size.
+
+## [17.2.3] - 2026-08-01
+
+### Fixed
+
+- Stripped `<think>…</think>` reasoning blocks from remote LLM output in `cleanOutput`, so reasoning-model responses no longer leak into consolidated memories or corrupt fact extraction (the reasoning wrapper previously survived parsing and every stored fact became reasoning prose). ([#7231](https://github.com/can1357/oh-my-pi/issues/7231))
+
+## [17.2.2] - 2026-07-31
+
+### Fixed
+
+- Fixed a resource leak where SQLite prepared statements were not properly released, keeping the database connection alive after calling close(). This resolves file locking issues on Windows (which prevented deleting, moving, or rotating database files) and silent file handle leaks on POSIX systems.
+
 ## [17.0.8] - 2026-07-22
 
 ### Changed

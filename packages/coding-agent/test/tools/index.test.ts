@@ -148,13 +148,26 @@ describe("createTools", () => {
 		expect(names).toEqual(["read", "write"]);
 	});
 
-	it("creates an xd:// registry without remounting explicitly requested built-ins", async () => {
+	it("creates xd:// presentation state without remounting explicitly requested built-ins", async () => {
+		const session = createTestSession();
+		const tools = await createTools(session, ["read", "lsp", "write"]);
+
+		expect(session.xdev).toBeDefined();
+		expect(session.xdev?.mountedNames.size).toBe(0);
+		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "write"]);
+	});
+
+	it("grants a device-only xd:// transport write when an explicit list keeps read but omits write", async () => {
+		// The xd:// transport rides `write xd://<tool>`; with no write at all the
+		// session would allocate no xd:// state and later SDK assembly would
+		// expose custom/MCP tools top-level. A device-only write restores
+		// mounting while filesystem writes stay rejected (see WriteTool).
 		const session = createTestSession();
 		const tools = await createTools(session, ["read", "lsp"]);
 
-		expect(session.xdevRegistry).toBeDefined();
-		expect(session.xdevRegistry?.entries()).toEqual([]);
-		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp"]);
+		expect(session.deviceOnlyWrite).toBe(true);
+		expect(session.xdev).toBeDefined();
+		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "write"]);
 	});
 
 	it("lowercases requested tool subset", async () => {
@@ -222,7 +235,8 @@ describe("createTools", () => {
 			}),
 			["ask", "read"],
 		);
-		expect(requested.map(t => t.name)).toEqual(["read"]);
+		// write joins as the device-only xd:// transport (read granted, ask disabled).
+		expect(requested.map(t => t.name)).toEqual(["read", "write"]);
 	});
 
 	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {
@@ -262,7 +276,9 @@ describe("createTools", () => {
 		expect(names).not.toContain("inspect_image");
 
 		const requestedTools = await createTools(createTestSession({ settings: session.settings }), ["bash", "read"]);
-		expect(requestedTools.map(t => t.name)).toEqual(["read"]);
+		// `write` joins as the device-only xd:// transport: read was granted,
+		// write omitted (see the "device-only xd:// transport write" test).
+		expect(requestedTools.map(t => t.name)).toEqual(["read", "write"]);
 	});
 
 	it("auto-includes goal when goal mode is active", async () => {
@@ -275,7 +291,8 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "goal"]);
+		// `write` joins last as the device-only xd:// transport (see above).
+		expect(names).toEqual(["read", "goal", "write"]);
 	});
 
 	it("does not widen a restricted explicit tool list for an active goal", async () => {
@@ -301,7 +318,118 @@ describe("createTools", () => {
 		expect(session.isToolActive?.("read")).toBe(false);
 	});
 
-	it("HIDDEN_TOOLS contains yield and goal", () => {
-		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "yield"]);
+	it("allows checkpoint/rewind in subagent when explicitly requested and enabled", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+				["checkpoint", "rewind"],
+			)
+		).map(t => t.name);
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("excludes checkpoint/rewind from subagent when not explicitly requested", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+			)
+		).map(t => t.name);
+		expect(names).not.toContain("checkpoint");
+		expect(names).not.toContain("rewind");
+	});
+
+	it("excludes checkpoint/rewind from subagent when disabled even if explicitly requested", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": false }),
+				}),
+				["checkpoint", "rewind"],
+			)
+		).map(t => t.name);
+		expect(names).not.toContain("checkpoint");
+		expect(names).not.toContain("rewind");
+	});
+
+	it("allows checkpoint/rewind at top level when enabled and explicitly requested", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+				["checkpoint", "rewind"],
+			)
+		).map(t => t.name);
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("auto-includes rewind when only checkpoint is in the explicit list", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+				["checkpoint"],
+			)
+		).map(t => t.name);
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("auto-includes checkpoint when only rewind is in the explicit list", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+				["rewind"],
+			)
+		).map(t => t.name);
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("does not auto-include checkpoint/rewind when neither is requested", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+				["read"],
+			)
+		).map(t => t.name);
+		expect(names).not.toContain("checkpoint");
+		expect(names).not.toContain("rewind");
+	});
+
+	it("auto-pairs checkpoint/rewind in a restricted subagent with one-sided list", async () => {
+		const names = (
+			await createTools(
+				createTestSession({
+					taskDepth: 1,
+					restrictToolNames: true,
+					settings: createSettingsWithOverrides({ "checkpoint.enabled": true }),
+				}),
+				["checkpoint"],
+			)
+		).map(t => t.name);
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("HIDDEN_TOOLS contains yield, goal, and think", () => {
+		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "think", "yield"]);
 	});
 });

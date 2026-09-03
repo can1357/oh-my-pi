@@ -1,5 +1,5 @@
 /**
- * Internal URL router for internal protocols (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `skill://`, `ssh://`, `vault://`, and `xd://`).
+ * Internal URL router for internal protocols (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`).
  *
  * One process-global router with one handler per scheme. Access via
  * `InternalUrlRouter.instance()`. Handlers are stateless; per-session and
@@ -13,8 +13,9 @@ import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
-import { parseInternalUrl } from "./parse";
+import { extractUriScheme, parseInternalUrl } from "./parse";
 import { RuleProtocolHandler } from "./rule-protocol";
+import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
 import { SshProtocolHandler } from "./ssh-protocol";
 import type {
@@ -42,6 +43,8 @@ export class InternalUrlRouter {
 		this.register(new VaultProtocolHandler());
 		this.register(new SkillProtocolHandler());
 		this.register(new RuleProtocolHandler());
+		// Reserved OMP-owned security-analysis namespace; vendor adapters normalize into its store.
+		this.register(new SecurityProtocolHandler());
 		this.register(new McpProtocolHandler());
 		this.register(new IssueProtocolHandler());
 		this.register(new PrProtocolHandler());
@@ -79,6 +82,20 @@ export class InternalUrlRouter {
 		return this.#handlers.has(match[1].toLowerCase());
 	}
 
+	/**
+	 * Whether read can resolve this URL through either a native handler or the
+	 * MCP resource fallback. MCP resources may use arbitrary custom schemes and
+	 * may be opaque (`urn:example:document`) rather than hierarchical.
+	 */
+	canResolve(input: string): boolean {
+		const scheme = extractUriScheme(input);
+		if (!scheme) return false;
+		// Registered handlers only accept the hierarchical `scheme://` form;
+		// opaque inputs reach the MCP resource fallback alone.
+		if (this.#handlers.has(scheme)) return this.canHandle(input);
+		return this.#isMcpResourceScheme(scheme);
+	}
+
 	/** Schemes whose handler supports host/path autocomplete. */
 	completionSchemes(): string[] {
 		const schemes: string[] = [];
@@ -98,10 +115,16 @@ export class InternalUrlRouter {
 		return handler.complete(query, context);
 	}
 
-	#route(input: string): { parsed: InternalUrl; handler: ProtocolHandler } {
+	#isMcpResourceScheme(scheme: string): boolean {
+		return !["file", "http", "https"].includes(scheme) && this.#handlers.has("mcp");
+	}
+
+	#route(input: string, allowMcpResource = false): { parsed: InternalUrl; handler: ProtocolHandler } {
 		const parsed = parseInternalUrl(input);
 		const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
-		const handler = this.#handlers.get(scheme);
+		const handler =
+			this.#handlers.get(scheme) ??
+			(allowMcpResource && this.#isMcpResourceScheme(scheme) ? this.#handlers.get("mcp") : undefined);
 		if (!handler) {
 			const available = Array.from(this.#handlers.keys())
 				.map(candidate => `${candidate}://`)
@@ -113,7 +136,7 @@ export class InternalUrlRouter {
 
 	/** Resolve an internal URL through its registered protocol handler. */
 	async resolve(input: string, context?: ResolveContext): Promise<InternalResource> {
-		const { parsed, handler } = this.#route(input);
+		const { parsed, handler } = this.#route(input, true);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.immutable };
 	}

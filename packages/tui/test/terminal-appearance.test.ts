@@ -47,6 +47,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 		previousHeadless = setTerminalHeadless(false);
+		delete Bun.env.TMUX;
 	});
 
 	afterEach(() => {
@@ -64,7 +65,10 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("TMUX", originalTmux);
 	});
 
-	function setupTerminal() {
+	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
+	// where isConPTYHosted() would otherwise read the live WSL_* env. The two
+	// ConPTY cases opt in explicitly.
+	function setupTerminal({ conpty = false }: { conpty?: boolean } = {}) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		vi.spyOn(process, "kill").mockReturnValue(true);
@@ -76,7 +80,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 			return true;
 		});
 
-		const terminal = new ProcessTerminal();
+		const terminal = new ProcessTerminal({ conpty });
 		terminal.start(
 			data => received.push(data),
 			() => {},
@@ -129,25 +133,94 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
-	it("OSC 11 updates terminal.appearance and fires callbacks with dedup", () => {
-		const { terminal } = setupTerminal();
-		const appearances: string[] = [];
-		terminal.onAppearanceChange(a => appearances.push(a));
+	it("preserves an explicit refresh token queued behind an automatic OSC 11 query", () => {
+		vi.useFakeTimers();
+		const { terminal, queryCount } = setupTerminal();
 
-		// Send dark background response + DA1
+		// Seed the current appearance and drain all startup probe sentinels.
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		const events: Array<{ kind: "report" | "change"; appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => {
+			events.push({ kind: "report", appearance, token });
+		});
+		terminal.onAppearanceChange((appearance, token) => {
+			events.push({ kind: "change", appearance, token });
+		});
+		events.length = 0;
+
+		// Mode 2031 starts an automatic query. The explicit refresh must queue
+		// behind it rather than lending its identity to the in-flight response.
+		process.stdin.emit("data", "\x1b[?997;1n");
+		vi.advanceTimersByTime(100);
+		expect(queryCount()).toBe(2);
+		const supersededToken = 41;
+		const requestToken = 42;
+		expect(terminal.refreshAppearance?.(supersededToken)).toBe(supersededToken);
+		expect(terminal.refreshAppearance?.(requestToken)).toBe(requestToken);
+		expect(queryCount()).toBe(2);
+
+		// The automatic response is unchanged and therefore reports without a
+		// change callback or request token. Its DA1 starts the queued refresh.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
 		process.stdin.emit("data", "\x1b[?1;2c");
+		expect(queryCount()).toBe(3);
 
-		expect(terminal.appearance).toBe("dark");
-		expect(appearances).toEqual(["dark"]);
-
-		// Send same color again — callback should NOT fire again
-		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
 		process.stdin.emit("data", "\x1b[?1;2c");
-
-		expect(appearances).toEqual(["dark"]);
-
 		terminal.stop();
+
+		expect(events).toEqual([
+			{ kind: "report", appearance: "dark", token: undefined },
+			{ kind: "report", appearance: "light", token: requestToken },
+			{ kind: "change", appearance: "light", token: requestToken },
+		]);
+	});
+
+	it("reports every OSC 11 response while change callbacks remain deduplicated", () => {
+		const { terminal } = setupTerminal();
+		const reports: Array<{ reported: string; current: string | undefined }> = [];
+		const changes: string[] = [];
+		let selfUnsubscribeCalls = 0;
+		const unsubscribeSelf = terminal.onAppearanceReport?.(() => {
+			selfUnsubscribeCalls++;
+			unsubscribeSelf?.();
+		});
+		terminal.onAppearanceReport?.(() => {
+			throw new Error("report callback failure");
+		});
+		const unsubscribeCollector = terminal.onAppearanceReport?.(appearance => {
+			reports.push({ reported: appearance, current: terminal.appearance });
+		});
+		terminal.onAppearanceChange(appearance => changes.push(appearance));
+
+		// Complete the startup query and drain every startup probe sentinel before
+		// issuing explicit refreshes, so each response belongs to a real query cycle.
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+
+		terminal.refreshAppearance?.();
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		terminal.refreshAppearance?.();
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+
+		// Stop before asserting so a failed expectation cannot leak stdin listeners
+		// or terminal modes into subsequent tests.
+		terminal.stop();
+		unsubscribeCollector?.();
+		unsubscribeCollector?.();
+
+		expect(reports).toEqual([
+			{ reported: "dark", current: "dark" },
+			{ reported: "dark", current: "dark" },
+			{ reported: "light", current: "light" },
+		]);
+		expect(selfUnsubscribeCalls).toBe(1);
+		expect(changes).toEqual(["dark", "light"]);
 	});
 
 	it("replays already detected OSC 11 appearance to late subscribers", () => {
@@ -273,15 +346,22 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// An explicit refresh gesture (Ctrl+L) issues one bounded probe.
 		terminal.refreshAppearance?.();
-		expect(queryCount()).toBe(afterInitial + 1);
+		const afterFirstRefresh = queryCount();
 
 		// Complete that query's cycle, then refresh again: still one probe each.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
-		expect(queryCount()).toBe(afterInitial + 2);
+		const afterSecondRefresh = queryCount();
 
 		terminal.stop();
+		const afterStop = queryCount();
+		terminal.refreshAppearance?.();
+		const afterStoppedRefresh = queryCount();
+
+		expect(afterFirstRefresh).toBe(afterInitial + 1);
+		expect(afterSecondRefresh).toBe(afterInitial + 2);
+		expect(afterStoppedRefresh).toBe(afterStop);
 	});
 
 	it("passes an explicit appearance refresh through tmux without changing the startup probe", () => {
@@ -295,9 +375,62 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
 
-		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\x1b[c\x1b\\");
+		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\");
 
 		terminal.stop();
+	});
+
+	it("reads tmux's refreshed cache without passing a DA1 reply through tmux", () => {
+		vi.useFakeTimers();
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		const { terminal, received, queryCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		const reports: Array<{ appearance: string; token: number | undefined }> = [];
+		terminal.onAppearanceReport?.((appearance, token) => reports.push({ appearance, token }));
+		const beforeRefresh = queryCount();
+
+		const token = 42;
+		terminal.refreshAppearance?.(token);
+		expect(queryCount()).toBe(beforeRefresh);
+
+		// A fragmented outer DA1 reply can be decoded by tmux as an Alt+[ key
+		// followed by printable capability bytes. Wait for the OSC 11 response to
+		// reach tmux's cache, then query that cache directly with a local sentinel.
+		vi.advanceTimersByTime(99);
+		expect(queryCount()).toBe(beforeRefresh);
+		vi.advanceTimersByTime(1);
+		expect(queryCount()).toBe(beforeRefresh + 1);
+
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		const detected = terminal.appearance;
+		terminal.stop();
+
+		expect(detected).toBe("light");
+		expect(reports).toEqual([{ appearance: "light", token }]);
+		expect(received).toEqual([]);
+	});
+
+	it("cancels a pending tmux appearance cache read during teardown", () => {
+		vi.useFakeTimers();
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		const { terminal, queryCount, sentinelCount } = setupTerminal();
+
+		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
+		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		const directQueriesBeforeRefresh = queryCount();
+		const directSentinelsBeforeRefresh = sentinelCount();
+
+		terminal.refreshAppearance?.();
+		expect(vi.getTimerCount()).toBe(1);
+		terminal.stop();
+		expect(vi.getTimerCount()).toBe(0);
+		vi.advanceTimersByTime(100);
+
+		expect(queryCount()).toBe(directQueriesBeforeRefresh);
+		expect(sentinelCount()).toBe(directSentinelsBeforeRefresh);
 	});
 
 	it("refreshAppearance() re-evaluates a changed background through the callback pipeline", () => {
@@ -495,9 +628,12 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		expect(received).toEqual([]);
 
-		// An eighth stray DA1 has no owner and must reach the input handler — it is
+		// An eighth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
+		// exclusively a terminal->host report, never a keystroke, so a reply that
+		// lands after the sentinel FIFO drains (slow SSH/PTY links) must not leak
+		// into the composer as literal text (#8542).
 		process.stdin.emit("data", "\x1b[?1;2c");
-		expect(received).toEqual(["\x1b[?1;2c"]);
+		expect(received).toEqual([]);
 
 		terminal.stop();
 	});
@@ -519,13 +655,33 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("uses disambiguation-only keyboard reporting on ConPTY", () => {
+		const { terminal, writes } = setupTerminal({ conpty: true });
+		writes.length = 0;
+		process.stdin.emit("data", "\x1b[?0u");
+
+		expect(writes).toContain("\x1b[>1u");
+		expect(writes).not.toContain("\x1b[>5u");
+		terminal.stop();
+	});
+
+	it("avoids alternate-key reporting on ConPTY while preserving parent event reporting", () => {
+		const { terminal, writes } = setupTerminal({ conpty: true });
+		writes.length = 0;
+		process.stdin.emit("data", "\x1b[?3u");
+
+		expect(writes).toContain("\x1b[>3u");
+		expect(writes).not.toContain("\x1b[>7u");
+		terminal.stop();
+	});
+
 	it("shutdown balances the single kitty push performed on detection", () => {
 		const { terminal, writes } = setupTerminal();
 
 		// Simulate kitty-capable terminal reply (level >=1).
 		process.stdin.emit("data", "\x1b[?1u");
 
-		const pushes = writes.filter(w => w === "\x1b[>1u" || w === "\x1b[>7u" || w === "\x1b[>31u").length;
+		const pushes = writes.filter(w => w === "\x1b[>5u" || w === "\x1b[>7u" || w === "\x1b[>31u").length;
 		expect(pushes).toBe(1);
 
 		terminal.stop();
@@ -619,6 +775,19 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		const { terminal, reports } = setup();
 		process.stdin.emit("data", "\x1b[?2026;0$y");
 		expect(reports).toContainEqual({ mode: 2026, supported: false });
+		terminal.stop();
+	});
+
+	it("forwards DECRPM status so subscribers can distinguish unrecognized from permanently reset", () => {
+		const { terminal } = setup();
+		const statuses: Array<{ mode: number; status?: number }> = [];
+		terminal.onPrivateModeReport?.((mode, _supported, _confirmed, status) => {
+			statuses.push({ mode, status });
+		});
+		process.stdin.emit("data", "\x1b[?2026;0$y");
+		process.stdin.emit("data", "\x1b[?2048;4$y");
+		expect(statuses).toContainEqual({ mode: 2026, status: 0 });
+		expect(statuses).toContainEqual({ mode: 2048, status: 4 });
 		terminal.stop();
 	});
 
@@ -879,9 +1048,9 @@ describe("OSC 66 text-sizing capability", () => {
 	it("advertises text sizing only for Kitty", () => {
 		// OSC 66 is a Kitty-only protocol; any other terminal must report the
 		// capability as false so the renderer never emits raw escape bytes there.
-		expect(getTerminalInfo("kitty").textSizing).toBe(true);
+		expect(getTerminalInfo("kitty").supportsTextSizing).toBe(true);
 		for (const id of ["ghostty", "wezterm", "iterm2", "vscode", "alacritty", "base", "trueColor"] as const) {
-			expect(getTerminalInfo(id).textSizing).toBe(false);
+			expect(getTerminalInfo(id).supportsTextSizing).toBe(false);
 		}
 	});
 });

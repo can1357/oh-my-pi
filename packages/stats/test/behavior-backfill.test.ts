@@ -95,4 +95,25 @@ describe("behavior backfill", () => {
 		expect(getBehaviorOverall(null).totalMessages).toBe(1);
 		expect(getFileOffset(sessionFile)).not.toBeNull();
 	});
+
+	it("marks full-session backfills complete after a successful sync", async () => {
+		await writeSessionFile();
+		await syncAllSessions({ workers: 1 });
+		closeDb();
+
+		const database = new Database(getStatsDbPath(), { readonly: true });
+		const rows = database
+			.query(
+				"SELECT key, value FROM meta WHERE key IN ('user_messages_v8', 'tool_calls_v1', 'user_message_links_v1', 'premium_requests_priority_v1') ORDER BY key",
+			)
+			.all() as { key: string; value: string }[];
+		database.close();
+
+		expect(rows).toEqual([
+			{ key: "premium_requests_priority_v1", value: "complete" },
+			{ key: "tool_calls_v1", value: "complete" },
+			{ key: "user_message_links_v1", value: "complete" },
+			{ key: "user_messages_v8", value: "complete" },
+		]);
+	});
 });

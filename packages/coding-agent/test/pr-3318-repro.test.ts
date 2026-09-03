@@ -18,10 +18,16 @@ describe("PR 3318 repro", () => {
 			metadata: { email: "", accountId: "", projectId: "" },
 		};
 		const text = await buildUsageReportText({
-			session: { model: undefined, fetchUsageReports: async () => [report] },
+			session: {
+				model: undefined,
+				fetchUsageReports: async () => [report],
+				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
+			},
 		} as never);
 
 		expect(text).toContain("scoped-account: 1.00 requests used");
 		expect(text).not.toContain("account 1: 1.00 requests used");
+		expect(text).toContain("Models with usage data");
+		expect(text).toContain("test-provider/coding-plan-model");
 	});
 });

@@ -6,9 +6,7 @@
  * Run from the repo root: `bun packages/mnemopi/bench/native-vectors.bench.ts`
  */
 import * as os from "node:os";
-import {
-	cosineSimilarityPairs,
-} from "@oh-my-pi/pi-natives";
+import { cosineSimilarityPairs } from "@oh-my-pi/pi-natives";
 import { jaccardSimilarity, mmrRerank } from "../src/core/mmr";
 import { searchExactVectorIndex } from "../src/core/vector-index";
 import { cosineSimilarity } from "../src/core/vector-math";
@@ -46,7 +44,12 @@ interface Row {
 	nativeIterations: number;
 }
 
-function pushRow(kernel: string, count: number, ts: { ns: number; iterations: number }, native: { ns: number; iterations: number }): void {
+function pushRow(
+	kernel: string,
+	count: number,
+	ts: { ns: number; iterations: number },
+	native: { ns: number; iterations: number },
+): void {
 	rows.push({
 		kernel,
 		count,
@@ -124,28 +127,31 @@ for (const count of COUNTS.filter(n => n <= 1000)) {
 		pairIterations,
 		pairWarmup,
 	);
-	const native = timeNs(() => {
-		// Current clusterBySimilarity: flatten, one crossing, then adjacency
-		// built from the materialized pair list.
-		let dim = 0;
-		for (const vector of vectors) if (vector.length > dim) dim = vector.length;
-		const flat = new Float64Array(vectors.length * dim);
-		for (let i = 0; i < vectors.length; i += 1) {
-			const vector = vectors[i];
-			if (vector === undefined) continue;
-			for (let col = 0; col < vector.length; col += 1) flat[i * dim + col] = vector[col] ?? 0;
-		}
-		const pairs = cosineSimilarityPairs(flat, vectors.length, dim, threshold);
-		const adjacency: number[][] = Array.from({ length: count }, () => []);
-		for (let p = 0; p < pairs.length; p += 2) {
-			adjacency[pairs[p] ?? 0]?.push(pairs[p + 1] ?? 0);
-			adjacency[pairs[p + 1] ?? 0]?.push(pairs[p] ?? 0);
-		}
-		sink += adjacency[0]?.length ?? 0;
-	}, pairIterations, pairWarmup);
+	const native = timeNs(
+		() => {
+			// Current clusterBySimilarity: flatten, one crossing, then adjacency
+			// built from the materialized pair list.
+			let dim = 0;
+			for (const vector of vectors) if (vector.length > dim) dim = vector.length;
+			const flat = new Float64Array(vectors.length * dim);
+			for (let i = 0; i < vectors.length; i += 1) {
+				const vector = vectors[i];
+				if (vector === undefined) continue;
+				for (let col = 0; col < vector.length; col += 1) flat[i * dim + col] = vector[col] ?? 0;
+			}
+			const pairs = cosineSimilarityPairs(flat, vectors.length, dim, threshold);
+			const adjacency: number[][] = Array.from({ length: count }, () => []);
+			for (let p = 0; p < pairs.length; p += 2) {
+				adjacency[pairs[p] ?? 0]?.push(pairs[p + 1] ?? 0);
+				adjacency[pairs[p + 1] ?? 0]?.push(pairs[p] ?? 0);
+			}
+			sink += adjacency[0]?.length ?? 0;
+		},
+		pairIterations,
+		pairWarmup,
+	);
 	pushRow("cosineSimilarityPairs (incl. flatten+adjacency)", count, ts, native);
 }
-
 
 // mmrRerank production paths: the TS side wraps jaccardSimilarity in a lambda,
 // defeating the identity check so the exact pre-native selection loop runs; the

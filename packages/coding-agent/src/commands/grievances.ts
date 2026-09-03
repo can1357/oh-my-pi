@@ -1,12 +1,13 @@
 /**
  * View, clean, and push reported tool issues from automated QA.
  */
+
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { grievancesHelp as commandHelp } from "../cli/command-help";
 import { cleanGrievances, listGrievances, pushGrievances } from "../cli/grievances-cli";
 
 export default class Grievances extends Command {
-	static description = "View, clean, or push reported tool issues (auto-QA grievances)";
-
+	static description = commandHelp.description;
 	static args = {
 		// Positional action: "list" (default), "clean", or "push". A positional
 		// arg keeps the historical `omp grievances` invocation working unchanged

@@ -5,7 +5,8 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-/// Normalizes shell-facing path aliases before std::fs sees them.
+/// Normalizes shell-facing path aliases before `std::fs` sees them.
+#[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 	#[cfg(windows)]
 	{
@@ -18,6 +19,7 @@ pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 }
 
 /// Returns a Windows drive root for a shell pattern that starts with an MSYS/WSL drive alias.
+#[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn pattern_drive_alias_root(
 	starts_with_forward_slash: bool,
 	first: &str,
@@ -72,7 +74,7 @@ fn drive_root_path(drive: u8) -> PathBuf {
 }
 
 #[cfg(any(windows, test))]
-fn is_ascii_drive_component(value: &str) -> bool {
+const fn is_ascii_drive_component(value: &str) -> bool {
 	value.len() == 1 && value.as_bytes()[0].is_ascii_alphabetic()
 }
 
@@ -82,12 +84,16 @@ fn translate_unix_drive_path(path: &Path) -> Option<PathBuf> {
 	let bytes = raw.as_bytes();
 	let (drive, tail) = drive_alias_parts(bytes)?;
 
+	// `tail` is a suffix of the valid UTF-8 `raw` beginning at an ASCII `/`
+	// boundary, so it is itself valid UTF-8. Translate separators per `char` —
+	// iterating bytes would split multibyte scalars (e.g. `José` → `JosÃ©`).
+	let tail = std::str::from_utf8(tail).ok()?;
 	let mut native = String::with_capacity(3 + tail.len());
 	native.push(char::from(drive).to_ascii_uppercase());
 	native.push(':');
 	native.push('\\');
-	for &byte in tail {
-		native.push(if is_path_separator(byte) { '\\' } else { char::from(byte) });
+	for ch in tail.chars() {
+		native.push(if ch == '/' || ch == '\\' { '\\' } else { ch });
 	}
 	Some(PathBuf::from(native))
 }
@@ -115,73 +121,6 @@ fn drive_alias_parts(bytes: &[u8]) -> Option<(u8, &[u8])> {
 	}
 
 	None
-}
-
-#[cfg(any(windows, test))]
-const fn is_path_separator(byte: u8) -> bool {
-	byte == b'/' || byte == b'\\'
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn unix_drive_aliases_translate_to_windows_roots() {
-		assert_eq!(translate_unix_drive_path(Path::new("/c")).as_deref(), Some(Path::new("C:\\")));
-		assert_eq!(
-			translate_unix_drive_path(Path::new("/d/project/app")).as_deref(),
-			Some(Path::new("D:\\project\\app")),
-		);
-		assert_eq!(
-			translate_unix_drive_path(Path::new("/D/project")).as_deref(),
-			Some(Path::new("D:\\project")),
-		);
-	}
-
-	#[test]
-	fn wsl_mount_drive_aliases_translate_to_windows_roots() {
-		assert_eq!(
-			translate_unix_drive_path(Path::new("/mnt/d/project")).as_deref(),
-			Some(Path::new("D:\\project")),
-		);
-		assert_eq!(
-			translate_unix_drive_path(Path::new("/MNT/c")).as_deref(),
-			Some(Path::new("C:\\")),
-		);
-	}
-
-	#[test]
-	fn pattern_drive_alias_roots_report_consumed_components() {
-		assert_eq!(
-			pattern_drive_alias_root_impl(true, "", Some("d"), Some("project")),
-			Some((PathBuf::from("D:/"), 2)),
-		);
-		assert_eq!(
-			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("d")),
-			Some((PathBuf::from("D:/"), 3)),
-		);
-	}
-
-	#[test]
-	fn pattern_drive_alias_roots_require_forward_slash_prefix() {
-		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs")), None);
-		assert_eq!(
-			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d")),
-			None,
-		);
-		assert_eq!(pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data")), None);
-	}
-
-	#[test]
-	fn non_drive_absolute_paths_are_left_native() {
-		assert_eq!(translate_unix_drive_path(Path::new("/")).as_deref(), None);
-		assert_eq!(translate_unix_drive_path(Path::new("/dev/null")).as_deref(), None);
-		assert_eq!(translate_unix_drive_path(Path::new("/mnt/data")).as_deref(), None);
-		assert_eq!(translate_unix_drive_path(Path::new("relative/path")).as_deref(), None);
-		assert_eq!(translate_unix_drive_path(Path::new("\\d\\logs")).as_deref(), None);
-		assert_eq!(translate_unix_drive_path(Path::new("\\mnt\\d\\logs")).as_deref(), None);
-	}
 }
 
 pub use super::platform::fs::*;
@@ -218,4 +157,78 @@ pub trait PathExt {
 
 	/// Returns the device ID and inode number for the path.
 	fn get_device_and_inode(&self) -> Result<(u64, u64), crate::error::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn unix_drive_aliases_translate_to_windows_roots() {
+		assert_eq!(translate_unix_drive_path(Path::new("/c")).as_deref(), Some(Path::new("C:\\")));
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/d/project/app")).as_deref(),
+			Some(Path::new("D:\\project\\app")),
+		);
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/D/project")).as_deref(),
+			Some(Path::new("D:\\project")),
+		);
+	}
+
+	#[test]
+	fn wsl_mount_drive_aliases_translate_to_windows_roots() {
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/mnt/d/project")).as_deref(),
+			Some(Path::new("D:\\project")),
+		);
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/MNT/c")).as_deref(),
+			Some(Path::new("C:\\")),
+		);
+	}
+
+	#[test]
+	fn drive_alias_tail_preserves_non_ascii_components() {
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/c/Users/José/file")).as_deref(),
+			Some(Path::new("C:\\Users\\José\\file")),
+		);
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/mnt/d/项目/データ")).as_deref(),
+			Some(Path::new("D:\\项目\\データ")),
+		);
+	}
+
+	#[test]
+	fn pattern_drive_alias_roots_report_consumed_components() {
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("d"), Some("project")),
+			Some((PathBuf::from("D:/"), 2)),
+		);
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("d")),
+			Some((PathBuf::from("D:/"), 3)),
+		);
+	}
+
+	#[test]
+	fn pattern_drive_alias_roots_require_forward_slash_prefix() {
+		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs")), None);
+		assert_eq!(
+			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d")),
+			None,
+		);
+		assert_eq!(pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data")), None);
+	}
+
+	#[test]
+	fn non_drive_absolute_paths_are_left_native() {
+		assert_eq!(translate_unix_drive_path(Path::new("/")).as_deref(), None);
+		assert_eq!(translate_unix_drive_path(Path::new("/dev/null")).as_deref(), None);
+		assert_eq!(translate_unix_drive_path(Path::new("/mnt/data")).as_deref(), None);
+		assert_eq!(translate_unix_drive_path(Path::new("relative/path")).as_deref(), None);
+		assert_eq!(translate_unix_drive_path(Path::new("\\d\\logs")).as_deref(), None);
+		assert_eq!(translate_unix_drive_path(Path::new("\\mnt\\d\\logs")).as_deref(), None);
+	}
 }

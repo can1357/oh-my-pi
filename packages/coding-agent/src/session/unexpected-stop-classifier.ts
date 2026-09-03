@@ -1,4 +1,4 @@
-import { type AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -16,13 +16,21 @@ const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
  */
 const ANSWER_MAX_TOKENS = 16;
 /**
- * Online classifier budget. Sized to survive backends that ignore
- * `disableReasoning` (e.g. Qwen3 via llama.cpp catalogued `reasoning: false`
- * but still emitting thinking): the yes/no keyword needs to land after any
- * unavoidable thinking preamble. `maxTokens` is a hard cap — non-thinking
- * completions still return in a single word (issue #4355).
+ * Online classifier budget. Sized against two independent constraints:
+ *   - Backends that ignore `disableReasoning` still emit a thinking preamble
+ *     (e.g. Qwen3 via llama.cpp catalogued `reasoning: false` but still thinking;
+ *     Anthropic via LiteLLM/Vertex, whose `openai-completions` route downgrades a
+ *     disabled request to the lowest reasoning effort instead of turning thinking
+ *     off). The yes/no keyword must have room to land after that preamble
+ *     (issue #4355).
+ *   - Anthropic-dialect proxies reject `max_tokens <= thinking.budget_tokens`. The
+ *     pinned lowest effort maps to at least Anthropic's 1024-token minimum budget,
+ *     so the cap MUST comfortably exceed 1024 or the request 400s with
+ *     `max_tokens must be greater than thinking.budget_tokens` (issue #8610).
+ * `maxTokens` is a hard cap — non-thinking completions still return in a single
+ * word.
  */
-const REASONING_SAFE_MAX_TOKENS = 1024;
+const ONLINE_REASONING_SAFE_MAX_TOKENS = 4096;
 
 export interface ClassifyUnexpectedStopDeps {
 	settings: Settings;
@@ -32,16 +40,26 @@ export interface ClassifyUnexpectedStopDeps {
 	signal?: AbortSignal;
 }
 
+/** Detects terminal turns eligible for mechanical recovery or smart classification. */
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	if (message.stopReason !== "stop") return false;
-	let hasText = false;
+	let hasContent = false;
 	for (const content of message.content) {
 		if (content.type === "toolCall") return false;
 		if (content.type === "text" && /\S/.test(content.text)) {
-			hasText = true;
+			hasContent = true;
+		}
+		// A signed thinking-only stop is still a candidate: reasoning models can
+		// trap the intended response (or a truncated fragment) in a thinking block
+		// with no text. #isEmptyAssistantStop treats a non-whitespace signature as
+		// terminal (not empty), so such stops bypass the empty-stop path entirely.
+		// Match that predicate here — unsigned thinking-only stops stay with the
+		// empty-stop retry path (and its cap) rather than being re-handled here.
+		if (content.type === "thinking" && /\S/.test(content.thinking) && /\S/.test(content.thinkingSignature ?? "")) {
+			hasContent = true;
 		}
 	}
-	return hasText;
+	return hasContent;
 }
 
 export async function classifyUnexpectedStop(
@@ -77,21 +95,25 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 		throw new Error(`unexpected-stop: no API key for ${model.provider}/${model.id}`);
 	}
 	const metadata = deps.metadataResolver?.(model.provider);
-	const maxTokens = REASONING_SAFE_MAX_TOKENS;
+	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
 
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [CLASSIFIER_SYSTEM_PROMPT],
-			messages: [{ role: "user", content: text, timestamp: Date.now() }],
-		},
-		{
-			apiKey: deps.registry.resolver(model, deps.sessionId),
-			maxTokens,
-			disableReasoning: true,
-			metadata,
-			signal: deps.signal,
-		},
+	const response = await retryTransientCompletion(
+		() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [CLASSIFIER_SYSTEM_PROMPT],
+					messages: [{ role: "user", content: text, timestamp: Date.now() }],
+				},
+				{
+					apiKey: deps.registry.resolver(model, deps.sessionId),
+					maxTokens,
+					disableReasoning: true,
+					metadata,
+					signal: deps.signal,
+				},
+			),
+		{ signal: deps.signal },
 	);
 
 	if (response.stopReason === "error") {

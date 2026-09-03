@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 import { type ExtensionModule, extensionModuleCapability } from "@oh-my-pi/pi-coding-agent/capability/extension-module";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -9,6 +10,7 @@ import {
 	discoverExtensionPaths,
 	loadExtensions,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { discoverSessionExtensionPaths } from "@oh-my-pi/pi-coding-agent/sdk";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { filterUserScoped } from "./utils/filter-user-extensions";
 
@@ -27,8 +29,9 @@ describe("extensions discovery", () => {
 		tempDir.removeSync();
 	});
 
-	const discoverForTest = async (configuredPaths: string[] = []) => {
-		const result = await discoverAndLoadExtensions(configuredPaths, tempDir.path());
+	const discoverForTest = async (configuredPaths: string[] = [], ambient = false) => {
+		const paths = ambient ? configuredPaths : [extensionsDir, ...configuredPaths];
+		const result = await discoverAndLoadExtensions(paths, tempDir.path(), undefined, undefined, { ambient });
 		return {
 			...result,
 			extensions: filterUserScoped(result.extensions, [tempDir.path(), ...configuredPaths]),
@@ -136,6 +139,81 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("src");
 		expect(result.extensions[0].path).toContain("main.ts");
+	});
+
+	it("SDK explicit-only discovery loads package hooks without ambient package hooks", async () => {
+		const ambientPackage = path.join(tempDir.path(), "ambient-package");
+		fs.mkdirSync(path.join(ambientPackage, "hooks", "pre"), { recursive: true });
+		fs.writeFileSync(path.join(ambientPackage, "hooks", "pre", "ambient.ts"), extensionCodeWithTool("ambient-tool"));
+		fs.writeFileSync(
+			path.join(getProjectAgentDir(tempDir.path()), "settings.json"),
+			JSON.stringify({ extensions: [ambientPackage] }),
+		);
+
+		const packageDir = path.join(tempDir.path(), "explicit-package");
+		const sourceDir = path.join(packageDir, "src");
+		const hookDir = path.join(packageDir, "hooks", "pre");
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.mkdirSync(hookDir, { recursive: true });
+		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCodeWithTool("explicit-tool"));
+		fs.writeFileSync(path.join(hookDir, "read.ts"), extensionCodeWithTool("explicit-hook-tool"));
+		fs.writeFileSync(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "explicit-package",
+				omp: {
+					extensions: ["./src/main.ts"],
+				},
+			}),
+		);
+
+		const settings = await Settings.init({
+			inMemory: true,
+			cwd: tempDir.path(),
+			overrides: { extensions: [ambientPackage] },
+		});
+		const paths = await discoverSessionExtensionPaths(
+			{ disableExtensionDiscovery: true, additionalExtensionPaths: [packageDir] },
+			tempDir.path(),
+			settings,
+		);
+		const result = await loadExtensions(paths, tempDir.path());
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map(extension => extension.path)).toEqual([
+			path.join(hookDir, "read.ts"),
+			path.join(sourceDir, "main.ts"),
+		]);
+		expect(result.extensions.flatMap(extension => [...extension.tools.keys()])).toEqual([
+			"explicit-hook-tool",
+			"explicit-tool",
+		]);
+	});
+
+	it("explicit-only discovery ignores unreadable optional hook directories", async () => {
+		const packageDir = path.join(tempDir.path(), "explicit-package");
+		const sourceDir = path.join(packageDir, "src");
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCode);
+		fs.writeFileSync(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "explicit-package",
+				omp: {
+					extensions: ["./src/main.ts"],
+				},
+			}),
+		);
+
+		const permissionError = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const readdirSpy = vi.spyOn(fsPromises, "readdir").mockRejectedValueOnce(permissionError);
+		try {
+			await expect(
+				discoverExtensionPaths([packageDir], tempDir.path(), undefined, { ambient: false }),
+			).resolves.toEqual([path.join(sourceDir, "main.ts")]);
+		} finally {
+			readdirSpy.mockRestore();
+		}
 	});
 
 	it("discovers a symlinked extension package directory", async () => {
@@ -375,7 +453,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(path.join(realDir, "index.ts"), extensionCode);
 		fs.symlinkSync(realDir, path.join(extensionsDir, "weird.ts"), "dir");
 
-		const result = await discoverForTest();
+		const result = await discoverForTest([], true);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
@@ -613,12 +691,33 @@ describe("extensions discovery", () => {
 			`,
 		);
 
-		const result = await discoverForTest();
+		const result = await discoverForTest([], true);
 		const loadedHook = result.extensions.find(extension => extension.path === hookPath);
 
 		expect(result.errors).toHaveLength(0);
-		expect(loadedHook).toBeDefined();
 		expect(loadedHook?.handlers.has("tool_call")).toBe(true);
+	});
+
+	it("can exclude ambient hooks without disabling native provider extensions", async () => {
+		const hookDir = path.join(getProjectAgentDir(tempDir.path()), "hooks", "pre");
+		fs.mkdirSync(hookDir, { recursive: true });
+		const hookPath = path.join(hookDir, "models-poison.ts");
+		fs.writeFileSync(
+			hookPath,
+			`export default function(pi) {
+				pi.on("tool_call", async () => ({ block: true, reason: "blocked by hook" }));
+			}`,
+		);
+		const nativeExtensionPath = path.join(extensionsDir, "provider.ts");
+		fs.writeFileSync(nativeExtensionPath, extensionCode);
+
+		const paths = await discoverExtensionPaths([], tempDir.path(), undefined, {
+			ambient: true,
+			includeAmbientHooks: false,
+		});
+
+		expect(paths).toContain(nativeExtensionPath);
+		expect(paths).not.toContain(hookPath);
 	});
 
 	it("keeps discovered hooks separate from disabled extension-module ids", async () => {
@@ -644,12 +743,11 @@ describe("extensions discovery", () => {
 		});
 		initializeWithSettings(settings);
 
-		const result = await discoverForTest();
+		const result = await discoverForTest([], true);
 		const loadedHook = result.extensions.find(extension => extension.path === hookPath);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions.find(extension => extension.path === extensionPath)).toBeUndefined();
-		expect(loadedHook).toBeDefined();
 		expect(loadedHook?.handlers.has("tool_call")).toBe(true);
 	});
 

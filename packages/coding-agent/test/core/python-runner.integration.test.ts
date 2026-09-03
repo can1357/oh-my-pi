@@ -123,6 +123,25 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			expect(result.exitCode).toBe(1);
 			expect(result.output).toContain("ValueError");
 			expect(result.output).toContain("boom");
+			// Traceback starts at user code; runner-internal frames stay hidden.
+			expect(result.output).toContain('File "<cell>"');
+			expect(result.output).not.toContain("_exec_source_async");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("reports cell syntax errors without runner-internal frames", async () => {
+		using tempDir = TempDir.createSync("@python-runner-syntax-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const result = await executePythonWithKernel(kernel, 'echo "hi"');
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toContain("SyntaxError");
+			expect(result.output).toContain('File "<cell>"');
+			// Caret display only — no stack header, no runner machinery.
+			expect(result.output).not.toContain("Traceback (most recent call last");
+			expect(result.output).not.toContain("_compile_source");
 		} finally {
 			await kernel.shutdown();
 		}

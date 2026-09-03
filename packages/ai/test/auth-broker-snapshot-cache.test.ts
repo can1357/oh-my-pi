@@ -11,6 +11,12 @@ import { removeWithRetries } from "../../utils/src/temp";
 
 const TOKEN = "broker-cache-token";
 const URL = "http://127.0.0.1:8765";
+const CACHE_VERSION_OFFSET = 4;
+const CACHE_IV_OFFSET = CACHE_VERSION_OFFSET + 1;
+const CACHE_IV_LENGTH = 12;
+const CACHE_HEADER_LENGTH = CACHE_IV_OFFSET + CACHE_IV_LENGTH;
+const CURRENT_CACHE_VERSION = 2;
+const TEXT_ENCODER = new TextEncoder();
 
 function makeSnapshot(generatedAt: number): SnapshotResponse {
 	return {
@@ -35,6 +41,35 @@ function makeSnapshot(generatedAt: number): SnapshotResponse {
 	};
 }
 
+async function decryptCachePayloadAsVersion1(
+	payload: Uint8Array,
+	token: string,
+	url: string,
+): Promise<Uint8Array | null> {
+	if (payload[CACHE_VERSION_OFFSET] !== 1 || payload.byteLength <= CACHE_HEADER_LENGTH) return null;
+	const digest = await globalThis.crypto.subtle.digest("SHA-256", TEXT_ENCODER.encode(token));
+	const key = await globalThis.crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["decrypt"]);
+	const iv = new Uint8Array(CACHE_IV_LENGTH);
+	iv.set(payload.subarray(CACHE_IV_OFFSET, CACHE_HEADER_LENGTH));
+	const ciphertext = new Uint8Array(payload.byteLength - CACHE_HEADER_LENGTH);
+	ciphertext.set(payload.subarray(CACHE_HEADER_LENGTH));
+	try {
+		return new Uint8Array(
+			await globalThis.crypto.subtle.decrypt(
+				{
+					name: "AES-GCM",
+					iv,
+					additionalData: TEXT_ENCODER.encode(url),
+				},
+				key,
+				ciphertext,
+			),
+		);
+	} catch {
+		return null;
+	}
+}
+
 async function withCachePath(run: (cachePath: string) => Promise<void>): Promise<void> {
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-snapshot-cache-"));
 	try {
@@ -53,6 +88,7 @@ describe("auth-broker snapshot cache", () => {
 			const stat = await fs.stat(cachePath);
 			expect(stat.mode & 0o777).toBe(0o600);
 			const payload = await fs.readFile(cachePath);
+			expect(payload[CACHE_VERSION_OFFSET]).toBe(CURRENT_CACHE_VERSION);
 			expect(new TextDecoder().decode(payload)).not.toContain("secret-api-key");
 
 			const decoded = await readAuthBrokerSnapshotCache({
@@ -63,6 +99,48 @@ describe("auth-broker snapshot cache", () => {
 				now: () => 1_001_000,
 			});
 			expect(decoded).toEqual(snapshot);
+		});
+	});
+
+	test("sweeps abandoned temp files without touching a concurrent write", async () => {
+		await withCachePath(async cachePath => {
+			const stale = `${cachePath}.1234.stale.tmp`;
+			const active = `${cachePath}.5678.active.tmp`;
+			await Promise.all([fs.writeFile(stale, "stale"), fs.writeFile(active, "active")]);
+			const old = new Date(Date.now() - 2 * 60 * 60_000);
+			await fs.utimes(stale, old, old);
+
+			await writeAuthBrokerSnapshotCache({
+				path: cachePath,
+				token: TOKEN,
+				url: URL,
+				snapshot: makeSnapshot(Date.now()),
+			});
+
+			expect(await Bun.file(stale).exists()).toBeFalse();
+			expect(await Bun.file(active).exists()).toBeTrue();
+		});
+	});
+
+	test("authenticates the version so a version 2 payload cannot be opened as version 1", async () => {
+		await withCachePath(async cachePath => {
+			const snapshot = makeSnapshot(1_000_000);
+			await writeAuthBrokerSnapshotCache({ path: cachePath, token: TOKEN, url: URL, snapshot });
+
+			const payload = await fs.readFile(cachePath);
+			payload[CACHE_VERSION_OFFSET] = 1;
+			expect(await decryptCachePayloadAsVersion1(payload, TOKEN, URL)).toBeNull();
+			await fs.writeFile(cachePath, payload);
+
+			expect(
+				await readAuthBrokerSnapshotCache({
+					path: cachePath,
+					token: TOKEN,
+					url: URL,
+					ttlMs: 60_000,
+					now: () => 1_001_000,
+				}),
+			).toBeNull();
 		});
 	});
 

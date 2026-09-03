@@ -37,15 +37,13 @@ describe("streaming edit preview coalescing", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	// Read `edits[0].new_text` by narrowing rather than asserting an inline shape,
+	// Read `new_string` by narrowing rather than asserting an inline shape,
 	// so the captured args identity stays type-checked.
 	function firstNewText(args: unknown): unknown {
-		if (!args || typeof args !== "object" || !("edits" in args)) return undefined;
-		const edits = args.edits;
-		if (!Array.isArray(edits) || edits.length === 0) return undefined;
-		const first: unknown = edits[0];
-		if (!first || typeof first !== "object" || !("new_text" in first)) return undefined;
-		return first.new_text;
+		if (args && typeof args === "object" && "new_string" in args) {
+			return args.new_string;
+		}
+		return undefined;
 	}
 
 	test("a slow compute is not aborted by a newer chunk; it lands, then re-runs with the latest args", async () => {
@@ -80,7 +78,7 @@ describe("streaming edit preview coalescing", () => {
 		// (mock returns an unresolved promise) so we can race a newer chunk against it.
 		const component = new ToolExecutionComponent(
 			"edit",
-			{ path: file, edits: [{ old_text: "const a = 1;", new_text: "a" }] },
+			{ path: file, old_string: "const a = 1;", new_string: "a" },
 			{},
 			tool,
 			ui,
@@ -93,7 +91,7 @@ describe("streaming edit preview coalescing", () => {
 
 			// A newer chunk arrives mid-compute. Coalescing must NOT cancel #0 and
 			// must NOT launch a second concurrent compute — only mark a rerun pending.
-			component.updateArgs({ path: file, edits: [{ old_text: "const a = 1;", new_text: "ab" }] });
+			component.updateArgs({ path: file, old_string: "const a = 1;", new_string: "ab" });
 			expect(calls.length).toBe(1);
 			expect(calls[0]!.signal.aborted).toBe(false);
 
@@ -116,6 +114,40 @@ describe("streaming edit preview coalescing", () => {
 		} finally {
 			// updateArgs starts the edit spinner interval; clear it so the timer
 			// never leaks into later tests.
+			component.stopAnimation();
+		}
+	});
+	// Transcript rebuild constructs a historical edit call and applies its
+	// persisted result within the same sync replay chunk. The renderer prefers
+	// `details.diff` from that result, so the streaming preview compute must be
+	// cancelled before it runs — re-running the edit engine for every historical
+	// edit made session restore take multiple seconds (sloppy matcher dominated
+	// the restore CPU profile).
+	test("a result settled in the same tick as construction cancels the preview compute", async () => {
+		const spy = spyOn(EDIT_MODE_STRATEGIES.replace, "computeDiffPreview");
+		restore = () => spy.mockRestore();
+
+		const ui = { requestRender() {} } as unknown as TUI;
+		const tool = { mode: "replace" } as unknown as AgentTool;
+		const component = new ToolExecutionComponent(
+			"edit",
+			{ path: file, old_string: "const a = 1;", new_string: "const a = 2;" },
+			{},
+			tool,
+			ui,
+			tmpDir,
+		);
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "ok" }],
+					details: { diff: "@@ -1 +1 @@\n-const a = 1;\n+const a = 2;", firstChangedLine: 1 },
+				},
+				false,
+			);
+			await component.whenPreviewSettled();
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
 			component.stopAnimation();
 		}
 	});

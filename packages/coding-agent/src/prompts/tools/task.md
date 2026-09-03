@@ -11,30 +11,49 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 
 # Task Design
-- **Agent typing:** Pick each item's `agent` type. Read-only research MUST use `agent: "scout"` (faster model). Use default worker only when no specialist fits.
+- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Read-only research MUST run on `scout` (faster model).{{/if}} Omit `agent` when the spawn-policy default is the best fit; otherwise pass the specialist explicitly.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
-- **One-pass:** Prefer agents that investigate AND edit in one pass; spin a read-only scout only when affected files are genuinely unknown.
+- **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a read-only scout only when affected files are genuinely unknown.{{/if}}
+- **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Have siblings coordinate through `hub` before editing shared files.{{/if}} Name one integration owner and serialize only the irreducibly shared mutation boundary. Every concurrent batch has two prerequisites:
+  1. Every task MUST skip validation (build/lint/tests) — validating mid-flight blocks agents on each other's edits.
+  2. Decide cross-task contracts up front (e.g. the interface A implements and B consumes) and state them in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}}, not left for agents to negotiate.
 
 # Inputs
 {{#if batchEnabled}}
 - `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
 - `tasks[]`: Array of subagents to spawn.
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
-  - `agent`: The agent type running this item (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+  - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
+    Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+    NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+{{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
+{{/if}}
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
-  - `isolated`: Run in dedicated worktree, return patches. Destroyed on completion, cannot be addressed afterward.
+{{#if applyIsolatedChanges}}
+  - `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
+{{else}}
+  - `isolated`: Run in a dedicated worktree; changes are retained as patch or branch artifacts without modifying the parent checkout.
+{{/if}}
 {{/if}}
 {{else}}
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
-- `agent`: The agent type to spawn (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+- `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
+  Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
+  NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+{{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
+{{/if}}
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
-- `isolated`: Run in dedicated worktree, return patches.
+{{#if applyIsolatedChanges}}
+- `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
+{{else}}
+- `isolated`: Run in a dedicated worktree; changes are retained as patch or branch artifacts without modifying the parent checkout.
+{{/if}}
 {{/if}}
 {{/if}}
 
@@ -59,7 +78,7 @@ Pass large payloads via `local://<path>` URIs, NEVER inline text.
 {{#if spawningDisabled}}
 Agent spawning is currently disabled.
 {{else}}
-Pick the most specific agent; use default worker only when no specialist fits.
+Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
 {{#list agents join="\n"}}
 ### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
 {{description}}

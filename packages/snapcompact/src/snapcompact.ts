@@ -31,11 +31,12 @@
  *   billing (32px × 1.2, 10k-patch budget at `detail: "original"`) is
  *   area-proportional, so resolution cannot improve chars/$ — 1568 stays.
  *   `detail: "high"` would downgrade (2,500-patch cap); `original` is sent.
- * - **Unknown providers** default to the Anthropic shape. `providerImageBudget`
- *   still caps per-request images per provider so inline imaging cannot flood a
- *   request with attachments, but the old OpenRouter-specific 8-image cap is
- *   gone; routers now use the same permissive budget as direct Anthropic/Claude
- *   lines unless configured otherwise upstream.
+ * - **Unknown providers** default to `8on22-bw` with Anthropic-style
+ *   visual-token area billing. `providerImageBudget` still caps per-request
+ *   images per provider so inline imaging cannot flood a request with
+ *   attachments, but the old OpenRouter-specific 8-image cap is gone; routers
+ *   now use the same permissive budget as direct Anthropic/Claude lines unless
+ *   configured otherwise upstream.
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
@@ -45,6 +46,7 @@
  */
 
 import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -201,10 +203,13 @@ export function isShapeVariantName(value: unknown): value is ShapeVariantName {
 }
 
 /** Provider families with distinct image billing. */
-type BillingFamily = "anthropic" | "google" | "openai";
+type BillingFamily = "anthropic" | "google" | "openai" | "unknown";
 
 function billingFamily(api?: Api): BillingFamily {
 	switch (api) {
+		case "anthropic-messages":
+		case "bedrock-converse-stream":
+			return "anthropic";
 		case "openai-completions":
 		case "openai-responses":
 		case "openai-codex-responses":
@@ -215,9 +220,8 @@ function billingFamily(api?: Api): BillingFamily {
 		case "google-vertex":
 			return "google";
 		default:
-			// anthropic-messages, bedrock-converse-stream, and anything unknown
-			// share Anthropic's pixel-area pricing as the safe ceiling.
-			return "anthropic";
+			// Unknown APIs share Anthropic's pixel-area pricing as the safe ceiling.
+			return "unknown";
 	}
 }
 
@@ -305,6 +309,7 @@ const FAMILY_VARIANT: Record<BillingFamily, ShapeVariantName> = {
 	anthropic: "11on16-bw",
 	google: "8on22-bw",
 	openai: "8on22-bw",
+	unknown: "8on22-bw",
 };
 
 /** Denser companion variant per family for the foveated archive middle: same
@@ -315,12 +320,14 @@ const FAMILY_VARIANT_LOW: Record<BillingFamily, ShapeVariantName> = {
 	anthropic: "8on16-bw",
 	google: "8on16-bw",
 	openai: "8on16-bw",
+	unknown: "8on16-bw",
 };
 
 const FAMILY_SHAPE: Record<BillingFamily, Shape> = {
 	anthropic: SHAPES.anthropic,
 	google: SHAPES.google,
 	openai: SHAPES.openai,
+	unknown: priceShape(SHAPE_VARIANTS["8on22-bw"], "unknown"),
 };
 
 /** One model line's ideal format: variant plus an optional frame-size
@@ -330,17 +337,17 @@ export interface IdealShape {
 	frameSize?: number;
 }
 
-/** Eval-winning format per model line, matched against the model id. The
- *  wire API only identifies the gateway — a Claude served through Vertex or
- *  OpenRouter still reads best with its own shape. Patterns cover the model
- *  lines the mono evals measured; everything else falls back to the API
- *  family's winner at the standard 1568px frame. First match wins. */
+/** Eval-winning format per model line. The wire API only identifies the
+ *  gateway — a Claude served through Vertex or OpenRouter still reads best
+ *  with its own shape. Classified Anthropic models use the shared catalog
+ *  identity parser; remaining model lines use first-match regex rules and fall
+ *  back to the API family's winner at the standard 1568px frame. */
+const HIGH_RES_ANTHROPIC_VARIANT = { variant: "11on16-bw", frameSize: 1932 } as const satisfies IdealShape;
 const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
-	// Opus 4.7+ and Fable/Mythos read high-res natively (2576px edge under a
-	// 4,784 visual-token cap → 1932px square sweet spot): same recall and
-	// cost as 1568, a third fewer frames.
-	[/claude.*(fable|mythos)/i, { variant: "11on16-bw", frameSize: 1932 }],
-	[/claude-?opus-?4[.-][7-9]/i, { variant: "11on16-bw", frameSize: 1932 }],
+	// Versionless Fable/Mythos aliases (e.g. `claude-fable-latest`) never parse
+	// a numeric version, so keep them on the high-res tier by name — every
+	// Fable/Mythos line reads it natively.
+	[/claude.*(fable|mythos)/i, HIGH_RES_ANTHROPIC_VARIANT],
 	// Older Claude lines downscale past 1568px — keep the safe size.
 	[/claude/i, { variant: "11on16-bw" }],
 	// Gemini 3.x bills a fixed 1,120-token budget per image regardless of
@@ -348,15 +355,34 @@ const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
 	[/gemini/i, { variant: "8on22-bw", frameSize: 2048 }],
 	// gpt-5.5 patch billing is area-proportional; 1568 is already optimal.
 	[/gpt|codex/i, { variant: "8on22-bw" }],
-	// kimi's image processor downscales past 1792px (64×64 28px patches);
-	// 1568 wins on chars/$ and reads at f1 .973 (≤8 frames per request).
-	[/kimi/i, { variant: "8on16-bw" }],
+	// kimi-k3 chunked bench: `8on22-bw` scored f1 .915 @ $0.66 vs .813 on `8on16-bw` ($0.70);
+	// 1568 wins on chars/$ (image processor downscales past 1792px).
+	[/kimi/i, { variant: "8on22-bw" }],
 	// glm-4.6v .780 mono via direct vendor routing.
 	[/glm/i, { variant: "8on16-bw" }],
 ];
 
 /** Eval-ideal format for a model id, or undefined when unmeasured. */
 export function idealShapeVariant(modelId: string): IdealShape | undefined {
+	const identity = classifyModel("", modelId, { lenient: true });
+	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
+	const opusFloor = parseRevision("4.7");
+	if (
+		identity.class === "anthropic" &&
+		(identity.family === "fable" ||
+			identity.family === "mythos" ||
+			(identity.family === "opus" &&
+				revision !== undefined &&
+				opusFloor !== undefined &&
+				compareRevision(revision, opusFloor) >= 0))
+	) {
+		// Opus 4.7+ and Fable/Mythos read high-res natively: same recall and
+		// cost as 1568, a third fewer frames. 1932 is the largest *square* not
+		// downscaled under Anthropic's 4,784 visual-token cap ((1932/28)² =
+		// 69² = 4,761 ≤ 4,784 28px patches), and staying below 2000px clears
+		// the stricter ≤2000px limit for requests with more than 20 images.
+		return HIGH_RES_ANTHROPIC_VARIANT;
+	}
 	return MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1];
 }
 
@@ -496,6 +522,11 @@ export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 /** Per-request image budget for `provider`; unknown providers get the floor. */
 export function providerImageBudget(provider: string | undefined): number {
 	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+}
+
+/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+export function providerFrameBudget(provider: string | undefined): number {
+	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */
@@ -735,6 +766,12 @@ export interface SerializeOptions {
 	/** Print tool-result text in dim gray ink so archived conversation reads
 	 *  louder than archived tool noise. Defaults to `true`. */
 	dimToolResults?: boolean;
+	/** Serialize assistant reasoning as `¶think:` sections. Defaults to `true`.
+	 *  Callers archiving for a Claude/Anthropic-dialect model set this `false`:
+	 *  the archive frames are replayed as text into every later request, and
+	 *  reasoning rendered back to Claude trips its `reasoning_extraction`
+	 *  classifier (issue #6093). */
+	includeThinking?: boolean;
 }
 
 /** Keep the head and tail of `text`, eliding the middle beyond `maxChars`. */
@@ -746,6 +783,132 @@ function truncateForSummary(text: string, maxChars: number, headRatio: number): 
 	const elided = text.length - maxChars;
 	const tail = tailChars > 0 ? text.slice(-tailChars) : "";
 	return `${text.slice(0, headChars)} […${elided}ch elided…] ${tail}`;
+}
+
+/** One elision marker as emitted by {@link truncateForSummary} (Unicode
+ *  ellipses) or as persisted after `normalize()` (ASCII dots). */
+const ELIDED_MARKER = String.raw`\[(?:…|\.{3})\d+ch elided(?:…|\.{3})\]`;
+
+/** Unquoted RFC 2045 token used as a media-type parameter name or value.
+ *  Quoted-string values (RFC 822) are out of scope. */
+const MEDIA_TYPE_TOKEN = String.raw`[\w!#$%&'*+.^|~-]+`;
+
+/** An inline base64 data URL. The payload may be empty or carry one embedded
+ *  elision marker so fragments left by pre-guard slices — including a cut
+ *  landing exactly on `;base64,` — still match. RFC 2397 allows `*( ";" parameter )`
+ *  between type/subtype and the terminal `;base64`; unquoted tokens are matched,
+ *  quoted-string values are out of scope. `data:` and `base64` match
+ *  case-insensitively (`gi`). Matching starts at `data:`; Markdown wrappers are
+ *  recovered by {@link adjacentMarkdownOpenerStart} after each hit. */
+const DATA_URL_ATOM = new RegExp(
+	String.raw`data:([A-Za-z][\w.+-]*\/[\w.+-]+(?:;${MEDIA_TYPE_TOKEN}=${MEDIA_TYPE_TOKEN})*);base64,` +
+		String.raw`([A-Za-z0-9+/=]*(?:\s*${ELIDED_MARKER}\s*[A-Za-z0-9+/=]*)?)` +
+		String.raw`(\s*\))?`,
+	"gi",
+);
+
+const ELIDED_MARKER_RE = new RegExp(String.raw`\s*${ELIDED_MARKER}\s*`);
+const MARKDOWN_WHITESPACE_CHAR = /\s/;
+
+/** Canonical base64: 4-char groups with valid terminal padding. */
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$/;
+
+/** A non-canonical payload at least this long is a damaged fragment of a real
+ *  data URL (e.g. an archive head cut mid-payload by a structure-blind slice),
+ *  not a prose mention like `data:image/png;base64,abc`. */
+const DAMAGED_PAYLOAD_MIN_CHARS = 40;
+
+/** Context for {@link elideDataUrls}. `source` text is intact (never sliced),
+ *  so a short non-canonical payload is a prose mention and stays untouched.
+ *  `archive` text may have been cut by pre-guard structure-blind slices at
+ *  any offset — even 0–39 chars past `;base64,` — so every recognized prefix
+ *  is suspect and is always elided. */
+type DataUrlContext = "source" | "archive";
+
+/** Start of `!?[label](\s*` immediately before `dataIndex`, or `undefined`.
+ *  The opener must lie in `[cursor, dataIndex)`. Nested `[` in the label is
+ *  kept (the old `[^\]\n]*` class allowed it) by taking the earliest `[` after
+ *  a prior `]`, newline, or `cursor`; the scan never walks already-emitted
+ *  text, so repeated `](data:...)` stays linear. */
+function adjacentMarkdownOpenerStart(text: string, dataIndex: number, cursor: number): number | undefined {
+	let i = dataIndex;
+	while (i > cursor && MARKDOWN_WHITESPACE_CHAR.test(text.charAt(i - 1))) i--;
+	// `](` and any following whitespace must sit in [cursor, dataIndex).
+	if (i - 2 < cursor || text.charAt(i - 1) !== "(" || text.charAt(i - 2) !== "]") return undefined;
+	let opener = -1;
+	for (let j = i - 3; j >= cursor; j--) {
+		const c = text.charAt(j);
+		if (c === "]" || c === "\n") break;
+		if (c === "[") opener = j;
+	}
+	if (opener < 0) return undefined;
+	return opener > cursor && text.charAt(opener - 1) === "!" ? opener - 1 : opener;
+}
+
+/** Replace every inline base64 data URL atomically with a deterministic
+ *  placeholder. A character cap that slices inside a base64 payload leaves a
+ *  recognizable image reference that can never decode; OpenAI-dialect
+ *  providers reject such requests as invalid image input, and because the
+ *  corrupted text persists in the archive the session re-fails on every later
+ *  request. The payload is worthless to a model as text, so the whole atom —
+ *  Markdown wrapper included — collapses to its metadata. Payloads already
+ *  carrying an elision marker, and non-canonical fragments left by pre-guard
+ *  slices, are healed the same way.
+ *
+ *  The placeholder's `<mime>` is the media type as written: type/subtype plus
+ *  any unquoted RFC 2397 `;parameter=value` segments, original case preserved.
+ *  Parameters are kept rather than stripped to a bare type/subtype so charset
+ *  (and similar) remain visible after elision and the label stays a pure
+ *  function of the captured text. */
+function elideDataUrls(text: string, context: DataUrlContext = "source"): string {
+	if (!/;base64,/i.test(text)) return text;
+	DATA_URL_ATOM.lastIndex = 0;
+	let match = DATA_URL_ATOM.exec(text);
+	if (match === null) return text;
+	const out: string[] = [];
+	let cursor = 0;
+	while (match !== null) {
+		const urlStart = match.index;
+		const urlEnd = urlStart + match[0].length;
+		const mime = match[1] ?? "";
+		const payload = match[2] ?? "";
+		const closer = match[3];
+		const marker = ELIDED_MARKER_RE.exec(payload);
+		const isAtom =
+			context === "archive" ||
+			marker !== null ||
+			CANONICAL_BASE64.test(payload) ||
+			payload.length >= DAMAGED_PAYLOAD_MIN_CHARS;
+		if (!isAtom) {
+			// Advance through short prose too, so a later wrapper cannot swallow
+			// a data URL already copied out of its Markdown label.
+			out.push(text.slice(cursor, urlEnd));
+			cursor = urlEnd;
+		} else {
+			const b64Chars = marker
+				? payload.length - marker[0].length + Number(/\d+/.exec(marker[0])?.[0] ?? 0)
+				: payload.length;
+			const placeholder = `[data URL omitted: ${mime}, ${b64Chars} base64 chars]`;
+			const foundOpener = adjacentMarkdownOpenerStart(text, urlStart, cursor);
+			const openerStart = foundOpener !== undefined && foundOpener >= cursor ? foundOpener : undefined;
+			const emitStart = openerStart ?? urlStart;
+			out.push(text.slice(cursor, emitStart));
+			// Swallow the Markdown wrapper only when both delimiters matched;
+			// otherwise re-emit whichever half was captured untouched. An opener
+			// that starts before the already-emitted cursor would overlap a prior
+			// replacement, so that URL is treated as bare.
+			if (openerStart !== undefined && closer !== undefined) {
+				out.push(placeholder);
+			} else {
+				const opener = openerStart !== undefined ? text.slice(openerStart, urlStart) : "";
+				out.push(opener, placeholder, closer ?? "");
+			}
+			cursor = urlEnd;
+		}
+		match = DATA_URL_ATOM.exec(text);
+	}
+	out.push(text.slice(cursor));
+	return out.join("");
 }
 
 const DIM_MARKERS = /[\u000e\u000f]/g;
@@ -773,6 +936,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 	const toolCallMaxChars = options?.toolCallMaxChars ?? TOOL_CALL_MAX_CHARS;
 	const headRatio = options?.truncateHeadRatio ?? TRUNCATE_HEAD_RATIO;
 	const dimToolResults = options?.dimToolResults !== false;
+	const includeThinking = options?.includeThinking !== false;
 	const parts: string[] = [];
 	let lastPrefix: string | null = null;
 
@@ -808,7 +972,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 	// Wrap a raw tool-result body in an `<out>` block, dimming only the body so
 	// the frame coloring keeps scope markers and calls loud.
 	const renderResultBlock = (rawText: string): string => {
-		const body = truncateForSummary(stripDimMarkers(rawText), toolResultMaxChars, headRatio);
+		const body = truncateForSummary(elideDataUrls(stripDimMarkers(rawText)), toolResultMaxChars, headRatio);
 		return `<out>\n${dimToolResults ? `${DIM_ON}${body}${DIM_OFF}` : body}\n</out>`;
 	};
 
@@ -845,6 +1009,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 					const text = stripDimMarkers(block.text);
 					if (text.trim()) pendingText.push(text);
 				} else if (block.type === "thinking") {
+					if (!includeThinking) continue;
 					const thinking = stripDimMarkers(block.thinking);
 					if (thinking.trim()) pendingThinking.push(thinking);
 				} else if (block.type === "toolCall") {
@@ -865,7 +1030,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 							.filter(([key]) => key !== INTENT_FIELD)
 							.map(
 								([key, value]) =>
-									`${key}=${truncateForSummary(JSON.stringify(value) ?? "undefined", toolArgMaxChars, headRatio)}`,
+									`${key}=${truncateForSummary(elideDataUrls(JSON.stringify(value) ?? "undefined"), toolArgMaxChars, headRatio)}`,
 							)
 							.join(", "),
 						toolCallMaxChars,
@@ -1587,7 +1752,7 @@ export function archiveSourceText(archive: Archive): string | undefined {
 		[archive.textHead, archive.textTail]
 			.filter((part): part is string => typeof part === "string" && part.length > 0)
 			.join(NEWLINE_GLYPH);
-	return text.length > 0 ? toPlainText(text) : undefined;
+	return text.length > 0 ? elideDataUrls(toPlainText(text), "archive") : undefined;
 }
 
 /** Build the text used to choose and preflight a font-aware snapcompact shape. */
@@ -1675,7 +1840,7 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 			: hasOmittedImages
 				? `\n${omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes)}\n`
 				: "";
-		blocks.push({ type: "text", text: toPlainText(archive.textHead) + suffix });
+		blocks.push({ type: "text", text: elideDataUrls(toPlainText(archive.textHead), "archive") + suffix });
 	} else if (hasOmittedImages && !hasImages) {
 		blocks.push({ type: "text", text: omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes) });
 	}
@@ -1692,7 +1857,7 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 			: archive.truncatedChars > 0 || hasOmittedImages
 				? "\n-------------- middle history omitted above\n"
 				: "";
-		const tail = prefix + toPlainText(archive.textTail);
+		const tail = prefix + elideDataUrls(toPlainText(archive.textTail), "archive");
 		const lastBlock = blocks[blocks.length - 1];
 		if (lastBlock?.type === "text") {
 			lastBlock.text += tail;
@@ -1834,6 +1999,29 @@ function planArchive(text: string, high: Shape, low: Shape, maxFrames: number): 
 }
 
 /**
+ * Drop `¶think:` sections from serialized archive source text.
+ *
+ * Archives written before {@link SerializeOptions.includeThinking} existed bake
+ * reasoning into their kept source; replaying it to Claude trips the
+ * `reasoning_extraction` classifier (issue #6093). Re-compaction re-renders the
+ * whole unfolded source, so scrubbing the prior text heals a poisoned session
+ * at its next compaction. Conservative by construction: only sections that
+ * start with `¶think:` at a section boundary are dropped.
+ */
+function stripThinkingSections(text: string): string {
+	return text
+		.split(NEWLINE_GLYPH)
+		.map(segment =>
+			segment
+				.split(/\n\n(?=¶(?:user|think|ai|call):)/)
+				.filter(section => !section.startsWith("¶think:"))
+				.join("\n\n"),
+		)
+		.filter(segment => segment.length > 0)
+		.join(NEWLINE_GLYPH);
+}
+
+/**
  * Run a snapcompact compaction over prepared messages. Fully local: serializes
  * the discarded history, appends it to the accumulated archive source text, and
  * re-renders that source into an ordered history layout: plain text at the
@@ -1858,11 +2046,21 @@ export async function compact<TMessage = Message>(
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
 	const serialized = serializeConversation(llmMessages, options);
 	const previousArchive = getPreservedArchive(previousPreserveData);
-	const previousText =
+	const previousTextRaw =
 		previousArchive?.text ??
 		[previousArchive?.textHead, previousArchive?.textTail]
 			.filter((part): part is string => typeof part === "string" && part.length > 0)
 			.join(NEWLINE_GLYPH);
+	// Legacy archives may carry `¶think:` sections from before includeThinking
+	// existed; scrub them when this compaction excludes thinking so the
+	// re-rendered archive stops replaying reasoning (issue #6093). They may
+	// also carry data URLs a pre-guard slice cut at any offset; heal those in
+	// archive context before the text is folded into the new source.
+	const previousTextHealed = elideDataUrls(previousTextRaw, "archive");
+	const previousText =
+		options?.includeThinking === false && previousTextHealed.length > 0
+			? stripThinkingSections(previousTextHealed)
+			: previousTextHealed;
 	const hasPreviousText = previousText.length > 0;
 	const includedPreviousSummary = !hasPreviousText && !!previousSummary;
 	const shapeProbeText = renderabilityProbeText(serialized, previousPreserveData, previousSummary);
@@ -1890,6 +2088,12 @@ export async function compact<TMessage = Message>(
 	if (hasPreviousText) {
 		archiveText = archiveText.length > 0 ? `${previousText}${NEWLINE_GLYPH}${archiveText}` : previousText;
 	}
+	// Data URLs must never reach planArchive: its edge slices are structure-
+	// blind, and a split payload replays as broken image input on every later
+	// request. previousText is already strictly healed above; this source-mode
+	// pass covers intact URLs in fresh user/assistant text, which the
+	// serializer never truncates.
+	archiveText = elideDataUrls(archiveText);
 
 	const layout = planArchive(archiveText, high, low, maxFrames);
 	truncatedChars += layout.truncatedChars;
@@ -1925,6 +2129,11 @@ export async function compact<TMessage = Message>(
 
 	const frames = await Promise.all(newFrames);
 	const totalChars = frames.reduce((sum, frame) => sum + frame.chars, 0) + textChars;
+	const frameCols: number[] = [];
+	for (const frame of frames) {
+		if (!frameCols.includes(frame.cols)) frameCols.push(frame.cols);
+	}
+	const summaryCols = frameCols.length > 0 ? frameCols.join(" or ") : geo.cols;
 
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	const files = formatFileList(readFiles, modifiedFiles, fileOps.read);
@@ -1937,7 +2146,7 @@ export async function compact<TMessage = Message>(
 			frameCount: frames.length,
 			multipleFrames: frames.length > 1,
 			docColumns: high.columns === 2,
-			cols: geo.cols,
+			cols: summaryCols,
 			rows: geo.rows,
 			sentenceInk: high.variant === "sent",
 			stopwordDimmed: high.stopwordDim === true,

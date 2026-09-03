@@ -19,12 +19,12 @@ Shared prompts MUST be written for the smallest model that consumes them — big
 
 The strongest format control never enters the prompt:
 
-| Lever | Effect |
-| --- | --- |
-| Assistant prefill (`<title>`, `{"name": `) | Commits the model into the format; kills preamble failures |
-| Stop strings + token caps | Bound runaway output better than "be brief" |
-| Greedy decoding / temp ≤0.3 | Removes the format lottery (LFM2: temp 0.3, min_p 0.15, rep. penalty 1.05) |
-| Post-processing in code | Strips quotes/punctuation/stray tags regardless of what the model emits |
+|Lever|Effect|
+|---|---|
+|Assistant prefill (`<title>`, `{"name": `)|Commits the model into the format; kills preamble failures|
+|Stop strings + token caps|Bound runaway output better than "be brief"|
+|Greedy decoding / temp ≤0.3|Removes the format lottery (LFM2: temp 0.3, min_p 0.15, rep. penalty 1.05)|
+|Post-processing in code|Strips quotes/punctuation/stray tags regardless of what the model emits|
 
 Code already neutralizes a failure mode? DELETE its rule. Each dropped rule buys headroom for the rules that matter.
 

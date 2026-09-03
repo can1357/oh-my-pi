@@ -196,6 +196,8 @@ export interface ChatCompletionContentPartText {
 	text: string;
 	/** Always `text`. */
 	type: "text";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 
 /** Image content part. */
@@ -203,6 +205,8 @@ export interface ChatCompletionContentPartImage {
 	image_url: ChatCompletionContentPartImageImageURL;
 	/** Always `image_url`. */
 	type: "image_url";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 
 /** SDK `ChatCompletionContentPartImage.ImageURL`. */
@@ -218,6 +222,8 @@ export interface ChatCompletionContentPartInputAudio {
 	input_audio: ChatCompletionContentPartInputAudioInputAudio;
 	/** Always `input_audio`. */
 	type: "input_audio";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 
 /** SDK `ChatCompletionContentPartInputAudio.InputAudio`. */
@@ -233,6 +239,8 @@ export interface ChatCompletionContentPartFile {
 	file: ChatCompletionContentPartFileFile;
 	/** Always `file`. */
 	type: "file";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 
 /** SDK `ChatCompletionContentPart.File.File`. */
@@ -251,6 +259,8 @@ export interface ChatCompletionContentPartRefusal {
 	refusal: string;
 	/** Always `refusal`. */
 	type: "refusal";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 
 /** User-message content part union. */
@@ -798,6 +808,8 @@ export interface ChatCompletionCreateParamsBase {
 	prompt_cache_key?: string;
 	/** Retention policy for the prompt cache; `24h` enables extended caching. */
 	prompt_cache_retention?: "in_memory" | "24h" | null;
+	/** Explicit prompt-cache mode and minimum lifetime for GPT-5.6+ models. */
+	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" };
 	/** Constrains effort on reasoning for reasoning models. */
 	reasoning_effort?: ReasoningEffort | null;
 	/** Output format: text, JSON mode, or Structured Outputs JSON schema. */

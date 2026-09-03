@@ -1,0 +1,108 @@
+{
+  "container": "UTOK1: magic 'UTOK1\\n' (6B), u32le entry count, then per entry varint(len)+raw token bytes; rank = entry index (contiguous, assert at pack time). Whole file zstd -19 -> data/<name>.bin.zst",
+  "o200k_base": {
+    "source": "openaipublic .tiktoken (cache/o200k_base.tiktoken)",
+    "vocab": 199998,
+    "pattern": "VERIFY against tiktoken-rs o200k_base source"
+  },
+  "cl100k_base": {
+    "source": "cache/cl100k_base.tiktoken",
+    "vocab": 100256,
+    "pattern": "VERIFY against tiktoken-rs cl100k_base source"
+  },
+  "qwen3": {
+    "source": "cache/qwen3.8.tokenizer.json (Qwen/Qwen3.8-27B; identical for Qwen3.5/3.6)",
+    "normalizer": "NFC",
+    "pre": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": false,
+          "use_regex": false
+        }
+      ]
+    },
+    "note": "HF vocab id 0 decoded to '｜' — NOT plain GPT-2 byte alphabet; agent must determine actual vocab string encoding before packing"
+  },
+  "deepseek3": {
+    "source": "cache/deepseek-v4.tokenizer.json (base BPE identical V3..V4, verified: same 128000 vocab + 127741 merges hash)",
+    "normalizer": null,
+    "pre": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "\\p{N}{1,3}"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "[一-龥぀-ゟ゠-ヿ]+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        }
+      ]
+    },
+    "addedTokensExcluded": 1283
+  },
+  "kimi_k2": {
+    "source": "cache/kimi.tiktoken.model (K3; base identical K2)",
+    "vocab": 163584,
+    "pattern": "[\\p{Han}]+|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}&&[^\\p{Han}]]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}&&[^\\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}&&[^\\p{Han}]]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}&&[^\\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+    "patternNote": "uses class intersection && plus lookahead; from tokenization_kimi.py"
+  },
+  "glm5": {
+    "source": "cache/glm-5.tokenizer.json (zai-org/GLM-5; superset of GLM-4.x, ids preserved)",
+    "vocab": 154820,
+    "normalizer": null,
+    "pre": {
+      "type": "Sequence",
+      "pretokenizers": [
+        {
+          "type": "Split",
+          "pattern": {
+            "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+          },
+          "behavior": "Isolated",
+          "invert": false
+        },
+        {
+          "type": "ByteLevel",
+          "add_prefix_space": false,
+          "trim_offsets": true,
+          "use_regex": false
+        }
+      ]
+    },
+    "ignore_merges": true
+  }
+}

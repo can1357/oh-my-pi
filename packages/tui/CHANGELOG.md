@@ -1,6 +1,397 @@
 # Changelog
 
 ## [Unreleased]
+
+## [18.1.5] - 2026-09-03
+
+### Fixed
+
+- Fixed terminal query support in supervised PTY processes, including cursor position reports.
+- Fixed paste-and-submit handling so an Enter keypress received with a bracketed paste is delivered to the previously focused component; `Editor.onLargePaste` now receives `PasteOptions` describing the queued submit.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed the TUI tearing in Herdr panes so the live viewport updates as one frame instead of leaving the top frozen while only the bottom refreshed. Pane identity vars (`HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`) also count as inside Herdr, not only `HERDR_ENV=1`. A DECRPM “unrecognized” report keeps synchronized output on; a “permanently reset” report, or a custom terminal that omits the DECRPM status, still turns it off.
+
+## [18.1.0] - 2026-09-01
+
+### Fixed
+
+- Improved terminal stability when resuming image-heavy sessions, preventing large transcript repaints from being mistaken for stalled output or exceeding the terminal output limit.
+- Fixed inline images leaving blank rows in Herdr panes when resuming or rendering sessions in nested terminals.
+- Fixed the TUI crashing on reference-style Markdown links whose labels match JavaScript built-in names; these links now render safely as plain text.
+- Fixed fatal cleanup leaving the cursor inside a focused input before error output is displayed.
+- Fixed resumed sessions showing stale background bands until the next keypress in WSL and Windows Terminal.
+
+## [18.0.11] - 2026-08-29
+
+### Added
+
+- Added `setTerminalHyperlinks()` to let hosts control OSC 8 hyperlink behavior in rendered Markdown links.
+
+### Fixed
+
+- Fixed inline color swatches appearing for words with hex-like prefixes, such as `#each`; swatches now appear only when the entire word is a valid color.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Press the Right Arrow at the end of a line to accept autocomplete suggestions, inline ghost-text completions, and spelling corrections, just like Tab.
+- Added a smooth brand-color transition and an elapsed turn timer to the status line while the agent is working.
+- Added a full-width “band” composer style for flush status lines.
+
+## [18.0.9] - 2026-08-28
+
+### Added
+
+- Exported TuiDebugServer for programmatic headless control
+- Added debug demonstration script to examples
+- Added an `OMP_TUI_DEBUG` Unix socket for headless TUI driving and structured inspection.
+
+### Changed
+
+- Inline hex colors now render with VS Code-style colored backgrounds and automatically selected black or white text for readability, alongside the color swatch.
+- LaTeX text formatting commands such as \textbf, \textit, \textsl, and \emph now render as terminal bold or italic text.
+
+### Fixed
+
+- Fixed inline color swatches rendering incorrectly inside highlighted lines.
+- Fixed terminal resizing in tmux panes and Windows consoles duplicating the current in-progress turn in scrollback.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- `ProcessTerminal` accepts a `conpty` option to force ConPTY-hosted behavior on or off, keeping terminal tests hermetic on WSL where live env detection would otherwise flip kitty-keyboard flags and write chunking ([#9887](https://github.com/can1357/oh-my-pi/issues/9887)).
+
+### Fixed
+
+- Fixed pending-work animations repeatedly composing expensive frames without applying their full render cost to CPU backpressure.
+- Fixed unfinished live viewport rows entering tmux pane history and duplicating streamed output ([#9780](https://github.com/can1357/oh-my-pi/issues/9780)).
+
+## [18.0.7] - 2026-08-26
+
+### Breaking Changes
+
+- Removed the `inlineMathSpanEnd` and `mathStartIndex` exports; the math delimiter grammar now lives in `@oh-my-pi/pi-utils/math-delimiters`.
+
+### Fixed
+
+- Math spans now end at the first unescaped delimiter, so a TeX row break no longer closes a span early: `\(a \\) b\)` renders as one equation, and an escaped `\$` no longer ends `$$…$$`.
+- Fixed image previews displaying as garbled characters in Paseo terminals.
+- Fixed terminal resizing from duplicating committed history in native scrollback.
+- Fixed autocomplete suggestions for bare-name skills such as `/batch` when no command matches the prefix more strongly.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added `Markdown.getLastRenderStableText()` to expose the stable prefix of streamed Markdown text for append-only transcript publication.
+
+## [18.0.5] - 2026-08-25
+
+### Breaking Changes
+
+- Renamed the public `TerminalFrameProvider.resetHistory` method to `beginHistoryReplay`.
+
+### Added
+
+- Loader messages can now be provided as a function, allowing dynamic labels such as live countdowns to update on each spinner tick while preserving the existing behavior for static strings.
+
+### Changed
+
+- Improved history replay and terminal output handling so replayed content is rendered efficiently and complete replay results are written together.
+
+### Fixed
+
+- Fixed graceful shutdown so finalized output is correctly retired before handing control back to the shell.
+- Fixed terminal scrollback corruption during shutdown, tmux pane zoom and resize, and destructive screen resets, preventing duplicated frames, lost history, and stale transcript re-streaming.
+- Fixed streaming Markdown rendering at chunk boundaries to preserve CommonMark emphasis behavior for Unicode text and correctly recognize GFM tables as they are completed.
+
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Significantly improved streaming Markdown rendering performance by caching unchanged rows, resuming boundary walks, and inspecting only text deltas for guard scans and OSC 8 normalization.
+
+### Fixed
+
+- Fixed TUI aborting when syntax highlighting fails during Markdown rendering by falling back to unhighlighted text.
+- Fixed Korean IME cursor drift in Orca by properly matching two-cell Hangul Compatibility Jamo rendering.
+
+## [18.0.3] - 2026-08-23
+
+### Fixed
+
+- Fixed inline images vanishing from the transcript and scrollback when the session exits: stop no longer deletes transmitted Kitty images from the terminal's graphics store.
+
+## [18.0.2] - 2026-08-23
+
+### Fixed
+
+- Fixed visible history being erased when enlarging the terminal.
+
+## [18.0.1] - 2026-08-23
+
+### Added
+
+- Collapsed individual skill commands into a `/skill:` namespace entry to declutter suggestions
+- Added `TUI.renderNow()` for terminal-safe synchronous priority frames that retain resize debounce, output-backlog, and image deferral safeguards.
+
+### Changed
+
+- Improved slash command autocompletion to chain suggestions after selecting a namespace
+- Replaced the native-scrollback inference API (`NativeScrollback*` interfaces and the scrollback rebuild/resize settings hooks) with explicit `TerminalFramePlan` history batches.
+- Post-resize repaints now recover the reflowed viewport anchor with a cursor-position report (DSR) instead of trusting stale grid coordinates, so a settled resize no longer duplicates the editor/status rows on screen.
+- History appends that overflow the screen erase the old live viewport first, so a scroll can only push committed rows and blanks into scrollback, never an unfinished frame.
+
+### Fixed
+
+- Fixed consecutive prompt submissions being skipped by persistent history, allowing the latest project metadata to replace the previous entry without duplicating editor navigation history.
+- Fixed the history drain stalling on idle screens: accepting a batch now pumps the next frame, so a large resumed transcript retires to terminal history instead of pinning the live viewport in its emergency aggregate.
+- Fixed fuzzy matching so a qualifying whole-word hit is not hidden by an earlier mid-word occurrence ([#8465](https://github.com/can1357/oh-my-pi/pull/8465) by [@Mustaqeem66](https://github.com/Mustaqeem66)).
+- Fixed stray characters appearing in the terminal viewport during title updates
+- Fixed editor input lag when autocomplete providers are slow by keeping only the latest pending lookup.
+- Fixed pasting an image in kitty occasionally spraying base64 text into the composer alongside the image attachment: a kitty OSC 5522 clipboard packet torn by the incomplete-escape flush is now discarded up to its terminator instead of being replayed as keystrokes.
+- Fixed Kitty OSC 66 headings activating before the host explicitly enables text sizing.
+- Markdown streaming renderer now scans only the mutable tail (not the full document) for reference-link definitions and CR on every frame, eliminating the O(n²) `RegExp.test` cost that accounted for ~26% CPU during active streaming ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
+
+## [18.0.0] - 2026-08-22
+
+### Breaking Changes
+
+- Changed native macOS spelling and completion functions to return Promises.
+- Updated `EditorTextAssistProvider.tryAutocorrect` signature to receive editor state instead of raw text.
+- Updated `Editor.decorateText` signature to provide line and column context instead of raw text.
+
+### Added
+
+- Added `EditorTextAssistProvider` with spelling suggestion support (`ctrl+.`), word replacement choices, and async autocorrection handling.
+- Added `Terminal.pendingOutputBytes` and an output-backpressure render gate to drop stale frames on slow terminals.
+- Added `deferInput` startup option and `enableInput()` across `Terminal`, `TUI`, and `TUIStartOptions` to improve startup responsiveness.
+- Added icon support and customizable theming to autocomplete and select lists.
+- Added `MarkdownTheme.createHighlightStream` for incremental syntax highlighting of completed lines in streaming Markdown code blocks.
+- Added `maxDescriptionRows` option to `SelectList` layouts to truncate wrapped descriptions with an ellipsis.
+- Added `commandUsage` ranking callback support to `CombinedAutocompleteProvider` to prioritize frequently used slash commands.
+- Added `Editor.viewportRowsProvider` to constrain autocomplete dropdowns within the available terminal height.
+- Added `Editor.setTheme()` to dynamically change themes without recreating the editor or losing draft content.
+
+### Changed
+
+- Adjusted word completion to skip appending a trailing space when the following character is punctuation.
+- Increased default autocomplete dropdown height from 5 to 10 items.
+
+### Fixed
+
+- Fixed TUI freezing during large repaints on slow or occluded terminals by moving stdout writes to an off-thread writer.
+
+## [17.4.4] - 2026-08-22
+
+### Added
+
+- Added `setResizeScrollback()` / `ResizeScrollbackMode` (`PI_TUI_RESIZE_SCROLLBACK` env initializer) controlling what a settled in-place width resize does to native scrollback, which the host rewraps naively at the old width: `append` replays the transcript at the settled width below the old-wrap history, `rebuild` clears pane history first (ED3) so it holds exactly one current-width copy, and `preserve` repaints the viewport only with zero history growth. The raw engine defaults to `preserve`; the coding agent's `tui.resizeScrollback` setting (default `append`) governs interactive sessions.
+
+### Fixed
+
+- `visibleWidth` now measures APC sequences (Kitty graphics commands, cursor markers) as zero cells instead of counting their payload as printable text, matching the native width engine.
+- Kitty Unicode-placeholder rows with long styled prefixes (e.g. bordered thumbnail cards) are recognized as image lines again, keeping them on the verbatim render path instead of SGR coalescing/truncation.
+- Fixed multiplexer width-epoch resolution failing for every real component tree, which forced the conservative full-transcript replay (and one duplicated transcript copy in pane history) on every settled width resize: leading children without a width-epoch revision are no longer validated by width-dependent row counts (reflow is not mutation — identity plus the revision, when reported, is the stability proof), and `Markdown` now reports a width-independent mutation revision so it can sit above an epoch source ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Editor atom table: `insertAtom`/`registerAtom` stage compact atomic tokens whose registered expansion is emitted on submit (`getExpandedText`), alongside the existing paste-marker store.
+
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- Added optional `getNativeScrollbackLiveRegionPinnedStart()` hook to allow nested transcripts to pin a later dashboard without shifting the earliest live seam.
+
+## [17.4.0] - 2026-08-20
+
+### Added
+
+- Added composer border styles (`box`, `claude`, `pi`, `borderless`) via `ComposerStyle` objects and `getComposerStyle`, unifying chrome geometry and rendering across the editor and previews.
+- Added support for warning risk notes and row markers in settings lists.
+
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- Fixed images rendering as the `[Image: …]` text card on SIXEL terminals that expose no identifying environment variable (foot, xterm, contour): the graphics probe no longer requires Windows Terminal, and no longer reads an XTSMGRAPHICS success reply as a failure.
+- Fixed the multiline editor ignoring a `tui.input.submit` remap onto Ctrl+Enter: the hardcoded Ctrl/Shift+Enter → newline fallbacks now yield to an explicit submit binding, so Ctrl+Enter can be used to submit ([#8906](https://github.com/can1357/oh-my-pi/issues/8906)).
+
+## [17.3.5] - 2026-08-16
+
+### Fixed
+
+- Fixed long CPU-bound event-loop stalls being misclassified as system sleep and omitted from loop-blocked diagnostics.
+- Fixed focused components with markers falling back to full-screen redraws instead of direct row updates, preserving cursor position and native scrollback across marker changes.
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed a terminal Device-Attributes reply leaking into the composer as literal text (e.g. `1;22;…;52c`) when it arrived after the startup capability-probe sentinel FIFO drained, a race made observable by the added latency of an SSH/zmx PTY chain. DA1 replies (`CSI ? … c`) and split private-CSI responses are now consumed for the whole session lifetime, not only while a probe sentinel is outstanding ([#8542](https://github.com/can1357/oh-my-pi/issues/8542)).
+
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Fixed Gemini reports rendering their final headings and tables as one raw code block when the model emitted a lone closing Markdown fence without its opener.
+
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed screen flashing in Herdr panes during transcript streaming.
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.
+- Fixed an issue where scaled OSC 66 Markdown headings (such as "Large Headings" on Kitty) would render as invisible placeholders or get partially cleared after a redraw or terminal resize.
+
+## [17.2.13] - 2026-08-11
+
+### Fixed
+
+- Fixed inline images rendering permanently cropped on Kitty direct-placement terminals (WezTerm, Warp) when an image block straddled the viewport top during streaming: placements are now clipped to the visible slice at write time, and a placement id whose cells reached native scrollback is never re-used ([#8070](https://github.com/can1357/oh-my-pi/pull/8070) by [@voonfoo](https://github.com/voonfoo))
+
+## [17.2.12] - 2026-08-08
+
+### Fixed
+
+- Fixed slow Loader paints exceeding their cost-aware CPU duty cycle on WSL/ConPTY when a 200 ms backpressure cap was shorter than the proportional delay ([#8012](https://github.com/can1357/oh-my-pi/issues/8012)).
+- Fixed display-math (`$$…$$`) fractions rendering as fragmented text when the numerator and denominator are written on separate source lines: `latexToBlock` treated the top-level newline between `\frac{num}` and `{den}` as a row break, severing `\frac` from its denominator. Such argument-continuation newlines are now preserved so the fraction stays stacked ([#7996](https://github.com/can1357/oh-my-pi/issues/7996)).
+
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Fixed an issue where Herdr panes lost native terminal scrollback during TUI transcript replacements or resize redraws.
+- Fixed an issue inside tmux where explicit display resets retained stale light/dark palettes and leaked terminal capability bytes into the editor.
+
+## [17.2.10] - 2026-08-06
+
+### Fixed
+
+- Fixed a startup crash (EIO error) in multiplexer or SSH sessions when a revoked pty leaves stdin.isTTY active.
+- Fixed prompt autocomplete to support Windows drive-absolute paths (e.g., C:/ or C:\).
+- Fixed desktop notifications in systemd, tmux, or SSH-attached Linux sessions when DBUS_SESSION_BUS_ADDRESS is unset.
+- Fixed an issue where Shift+letter and shifted symbol inputs (such as capital letters, ?, and !) were silently dropped on Windows and WSL terminals using ConPTY (e.g., WezTerm).
+
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Fixed table borders (and adjacent cells) inheriting an open inline-code color when a cell's content wraps mid-code-span, by terminating each wrapped cell line's SGR state before the border glyphs ([#7575](https://github.com/can1357/oh-my-pi/issues/7575)).
+- Fixed inline images not rendering under WSL + Windows Terminal: the SIXEL capability probe gated on `process.platform === "win32"`, but WSL reports `linux`, so the probe never ran and images fell back to the text placeholder even on Sixel-capable Windows Terminal. The probe now runs on any ConPTY host (native win32 or WSL) ([#6009](https://github.com/can1357/oh-my-pi/issues/6009)).
+
+## [17.2.5] - 2026-08-03
+
+### Fixed
+
+- Fixed Kitty and Ghostty keyboard shortcuts on non-Latin keyboard layouts by requesting base-layout key reporting from the terminal.
+
+## [17.2.4] - 2026-08-01
+
+### Fixed
+
+- Fixed animated Loader paints saturating a CPU core on slow WSL/ConPTY terminals by applying cost-aware cadence backpressure while preserving 30fps on cheap frames ([#7290](https://github.com/can1357/oh-my-pi/issues/7290)).
+- Fixed interactive terminals suppressing all output and input when the host project sets `NODE_ENV=test` or `BUN_ENV=test` ([#7261](https://github.com/can1357/oh-my-pi/issues/7261)).
+
+## [17.2.2] - 2026-07-31
+
+### Added
+
+- Added request tokens to explicit OSC 11 appearance refreshes to allow consumers to correlate responses across queued and coalesced terminal probes.
+
+### Fixed
+
+- Fixed the event-loop watchdog incorrectly reporting system sleep or suspension as a synchronous ui.loop-blocked stall.
+- Fixed terminal copies of fenced-code blocks retaining margins from components, lists, or blockquotes in assistant messages (#7055 by @GratefulDave).
+
+## [17.2.0] - 2026-07-30
+
+### Added
+
+- Added response-level OSC 11 appearance subscriptions to help terminal consumers distinguish confirmed unchanged background classifications from missing replies.
+
+### Fixed
+
+- Fixed native Windows terminal panes freezing their host during forced closure by skipping the stdout-drain wait after ConPTY disconnects.
+- Fixed high CPU usage in the Loader spinner during idle waits by optimizing text wrapping and caching during frame updates.
+- Fixed hash-prefixed UUIDs in prose being misclassified as 8-digit CSS colors and receiving spurious swatches.
+- Fixed unbounded memory growth and potential host freezes when a PTY consumer stalls by capping the pending stdout backlog and treating undrained consumers as a disconnect.
+
+## [17.1.8] - 2026-07-28
+
+### Fixed
+
+- Fixed wrapped Markdown list continuations losing their hanging indentation in narrow terminal layouts.
+- Fixed an issue where emergency exits from fullscreen overlays could leave the Kitty keyboard protocol active, corrupting Arrow Up input in the terminal after exiting.
+
+## [17.1.7] - 2026-07-27
+
+### Added
+
+- Added bulk-input fast path and iterative processing for bracketed paste in the editor
+- Added windowed incremental lexing for large markdown documents
+
+### Changed
+
+- Eliminated the dominant markdown streaming CPU cost (73% of a profiled interactive session): marked's GFM `url` tokenizer and `lheading` rule are now gated by O(1)/O(n) charCode pre-checks, the pathological `hr`/`lheading`/`table`/`html` block rules use sticky clones that fail at offset 0 instead of rescanning the source, and the inline math/autolink `start()` scans dropped their regex alternations
+- Streaming markdown now freezes the stable prefix through provably closed lists instead of re-lexing everything after the last non-list block on every delta
+- Raised the markdown render cache entry budget (32 KiB → 256 KiB) so large messages — exactly the expensive renders — are cacheable
+- Deduplicated terminal cursor-visibility writes to skip redundant escape sequences
+
+## [17.1.6] - 2026-07-27
+
+### Fixed
+
+- Fixed omp dying with an uncaught `setRawMode failed with errno: 2` instead of exiting 129 when the terminal disconnects. A recycled terminal pane revokes the pty, so the raw-mode restore in `stop()` hit an fd that is no longer a tty; the throw escaped `#markTerminalDisconnected()` and preempted its own SIGHUP. Terminal teardown on the disconnect path is now best-effort, matching `emergencyTerminalRestore()`, so the exit added in [#5837](https://github.com/can1357/oh-my-pi/pull/5837) always runs.
+- Fixed the multi-line prompt editor bypassing the keybindings registry for word/line delete and yank: `ctrl+backspace` (a declared default of `tui.editor.deleteWordBackward`) never fired and `keybindings.yml` remaps of `deleteWordBackward`, `deleteWordForward`, `deleteToLineStart`, `deleteToLineEnd`, `yank`, and `yankPop` were ignored, because those actions were matched with hardcoded chords instead of `keybindings.matches(...)` like cursor motion and the single-line `Input` already do ([#6782](https://github.com/can1357/oh-my-pi/issues/6782)).
+- Restored the Windows Terminal raw `0x08` → `ctrl+backspace` disambiguation (`WT_SESSION` set, `SSH_*` unset) by routing the exported `matchesRawBackspace` helper through the `matchesKey`/`parseKey` seam. Remote SSH/container sessions where terminal identity is unavailable can opt in with `PI_TUI_RAW_BACKSPACE_IS_CTRL=1` ([#6782](https://github.com/can1357/oh-my-pi/issues/6782)).
+- Fixed plain Backspace deleting a whole word inside tmux/GNU screen/Zellij panes launched from Windows Terminal: multiplexers inherit `WT_SESSION` but emit raw `0x08` for plain Backspace, so the automatic raw-backspace → `ctrl+backspace` heuristic misfired. The heuristic now skips multiplexer sessions (`TMUX`/`STY`/`ZELLIJ` or `TERM` starting with `tmux`/`screen`); `PI_TUI_RAW_BACKSPACE_IS_CTRL=1` remains the explicit opt-in everywhere ([#6784](https://github.com/can1357/oh-my-pi/pull/6784)).
+
+## [17.1.4] - 2026-07-26
+
+### Fixed
+
+- Prevented inline Kitty graphics from covering full-width overlays such as `/switch`.
+- Fixed Ctrl+O (expand tools) truncating the session on ConPTY hosts (native Windows and WSL): the full-view replay routed through the ConPTY frame-truncation intended only for bulk transcript-replacement paints (issue #2115), dropping every row above the retained tail behind an "older lines hidden" marker. The bound now keys on paint intent — bulk replacements (initial resume, `/resume`, handoff, resize geometry rebuilds) stay bounded, while a user-driven `resetDisplay()` (Ctrl+O expand, thinking/setting toggles, display reset) replays the whole transcript ([#4863](https://github.com/can1357/oh-my-pi/issues/4863)).
+
+## [17.1.2] - 2026-07-24
+
+### Fixed
+
+- Fixed the terminal flickering when leaving a fullscreen overlay (e.g. `/settings`, the models page) or resizing on terminals that re-report their size whenever the alternate screen buffer toggles: the alt-toggle size echo no longer arms a destructive full-screen (ED3) rebuild, and the in-place repaint path is now auto-detected for any such terminal instead of only Warp ([#6511](https://github.com/can1357/oh-my-pi/issues/6511)).
+
+## [17.1.1] - 2026-07-24
+
+### Fixed
+
+- Fixed WarpTerminal wrapping streamed Compatibility Jamo at the platform-default width instead of its rendered one-cell width ([#6461](https://github.com/can1357/oh-my-pi/issues/6461)).
+
+## [17.1.0] - 2026-07-24
+
+### Added
+
+- Added Text.setStyleFn() to apply foreground stylers at render time, allowing components to dynamically re-resolve colors after invalidation instead of baking in the palette active at construction.
+
+### Fixed
+
+- Fixed an issue where exiting or tearing down the TUI left the terminal in cursor-key/keypad application mode (DECCKM), which broke arrow keys in the parent shell. Both stop() and emergencyTerminalRestore() now correctly emit standard rmkx resets.
+
+## [17.0.9] - 2026-07-23
+
 ### Added
 
 - Added `SelectList.setMaxVisible()` so hosts can refit the visible row budget to available height after construction.

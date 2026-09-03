@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import {
 	convertCodexResponsesMessages,
 	streamOpenAICodexResponses,
@@ -10,7 +11,6 @@ import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "@oh
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -610,6 +610,56 @@ describe("OpenAI responses history payload", () => {
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
 
+	it("preserves encrypted_function_args on replayed Codex function calls", () => {
+		// codex-rs #35845: an empty `encrypted_function_args` array marks plaintext
+		// collaboration arguments; the marker must survive replay verbatim or the
+		// backend would treat the replayed arguments as encrypted.
+		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		const nativeItems = [
+			{
+				type: "function_call",
+				id: "fc_plaintext_1",
+				call_id: "call_plaintext_collab",
+				name: "send_message",
+				namespace: "collaboration",
+				arguments: JSON.stringify({ message: "hello", task_name: "worker" }),
+				encrypted_function_args: [],
+				status: "completed",
+			},
+			{
+				type: "function_call_output",
+				call_id: "call_plaintext_collab",
+				output: "delivered",
+			},
+		];
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "fallback should not be replayed" }],
+					api: "openai-codex-responses",
+					provider: "openai-codex",
+					model: codexModel.id,
+					usage: issue5002ZeroUsage,
+					stopReason: "stop",
+					providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", nativeItems),
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "continue", timestamp: Date.now() },
+			],
+		};
+
+		const input = convertCodexResponsesMessages(codexModel, context);
+		expect(findResponsesInputItemByCallId(input, "function_call", "call_plaintext_collab")).toEqual({
+			type: "function_call",
+			call_id: "call_plaintext_collab",
+			name: "send_message",
+			namespace: "collaboration",
+			arguments: JSON.stringify({ message: "hello", task_name: "worker" }),
+			encrypted_function_args: [],
+		});
+	});
+
 	it("prepends multiple OpenAI developer instructions in order without changing prompt cache key routing", async () => {
 		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const payload = (await captureResponsesPayload(
@@ -676,8 +726,8 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("drops unfinished image generation calls from replayed native history", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+	it("normalizes result-bearing native images for full Codex replay", () => {
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		const context: Context = {
 			messages: [
 				{ role: "user", content: "first user", timestamp: Date.now() },
@@ -692,36 +742,43 @@ describe("OpenAI responses history payload", () => {
 							id: "ig_generating",
 							type: "image_generation_call",
 							status: "generating",
-							action: "generate",
+						},
+						{
+							id: "ig_stale_result",
+							type: "image_generation_call",
+							status: "generating",
+							result: "stale-result-image",
 						},
 						{
 							id: "ig_completed",
 							type: "image_generation_call",
 							status: "completed",
-							result: "base64-image",
-							action: "generate",
-							background: "opaque",
-							output_format: "png",
-							quality: "medium",
+							result: "completed-image",
 						},
 					],
-					true,
+					false,
+					"openai-codex",
+					model.id,
 				),
 				{ role: "user", content: "follow-up user", timestamp: Date.now() },
 			],
 		};
-		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
-		const imageGenerationItems = payload.input?.filter(item => {
-			if (!item || typeof item !== "object") return false;
-			return (item as { type?: unknown }).type === "image_generation_call";
-		});
+		const imageGenerationItems = convertCodexResponsesMessages(model, context).filter(
+			item => item.type === "image_generation_call",
+		);
 
 		expect(imageGenerationItems).toEqual([
+			{
+				id: "ig_stale_result",
+				type: "image_generation_call",
+				status: "completed",
+				result: "stale-result-image",
+			},
 			{
 				id: "ig_completed",
 				type: "image_generation_call",
 				status: "completed",
-				result: "base64-image",
+				result: "completed-image",
 			},
 		]);
 	});
@@ -944,9 +1001,9 @@ describe("OpenAI responses history payload", () => {
 		const payload = (await captureResponsesPayload(model, incrementalContext)) as { input?: unknown[] };
 		expect(payload.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "first question" }] },
-			...incrementalItems1.map(({ id: _id, ...item }) => item),
+			...incrementalItems1.map(({ id: _id, status: _status, ...item }) => item),
 			{ role: "user", content: [{ type: "input_text", text: "second question" }] },
-			...incrementalItems2.map(({ id: _id, ...item }) => item),
+			...incrementalItems2.map(({ id: _id, status: _status, ...item }) => item),
 			{ role: "user", content: [{ type: "input_text", text: "third question" }] },
 		]);
 	});
@@ -1125,13 +1182,15 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("strips replay-only ids and item references while preserving paired call_id values", async () => {
+	it("strips output-only replay metadata while preserving paired call_id values", async () => {
 		const opaqueReasoningId = `item_${"copilot/reasoning+token=".repeat(8)}`;
 		const opaqueMessageId = `item_${"copilot/message+opaque=".repeat(8)}`;
 		const opaqueCallId = `call_${"copilot/tool-call+opaque/=".repeat(8)}`;
 		const opaqueFunctionItemId = `item_${"copilot/function-item+opaque/=".repeat(8)}`;
+		const opaqueCustomCallId = `call_${"copilot/custom-call+opaque/=".repeat(8)}`;
+		const opaqueCustomItemId = `item_${"copilot/custom-item+opaque/=".repeat(8)}`;
 		const replayHistoryItems: Array<Record<string, unknown>> = [
-			{ type: "reasoning", id: opaqueReasoningId, encrypted_content: "enc_opaque" },
+			{ type: "reasoning", id: opaqueReasoningId, encrypted_content: "enc_opaque", status: "completed" },
 			{
 				type: "message",
 				role: "assistant",
@@ -1148,6 +1207,29 @@ describe("OpenAI responses history payload", () => {
 				status: "completed",
 			},
 			{ type: "function_call_output", id: "fco_should_be_removed", call_id: opaqueCallId, output: "72F" },
+			{
+				type: "custom_tool_call",
+				id: opaqueCustomItemId,
+				call_id: opaqueCustomCallId,
+				name: "apply_patch",
+				input: "*** Begin Patch\n*** End Patch\n",
+				status: "completed",
+			},
+			{
+				type: "custom_tool_call_output",
+				call_id: opaqueCustomCallId,
+				output: "patch applied",
+			},
+			{
+				type: "compaction",
+				encrypted_content: "encrypted-compaction",
+				status: "completed",
+			},
+			{
+				type: "compaction_summary",
+				summary: "compacted context",
+				status: "completed",
+			},
 			{ type: "item_reference", id: opaqueMessageId },
 		];
 		const context: Context = {
@@ -1163,36 +1245,182 @@ describe("OpenAI responses history payload", () => {
 		const messageItem = findResponsesInputItem(payload.input, "message");
 		const functionCallItem = findResponsesInputItem(payload.input, "function_call");
 		const functionCallOutputItem = findResponsesInputItem(payload.input, "function_call_output");
+		const customToolCallItem = findResponsesInputItem(payload.input, "custom_tool_call");
 		const itemReference = findResponsesInputItem(payload.input, "item_reference");
+		const compactionItem = findResponsesInputItem(payload.input, "compaction");
+		const compactionSummaryItem = findResponsesInputItem(payload.input, "compaction_summary");
 		const expectedCallId = truncateResponseItemId(opaqueCallId, "call");
 
 		expect(reasoningItem).toBeDefined();
 		expect(messageItem).toBeDefined();
 		expect(functionCallItem).toBeDefined();
 		expect(functionCallOutputItem).toBeDefined();
+		expect(customToolCallItem).toBeDefined();
 		expect(reasoningItem?.id).toBeUndefined();
 		expect(messageItem?.id).toBeUndefined();
 		expect(functionCallItem?.id).toBeUndefined();
 		expect(functionCallOutputItem?.id).toBeUndefined();
 		expect(itemReference).toBeUndefined();
+		expect(reasoningItem).not.toHaveProperty("status");
+		expect(messageItem).not.toHaveProperty("status");
+		expect(functionCallItem).not.toHaveProperty("status");
+		expect(customToolCallItem).not.toHaveProperty("status");
+		expect(compactionItem).not.toHaveProperty("status");
+		expect(compactionSummaryItem).not.toHaveProperty("status");
 		expect(
 			(payload.input ?? []).some(
 				item => item && typeof item === "object" && "id" in (item as Record<string, unknown>),
 			),
 		).toBe(false);
 		expect(reasoningItem?.encrypted_content).toBe("enc_opaque");
+		expect(compactionItem?.encrypted_content).toBe("encrypted-compaction");
+		expect(compactionSummaryItem?.summary).toBe("compacted context");
 		expect(functionCallItem).toBeDefined();
 		expect(functionCallItem!.call_id).toBe(expectedCallId);
 		expect(functionCallOutputItem?.call_id).toBe(expectedCallId);
+		expect(customToolCallItem?.call_id).toBe(truncateResponseItemId(opaqueCustomCallId, "call"));
 		expect((functionCallItem!.call_id as string).length).toBeLessThanOrEqual(64);
 		expect(containsAssistantOutputText(payload.input, "Sanitized assistant answer")).toBe(true);
 		expect(replayHistoryItems[0]?.id).toBe(opaqueReasoningId);
 		expect(replayHistoryItems[1]?.id).toBe(opaqueMessageId);
 		expect(replayHistoryItems[2]?.id).toBe(opaqueFunctionItemId);
 		expect(replayHistoryItems[2]?.call_id).toBe(opaqueCallId);
+		expect(replayHistoryItems[1]?.status).toBe("completed");
+		expect(replayHistoryItems[2]?.status).toBe("completed");
 		expect(replayHistoryItems[3]?.id).toBe("fco_should_be_removed");
 		expect(replayHistoryItems[3]?.call_id).toBe(opaqueCallId);
-		expect(replayHistoryItems[4]?.id).toBe(opaqueMessageId);
+		expect(replayHistoryItems[4]?.status).toBe("completed");
+		expect(replayHistoryItems[6]?.status).toBe("completed");
+		expect(replayHistoryItems[7]?.status).toBe("completed");
+		expect(replayHistoryItems[8]?.id).toBe(opaqueMessageId);
+	});
+
+	it("preserves the reasoning ID linked to a native computer call in the next request", async () => {
+		const nativeComputerHistory = [
+			{
+				type: "reasoning",
+				id: "rs_interrupted_computer_turn",
+				summary: [],
+				encrypted_content: "encrypted-computer-reasoning",
+				status: "completed",
+			},
+			{
+				type: "computer_call",
+				id: "cu_interrupted_computer_turn",
+				call_id: "call_interrupted_computer_turn",
+				action: { type: "screenshot" },
+				pending_safety_checks: [],
+				status: "completed",
+			},
+			{
+				type: "computer_call_output",
+				call_id: "call_interrupted_computer_turn",
+				output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+			},
+		];
+		const context: Context = {
+			messages: [
+				makeAssistantMessage(nativeComputerHistory, false, "openai", "gpt-5.4"),
+				{ role: "user", content: "continue after interrupt", timestamp: Date.now() },
+			],
+		};
+
+		const model = getOpenAIReasoningModel("openai", "gpt-5.4");
+		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
+
+		expect(payload.input).toEqual([
+			{
+				type: "reasoning",
+				id: "rs_interrupted_computer_turn",
+				summary: [],
+				encrypted_content: "encrypted-computer-reasoning",
+			},
+			{
+				type: "computer_call",
+				id: "cu_interrupted_computer_turn",
+				call_id: "call_interrupted_computer_turn",
+				action: { type: "screenshot" },
+				pending_safety_checks: [],
+				status: "completed",
+			},
+			{
+				type: "computer_call_output",
+				call_id: "call_interrupted_computer_turn",
+				output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+			},
+			{ role: "user", content: [{ type: "input_text", text: "continue after interrupt" }] },
+		]);
+	});
+
+	it("preserves linked reasoning when the screenshot is a later tool result", async () => {
+		const context: Context = {
+			messages: [
+				{
+					...makeAssistantMessage(
+						[
+							{
+								type: "reasoning",
+								id: "rs_split_computer_turn",
+								summary: [],
+								encrypted_content: "encrypted-split-computer-reasoning",
+								status: "completed",
+							},
+							{
+								type: "computer_call",
+								id: "cu_split_computer_turn",
+								call_id: "call_split_computer_turn",
+								action: { type: "screenshot" },
+								pending_safety_checks: [],
+								status: "completed",
+							},
+						],
+						true,
+						"openai",
+						"gpt-5.4",
+					),
+					content: [
+						{
+							type: "toolCall" as const,
+							id: "call_split_computer_turn|cu_split_computer_turn",
+							name: "computer",
+							arguments: { actions: [{ type: "screenshot" }] },
+							providerMetadata: {
+								type: "computer" as const,
+								providerItemId: "cu_split_computer_turn",
+								actions: [{ type: "screenshot" as const }],
+								pendingSafetyChecks: [],
+							},
+						},
+					],
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_split_computer_turn|cu_split_computer_turn",
+					toolName: "computer",
+					content: [{ type: "image", data: "AAEC", mimeType: "image/png" }],
+					isError: false,
+					timestamp: Date.now(),
+					providerMetadata: {
+						type: "computer",
+						screenshot: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+						acknowledgedSafetyChecks: [],
+					},
+				},
+				{ role: "user", content: "continue after split persistence", timestamp: Date.now() },
+			],
+		};
+
+		const model = getOpenAIReasoningModel("openai", "gpt-5.4");
+		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
+
+		expect(findResponsesInputItem(payload.input, "reasoning")?.id).toBe("rs_split_computer_turn");
+		expect(findResponsesInputItem(payload.input, "computer_call")).toMatchObject({
+			id: "cu_split_computer_turn",
+			call_id: "call_split_computer_turn",
+		});
+		expect(findResponsesInputItem(payload.input, "computer_call_output")).toMatchObject({
+			call_id: "call_split_computer_turn",
+		});
 	});
 
 	it("backward compat: old full-snapshot payloads still replace history for legacy same-provider assistant turns", async () => {
@@ -1386,5 +1614,64 @@ describe("OpenAI responses history payload", () => {
 			);
 		}) as { content?: string } | undefined;
 		expect(note?.content).toContain(orphanOutput);
+	});
+
+	it("honors strict pairing overrides against opposite catalog defaults", async () => {
+		const orphanCallId = "call_override_orphan";
+		const orphanOutput = "orphan result";
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: orphanCallId, name: "read", arguments: { path: "README.md" } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5-mini",
+					usage: issue5002ZeroUsage,
+					stopReason: "toolUse",
+					providerPayload: createOpenAIResponsesHistoryPayload(
+						"openai",
+						[{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] }],
+						false,
+					),
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: orphanCallId,
+					toolName: "read",
+					content: [{ type: "text", text: orphanOutput }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		};
+		const catalogNonStrictModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const catalogStrictModel: Model<"openai-responses"> = {
+			...catalogNonStrictModel,
+			compat: { ...catalogNonStrictModel.compat, strictResponsesPairing: true },
+		};
+		const strictOverridePayload = (await captureResponsesPayload(catalogNonStrictModel, context, undefined, {
+			strictResponsesPairing: true,
+		})) as { input?: unknown[] };
+		const nonStrictOverridePayload = (await captureResponsesPayload(catalogStrictModel, context, undefined, {
+			strictResponsesPairing: false,
+		})) as { input?: unknown[] };
+		const orphanNote = (input: unknown[] | undefined): { content?: string } | undefined =>
+			input?.find(item => {
+				if (!item || typeof item !== "object") return false;
+				const candidate = item as { type?: unknown; role?: unknown; content?: unknown };
+				return (
+					candidate.type === "message" &&
+					candidate.role === "assistant" &&
+					typeof candidate.content === "string" &&
+					candidate.content.includes(orphanCallId) &&
+					candidate.content.includes(orphanOutput)
+				);
+			}) as { content?: string } | undefined;
+
+		expect(orphanNote(strictOverridePayload.input)?.content).toContain("[Orphan read result;");
+		expect(orphanNote(nonStrictOverridePayload.input)?.content).toContain("[Orphan tool result;");
 	});
 });

@@ -1,8 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { ArkErrors, type Type } from "arktype";
 import { JSONC, YAML } from "bun";
+
+const YAML_MAPPING_HEADER_TRAILING_SPACE = /: +$/gm;
+
+/** Serialize config YAML without Bun's trailing space on block mapping headers. */
+export function stringifyYamlConfig(value: unknown): string {
+	return YAML.stringify(value, null, 2).replace(YAML_MAPPING_HEADER_TRAILING_SPACE, ":");
+}
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
@@ -46,12 +53,16 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 			migratedPaths.add(key);
 			return;
 		}
-		fs.writeFileSync(ymlPath, YAML.stringify(parsed, null, 2));
+		fs.writeFileSync(ymlPath, stringifyYamlConfig(parsed));
 		migratedPaths.add(key);
 	} catch (error) {
 		logger.warn("migrateJsonToYml: migration failed", { error: String(error) });
 	}
 }
+
+export type ConfigSchemaSource =
+	| { readonly kind: "eager"; readonly schema: Type }
+	| { readonly kind: "deferred"; readonly resolve: () => Type };
 
 export interface IConfigFile<T> {
 	readonly id: string;
@@ -105,11 +116,11 @@ export class ConfigError extends Error {
 		this.#message = message;
 	}
 
-	get message(): string {
+	override get message(): string {
 		return this.#message;
 	}
 
-	toString(): string {
+	override toString(): string {
 		return this.message;
 	}
 }
@@ -125,14 +136,17 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	readonly #basePath: string;
 	readonly #yamlFallbackPath: string | null;
 	readonly #jsonMigrationPath: string | null;
+	readonly #schemaSource: ConfigSchemaSource;
+	#resolvedSchema?: Type;
 	#cache?: LoadResult<T>;
 	#auxValidate?: (value: T) => void;
 
 	constructor(
 		readonly id: string,
-		readonly schema: Type,
+		schema: Type | ConfigSchemaSource,
 		configPath: string = path.join(getAgentDir(), `${id}.yml`),
 	) {
+		this.#schemaSource = typeof schema === "function" ? { kind: "eager", schema } : schema;
 		this.#basePath = configPath;
 		if (configPath.endsWith(".yml")) {
 			this.#yamlFallbackPath = `${configPath.slice(0, -4)}.yaml`;
@@ -150,6 +164,12 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		}
 	}
 
+	get schema(): Type {
+		if (this.#schemaSource.kind === "eager") return this.#schemaSource.schema;
+		if (!this.#resolvedSchema) this.#resolvedSchema = this.#schemaSource.resolve();
+		return this.#resolvedSchema;
+	}
+
 	/**
 	 * Run the JSON → YAML migration synchronously, if applicable. Idempotent.
 	 * Sync callers (tests, settings init) hit this implicitly via {@link tryLoad}.
@@ -164,8 +184,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 	relocate(configPath?: string): ConfigFile<T> {
 		if (!configPath || configPath === this.#basePath) return this;
-		const result = new ConfigFile<T>(this.id, this.schema, configPath);
+		const result = new ConfigFile<T>(this.id, this.#schemaSource, configPath);
 		result.#auxValidate = this.#auxValidate;
+		result.#resolvedSchema = this.#resolvedSchema;
 		result.#ensureMigrated();
 		return result;
 	}
@@ -238,7 +259,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			}
 
 			const checked = this.schema(parsed);
-			if (checked instanceof ArkErrors) {
+			if (checked instanceof OmpErrors) {
 				const schemaErrors: ConfigSchemaError[] = checked.map(error => ({
 					instancePath: error.path.length === 0 ? "root" : error.path.join("."),
 					message: error.problem,

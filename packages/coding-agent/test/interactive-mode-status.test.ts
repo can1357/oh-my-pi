@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
@@ -18,7 +18,6 @@ function renderContainer(container: Container, width = 120): string {
 }
 
 function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: UiHelpers } {
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
@@ -38,10 +37,13 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		},
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
-		renderSessionContext: (
+		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
+			helpers.renderSessionContext(context, options),
+		renderSessionContextIncrementally: (
 			context: SessionContext,
-			options?: { updateFooter?: boolean; populateHistory?: boolean },
-		) => helpers.renderSessionContext(context, options),
+			options: RenderSessionContextOptions,
+			renderChunk?: () => void,
+		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 		settings: { get: () => false },
 		session: {
@@ -60,7 +62,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		toolOutputExpanded: false,
 		hideThinkingBlock: false,
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, helpers };
 }
 
@@ -125,13 +127,18 @@ describe("InteractiveMode.showStatus", () => {
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_TWO");
 	});
 
-	test("preserves startup notifications while rendering the initial transcript", () => {
-		const { ctx, helpers } = createInitialRenderHarness();
+	test("preserves startup notifications while rendering the initial transcript", async () => {
+		await Settings.init({ inMemory: true });
+		try {
+			const { ctx, helpers } = createInitialRenderHarness();
 
-		helpers.showWarning("startup notification probe");
-		helpers.renderInitialMessages({ preserveExistingChat: true });
+			helpers.showWarning("startup notification probe");
+			await helpers.renderInitialMessages({ preserveExistingChat: true });
 
-		expect(renderContainer(ctx.chatContainer)).toContain("startup notification probe");
+			expect(renderContainer(ctx.chatContainer)).toContain("startup notification probe");
+		} finally {
+			resetSettingsForTest();
+		}
 	});
 
 	test("preserves optimistic user signatures when rebuilding transcript state", () => {

@@ -112,6 +112,84 @@ describe("readToolRenderer hyperlinks", () => {
 	});
 });
 
+describe("readToolRenderer markdown content", () => {
+	it("renders text/markdown details through the markdown renderer", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "[notes.md#ABCD]\n1:# Heading\n2:\n3:This is **bold** text." }],
+				details: {
+					displayContent: { text: "# Heading\n\nThis is **bold** text.", startLine: 1 },
+					contentType: "text/markdown",
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+			{ path: "notes.md" },
+		);
+
+		const stripped = component
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(stripped).toContain("Heading");
+		expect(stripped).toContain("This is bold text.");
+		expect(stripped).not.toContain("# Heading");
+		expect(stripped).not.toContain("**bold**");
+	});
+
+	it("keeps untagged markdown source in the code renderer", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "[notes.md#ABCD]\n1:# Heading\n2:\n3:This is **bold** text." }],
+				details: {
+					displayContent: { text: "# Heading\n\nThis is **bold** text.", startLine: 1 },
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+			{ path: "notes.md" },
+		);
+
+		const stripped = component
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(stripped).toContain("# Heading");
+		expect(stripped).toContain("**bold**");
+	});
+
+	it("keeps raw markdown selector reads in the code renderer", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "# Heading\n\nThis is **bold** text." }],
+				details: {
+					displayContent: { text: "# Heading\n\nThis is **bold** text.", startLine: 1 },
+					contentType: "text/markdown",
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+			{ path: "notes.md:raw" },
+		);
+
+		const stripped = component
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(stripped).toContain("# Heading");
+		expect(stripped).toContain("**bold**");
+	});
+});
+
 describe("read ToolExecutionComponent framing", () => {
 	it("renders framed read results inside the standard tool container padding", () => {
 		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;

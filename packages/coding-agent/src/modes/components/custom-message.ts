@@ -2,7 +2,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Box, Container } from "@oh-my-pi/pi-tui";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { theme } from "../../modes/theme/theme";
-import type { CustomMessage } from "../../session/messages";
+import { type CustomMessage, LIVE_DELEGATION_MESSAGE_TYPE } from "../../session/messages";
 import { renderFramedMessage } from "./message-frame";
 
 /**
@@ -49,12 +49,15 @@ export class CustomMessageComponent extends Container {
 		// The transcript dispatch routes both `custom` and legacy `hookMessage` roles here:
 		// tag hooks with the hook glyph, other injected messages with a neutral package.
 		const isHook = (this.message.role as string) === "hookMessage";
+		const isLiveDelegation = this.message.customType === LIVE_DELEGATION_MESSAGE_TYPE;
 		const custom = renderFramedMessage({
 			message: this.message,
 			box: this.#box,
 			expanded: this.#expanded,
 			customRenderer: this.customRenderer,
 			icon: isHook ? theme.icon.extensionHook : theme.icon.package,
+			hideHeader: isLiveDelegation,
+			borderColor: isLiveDelegation ? "borderAccent" : undefined,
 		});
 
 		if (custom) {

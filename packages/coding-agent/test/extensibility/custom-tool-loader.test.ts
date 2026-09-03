@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { loadCustomTools, type ToolPathWithSource } from "../../src/extensibility/custom-tools/loader";
 
 let tempRoot: string | undefined;
@@ -30,7 +32,7 @@ const VALID_TOOL_SOURCE = [
 	'\tname: "safe_custom_tool",',
 	'\tlabel: "Safe Custom Tool",',
 	'\tdescription: "Returns a fixed response",',
-	"\tparameters: api.zod.object({}),",
+	"\tparameters: api.arktype({}),",
 	"\tasync execute() {",
 	'\t\treturn { content: [{ type: "text", text: "ok" }] };',
 	"\t},",
@@ -51,7 +53,7 @@ const MIXED_ARRAY_SOURCE = [
 	'\t\tname: "mixed_valid_tool",',
 	'\t\tlabel: "Mixed Valid Tool",',
 	'\t\tdescription: "Returns a fixed response from a mixed tool factory result",',
-	"\t\tparameters: api.zod.object({}),",
+	"\t\tparameters: api.arktype({}),",
 	"\t\tasync execute() {",
 	'\t\t\treturn { content: [{ type: "text", text: "ok" }] };',
 	"\t\t},",
@@ -63,7 +65,7 @@ const MIXED_ARRAY_SOURCE = [
 const MISSING_NAME_SOURCE = [
 	"export default api => ({",
 	'\tdescription: "Missing name but otherwise loadable shape",',
-	"\tparameters: api.zod.object({}),",
+	"\tparameters: api.arktype({}),",
 	"\tasync execute() {",
 	'\t\treturn { content: [{ type: "text", text: "ok" }] };',
 	"\t},",
@@ -71,6 +73,48 @@ const MISSING_NAME_SOURCE = [
 ].join("\n");
 
 describe("custom tool loader", () => {
+	it("injects callable omptype-backed zod schemas through validation and wire emission", async () => {
+		const toolPath = await writeTool(
+			"zod-wire.js",
+			[
+				"export default api => ({",
+				'\tname: "zod_wire_tool",',
+				'\t\tdescription: "Validates an injected schema",',
+				'\tparameters: api.arktype({ path: api.arktype("string") }),',
+				"\tasync execute() {",
+				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+		const result = await loadCustomTools([{ path: toolPath }], requireTempRoot(), []);
+		const tool = result.tools[0]?.tool;
+
+		expect(result.errors).toEqual([]);
+		expect(tool).toBeDefined();
+		expect(
+			validateToolArguments(tool!, {
+				type: "toolCall",
+				id: "valid",
+				name: tool!.name,
+				arguments: { path: "README.md" },
+			}),
+		).toEqual({ path: "README.md" });
+		expect(() =>
+			validateToolArguments(tool!, {
+				type: "toolCall",
+				id: "invalid",
+				name: tool!.name,
+				arguments: {},
+			}),
+		).toThrow('Validation failed for tool "zod_wire_tool"');
+		expect(toolWireSchema(tool!)).toMatchObject({
+			type: "object",
+			properties: { path: { type: "string" } },
+			required: ["path"],
+		});
+	});
+
 	it("skips a tool that calls process.exit synchronously at import time and still loads later valid tools", async () => {
 		// CLI-shaped module: main() at the bottom, exit on failure (issue #1704).
 		// Without the exit guard this terminates the test process before the
@@ -187,7 +231,7 @@ describe("custom tool loader", () => {
 				"export default api => ({",
 				'\tname: "stdin_hijack_tool",',
 				'\tdescription: "Loads fine but hijacks stdin at import",',
-				"\tparameters: api.zod.object({}),",
+				"\tparameters: api.arktype({}),",
 				"\tasync execute() {",
 				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
 				"\t},",
@@ -223,7 +267,7 @@ describe("custom tool loader", () => {
 				"export default api => ({",
 				'\tname: "stdin_pause_tool",',
 				'\tdescription: "Pauses host stdin at import",',
-				"\tparameters: api.zod.object({}),",
+				"\tparameters: api.arktype({}),",
 				"\tasync execute() {",
 				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
 				"\t},",
@@ -253,7 +297,7 @@ describe("custom tool loader", () => {
 				"export default api => ({",
 				'\tname: "stdin_strip_tool",',
 				'\tdescription: "Removes host data listeners at import",',
-				"\tparameters: api.zod.object({}),",
+				"\tparameters: api.arktype({}),",
 				"\tasync execute() {",
 				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
 				"\t},",

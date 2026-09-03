@@ -93,4 +93,52 @@ describe("ProcessTerminal headless suppression", () => {
 			setTerminalHeadless(previous);
 		}
 	});
+
+	// A paste-and-Enter burst must reach the focused component as one input so
+	// the paste cannot move focus (large-paste menu) before the Enter lands;
+	// a terminal report after the paste is not input and stays with the terminal.
+	it("dispatches a bracketed paste and its same-read Enter as one input", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		const input: string[] = [];
+		try {
+			terminal.start(
+				data => input.push(data),
+				() => {},
+			);
+			process.stdin.emit("data", Buffer.from("\x1b[200~line 1\nline 2\x1b[201~\r"));
+			process.stdin.emit("data", Buffer.from("\x1b[200~payload\x1b[201~\x1b[?1;2c"));
+
+			expect(input).toEqual(["\x1b[200~line 1\nline 2\x1b[201~\r", "\x1b[200~payload\x1b[201~"]);
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
+
+	// #6374: arrows stopped working inside omp and stayed broken in the shell
+	// after exit — a missing cursor-key/keypad reset. omp owns the TTY and emits
+	// a full private-mode reset menu, but never restored normal cursor-key
+	// (DECCKM) / numeric-keypad mode (terminfo `rmkx` = "\x1b[?1l\x1b>"). If the
+	// terminal was left in application-cursor-keys mode, arrows arrived as SS3
+	// and the parent shell's Up/Down history navigation broke. start() must
+	// normalize the state and stop() must restore it.
+	it("emits rmkx on start and stop to normalize/restore cursor-key + keypad mode (#6374)", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		try {
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			expect(writes.join("")).toContain("\x1b[?1l\x1b>");
+
+			writes.length = 0;
+			terminal.stop();
+			expect(writes.join("")).toContain("\x1b[?1l\x1b>");
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
 });

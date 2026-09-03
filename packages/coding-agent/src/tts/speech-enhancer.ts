@@ -15,7 +15,7 @@
  *   mechanical {@link SpeakableStream} cleanup — speech never blocks on the
  *   model.
  */
-import { type AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
@@ -82,20 +82,25 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
-			const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
-			const response = await completeSimple(
-				model,
-				{
-					systemPrompt: [SYSTEM_PROMPT],
-					messages: [{ role: "user", content: boundBlock(block), timestamp: Date.now() }],
+			const response = await retryTransientCompletion(
+				() => {
+					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
+					return completeSimple(
+						model,
+						{
+							systemPrompt: [SYSTEM_PROMPT],
+							messages: [{ role: "user", content: boundBlock(block), timestamp: Date.now() }],
+						},
+						{
+							apiKey: registry.resolver(model, sessionId),
+							maxTokens: ANSWER_MAX_TOKENS,
+							disableReasoning: true,
+							metadata,
+							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+						},
+					);
 				},
-				{
-					apiKey: registry.resolver(model, sessionId),
-					maxTokens: ANSWER_MAX_TOKENS,
-					disableReasoning: true,
-					metadata,
-					signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-				},
+				{ signal },
 			);
 			if (response.stopReason === "error") {
 				logger.debug("speech-enhancer: rewrite errored", { error: response.errorMessage });

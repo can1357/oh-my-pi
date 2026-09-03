@@ -139,4 +139,36 @@ describe("discoverAgents", () => {
 		expect(collide?.description).toBe("from-cli");
 		expect(collide?.filePath).toBe(path.join(cliExt, "agents", "collide.md"));
 	});
+
+	test("explicit-only CLI roots expose only explicitly named package agents", async () => {
+		const staleExt = path.join(tempHome, "stale-ext");
+		const explicitExt = path.join(tempHome, "explicit-ext");
+		const settingsExt = path.join(tempHome, "settings-ext");
+		for (const [root, name] of [
+			[staleExt, "stale-agent"],
+			[explicitExt, "explicit-agent"],
+			[settingsExt, "settings-agent"],
+		] as const) {
+			await fs.mkdir(path.join(root, "agents"), { recursive: true });
+			await fs.writeFile(
+				path.join(root, "agents", `${name}.md`),
+				["---", `name: ${name}`, `description: ${name}`, "---", `${name} body`].join("\n"),
+			);
+		}
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.writeFile(path.join(projectDir, ".omp", "settings.json"), JSON.stringify({ extensions: [settingsExt] }));
+		await writeOmpPluginAgent(tempHome);
+
+		injectOmpExtensionCliRoots([staleExt], tempHome, projectDir);
+		injectOmpExtensionCliRoots([explicitExt], tempHome, projectDir, {
+			mode: "explicit-only",
+			replace: true,
+		});
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const names = agents.map(agent => agent.name);
+
+		expect(names).toContain("explicit-agent");
+		expect(names).not.toEqual(expect.arrayContaining(["stale-agent", "settings-agent", "loom-verify-spec"]));
+	});
 });

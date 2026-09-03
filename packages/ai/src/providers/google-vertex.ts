@@ -1,3 +1,4 @@
+import { resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Context, Model, StreamFunction } from "../types";
@@ -52,8 +53,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 				];
 			}
 			const baseHeaders: Record<string, string> = {
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
+				...model.headers,
+				...options?.headers,
 			};
 			// Vertex AI ignores a `serviceTier` request-body field (unlike the direct
 			// Gemini API); priority must travel as a request header. Only `priority`
@@ -69,7 +70,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 				// global-only request.
 				const explicitLocation = options?.location;
 				const location = explicitLocation ?? resolveAmbientLocation() ?? "global";
-				const host = resolveEndpointHost(location);
+				const host = resolveVertexEndpointHost(location);
 				const path = `${API_VERSION}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
 				const useGlobalFallback = !explicitLocation && host !== "aiplatform.googleapis.com";
 				return {
@@ -87,7 +88,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 			const project = resolveProject(options);
 			const location = resolveLocation(options);
 			const accessToken = await getVertexAccessToken({ signal: options?.signal, fetch: options?.fetch });
-			const host = resolveEndpointHost(location);
+			const host = resolveVertexEndpointHost(location);
 			const url = `https://${host}/${API_VERSION}/projects/${project}/locations/${location}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
 			return {
 				params,
@@ -117,9 +118,6 @@ function resolveProject(options?: GoogleVertexOptions): string {
 	return project;
 }
 
-function resolveEndpointHost(location: string): string {
-	return location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
-}
 function resolveAmbientLocation(): string | undefined {
 	return $env.GOOGLE_VERTEX_LOCATION || $env.GOOGLE_CLOUD_LOCATION || $env.VERTEX_LOCATION || undefined;
 }

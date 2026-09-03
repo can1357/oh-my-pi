@@ -1,6 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { googleVertexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import {
+	googleModelManagerOptions,
+	googleVertexModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/google";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
@@ -44,7 +53,7 @@ const googleVertexModelsDevPayload = {
 } satisfies Record<string, unknown>;
 
 describe("google-vertex model catalog", () => {
-	it("maps the models.dev Vertex catalog instead of the project discovery endpoint", () => {
+	it("maps the stencil.so Vertex catalog instead of the project discovery endpoint", () => {
 		const models = mapModelsDevToModels(googleVertexModelsDevPayload, MODELS_DEV_PROVIDER_DESCRIPTORS).filter(
 			model => model.provider === "google-vertex",
 		);
@@ -85,10 +94,45 @@ describe("google-vertex model catalog", () => {
 		expect(options.fetchDynamicModels).toBeUndefined();
 		expect(options.staticModels).toBeUndefined();
 
-		const result = await resolveProviderModels(options, "offline");
+		const result = await resolveProviderModels({ ...options, cacheDbPath: ":memory:" }, "offline");
 		expect(result.stale).toBe(false);
-		expect(result.models.some(model => model.id === "deepseek-ai/deepseek-v3.2-maas")).toBe(true);
+		expect(result.models.some(model => model.id.endsWith("-maas") && model.api === "openai-completions")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-3.5-flash")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-1.5-pro")).toBe(false);
+	});
+
+	it("invalidates cached Gemini 3.7 Flash effort metadata on upgrade (#10543)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-flash37-cache-"));
+		try {
+			for (const [providerId, options] of [
+				["google", googleModelManagerOptions()],
+				["google-vertex", googleVertexModelManagerOptions()],
+			] as const) {
+				const bundledModels = getBundledModels(providerId);
+				const current = bundledModels.find(model => model.id === "gemini-3.7-flash");
+				if (!current?.thinking) throw new Error(`${providerId} Gemini 3.7 Flash is missing thinking metadata`);
+				const stale = {
+					...current,
+					thinking: {
+						...current.thinking,
+						efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+					},
+				};
+				const cacheDbPath = path.join(tempDir, `${providerId}.db`);
+				writeModelCache(providerId, Date.now(), [stale], true, "merge-v3:pre-10543", cacheDbPath);
+
+				const result = await resolveProviderModels(
+					{ ...options, staticModels: bundledModels, cacheDbPath },
+					"offline",
+				);
+				expect(result.models.find(model => model.id === current.id)?.thinking?.efforts).toEqual([
+					Effort.Low,
+					Effort.Medium,
+					Effort.High,
+				]);
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

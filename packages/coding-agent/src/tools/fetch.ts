@@ -1,12 +1,13 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { FetchImpl, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
+import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
 import type { Settings } from "../config/settings";
 import { readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -20,16 +21,16 @@ import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
-import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "../utils/zip";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
+import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { isReadableUrlPath, type LineRange, parseLineRanges } from "./path-utils";
 import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
-import { listTables, looksLikeSqlite, renderTableList } from "./sqlite-reader";
+import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -516,7 +517,7 @@ function cleanFeedText(text: string): string {
  * Parse RSS/Atom feed to markdown
  */
 async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<string> {
-	const { parseHTML } = await import("linkedom");
+	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
 	try {
 		const doc = parseHTML(content).document;
 
@@ -576,6 +577,19 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
  * local fallback renderers (trafilatura, lynx, native). See #1449.
  */
 const REMOTE_READER_MAX_MS = 10_000;
+const JINA_MARKDOWN_MARKER = "Markdown Content:";
+const JINA_READER_MAX_BYTES = 2 * 1024 * 1024;
+
+function parseJinaReaderContent(responseBody: string): string | null {
+	const markerStart = responseBody.indexOf(JINA_MARKDOWN_MARKER);
+	if (markerStart < 0) return null;
+
+	const content = responseBody.slice(markerStart + JINA_MARKDOWN_MARKER.length).trim();
+	if (content.length < 100 || content.startsWith("Loading...") || content.startsWith("Please enable JavaScript")) {
+		return null;
+	}
+	return content;
+}
 
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "jina";
@@ -652,11 +666,20 @@ export async function renderHtmlToText(
 			return firstDocument ? getParallelExtractContent(firstDocument) : null;
 		},
 		jina: async () => {
+			const apiKey = findCredential(storage, getEnvApiKey("jina"), "jina");
+			const headers: Record<string, string> = {
+				Accept: "text/markdown",
+				"X-No-Cache": "true",
+			};
+			if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 			const response = await fetchImpl(`https://r.jina.ai/${url}`, {
-				headers: { Accept: "text/markdown" },
+				headers,
 				signal: remoteSignal(),
 			});
-			return response.ok ? await response.text() : null;
+			if (!response.ok) return null;
+			const contentLength = Number(response.headers.get("content-length"));
+			if (Number.isFinite(contentLength) && contentLength > JINA_READER_MAX_BYTES) return null;
+			return parseJinaReaderContent(await response.text());
 		},
 	};
 
@@ -867,8 +890,7 @@ async function renderSqlitePayload(bytes: Uint8Array): Promise<string> {
 	return withTempBinaryFile("omp-url-sqlite-", ".sqlite", bytes, async tempPath => {
 		let db: Database | null = null;
 		try {
-			db = new Database(tempPath, { readonly: true, strict: true });
-			db.run("PRAGMA busy_timeout = 3000");
+			db = await openSqliteReadConnection(tempPath);
 			const listLimit = applyListLimit(listTables(db), { limit: URL_SQLITE_LIST_LIMIT });
 			return renderTableList(listLimit.items);
 		} finally {

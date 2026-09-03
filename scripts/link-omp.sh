@@ -13,7 +13,7 @@
 # write under `/` — see https://github.com/can1357/oh-my-pi/issues/3701.
 set -e
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 target=$repo_root/packages/coding-agent/scripts/omp
 
 if [ ! -x "$target" ]; then

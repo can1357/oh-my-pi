@@ -19,11 +19,9 @@ const cleanupRoots: string[] = [];
 let activeProc: AcpProc | undefined;
 
 /**
- * Tear the child down hard. SIGTERM first so the process gets a chance to
- * unwind, but force-kill quickly if it hasn't reaped — `omp acp` blocks on
- * stdin reads and won't notice SIGTERM until we close the pipes. We bound
- * the entire shutdown to ~2s so a stuck child never trips Bun's 5s hook
- * timeout (which is what produced the "afterEach hook timed out" flakes).
+ * Tear the child down deterministically. Once the initialize frame has been
+ * asserted there is no graceful-shutdown behavior under test, so close stdin
+ * and kill the throwaway process rather than parking on a grace-period timer.
  */
 async function teardown(proc: AcpProc): Promise<void> {
 	// Close stdin so any blocking read in the child wakes up.
@@ -44,28 +42,11 @@ async function teardown(proc: AcpProc): Promise<void> {
 	}
 
 	try {
-		proc.kill("SIGTERM");
+		proc.kill("SIGKILL");
 	} catch {
 		// already exited
 	}
-
-	// Race the natural exit against a short grace, then escalate to SIGKILL
-	// and race again against a hard cap. `await proc.exited` after SIGKILL
-	// always returns promptly on Darwin/Linux.
-	const graceMs = 200;
-	const hardCapMs = 1500;
-	const exited = proc.exited;
-	const raced = await Promise.race([
-		exited.then(() => "exited" as const),
-		Bun.sleep(graceMs).then(() => "grace" as const),
-	]);
-	if (raced === "exited") return;
-	try {
-		proc.kill("SIGKILL");
-	} catch {
-		// already exited between the SIGTERM and SIGKILL
-	}
-	await Promise.race([exited, Bun.sleep(hardCapMs)]);
+	await proc.exited;
 }
 
 afterEach(async () => {
@@ -185,9 +166,8 @@ describe("ACP stdout hygiene", () => {
 
 		// First frame is good. Tear the child down now so the test body's
 		// wall time is bounded by "boot + first frame", not by waiting for
-		// stderr or a delayed shutdown. teardown() closes stdin/stdout/stderr
-		// and escalates SIGTERM→SIGKILL, which both stops the child and
-		// resolves stderrPump.
+		// stderr or a delayed shutdown. teardown() closes the pipes and kills
+		// the throwaway child, which also resolves stderrPump.
 		await teardown(proc);
 		activeProc = undefined;
 		await stderrPump;

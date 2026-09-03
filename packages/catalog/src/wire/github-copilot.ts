@@ -1,13 +1,27 @@
+import type { FetchImpl } from "../types";
+import { isRecord } from "../utils";
+
 /**
  * GitHub Copilot wire metadata: API-key envelope parsing and endpoint
  * derivation shared by catalog discovery and the pi-ai OAuth flow. The device
  * login / token refresh flow lives in `@oh-my-pi/pi-ai`'s registry.
  */
 
-export const COPILOT_USER_AGENT = "opencode/1.3.15" as const;
+const COPILOT_CLI_VERSION = "1.0.82";
+const COPILOT_CLI_USER_AGENT = `copilot/${COPILOT_CLI_VERSION}`;
 
-export const OPENCODE_HEADERS = {
-	"User-Agent": COPILOT_USER_AGENT,
+/** Headers sent by Copilot CLI to GitHub API and OAuth endpoints. */
+export const COPILOT_GITHUB_HEADERS = {
+	"User-Agent": COPILOT_CLI_USER_AGENT,
+} as const;
+
+/** Copilot CLI identity sent to the Copilot API. */
+export const COPILOT_CAPI_IDENTITY_HEADERS = {
+	...COPILOT_GITHUB_HEADERS,
+	"Editor-Version": COPILOT_CLI_USER_AGENT,
+	"Copilot-Integration-Id": "copilot-developer-cli",
+	"Copilot-Harness-Id": "copilot-sdk",
+	"Openai-Intent": "conversation-agent",
 } as const;
 
 /**
@@ -19,13 +33,44 @@ export const OPENCODE_HEADERS = {
  * of 1M for Claude Opus). Never send this to `api.github.com` REST endpoints —
  * they validate `X-GitHub-Api-Version` against the REST version vocabulary.
  */
-export const COPILOT_API_VERSION = "2026-06-01" as const;
+export const COPILOT_API_VERSION = "2026-08-01" as const;
 
-/** Headers for `api.githubcopilot.com` (capi) requests: discovery, chat, policy. */
+/** Headers shared by Copilot API model requests and model definitions. */
 export const COPILOT_API_HEADERS = {
-	...OPENCODE_HEADERS,
+	...COPILOT_CAPI_IDENTITY_HEADERS,
 	"X-GitHub-Api-Version": COPILOT_API_VERSION,
 } as const;
+
+/** Copilot CLI headers for user-initiated model discovery. */
+export const COPILOT_DISCOVERY_HEADERS = {
+	...COPILOT_API_HEADERS,
+	"X-Initiator": "user",
+} as const;
+
+const MANAGED_COPILOT_HEADER_NAMES: Record<string, true> = {
+	"user-agent": true,
+	"editor-version": true,
+	"copilot-integration-id": true,
+	"copilot-harness-id": true,
+	"openai-intent": true,
+	"x-github-api-version": true,
+	"x-initiator": true,
+	"x-interaction-type": true,
+};
+
+/** Preserve model-specific headers while enforcing the current Copilot API identity. */
+export function mergeCopilotApiHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
+	const merged: Record<string, string> = {};
+	if (headers) {
+		for (const name in headers) {
+			const value = headers[name];
+			if (value !== undefined && !MANAGED_COPILOT_HEADER_NAMES[name.toLowerCase()]) {
+				merged[name] = value;
+			}
+		}
+	}
+	return { ...merged, ...COPILOT_API_HEADERS };
+}
 
 type GitHubCopilotApiKeyPayload = {
 	token?: unknown;
@@ -68,6 +113,35 @@ export function normalizeGitHubCopilotApiEndpoint(input: string | undefined): st
 		const url = new URL(trimmed);
 		if (url.protocol !== "https:" || !url.hostname) return undefined;
 		return trimmed.replace(/\/+$/, "");
+	} catch {
+		return undefined;
+	}
+}
+/**
+ * Resolve the plan-specific Copilot API endpoint advertised for a GitHub token.
+ * Login and raw environment-token discovery share this best-effort probe. Pass
+ * a `signal` to bound it against the same discovery deadline as `/models`; a
+ * stalled probe otherwise blocks discovery indefinitely.
+ */
+export async function discoverGitHubCopilotApiEndpoint(
+	token: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	try {
+		const response = await fetchImpl("https://api.github.com/copilot_internal/user", {
+			headers: {
+				Accept: "application/json",
+				Authorization: `token ${token}`,
+				...COPILOT_GITHUB_HEADERS,
+			},
+			signal,
+		});
+		if (!response.ok) return undefined;
+		const data: unknown = await response.json();
+		if (!isRecord(data) || !isRecord(data.endpoints)) return undefined;
+		const endpoint = data.endpoints.api;
+		return typeof endpoint === "string" ? normalizeGitHubCopilotApiEndpoint(endpoint) : undefined;
 	} catch {
 		return undefined;
 	}

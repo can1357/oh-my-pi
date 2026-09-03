@@ -1,14 +1,50 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import {
+	type AzureOpenAIResponsesOptions,
+	streamAzureOpenAIResponses,
+} from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
+import {
+	buildParams,
+	type OpenAIResponsesOptions,
+	streamOpenAIResponses,
+} from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { stream as streamModel, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
-import { buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { withEnv } from "./helpers";
+
+interface ResponsesCompatTestSpec {
+	id?: string;
+	name: string;
+	provider: string;
+	baseUrl: string;
+	reasoning?: boolean;
+}
+
+function buildOpenAIResponsesCompat(spec: ResponsesCompatTestSpec) {
+	return resolveModelPolicy({
+		id: spec.id ?? "test-model",
+		api: "openai-responses",
+		provider: spec.provider,
+		baseUrl: spec.baseUrl,
+		name: spec.name,
+		reasoning: spec.reasoning ?? false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	}).compat;
+}
 
 const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 const openRouterResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "openai/gpt-5.5",
+	identity: classifyModel("openrouter", "openai/gpt-5.5"),
 	name: "OpenRouter GPT 5.5",
 	provider: "openrouter",
 	baseUrl: "https://openrouter.ai/api/v1",
@@ -22,6 +58,7 @@ const openRouterResponsesModel: Model<"openai-responses"> = {
 const openRouterAnthropicResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "anthropic/claude-sonnet-4.5",
+	identity: classifyModel("openrouter", "anthropic/claude-sonnet-4.5"),
 	name: "OpenRouter Claude Sonnet 4.5",
 	provider: "openrouter",
 	baseUrl: "https://openrouter.ai/api/v1",
@@ -35,6 +72,7 @@ const openRouterAnthropicResponsesModel: Model<"openai-responses"> = {
 const xaiOAuthResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "grok-build",
+	identity: classifyModel("xai-oauth", "grok-build"),
 	name: "Grok Build",
 	provider: "xai-oauth",
 	baseUrl: "https://api.x.ai/v1",
@@ -46,6 +84,47 @@ const xaiOAuthResponsesModel: Model<"openai-responses"> = {
 		reasoning: true,
 	}),
 };
+const xaiApiKeyResponsesModel: Model<"openai-responses"> = {
+	...model,
+	id: "grok-code-fast-1",
+	identity: classifyModel("xai", "grok-code-fast-1"),
+	name: "Grok Code Fast 1",
+	provider: "xai",
+	baseUrl: "https://api.x.ai/v1",
+	compat: buildOpenAIResponsesCompat({
+		id: "grok-code-fast-1",
+		name: "Grok Code Fast 1",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+	}),
+};
+
+const openAI56ResponsesModel: Model<"openai-responses"> = {
+	...model,
+	id: "gpt-5.6",
+	identity: classifyModel("openai", "gpt-5.6"),
+	name: "GPT-5.6",
+	compat: buildOpenAIResponsesCompat({
+		id: "gpt-5.6",
+		name: "GPT-5.6",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+	}),
+};
+
+const azureOpenAI56ResponsesModel: Model<"azure-openai-responses"> = buildModel({
+	id: "gpt-5.6",
+	name: "GPT-5.6",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: "https://example.openai.azure.com/openai/v1",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400_000,
+	maxTokens: 128_000,
+});
 
 function createSseResponse(events: unknown[]): Response {
 	const payload = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
@@ -192,6 +271,10 @@ async function captureDispatchedOpenAIResponseHeaders(
 async function captureSimpleOpenAIResponseBody(
 	options: SimpleStreamOptions,
 	requestModel: Model<"openai-responses"> = model,
+	requestContext: Context = {
+		systemPrompt: ["stable system", "stable durable context"],
+		messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+	},
 ): Promise<Record<string, unknown> | null> {
 	let body: Record<string, unknown> | null = null;
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
@@ -228,12 +311,7 @@ async function captureSimpleOpenAIResponseBody(
 		]);
 	});
 
-	const context: Context = {
-		systemPrompt: ["stable system", "stable durable context"],
-		messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-	};
-	const stream = streamSimple(requestModel, context, { apiKey: "test-key", ...options, fetch: fetchMock });
-
+	const stream = streamSimple(requestModel, requestContext, { apiKey: "test-key", ...options, fetch: fetchMock });
 	for await (const event of stream) {
 		if (event.type === "done" || event.type === "error") break;
 	}
@@ -243,6 +321,343 @@ async function captureSimpleOpenAIResponseBody(
 
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("OpenAI Responses explicit prompt cache policy", () => {
+	const historicalContext: Context = {
+		messages: [
+			{ role: "user", content: [{ type: "text", text: "stable history" }], timestamp: 0 },
+			{ role: "user", content: [{ type: "text", text: "current prompt" }], timestamp: 1 },
+		],
+	};
+
+	it("leaves the existing request shape unchanged when the policy is unset", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key" },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_key).toBe("cache-key");
+		expect(params).not.toHaveProperty("prompt_cache_options");
+		const [firstMessage] = params.input ?? [];
+		if (!firstMessage || !("content" in firstMessage) || !Array.isArray(firstMessage.content)) {
+			throw new Error("Expected Responses input message content");
+		}
+		expect(firstMessage.content[0]).not.toHaveProperty("prompt_cache_breakpoint");
+	});
+
+	it("marks one existing stable history block and leaves the current prompt unmodified", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", promptCache: { mode: "explicit" } },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+		const [historical, current] = params.input ?? [];
+		if (
+			!historical ||
+			!current ||
+			!("content" in historical) ||
+			!Array.isArray(historical.content) ||
+			!("content" in current) ||
+			!Array.isArray(current.content)
+		) {
+			throw new Error("Expected Responses input message content");
+		}
+		expect(historical.content[0]).toMatchObject({ prompt_cache_breakpoint: { mode: "explicit" } });
+		expect(current.content[0]).not.toHaveProperty("prompt_cache_breakpoint");
+		expect(historicalContext.messages[0].content).toEqual([{ type: "text", text: "stable history" }]);
+	});
+
+	it("leaves boundary selection automatic in implicit mode", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", promptCache: { mode: "implicit" } },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
+		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("marks the latest eligible stable history block", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "oldest stable history" }], timestamp: 0 },
+					{ role: "user", content: [{ type: "text", text: "newer stable history" }], timestamp: 1 },
+					{ role: "user", content: [{ type: "text", text: "current prompt" }], timestamp: 2 },
+				],
+			},
+			{ sessionId: "cache-key", promptCache: { mode: "explicit" } },
+			undefined,
+		).params;
+
+		expect(params.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "oldest stable history" }] },
+			{
+				role: "user",
+				content: [
+					{
+						type: "input_text",
+						text: "newer stable history",
+						prompt_cache_breakpoint: { mode: "explicit" },
+					},
+				],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "current prompt" }] },
+		]);
+	});
+
+	it("marks an existing first-turn developer string without adding a message or changing its text", () => {
+		const firstTurnWithSystem: Context = {
+			systemPrompt: ["stable developer instruction"],
+			messages: [{ role: "user", content: [{ type: "text", text: "only prompt" }], timestamp: 0 }],
+		};
+		const params = buildParams(
+			openAI56ResponsesModel,
+			firstTurnWithSystem,
+			{ promptCache: { mode: "explicit" } },
+			undefined,
+		).params;
+
+		expect(params.input).toEqual([
+			{
+				role: "developer",
+				content: [
+					{
+						type: "input_text",
+						text: "stable developer instruction",
+						prompt_cache_breakpoint: { mode: "explicit" },
+					},
+				],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "only prompt" }] },
+		]);
+	});
+
+	it("routes explicit policy through streamSimple", async () => {
+		const body = await captureSimpleOpenAIResponseBody(
+			{ sessionId: "cache-key", promptCache: { mode: "explicit" } },
+			openAI56ResponsesModel,
+			historicalContext,
+		);
+
+		expect(body?.prompt_cache_key).toBe("cache-key");
+		expect(body?.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+		const input = body?.input;
+		if (!Array.isArray(input)) throw new Error("Expected Responses input");
+		expect(input[0]).toMatchObject({
+			content: [{ type: "input_text", text: "stable history", prompt_cache_breakpoint: { mode: "explicit" } }],
+		});
+	});
+
+	it("does not manufacture a breakpoint on a first-turn prompt or when the caller opts out", () => {
+		const firstTurn: Context = {
+			messages: [{ role: "user", content: [{ type: "text", text: "only prompt" }], timestamp: 0 }],
+		};
+		const firstTurnParams = buildParams(
+			openAI56ResponsesModel,
+			firstTurn,
+			{ promptCache: { mode: "explicit" } },
+			undefined,
+		).params;
+		const noBreakpointParams = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ promptCache: { mode: "explicit", breakpoint: "none" } },
+			undefined,
+		).params;
+
+		for (const params of [firstTurnParams, noBreakpointParams]) {
+			for (const item of params.input ?? []) {
+				if (!("content" in item) || !Array.isArray(item.content)) continue;
+				for (const block of item.content) {
+					expect(block).not.toHaveProperty("prompt_cache_breakpoint");
+				}
+			}
+		}
+	});
+
+	it("rejects explicit policy through streamSimple before sending unsupported Responses requests", () => {
+		const unsupportedModel: Model<"openai-responses"> = {
+			...openAI56ResponsesModel,
+			id: "gpt-5.5",
+			identity: classifyModel("openai", "gpt-5.5"),
+			compat: buildOpenAIResponsesCompat({
+				id: "gpt-5.5",
+				name: "GPT-5.5",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+			}),
+		};
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			throw new Error("Unsupported Responses requests must not reach fetch");
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: [{ type: "text", text: "prompt" }], timestamp: 0 }],
+		};
+		const options: SimpleStreamOptions = {
+			apiKey: "test-key",
+			promptCache: { mode: "explicit" },
+			fetch: fetchMock,
+		};
+
+		expect(() => streamSimple(unsupportedModel, context, options)).toThrow(
+			"OpenAI explicit prompt caching is unsupported",
+		);
+		expect(() => streamSimple(azureOpenAI56ResponsesModel, context, options)).toThrow(
+			"OpenAI explicit prompt caching is unsupported",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects explicit policy through typed and direct Azure Responses dispatch", () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			throw new Error("Unsupported Azure Responses requests must not reach fetch");
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: [{ type: "text", text: "prompt" }], timestamp: 0 }],
+		};
+		const options: AzureOpenAIResponsesOptions = {
+			apiKey: "test-key",
+			promptCache: { mode: "explicit" },
+			fetch: fetchMock,
+		};
+
+		expect(() => streamModel(azureOpenAI56ResponsesModel, context, options)).toThrow(
+			"OpenAI explicit prompt caching is unsupported",
+		);
+		expect(() => streamAzureOpenAIResponses(azureOpenAI56ResponsesModel, context, options)).toThrow(
+			"OpenAI explicit prompt caching is unsupported",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("defers explicit policy validation to the gateway-resolved model for pi-native transport", async () => {
+		const sidecarModel: Model<"openai-responses"> = {
+			...openAI56ResponsesModel,
+			id: "gateway-model",
+			identity: classifyModel("openai", "gateway-model"),
+			baseUrl: "http://gateway.internal",
+			transport: "pi-native",
+			compat: buildOpenAIResponsesCompat({
+				id: "gpt-5.5",
+				name: "Gateway model",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+			}),
+		};
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as { options?: SimpleStreamOptions };
+			expect(body.options?.promptCache).toEqual({ mode: "explicit" });
+			return new Response(
+				`data: ${JSON.stringify({
+					type: "done",
+					reason: "stop",
+					message: {
+						role: "assistant",
+						content: [],
+						api: "openai-responses",
+						provider: "openai",
+						model: "gpt-5.6",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: 0,
+					},
+				})}\n\ndata: [DONE]\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		}) as FetchImpl;
+		const result = await streamSimple(
+			sidecarModel,
+			{ messages: [{ role: "user", content: "prompt", timestamp: 0 }] },
+			{ apiKey: "gateway-token", promptCache: { mode: "explicit" }, fetch: fetchMock },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("treats cacheRetention none as a disabled no-op before public policy validation", async () => {
+		const unsupportedModel: Model<"openai-responses"> = {
+			...openAI56ResponsesModel,
+			id: "gpt-5.5",
+			identity: classifyModel("openai", "gpt-5.5"),
+			compat: buildOpenAIResponsesCompat({
+				id: "gpt-5.5",
+				name: "GPT-5.5",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+			}),
+		};
+
+		const body = await captureSimpleOpenAIResponseBody(
+			{ cacheRetention: "none", promptCache: { mode: "explicit" } },
+			unsupportedModel,
+		);
+
+		if (body === null) throw new Error("Expected disabled prompt-cache request to reach the provider");
+		expect(body).not.toHaveProperty("prompt_cache_options");
+		const input = body.input;
+		if (!Array.isArray(input)) throw new Error("Expected Responses input");
+		const contentBlocks = input.flatMap(item => {
+			if (typeof item !== "object" || item === null || !("content" in item) || !Array.isArray(item.content)) {
+				return [];
+			}
+			return item.content;
+		});
+		expect(contentBlocks.length).toBeGreaterThan(0);
+		for (const block of contentBlocks) {
+			expect(block).not.toHaveProperty("prompt_cache_breakpoint");
+		}
+	});
+
+	it("honors cache retention environment overrides before public explicit policy validation", async () => {
+		const unsupportedModel: Model<"openai-responses"> = {
+			...openAI56ResponsesModel,
+			id: "gpt-5.5",
+			identity: classifyModel("openai", "gpt-5.5"),
+			compat: buildOpenAIResponsesCompat({
+				id: "gpt-5.5",
+				name: "GPT-5.5",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+			}),
+		};
+
+		await withEnv({ PI_CACHE_RETENTION: "none" }, async () => {
+			const body = await captureSimpleOpenAIResponseBody({ promptCache: { mode: "explicit" } }, unsupportedModel);
+
+			if (body === null) throw new Error("Expected disabled prompt-cache request to reach the provider");
+			expect(body).not.toHaveProperty("prompt_cache_options");
+		});
+
+		for (const retention of ["short", "long"] as const) {
+			await withEnv({ PI_CACHE_RETENTION: retention }, () => {
+				expect(() =>
+					streamSimple(
+						unsupportedModel,
+						{ messages: [{ role: "user", content: [{ type: "text", text: "prompt" }], timestamp: 0 }] },
+						{ apiKey: "test-key", promptCache: { mode: "explicit" } },
+					),
+				).toThrow("OpenAI explicit prompt caching is unsupported");
+			});
+		}
+	});
 });
 
 describe("openai-responses cache affinity", () => {
@@ -305,6 +720,16 @@ describe("openai-responses cache affinity", () => {
 			expect(captured.body?.existing).toBe(true);
 			expect(captured.body?.reasoning).toBeUndefined();
 		}
+	});
+
+	it("sets x-grok-conv-id cache affinity for paid xai Responses requests", async () => {
+		const captured = await captureDispatchedOpenAIResponseHeaders(
+			{ sessionId: "session-fallback" },
+			xaiApiKeyResponsesModel,
+		);
+
+		expect(getHeader(captured.headers, "x-grok-conv-id")).toBe("session-fallback");
+		expect(captured.body?.prompt_cache_key).toBe("session-fallback");
 	});
 
 	it("sets OpenRouter Responses session_id from sessionId in the body", async () => {

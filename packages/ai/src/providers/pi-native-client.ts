@@ -11,11 +11,12 @@
  *
  * Activated when a {@link Model} has `transport: "pi-native"` set; the
  * dispatch hook lives in `streamSimple()` (see `../stream.ts`). Used by
- * containerized omp deployments (robomp slots, the swarm extension) that
+ * containerized omp deployments (such as robomp slots) that
  * route every LLM call through a credential-holding sidecar so the slot
  * itself stays credential-free.
  */
-import { readSseJson } from "@oh-my-pi/pi-utils";
+import * as os from "node:os";
+import { getAppName, getInstallId, readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -29,6 +30,7 @@ import type {
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -116,7 +118,14 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 		Accept: "text/event-stream",
-		...(model.headers ?? {}),
+		// Usage-attribution identity: the gateway reports this request's token
+		// burn to the broker under the ORIGINATING client, not the gateway host.
+		// Attribution-only — the gateway never forwards x-omp-* upstream. Header
+		// values must stay ISO-8859-1-safe, hence the hostname scrub.
+		"x-omp-install-id": getInstallId(),
+		"x-omp-hostname": os.hostname().replace(/[^\x20-\x7e]/g, "?"),
+		"x-omp-app": getAppName(),
+		...model.headers,
 	};
 	if (apiKey && !headers.Authorization) {
 		headers.Authorization = `Bearer ${apiKey}`;
@@ -184,6 +193,14 @@ export function streamPiNative<TApi extends Api>(
 				stream.fail(await decodeGatewayError(response));
 				return;
 			}
+			// Callers can truthfully inspect the gateway HTTP response, but its
+			// request body is opaque here; callbacks themselves never cross the wire.
+			await notifyProviderResponse(
+				options,
+				response,
+				model,
+				response.headers.get("x-request-id") ?? response.headers.get("request-id"),
+			);
 			if (!response.body) {
 				stream.fail(
 					new AIError.AuthGatewayError("auth-gateway returned empty body", response.status, response.headers),

@@ -9,6 +9,7 @@ provides:
 - typed startup options for common `omp --mode rpc` flags such as thinking level,
   tool selection, prompt appends, provider session IDs, and headless session toggles
 - typed protocol models for state, bash results, compaction, and session stats
+- automatic protocol v2 negotiation, lossless chunk reassembly, and stable message pagination
 - a process-backed client that manages request correlation over stdio
 - typed per-event listeners plus a typed catch-all notification hook
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
@@ -193,6 +194,12 @@ request = client.next_ui_request(timeout=5.0)
 
 if request.method == "confirm":
     client.send_ui_confirmation(request.id, True)
+elif request.method == "select":
+    # option_details aligns positionally with options when descriptions are present.
+    for index, label in enumerate(request.options or ()):
+        detail = request.option_details[index] if request.option_details else {}
+        print(label, detail.get("description"))
+    client.send_ui_value(request.id, "approved")
 elif request.method in {"input", "editor"}:
     client.send_ui_value(request.id, "approved")
 ```

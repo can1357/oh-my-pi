@@ -1,3 +1,5 @@
 <system-reminder>
-This is an ephemeral side-channel turn that reuses the current conversation's context. The tool catalog stays attached only to keep the prompt cache warm — tools are NOT available on this turn. Do NOT emit any tool call; reply with plain text only. Any tool call you produce is discarded without executing.
+Ephemeral side-channel turn; reuses current conversation context.
+Tool catalog attached only to keep prompt cache warm; tools NOT available this turn.
+Do NOT emit tool calls; reply plain text only. Tool calls discarded without execution.
 </system-reminder>

@@ -120,8 +120,13 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async drain(): Promise<void> {
-		while (this.#drainPending.size > 0) {
-			await Promise.allSettled(this.#drainPending);
+		// Quiesce EVERY pending backend operation, not just the drain-tracked
+		// fire-and-forget publishes: an atomic write whose commit guard passed
+		// just before a terminal seal is still on the wire with
+		// `trackDrain: false`, and a graceful shutdown (SessionManager.close)
+		// must not return while it can still publish under a reopened path.
+		while (this.#drainPending.size > 0 || this.#pathPending.size > 0) {
+			await Promise.allSettled([...this.#drainPending, ...this.#pathPending.values()]);
 		}
 		const error = this.#firstDrainError;
 		this.#firstDrainError = undefined;
@@ -270,8 +275,15 @@ export class IndexedSessionStorage implements SessionStorage {
 				{ trackDrain: false },
 			);
 		} catch (err) {
-			this.#restoreIndex(path, previous);
-			throw toError(err);
+			const error = toError(err);
+			try {
+				if ((await this.#backend.readFull(path)) === content) return;
+			} catch {
+				// Preserve the original write failure; verification was unavailable.
+			}
+			const current = this.#index.get(path);
+			if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+			throw error;
 		}
 	}
 
@@ -502,6 +514,15 @@ class IndexedSessionStorageWriter implements SessionStorageWriter {
 		});
 		this.#pendingChain = next.catch(() => {});
 		return next;
+	}
+
+	appendSync(line: string): void {
+		if (this.#closed) throw new Error("Writer closed");
+		if (this.#error) throw this.#error;
+		// Local index is updated immediately; remote publish stays ordered on the
+		// path queue. Callers that need remote durability still await append()/flush().
+		const mtimeMs = this.#storage._appendForWriter(this.#path, line);
+		void this.#trackPromise(this.#storage._queueAppend(this.#path, line, mtimeMs, () => this.#error));
 	}
 
 	async append(line: string): Promise<void> {

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { AppendOnlyContextManager, AppendOnlyLog, StablePrefix } from "@oh-my-pi/pi-agent-core/append-only-context";
+import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import type { AgentContext, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, Tool, ToolExample } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { type } from "arktype";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -740,6 +741,114 @@ describe("message sync", () => {
 		expect(r2.messages).toHaveLength(1);
 		expect(r2.messages[0]!.content).toBe("new turn");
 	});
+	it("keeps sync decisions byte-faithful across steady-state, growth, rewrite, and revert", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+
+		// Partial message literals — syncMessages digests structural fields only.
+		const msgs: Message[] = [];
+		for (let i = 0; i < 4; i++) {
+			msgs.push({ role: "user", content: `q${i}` } as unknown as Message);
+			msgs.push({ role: "assistant", content: `a${i}` } as unknown as Message);
+		}
+		mgr.syncMessages(msgs);
+		expect([...mgr.log.entries()]).toEqual(msgs);
+
+		// Steady state: the pipeline hands back the same converted objects every
+		// call; the on-the-wire history must not move.
+		mgr.syncMessages(msgs);
+		expect([...mgr.log.entries()]).toEqual(msgs);
+
+		// Growth: prefix entries keep their identity, only the tail is added.
+		const before = [...mgr.log.entries()];
+		const tail = { role: "assistant", content: "new turn" } as unknown as Message;
+		msgs.push(tail);
+		mgr.syncMessages(msgs);
+		let entries = mgr.log.entries();
+		expect(entries.length).toBe(msgs.length);
+		expect(entries[entries.length - 1]).toBe(tail);
+		for (let i = 0; i < before.length; i++) expect(entries[i]).toBe(before[i]);
+
+		// Rewrite: one message's bytes change (fresh fragment objects); the log
+		// keeps the byte-stable prefix and replaces everything from the change.
+		const split = 5;
+		const rewritten = msgs.map((m, i) =>
+			i === split ? ({ role: m.role, content: "[pruned]" } as unknown as Message) : m,
+		);
+		mgr.syncMessages(rewritten);
+		entries = mgr.log.entries();
+		for (let i = 0; i < split; i++) expect(entries[i]).toBe(before[i]);
+		for (let i = split; i < rewritten.length; i++) expect(entries[i]).toBe(rewritten[i]);
+
+		// Revert: the original bytes return as fresh objects; the wire must show
+		// exactly those bytes again, in order.
+		const reverted = structuredClone(rewritten);
+		reverted[split] = { role: "assistant", content: "a2" } as unknown as Message;
+		mgr.syncMessages(reverted);
+		expect([...mgr.log.entries()]).toEqual(reverted);
+		const built = mgr.build(makeContext(), BUILD_OPTS);
+		expect(built.messages).toEqual(reverted);
+	});
+
+	it("re-syncs an in-place rewritten message once invalidation bumps its version", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+
+		const raw = { role: "assistant", content: [{ type: "text", text: "original" }] };
+		const msg = raw as unknown as Message;
+		mgr.syncMessages([msg]);
+		expect(mgr.log.entries()[0]).toBe(msg);
+
+		// Owner-side in-place rewrite under stable identity (prune/shake/
+		// strip-images seam): the log aliases the very object being mutated, so
+		// the memo must not keep serving pre-mutation bytes.
+		raw.content = [{ type: "text", text: "[redacted]" }];
+		invalidateMessageCache(msg);
+		mgr.syncMessages([msg]);
+		expect(mgr.log.entries()[0]).toBe(msg);
+
+		// A later replay restores the ORIGINAL bytes as a fresh object. The
+		// manager must diverge here and put the replayed bytes on the wire —
+		// not the stale aliased object whose digest matched the old bytes.
+		const reverted = {
+			role: "assistant",
+			content: [{ type: "text", text: "original" }],
+		} as unknown as Message;
+		mgr.syncMessages([reverted]);
+		const built = mgr.build(makeContext(), BUILD_OPTS);
+		expect(built.messages[0]).toBe(reverted);
+		expect(built.messages[0]!.content).toEqual([{ type: "text", text: "original" }]);
+	});
+
+	it("treats fresh-object clones with identical bytes as stable and still detects real rewrites", () => {
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+
+		const originals = [
+			{ role: "user", content: "q1" },
+			{ role: "assistant", content: "a1" },
+		] as unknown as Message[];
+		mgr.syncMessages(originals);
+
+		// Every call can re-normalize history into fresh objects (cerebras
+		// thinking-strip, transformContext re-render); identical bytes must keep
+		// the on-the-wire prefix objects stable.
+		const clones = structuredClone(originals);
+		mgr.syncMessages(clones);
+		let entries = mgr.log.entries();
+		expect(entries[0]).toBe(originals[0]);
+		expect(entries[1]).toBe(originals[1]);
+
+		// A real byte rewrite reaches sync as fresh fragment objects (owner
+		// invalidation recomputes the cached conversion) and must still diverge
+		// at exactly the changed message.
+		const rewritten = structuredClone(originals);
+		rewritten[1].content = "[pruned]";
+		mgr.syncMessages(rewritten);
+		entries = mgr.log.entries();
+		expect(entries[0]).toBe(originals[0]);
+		expect(entries[1]).toBe(rewritten[1]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -812,26 +921,16 @@ describe("tool examples injection through build()", () => {
 		properties: { paths: { type: "array", items: { type: "string" } } },
 	};
 
-	it("injects examples when exampleDialect is provided", () => {
-		const mgr = new AppendOnlyContextManager();
-		const tool = makeTool("find", "Find files.", findParams, findExamples);
-		const ctx = makeContext({ tools: [tool] });
-
-		const result = mgr.build(ctx, { intentTracing: false, exampleDialect: "anthropic" });
-		const desc = result.tools?.[0]?.description ?? "";
-		expect(desc).toContain("<examples>");
-		expect(desc).toContain("# Find files");
-		expect(desc).toContain('<invoke name="find">');
-	});
-
-	it("omits examples when exampleDialect is undefined", () => {
+	it("always injects Python-syntax examples", () => {
 		const mgr = new AppendOnlyContextManager();
 		const tool = makeTool("find", "Find files.", findParams, findExamples);
 		const ctx = makeContext({ tools: [tool] });
 
 		const result = mgr.build(ctx, { intentTracing: false });
 		const desc = result.tools?.[0]?.description ?? "";
-		expect(desc).toBe("Find files.");
+		expect(desc).toContain("<examples>");
+		expect(desc).toContain("# Find files");
+		expect(desc).toContain('find(paths=["src/**/*.ts"])');
 	});
 
 	it("injects the `i` placeholder into examples when intentTracing is on", () => {
@@ -839,21 +938,21 @@ describe("tool examples injection through build()", () => {
 		const tool = makeTool("find", "Find files.", findParams, findExamples);
 		const ctx = makeContext({ tools: [tool] });
 
-		const result = mgr.build(ctx, { intentTracing: true, exampleDialect: "anthropic" });
+		const result = mgr.build(ctx, { intentTracing: true });
 		const desc = result.tools?.[0]?.description ?? "";
-		expect(desc).toContain(`<parameter name="${INTENT_FIELD}"`);
-		expect(desc).toContain("…");
+		expect(desc).toContain(`${INTENT_FIELD}="…"`);
 	});
 
-	it("exampleDialect flip invalidates the fingerprint cache", () => {
+	it("examples presence flip invalidates the fingerprint cache", () => {
 		const mgr = new AppendOnlyContextManager();
-		const tool = makeTool("find", "Find files.", undefined, findExamples);
-		const ctx = makeContext({ tools: [tool] });
+		const ctx1 = makeContext({ tools: [makeTool("find", "Find files.", undefined, undefined)] });
+		const ctx2 = makeContext({ tools: [makeTool("find", "Find files.", undefined, findExamples)] });
 
-		mgr.build(ctx, { intentTracing: false });
+		mgr.build(ctx1, { intentTracing: false });
 		const fpNoExamples = mgr.prefix.fingerprint;
 
-		mgr.build(ctx, { intentTracing: false, exampleDialect: "anthropic" });
+		mgr.invalidate();
+		mgr.build(ctx2, { intentTracing: false });
 		const fpWithExamples = mgr.prefix.fingerprint;
 
 		expect(fpNoExamples).not.toBe(fpWithExamples);

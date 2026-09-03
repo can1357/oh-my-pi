@@ -260,7 +260,7 @@ export class DapClient {
 		// socket connect fails, we must not leak the detached adapter process.
 		try {
 			await waitForCondition(() => isUnixSocketReady(socketPath), timeoutMs, proc);
-			const { readable, writeSink, socket } = await connectSocket({ unix: socketPath });
+			const { readable, writeSink, socket } = await connectSocket({ unix: socketPath }, timeoutMs);
 			const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
 			proc.exited.then(() => client.#handleProcessExit());
 			void client.#startMessageReader();
@@ -395,7 +395,6 @@ export class DapClient {
 			throw signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<TBody>();
-		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
 			unsubscribe();
 			this.#eventWaiterRejectors.delete(closeHandler);
@@ -424,7 +423,7 @@ export class DapClient {
 		if (signal) {
 			signal.addEventListener("abort", abortHandler, { once: true });
 		}
-		timeout = setTimeout(() => {
+		const timeout = setTimeout(() => {
 			cleanup();
 			reject(new Error(`DAP event ${event} timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
@@ -457,7 +456,6 @@ export class DapClient {
 		// receives the rejection normally; this handler is a passive guard.
 		promise.catch(() => {});
 
-		let timeout: NodeJS.Timeout | undefined;
 		const cleanup = () => {
 			if (timeout) clearTimeout(timeout);
 			if (signal) {
@@ -469,7 +467,7 @@ export class DapClient {
 			cleanup();
 			reject(signal?.reason instanceof Error ? signal.reason : new ToolAbortError());
 		};
-		timeout = setTimeout(() => {
+		const timeout = setTimeout(() => {
 			if (!this.#pendingRequests.has(requestSeq)) return;
 			this.#pendingRequests.delete(requestSeq);
 			cleanup();
@@ -924,10 +922,20 @@ function socketToSink(socket: Bun.Socket<undefined>): DapWriteSink {
 	};
 }
 
-/** Connect to a unix domain socket and return DAP transport streams. */
-async function connectSocket(options: { unix: string }): Promise<SocketTransport> {
-	const { promise, resolve } = Promise.withResolvers<SocketTransport>();
+/**
+ * Connect to a unix domain socket and return DAP transport streams.
+ *
+ * Rejects (rather than hanging) when the connect fails — a stat-ready but dead
+ * socket returns ECONNREFUSED, a socket removed between the readiness stat and
+ * the connect returns ENOENT, a permission mismatch returns EACCES — and when
+ * neither `open` nor an error arrives within `timeoutMs` (e.g. a TOCTOU stall).
+ * `#spawnSocketUnix`'s catch then kills the detached adapter instead of leaking
+ * it. Exported so tests can drive the reject path deterministically.
+ */
+export async function connectSocket(options: { unix: string }, timeoutMs: number): Promise<SocketTransport> {
+	const { promise, resolve, reject } = Promise.withResolvers<SocketTransport>();
 	let streamController: ReadableStreamDefaultController<Uint8Array>;
+	let opened = false;
 
 	const readable = new ReadableStream<Uint8Array>({
 		start(controller) {
@@ -935,10 +943,21 @@ async function connectSocket(options: { unix: string }): Promise<SocketTransport
 		},
 	});
 
+	const timer = setTimeout(() => {
+		reject(new Error(`Timed out connecting to unix socket ${options.unix} after ${timeoutMs}ms`));
+	}, timeoutMs);
+	// A late socket callback after settle is a no-op; clearing the timer just
+	// stops it from keeping the event loop alive past the connect.
+	void promise.then(
+		() => clearTimeout(timer),
+		() => clearTimeout(timer),
+	);
+
 	Bun.connect({
 		unix: options.unix,
 		socket: {
 			open(socket) {
+				opened = true;
 				resolve({
 					readable,
 					writeSink: socketToSink(socket),
@@ -949,6 +968,9 @@ async function connectSocket(options: { unix: string }): Promise<SocketTransport
 				streamController.enqueue(new Uint8Array(data));
 			},
 			close() {
+				if (!opened) {
+					reject(new Error(`Unix socket ${options.unix} closed before opening`));
+				}
 				try {
 					streamController.close();
 				} catch {
@@ -956,6 +978,9 @@ async function connectSocket(options: { unix: string }): Promise<SocketTransport
 				}
 			},
 			error(_socket, err) {
+				if (!opened) {
+					reject(err);
+				}
 				try {
 					streamController.error(err);
 				} catch {
@@ -963,6 +988,12 @@ async function connectSocket(options: { unix: string }): Promise<SocketTransport
 				}
 			},
 		},
+	}).catch(err => {
+		// Bun.connect rejects the returned promise on synchronous connect
+		// failures (e.g. ENOENT) without always firing the `error` handler.
+		if (!opened) {
+			reject(err);
+		}
 	});
 
 	return promise;

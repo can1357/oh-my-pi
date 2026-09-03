@@ -189,12 +189,25 @@ export async function getSearchProvider(id: SearchProviderId): Promise<SearchPro
 	return provider;
 }
 
-/** Preferred provider set via settings (default: auto) */
-let preferredProvId: SearchProviderId | "auto" = "auto";
+/** Provider fallback order set via settings (default: built-in order). */
+let orderedProvIds: readonly SearchProviderId[] = SEARCH_PROVIDER_ORDER;
+/** Providers the user explicitly listed in `providers.webSearchOrder`. */
+let explicitProvIds = new Set<SearchProviderId>();
 
-/** Set the preferred web search provider from settings */
-export function setPreferredSearchProvider(provider: SearchProviderId | "auto"): void {
-	preferredProvId = provider;
+/**
+ * Prioritize configured providers while retaining every unlisted provider in
+ * its built-in relative order. Invalid IDs are ignored defensively. Listed
+ * providers are treated as explicit selections: they resolve through
+ * `isExplicitlyAvailable`, so e.g. a hand-listed Perplexity may fall back to
+ * anonymous search exactly like the retired single-preference setting did.
+ */
+export function setSearchProviderOrder(providers: readonly SearchProviderId[]): void {
+	const prioritized = new Set(providers.filter(id => SEARCH_PROVIDER_ORDER.includes(id)));
+	explicitProvIds = prioritized;
+	orderedProvIds =
+		prioritized.size === 0
+			? SEARCH_PROVIDER_ORDER
+			: [...prioritized, ...SEARCH_PROVIDER_ORDER.filter(id => !prioritized.has(id))];
 }
 
 /** Providers excluded from web search resolution via settings. */
@@ -215,19 +228,21 @@ export interface SearchProviderCandidate {
 	explicit: boolean;
 }
 
-/** Return provider candidates in fallback order without loading their modules. */
-export function resolveProviderCandidates(
-	preferredProvider: SearchProviderId | "auto" = preferredProvId,
-): SearchProviderCandidate[] {
+/**
+ * Return provider candidates in fallback order without loading their modules.
+ * `forcedProvider` (a per-request `provider` argument) is terminal-first and
+ * bypasses exclusion; configured-order entries carry `explicit: true`.
+ */
+export function resolveProviderCandidates(forcedProvider?: SearchProviderId): SearchProviderCandidate[] {
 	const candidates: SearchProviderCandidate[] = [];
 
-	if (preferredProvider !== "auto" && !isSearchProviderExcluded(preferredProvider)) {
-		candidates.push({ id: preferredProvider, explicit: true });
+	if (forcedProvider !== undefined && !isSearchProviderExcluded(forcedProvider)) {
+		candidates.push({ id: forcedProvider, explicit: true });
 	}
 
-	for (const id of SEARCH_PROVIDER_ORDER) {
-		if (id === preferredProvider || isSearchProviderExcluded(id)) continue;
-		candidates.push({ id, explicit: false });
+	for (const id of orderedProvIds) {
+		if (id === forcedProvider || isSearchProviderExcluded(id)) continue;
+		candidates.push({ id, explicit: explicitProvIds.has(id) });
 	}
 
 	return candidates;
@@ -241,11 +256,11 @@ export function resolveProviderCandidates(
  */
 export async function resolveProviderChain(
 	authStorage: AuthStorage,
-	preferredProvider: SearchProviderId | "auto" = preferredProvId,
+	forcedProvider?: SearchProviderId,
 ): Promise<SearchProvider[]> {
 	const providers: SearchProvider[] = [];
 
-	for (const candidate of resolveProviderCandidates(preferredProvider)) {
+	for (const candidate of resolveProviderCandidates(forcedProvider)) {
 		const provider = await getSearchProvider(candidate.id);
 		const available = candidate.explicit
 			? await provider.isExplicitlyAvailable(authStorage)

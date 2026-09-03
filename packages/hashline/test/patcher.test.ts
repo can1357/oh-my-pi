@@ -12,6 +12,7 @@ import {
 	NodeFilesystem,
 	Patch,
 	Patcher,
+	type WriteResult,
 } from "@oh-my-pi/hashline";
 
 const PATH = "a.ts";
@@ -30,7 +31,7 @@ describe("Patcher snapshot tag integrity", () => {
 		const tag = snapshots.record(PATH, "before\n");
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 1.=1:\n+after`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 1-1:\n+after`));
 
 		expect(result.sections[0]?.op).toBe("update");
 		expect(result.sections[0]?.fileHash).toMatch(/^[0-9A-F]{4}$/);
@@ -46,7 +47,7 @@ describe("Patcher snapshot tag integrity", () => {
 			await Bun.write(filePath, new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(source)]));
 			const snapshots = new InMemorySnapshotStore();
 			const tag = snapshots.record(filePath, source);
-			const patch = Patch.parse([formatHashlineHeader(filePath, tag), "SWAP 1.=1:", "+using B;"].join("\n"));
+			const patch = Patch.parse([formatHashlineHeader(filePath, tag), "PUT 1-1:", "+using B;"].join("\n"));
 
 			await new Patcher({ fs: new NodeFilesystem(), snapshots }).apply(patch);
 
@@ -70,14 +71,14 @@ describe("Patcher snapshot tag integrity", () => {
 		expect(snapshots.byHash(PATH, tag)).toBeNull();
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 3.=3:\n+L3`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 3-3:\n+L3`));
 
 		expect(result.sections[0]?.op).toBe("update");
 		expect(fs.get(PATH)).toBe("l1\nl2\nL3\nl4\nl5\n");
 	});
 
 	it("normalizes lowercase section tags while parsing", () => {
-		const section = Patch.parseSingle(`[${PATH}#1a2b]\nSWAP 1.=1:\n+after`);
+		const section = Patch.parseSingle(`[${PATH}#1a2b]\nPUT 1-1:\n+after`);
 
 		expect(section.fileHash).toBe("1A2B");
 	});
@@ -90,7 +91,7 @@ describe("Patcher snapshot tag integrity", () => {
 		const patcher = new Patcher({ fs, snapshots });
 
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 1.=1:\n+after`));
+			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 1-1:\n+after`));
 			throw new Error("expected MismatchError");
 		} catch (error) {
 			expect(error).toBeInstanceOf(MismatchError);
@@ -114,7 +115,7 @@ describe("Patcher snapshot tag integrity", () => {
 		const bogus = live === "FFFF" ? "0000" : "FFFF";
 
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${bogus}]\nSWAP 1.=1:\n+after`));
+			await patcher.apply(Patch.parse(`[${PATH}#${bogus}]\nPUT 1-1:\n+after`));
 			throw new Error("expected MismatchError");
 		} catch (error) {
 			expect(error).toBeInstanceOf(MismatchError);
@@ -143,8 +144,58 @@ describe("Patcher snapshot tag integrity", () => {
 		const tag = snapshots.record(PATH, SNAPSHOT_TEXT, [1, 2]);
 
 		const patcher = new Patcher({ fs, snapshots });
-		await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 2.=2:\n+edited live`));
+		await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 2-2:\n+edited live`));
 		expect(fs.get(PATH)).toBe("line one 410\nedited live\n");
+	});
+});
+
+// A write-time transform outside the patcher's control (e.g. an ACP-connected
+// editor's format-on-save rewriting indentation on every save) must never
+// poison the next section's snapshot tag with content that no longer exists
+// on disk. `DriftingFilesystem` stands in for that editor: every write is
+// persisted verbatim to the backing store (so `fs.get` sees ground truth,
+// like the file the reporter grepped with `cat`/`grep` right after the tool
+// call returned), but `writeText` echoes back a *reformatted* copy — spaces
+// turned into tabs, exactly the corruption reported against the ACP bridge.
+class DriftingFilesystem extends InMemoryFilesystem {
+	override async writeText(path: string, content: string): Promise<WriteResult> {
+		const drifted = content.replace(/^ {4}/gm, "\t");
+		await super.writeText(path, drifted);
+		return { text: drifted };
+	}
+}
+
+describe("Patcher snapshot tag stays honest across a write-time content transform", () => {
+	it("keys the returned snapshot tag on what the Filesystem actually persisted, not the pre-write content", async () => {
+		const original = "function f() {\n    return 1;\n}\n";
+		const fs = new DriftingFilesystem([[PATH, original]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(PATH, original);
+		const patcher = new Patcher({ fs, snapshots });
+
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 2-2:\n+    return 2;`));
+		const section = result.sections[0];
+		if (!section) throw new Error("expected one section result");
+
+		// Ground truth: the Filesystem drifted the untouched line's indentation
+		// to tabs on write, exactly like a hostile format-on-save would.
+		const onDisk = fs.get(PATH);
+		expect(onDisk).toBe("function f() {\n\treturn 2;\n}\n");
+
+		// The returned tag MUST hash the drifted (real) content, not the
+		// pre-write text the patcher computed — otherwise the very next edit's
+		// tag validation is checked against content the file no longer has.
+		expect(section.fileHash).toBe(computeFileHash(onDisk ?? ""));
+		expect(section.header).toBe(formatHashlineHeader(PATH, computeFileHash(onDisk ?? "")));
+
+		// The drift is surfaced, not swallowed: silent divergence is exactly
+		// what turned a one-line edit into unexplained whole-file corruption.
+		expect(section.warnings.some(w => w.includes(PATH) && /reformatted it on save/.test(w))).toBe(true);
+
+		// A follow-up edit anchored on the returned tag must succeed against
+		// the real (drifted) file instead of failing a stale-tag mismatch.
+		await patcher.apply(Patch.parse(`[${PATH}#${section.fileHash}]\nPUT 1-1:\n+function g() {`));
+		expect(fs.get(PATH)).toBe("function g() {\n\treturn 2;\n}\n");
 	});
 });
 
@@ -154,7 +205,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[${PATH}]\nINS.TAIL:\n+c`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[${PATH}]\nPUT >$:\n+c`))).rejects.toThrow(
 			/Missing hashline snapshot tag.*use the write tool/s,
 		);
 		expect(fs.get(PATH)).toBe("a\nb\n");
@@ -165,7 +216,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[${PATH}]\nSWAP 1.=1:\n+X`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[${PATH}]\nPUT 1-1:\n+X`))).rejects.toThrow(
 			/Missing hashline snapshot tag/,
 		);
 	});
@@ -175,7 +226,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[ghost.ts#1A2B]\nINS.TAIL:\n+c`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[ghost.ts#1A2B]\nPUT >$:\n+c`))).rejects.toThrow(
 			/File not found.*use the write tool/is,
 		);
 	});
@@ -188,7 +239,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const stale = live === "0000" ? "FFFF" : "0000";
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${stale}]\nINS.TAIL:\n+c`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${stale}]\nPUT >$:\n+c`));
 
 		const section = result.sections[0];
 		expect(section?.op).toBe("update");
@@ -203,7 +254,7 @@ describe("Patcher mandatory snapshot tag policy", () => {
 		const tag = snapshots.record(PATH, content);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nINS.TAIL:\n+c`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT >$:\n+c`));
 
 		const section = result.sections[0];
 		expect(section?.op).toBe("update");
@@ -221,7 +272,7 @@ describe("Patcher seen-line provenance", () => {
 		const tag = snapshots.record(PATH, CONTENT, [1, 2]);
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`))).rejects.toThrow(
+		await expect(patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 4-4:\n+L4`))).rejects.toThrow(
 			/never displayed \(it showed/,
 		);
 		expect(fs.get(PATH)).toBe(CONTENT);
@@ -233,7 +284,7 @@ describe("Patcher seen-line provenance", () => {
 		const tag = snapshots.record(PATH, CONTENT, [1, 2]);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 2.=2:\n+L2`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 2-2:\n+L2`));
 
 		expect(result.sections[0]?.op).toBe("update");
 		expect(fs.get(PATH)).toBe("l1\nL2\nl3\nl4\nl5\n");
@@ -247,7 +298,7 @@ describe("Patcher seen-line provenance", () => {
 		snapshots.record(PATH, CONTENT, [4, 5]);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 4-4:\n+L4`));
 
 		expect(result.sections[0]?.op).toBe("update");
 		expect(fs.get(PATH)).toBe("l1\nl2\nl3\nL4\nl5\n");
@@ -262,7 +313,7 @@ describe("Patcher seen-line provenance", () => {
 
 		let message: string | undefined;
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`));
+			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 4-4:\n+L4`));
 		} catch (err) {
 			message = (err as Error).message;
 		}
@@ -273,7 +324,7 @@ describe("Patcher seen-line provenance", () => {
 
 		// The revealed line joins the snapshot's seen set, so a straight retry
 		// with the same [path#tag] header applies — no extra read required.
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 4-4:\n+L4`));
 		expect(result.sections[0]?.op).toBe("update");
 		expect(fs.get(PATH)).toBe("l1\nl2\nl3\nL4\nl5\n");
 	});
@@ -286,7 +337,7 @@ describe("Patcher seen-line provenance", () => {
 		const patcher = new Patcher({ fs, snapshots });
 
 		// Anchor 60 unseen lines — over the 40-line inline reveal cap.
-		const dels = Array.from({ length: 60 }, (_, i) => `DEL ${100 + i}`).join("\n");
+		const dels = Array.from({ length: 60 }, (_, i) => `CUT ${100 + i}`).join("\n");
 		let message: string | undefined;
 		try {
 			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\n${dels}`));
@@ -331,7 +382,7 @@ describe("Patcher seen-line provenance", () => {
 
 		let message: string | undefined;
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 2.=3:\n+X\n+Y`));
+			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 2-3:\n+X\n+Y`));
 		} catch (err) {
 			message = (err as Error).message;
 		}
@@ -351,7 +402,7 @@ describe("Patcher seen-line provenance", () => {
 		// having only seen the first 512 chars of a >4KB line.
 		let retryMessage: string | undefined;
 		try {
-			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 2.=3:\n+X\n+Y`));
+			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 2-3:\n+X\n+Y`));
 		} catch (err) {
 			retryMessage = (err as Error).message;
 		}
@@ -367,7 +418,7 @@ describe("Patcher seen-line provenance", () => {
 		const tag = snapshots.record(PATH, CONTENT);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 4.=4:\n+L4`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 4-4:\n+L4`));
 
 		expect(result.sections[0]?.op).toBe("update");
 	});
@@ -384,7 +435,7 @@ describe("Patcher tag-based path recovery", () => {
 		const patcher = new Patcher({ fs, snapshots });
 
 		// The header carries only the basename — the model dropped the directory.
-		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`));
+		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nPUT 2-2:\n+TWO`));
 
 		const section = result.sections[0];
 		expect(section?.op).toBe("update");
@@ -402,7 +453,7 @@ describe("Patcher tag-based path recovery", () => {
 		const tag = snapshots.record(NESTED, CONTENT);
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[other.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		await expect(patcher.apply(Patch.parse(`[other.ts#${tag}]\nPUT 2-2:\n+TWO`))).rejects.toThrow(/File not found/);
 		expect(fs.get(NESTED)).toBe(CONTENT);
 	});
 
@@ -413,9 +464,7 @@ describe("Patcher tag-based path recovery", () => {
 		const bogus = tag === "FFFF" ? "0000" : "FFFF";
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[file.ts#${bogus}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(
-			/File not found/,
-		);
+		await expect(patcher.apply(Patch.parse(`[file.ts#${bogus}]\nPUT 2-2:\n+TWO`))).rejects.toThrow(/File not found/);
 	});
 
 	it("declines recovery when two retained files share the filename and tag", async () => {
@@ -428,7 +477,7 @@ describe("Patcher tag-based path recovery", () => {
 		snapshots.record("b/file.ts", CONTENT);
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nPUT 2-2:\n+TWO`))).rejects.toThrow(/File not found/);
 		expect(fs.get("a/file.ts")).toBe(CONTENT);
 		expect(fs.get("b/file.ts")).toBe(CONTENT);
 	});
@@ -444,7 +493,7 @@ describe("Patcher tag-based path recovery", () => {
 		const tag = snapshots.record(NESTED, CONTENT);
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nPUT 2-2:\n+TWO`))).rejects.toThrow(/File not found/);
 		expect(fs.get(NESTED)).toBe(CONTENT);
 	});
 
@@ -462,7 +511,7 @@ describe("Patcher tag-based path recovery", () => {
 		const tag = snapshots.record(NESTED, CONTENT);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`));
+		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nPUT 2-2:\n+TWO`));
 		expect(result.sections[0]?.path).toBe(NESTED);
 		expect(fs.get(NESTED)).toBe("one\nTWO\nthree\n");
 	});
@@ -479,6 +528,6 @@ describe("Patcher tag-based path recovery", () => {
 		const snapshots = new InMemorySnapshotStore();
 		const patcher = new Patcher({ fs, snapshots });
 
-		await expect(patcher.apply(Patch.parse(`[file.ts#ABCD]\nSWAP 1.=1:\n+X`))).rejects.toThrow(/write gate/);
+		await expect(patcher.apply(Patch.parse(`[file.ts#ABCD]\nPUT 1-1:\n+X`))).rejects.toThrow(/write gate/);
 	});
 });

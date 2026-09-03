@@ -1,0 +1,6 @@
+# actionlint only knows GitHub-hosted labels; register the self-hosted ARC
+# runner scale set (infra/docs/04-arc-and-caching.md) so `runs-on: omp-kata`
+# lints clean.
+self-hosted-runner:
+   labels:
+      - omp-kata

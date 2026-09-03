@@ -1,7 +1,7 @@
 /**
  * Types for the internal URL routing system.
  *
- * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
+ * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
@@ -70,6 +70,12 @@ export interface InternalUrl extends URL {
 	 * Raw pathname extracted from input, preserving traversal markers before URL normalization.
 	 */
 	rawPathname?: string;
+	/**
+	 * Exact input string this URL was parsed from, before any normalization.
+	 * Set by `parseInternalUrl`; used where byte-exact URI matching matters
+	 * (e.g. MCP resource URIs compared by string equality).
+	 */
+	rawHref?: string;
 }
 
 /**
@@ -83,6 +89,15 @@ export interface InternalUrl extends URL {
 export interface ResolveContext {
 	/** Working directory of the calling session. */
 	cwd?: string;
+	/**
+	 * Calling session's session file. Handlers that resolve agent ids which may
+	 * be parked (`history://<id>`, `agent://<id>`) refresh the caller's
+	 * persisted roster against this root before registry lookup, so a
+	 * same-named id restored by another root's scan never shadows this
+	 * caller's own transcript or output. Absent when the caller has no session
+	 * file: those handlers keep their existing in-memory behavior.
+	 */
+	sessionFile?: string;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: unknown;
 	/** Caller's abort signal. */

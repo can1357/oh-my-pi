@@ -91,6 +91,7 @@ def upstream_repo(tmp_path: Path) -> Path:
 
 def test_workspace_key_and_branch_shape() -> None:
     assert workspace_key("oven-sh/bun", 30654) == "oven-sh__bun__30654"
+    assert workspace_key("oven-sh/bun", "release") == "oven-sh__bun__release"
     branch = make_branch(issue_number=30654, title="JSON.parse crashes on BOM", seed="oven-sh/bun#30654")
     assert branch.startswith("farm/")
     parts = branch.split("/")
@@ -405,6 +406,87 @@ def test_ensure_workspace_creates_worktree(tmp_path: Path, upstream_repo: Path) 
     assert ws.context_dir.is_dir()
     assert ws.repro_dir.is_dir()
     assert ws.artifacts_dir.is_dir()
+
+
+def test_release_workspace_resets_to_remote_main_and_uses_tag_session(
+    tmp_path: Path,
+    upstream_repo: Path,
+) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    workspace = mgr.ensure_release_workspace(
+        repo="octo/widget",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        tag="v1.2.3",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    assert workspace.branch == "main"
+    assert workspace.issue_number == "release"
+    assert workspace.workspace_key == "octo__widget__release"
+    assert workspace.session_dir.name == ".omp-session-v1.2.3"
+
+    (workspace.repo_dir / "local.txt").write_text("discard me\n", encoding="utf-8")
+    _git(["-C", str(workspace.repo_dir), "add", "local.txt"], cwd=tmp_path)
+    _git(["-C", str(workspace.repo_dir), "commit", "-m", "local crash residue"], cwd=tmp_path)
+    (workspace.repo_dir / "untracked.txt").write_text("discard me too\n", encoding="utf-8")
+
+    seed = tmp_path / "seed"
+    (seed / "remote.txt").write_text("new remote state\n", encoding="utf-8")
+    _git(["-C", str(seed), "add", "remote.txt"], cwd=tmp_path)
+    subprocess.run(
+        ["git", "commit", "-m", "advance remote"],
+        cwd=str(seed),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+    _git(["-C", str(seed), "push", "origin", "main"], cwd=tmp_path)
+    remote_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(seed),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    resumed = mgr.ensure_release_workspace(
+        repo="octo/widget",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        tag="v1.2.3",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(resumed.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == remote_head
+    assert not (resumed.repo_dir / "local.txt").exists()
+    assert not (resumed.repo_dir / "untracked.txt").exists()
+    assert (resumed.repo_dir / "remote.txt").read_text(encoding="utf-8") == "new remote state\n"
+
+    next_release = mgr.ensure_release_workspace(
+        repo="octo/widget",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        tag="v1.2.4",
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    assert next_release.repo_dir == resumed.repo_dir
+    assert next_release.session_dir.name == ".omp-session-v1.2.4"
 
 
 def test_ensure_workspace_pr_head_uses_detached_pr_ref(tmp_path: Path, upstream_repo: Path) -> None:
@@ -2313,3 +2395,78 @@ def test_remove_workspace_skips_prune_on_repeat_close_after_full_cleanup(
     mgr.remove_workspace(repo="o/r", number=43)
 
     assert calls == [], "repeat close ran a spurious git worktree prune on an already-clean workspace"
+
+
+def _seed_reclaimable_workspace(mgr: SandboxManager, repo: str, number: int) -> Path:
+    """Lay out a workspace with dep caches, session state, and source files."""
+    ws_root = mgr.workspace_root(repo, number)
+    for rel in (
+        "repo/node_modules/left-pad",
+        "repo/packages/tui/node_modules/dep",
+        "repo/src",
+        ".omp-session",
+        ".omp-xdg/cache/bun-install",
+        ".omp-xdg/state/omp",
+        ".omp-tmp",
+        "artifacts",
+    ):
+        (ws_root / rel).mkdir(parents=True)
+    (ws_root / "repo/node_modules/left-pad/index.js").write_text("x", encoding="utf-8")
+    (ws_root / "repo/packages/tui/node_modules/dep/index.js").write_text("x", encoding="utf-8")
+    (ws_root / "repo/src/keep.ts").write_text("keep", encoding="utf-8")
+    (ws_root / ".omp-session/session.jsonl").write_text("{}", encoding="utf-8")
+    (ws_root / ".omp-xdg/cache/bun-install/pkg.tgz").write_text("x", encoding="utf-8")
+    (ws_root / ".omp-xdg/state/omp/state.json").write_text("{}", encoding="utf-8")
+    (ws_root / ".omp-tmp/scratch").write_text("x", encoding="utf-8")
+    (ws_root / "artifacts/run.log").write_text("x", encoding="utf-8")
+    return ws_root
+
+
+def test_reclaim_workspace_caches_strips_dep_caches_and_preserves_state(tmp_path: Path) -> None:
+    # Contract: node_modules (root + nested) and the XDG cache/tmp go away;
+    # everything a `--continue` resume needs (session, source, artifacts,
+    # non-cache XDG state) survives; no `.trash-*` staging dirs are left.
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws_root = _seed_reclaimable_workspace(mgr, "octo/widget", 7)
+
+    assert mgr.reclaim_workspace_caches(repo="octo/widget", number=7) is True
+
+    assert not (ws_root / "repo/node_modules").exists()
+    assert not (ws_root / "repo/packages/tui/node_modules").exists()
+    assert not (ws_root / ".omp-xdg/cache").exists()
+    assert not (ws_root / ".omp-tmp").exists()
+    assert (ws_root / "repo/src/keep.ts").read_text(encoding="utf-8") == "keep"
+    assert (ws_root / ".omp-session/session.jsonl").exists()
+    assert (ws_root / ".omp-xdg/state/omp/state.json").exists()
+    assert (ws_root / "artifacts/run.log").exists()
+    assert not list(ws_root.glob(".trash-*"))
+
+    # Second pass: nothing left to reclaim.
+    assert mgr.reclaim_workspace_caches(repo="octo/widget", number=7) is False
+
+
+def test_reclaim_workspace_caches_missing_workspace_is_noop(tmp_path: Path) -> None:
+    mgr = SandboxManager(tmp_path / "workspaces")
+    assert mgr.reclaim_workspace_caches(repo="octo/widget", number=404) is False
+
+
+def test_reclaim_all_caches_sweeps_workspaces_not_pool(tmp_path: Path) -> None:
+    # Startup sweep: every workspace dir is stripped (including `.trash-*`
+    # leftovers from a reclaim that died mid-delete); the shared clone pool
+    # is never touched.
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws_a = _seed_reclaimable_workspace(mgr, "octo/widget", 1)
+    ws_b = _seed_reclaimable_workspace(mgr, "octo/gadget", 2)
+    (ws_b / ".trash-dead").mkdir()
+    (ws_b / ".trash-dead/junk").write_text("x", encoding="utf-8")
+    pool_marker = mgr.pool / "octo__widget" / "node_modules"
+    pool_marker.mkdir(parents=True)
+
+    assert mgr.reclaim_all_caches() == 2
+
+    for ws_root in (ws_a, ws_b):
+        assert not (ws_root / "repo/node_modules").exists()
+        assert (ws_root / ".omp-session/session.jsonl").exists()
+        assert not list(ws_root.glob(".trash-*"))
+    assert pool_marker.exists(), "sweep must never touch the shared clone pool"
+    assert mgr.reclaim_all_caches() == 0

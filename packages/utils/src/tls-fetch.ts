@@ -174,5 +174,5 @@ export function withExtraCaFetch<T extends { fetch?: FetchImpl } | undefined>(op
 	const fetchImpl = options?.fetch ?? (globalThis.fetch as FetchImpl);
 	const wrapped = wrapFetchForExtraCa(fetchImpl);
 	if (wrapped === fetchImpl && options?.fetch !== undefined) return options;
-	return { ...(options ?? {}), fetch: wrapped } as T;
+	return { ...options, fetch: wrapped } as T;
 }

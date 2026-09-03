@@ -2,18 +2,19 @@ import { afterAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { Type as TypeBoxShimType } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-typebox";
 import {
 	installLegacyPiSpecifierShim,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { Type as TypeBoxShimType } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // The remap installs a Bun.plugin onResolve hook plus an explicit
 // rewrite branch inside `rewriteBareImportsForLegacyExtension` that
-// redirects bare `@sinclair/typebox` specifiers to the in-repo Zod-backed
-// shim. Extensions that authored against TypeBox should keep working
-// unchanged without `@sinclair/typebox` ever needing to be installed.
+// redirects bare `@sinclair/typebox` specifiers to the omptype-backed
+// compatibility surface. Extensions should keep working unchanged without
+// `@sinclair/typebox` ever needing to be installed.
 installLegacyPiSpecifierShim();
 
 const tempRoots: string[] = [];
@@ -57,20 +58,65 @@ describe("legacy-pi TypeBox remap", () => {
 			[
 				'import { Type } from "typebox";',
 				"export const probe = Type;",
-				"export const unsafeSchema = Type.Unsafe({ type: 'object', properties: { path: { type: 'string' } }, required: ['path'] });",
+				"export const schema = Type.Unsafe({ type: 'object', properties: { path: { type: 'string' } }, required: ['path'] });",
 			].join("\n"),
 		);
 
 		const loaded = (await loadLegacyPiModule(entry)) as {
 			probe: typeof TypeBoxShimType;
-			unsafeSchema: Record<string, unknown>;
+			schema: Record<string, unknown>;
 		};
 
 		expect(loaded.probe).toBe(TypeBoxShimType);
-		expect({ ...loaded.unsafeSchema }).toEqual({
+		// `Type.Unsafe` is now a first-class omptype schema (so `Type.Optional`/
+		// `Type.Object` can compose it), so a top-level Unsafe tool param takes the
+		// omptype wire path and is closed like every other tool param. Compare the
+		// JSON-serialized wire — internal memoization stamps are non-serialized.
+		const wire = toolWireSchema({ name: "fixture", description: "", parameters: loaded.schema });
+		expect(JSON.parse(JSON.stringify(wire))).toEqual({
 			type: "object",
 			properties: { path: { type: "string" } },
 			required: ["path"],
+			additionalProperties: false,
 		});
+	});
+
+	it("preserves raw JSON Schema properties passed directly to Type.Object", async () => {
+		const entry = await writeFixtureExtension(
+			[
+				'import { Type } from "typebox";',
+				"export const schema = Type.Object({ cfg: { type: 'string', pattern: '^ok' }, label: Type.Optional(Type.String()) });",
+			].join("\n"),
+		);
+
+		const loaded = (await loadLegacyPiModule(entry)) as {
+			schema: Record<string, unknown> & { safeParse(input: unknown): { success: boolean } };
+		};
+
+		expect(loaded.schema.safeParse({ cfg: "okay" }).success).toBe(true);
+		expect(loaded.schema.safeParse({ cfg: "bad" }).success).toBe(false);
+		expect(loaded.schema.safeParse({ cfg: { type: "string" } }).success).toBe(false);
+		const wire = toolWireSchema({ name: "fixture", description: "", parameters: loaded.schema });
+		expect(JSON.parse(JSON.stringify(wire))).toEqual({
+			type: "object",
+			properties: {
+				cfg: { type: "string", pattern: "^ok" },
+				label: { type: "string" },
+			},
+			required: ["cfg"],
+			additionalProperties: false,
+		});
+	});
+
+	it("redirects minified bare typebox imports without whitespace around from", async () => {
+		const entry = await writeFixtureExtension(
+			'import{Type}from"typebox";export const schema=Type.Object({name:Type.String()});',
+		);
+
+		const loaded = (await loadLegacyPiModule(entry)) as {
+			schema: { safeParse: (input: unknown) => { success: boolean } };
+		};
+		expect(loaded.schema.safeParse({ name: "ok" }).success).toBe(true);
+		expect(loaded.schema.safeParse({}).success).toBe(false);
 	});
 });

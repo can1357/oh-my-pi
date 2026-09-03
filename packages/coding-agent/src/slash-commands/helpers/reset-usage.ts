@@ -54,6 +54,8 @@ export function describeRedeemOutcome(outcome: ResetCreditRedeemOutcome, label: 
 			return `${label}: that reset was already redeemed.`;
 		case "no_credit":
 			return `${label}: no saved resets available to spend.`;
+		case "credit_list_failed":
+			return `${label}: couldn't load this account's saved resets (network/auth) — nothing was spent, try again.`;
 		case "nothing_to_reset":
 			return `${label}: nothing to reset right now — your limits aren't constrained, so no credit was spent.`;
 		case "no_account":

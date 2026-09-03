@@ -1,0 +1,24 @@
+// Provider-wire compat for "huggingface"; regenerated from the frozen census using deployment contract selectors.
+
+provider "huggingface" {
+	thinking-mode "effort"
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "Qwen/Qwen3-235B-A22B-Thinking-2507" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-ai/DeepSeek-V3.*" {
+		requires-reasoning-content-for-all-assistant-turns #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "zai-org/GLM-4*" "zai-org/GLM-5" "zai-org/GLM-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "zai-org/GLM-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+}

@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { StoppingCriteria, TextGenerationPipeline } from "@huggingface/transformers";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -6,6 +7,7 @@ import { isSubcommand } from "@oh-my-pi/pi-coding-agent/cli-commands";
 import { getDefault, getEnumValues, getUi } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { TinyTitleDownloadProgressComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tiny-title-download-progress";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { RefCountedWorkerHandle } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -21,9 +23,16 @@ import {
 	TINY_TITLE_MODEL_OPTIONS,
 	TINY_TITLE_MODEL_VALUES,
 } from "@oh-my-pi/pi-coding-agent/tiny/models";
-import { createTinyTitleSubprocess, tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import {
+	createTinyTitleSubprocess,
+	TinyTitleClient,
+	tinyTitleClient,
+} from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import type { TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import type { Subprocess } from "bun";
+import { buildCompletionPrompt } from "../src/tiny/completion-prompt";
+import { createStopOnTextCriteria, type TransformersRuntime } from "../src/tiny/worker";
 
 function getModelOrThrow(id: string): Model<Api> {
 	const model = getBundledModel("anthropic", id);
@@ -67,7 +76,7 @@ function createTinyWorkerSpawnMock(calls: TinyWorkerSpawnCall[]) {
 		first: string[] | (TinyWorkerSpawnOptions & { cmd: string[] }),
 		second?: TinyWorkerSpawnOptions,
 	): Subprocess<"ignore", "ignore", "ignore"> {
-		const options = Array.isArray(first) ? { ...(second ?? {}), cmd: first } : first;
+		const options = Array.isArray(first) ? { ...second, cmd: first } : first;
 		calls.push({ options });
 		return {
 			pid: 12345,
@@ -199,6 +208,137 @@ describe("tiny title generator routing", () => {
 	});
 });
 
+interface FakeTinyWorker {
+	handle: RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>;
+	sent: TinyTitleWorkerInbound[];
+	refCount: number;
+	emit(message: TinyTitleWorkerOutbound): void;
+}
+
+function createFakeTinyWorker(): FakeTinyWorker {
+	const sent: TinyTitleWorkerInbound[] = [];
+	let onMessage: ((message: TinyTitleWorkerOutbound) => void) | undefined;
+	const worker: FakeTinyWorker = {
+		sent,
+		refCount: 0,
+		emit(message) {
+			onMessage?.(message);
+		},
+		handle: {
+			send(message) {
+				sent.push(message);
+			},
+			onMessage(handler) {
+				onMessage = handler;
+				return () => {
+					onMessage = undefined;
+				};
+			},
+			onError() {
+				return () => {};
+			},
+			async terminate() {},
+			ref() {
+				worker.refCount++;
+			},
+			unref() {
+				worker.refCount--;
+			},
+		},
+	};
+	return worker;
+}
+
+describe("tiny memory completion prompts", () => {
+	it("renders extraction instructions as a system turn separate from user input", () => {
+		const applyChatTemplate = vi.fn(() => "rendered prompt");
+		const tokenizer = { apply_chat_template: applyChatTemplate };
+
+		expect(buildCompletionPrompt(tokenizer as never, "actual user input", " extraction instructions ")).toBe(
+			"rendered prompt",
+		);
+		expect(applyChatTemplate).toHaveBeenCalledWith(
+			[
+				{ role: "system", content: "extraction instructions" },
+				{ role: "user", content: "actual user input" },
+			],
+			{
+				add_generation_prompt: true,
+				tokenize: false,
+				enable_thinking: false,
+			},
+		);
+	});
+
+	it("carries the extraction system prompt over the worker protocol", async () => {
+		const worker = createFakeTinyWorker();
+		const client = new TinyTitleClient(() => worker.handle);
+
+		const completion = client.complete("lfm2-1.2b", "actual user input", {
+			maxTokens: 64,
+			systemPrompt: "extraction instructions",
+		});
+		const request = worker.sent.find(message => message.type === "complete");
+		expect(request).toEqual({
+			type: "complete",
+			id: expect.any(String),
+			modelKey: "lfm2-1.2b",
+			prompt: "actual user input",
+			maxTokens: 64,
+			systemPrompt: "extraction instructions",
+		});
+		worker.emit({ type: "completion", id: request?.id ?? "", text: "extracted fact" });
+
+		expect(await completion).toBe("extracted fact");
+		await client.terminate();
+	});
+});
+
+describe("tiny title prewarm", () => {
+	it("spawns one idle worker that the first generate reuses (issue #6462)", async () => {
+		const workers: FakeTinyWorker[] = [];
+		let spawnCount = 0;
+		const client = new TinyTitleClient(() => {
+			spawnCount++;
+			const worker = createFakeTinyWorker();
+			workers.push(worker);
+			return worker.handle;
+		});
+
+		client.prewarm("lfm2-350m");
+
+		expect(spawnCount).toBe(1);
+		// No pending request registered, so the prewarmed worker is never
+		// referenced and never blocks process exit.
+		expect(workers[0]?.refCount).toBe(0);
+		// A no-op ping warms the transport without loading a model.
+		expect(workers[0]?.sent).toEqual([{ type: "ping", id: expect.any(String) }]);
+
+		const generated = client.generate("lfm2-350m", "Investigate routing");
+		// The first submit reuses the prewarmed worker — no second spawn.
+		expect(spawnCount).toBe(1);
+
+		const request = workers[0]?.sent.find(message => message.type === "generate");
+		expect(request?.type).toBe("generate");
+		workers[0]?.emit({ type: "title", id: request?.id ?? "", title: "Routing" });
+
+		expect(await generated).toBe("Routing");
+		await client.terminate();
+	});
+
+	it("does not spawn a worker for the online default", () => {
+		let spawnCount = 0;
+		const client = new TinyTitleClient(() => {
+			spawnCount++;
+			return createFakeTinyWorker().handle;
+		});
+
+		client.prewarm("online");
+
+		expect(spawnCount).toBe(0);
+	});
+});
+
 describe("tiny title subprocess", () => {
 	it("does not inherit worker output into the interactive terminal", async () => {
 		const calls: TinyWorkerSpawnCall[] = [];
@@ -258,5 +398,51 @@ describe("tiny title download progress UI", () => {
 describe("tiny-models CLI", () => {
 	it("registers tiny-models as a top-level subcommand", () => {
 		expect(isSubcommand("tiny-models")).toBe(true);
+	});
+});
+
+describe("local title stop criteria", () => {
+	/** Minimal stand-ins: the criteria only needs a StoppingCriteria base to extend
+	 *  and a tokenizer that can decode a token window. */
+	const transformers = { StoppingCriteria: class {} } as unknown as TransformersRuntime;
+	const tokenizer = {
+		decode: (ids: number[]) => ids.map(id => (id === 1 ? "</title>" : "x")).join(""),
+	} as unknown as TextGenerationPipeline["tokenizer"];
+	/** `_call(inputIds, scores)`; the criteria ignores scores. */
+	const call = (criteria: StoppingCriteria, inputIds: number[][]): boolean[] =>
+		criteria._call(
+			inputIds,
+			inputIds.map(() => []),
+		);
+
+	it("ignores a stop string that appears only in the prompt", () => {
+		const criteria = createStopOnTextCriteria(transformers, tokenizer, "</title>");
+		// Token 1 decodes to the stop string and sits inside the prompt.
+		const prompt = [1, 0, 0];
+		expect(call(criteria, [[...prompt, 0]])).toEqual([false]);
+		expect(call(criteria, [[...prompt, 0, 0]])).toEqual([false]);
+	});
+
+	it("stops once the stop string is generated", () => {
+		const criteria = createStopOnTextCriteria(transformers, tokenizer, "</title>");
+		const prompt = [1, 0, 0];
+		expect(call(criteria, [[...prompt, 0]])).toEqual([false]);
+		expect(call(criteria, [[...prompt, 0, 1]])).toEqual([true]);
+	});
+
+	it("tracks each batch entry independently", () => {
+		const criteria = createStopOnTextCriteria(transformers, tokenizer, "</title>");
+		expect(
+			call(criteria, [
+				[1, 0],
+				[0, 0],
+			]),
+		).toEqual([false, false]);
+		expect(
+			call(criteria, [
+				[1, 0, 0],
+				[0, 0, 1],
+			]),
+		).toEqual([false, true]);
 	});
 });

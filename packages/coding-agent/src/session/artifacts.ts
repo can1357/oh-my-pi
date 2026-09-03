@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { replaceFileAtomically } from "../utils/atomic-file";
 
 /**
  * Sanitize a tool name for safe use as the middle segment of the artifact
@@ -26,6 +27,42 @@ function sanitizeToolType(toolType: string): string {
 }
 
 /**
+ * Persist an artifact only when the filesystem confirms the complete payload is
+ * readable, then swap it into place atomically.
+ *
+ * Content is staged to a temporary sibling and verified (byte count, on-disk
+ * size, readability) before an atomic `rename` publishes it. `agent://<id>`
+ * discovers `${id}.md` by scanning the artifacts directory rather than reading
+ * `result.outputPath`, so a direct in-place write that fell short would leave a
+ * truncated file resolvable as incomplete output and a failed follow-up write
+ * would destroy the prior valid artifact. Staging keeps both hazards out: on
+ * any failure the temp file is removed and the existing artifact at `path` is
+ * untouched.
+ *
+ * Returns the verified UTF-8 byte count.
+ */
+export async function writeArtifact(path: string, content: string): Promise<number> {
+	const expectedBytes = Buffer.byteLength(content);
+	const tempPath = `${path}.tmp-${crypto.randomUUID()}`;
+	try {
+		const writtenBytes = await Bun.write(tempPath, content);
+		if (writtenBytes !== expectedBytes) {
+			throw new Error(`Artifact write incomplete: wrote ${writtenBytes} of ${expectedBytes} bytes`);
+		}
+		const file = Bun.file(tempPath);
+		if (file.size !== expectedBytes) {
+			throw new Error(`Artifact size mismatch: found ${file.size} of ${expectedBytes} bytes`);
+		}
+		await file.slice(0, Math.min(expectedBytes, 1)).arrayBuffer();
+		await replaceFileAtomically(tempPath, path);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true });
+		throw error;
+	}
+	return expectedBytes;
+}
+
+/**
  * Manages artifact storage for a session.
  *
  * Artifacts are stored with sequential IDs in the session's artifact directory.
@@ -39,7 +76,7 @@ export class ArtifactManager {
 	#nextId = 0;
 	readonly #dir: string;
 	#dirCreated = false;
-	#initialized = false;
+	#initPromise: Promise<void> | null = null;
 
 	/**
 	 * @param dir Directory that will hold artifact files. Created lazily on first save.
@@ -61,10 +98,11 @@ export class ArtifactManager {
 			await fs.mkdir(this.#dir, { recursive: true });
 			this.#dirCreated = true;
 		}
-		if (!this.#initialized) {
-			await this.#scanExistingIds();
-			this.#initialized = true;
-		}
+		// Memoize the first-use scan so it runs exactly once. Concurrent callers
+		// share the in-flight promise instead of each re-seeding #nextId across
+		// the readdir yield in #scanExistingIds (which would hand duplicate ids).
+		this.#initPromise ??= this.#scanExistingIds();
+		await this.#initPromise;
 	}
 
 	/**
@@ -114,7 +152,7 @@ export class ArtifactManager {
 	 */
 	async save(content: string, toolType: string): Promise<string> {
 		const { id, path } = await this.allocatePath(toolType);
-		await Bun.write(path, content);
+		await writeArtifact(path, content);
 		return id;
 	}
 

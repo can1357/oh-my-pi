@@ -11,17 +11,24 @@ import {
 } from "../utils";
 
 /**
- * Text component - displays multi-line text with word wrapping
+ * Text component - displays multi-line text with word wrapping.
+ *
+ * Foreground colors may be supplied lazily via {@link setStyleFn} instead of
+ * baked into `text`: the styler runs at render time, so a caller that
+ * invalidates the component on a theme change (see the coding-agent's
+ * `onThemeChange` handler) re-resolves the color against the now-active theme
+ * rather than replaying the palette active when the component was constructed.
  */
 export class Text implements Component {
 	#text: string;
 	#paddingX: number; // Left/right padding
 	#paddingY: number; // Top/bottom padding
 	#customBgFn?: (text: string) => string;
-
+	#styleFn?: (text: string) => string;
 	#ignoreTight = false;
 
 	setIgnoreTight(ignore: boolean): this {
+		if (this.#ignoreTight === ignore) return this;
 		this.#ignoreTight = ignore;
 		this.invalidate();
 		return this;
@@ -30,7 +37,7 @@ export class Text implements Component {
 	// Cache for rendered output
 	#cachedText?: string;
 	#cachedWidth?: number;
-	#cachedWidthEpoch?: number;
+	#cachedWidthConfigEpoch?: number;
 	#cachedLines?: string[];
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
@@ -38,6 +45,17 @@ export class Text implements Component {
 		this.#paddingX = paddingX;
 		this.#paddingY = paddingY;
 		this.#customBgFn = customBgFn;
+	}
+	/** Return bounded text and layout state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#text.slice(0, 120),
+			textLength: this.#text.length,
+			previewTruncated: this.#text.length > 120,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			ignoreTight: this.#ignoreTight,
+		};
 	}
 
 	getText(): string {
@@ -51,7 +69,7 @@ export class Text implements Component {
 		this.#text = text;
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
 		return true;
 	}
@@ -60,14 +78,29 @@ export class Text implements Component {
 		this.#customBgFn = customBgFn;
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
+	}
+
+	/**
+	 * Supply a foreground styler applied to the text at render time (e.g. a
+	 * theme color resolver). Unlike baking the color into `text`, the styler
+	 * re-runs on every render, so invalidating the component after a theme
+	 * change re-resolves the color against the active theme.
+	 */
+	setStyleFn(styleFn?: (text: string) => string): this {
+		this.#styleFn = styleFn;
+		this.#cachedText = undefined;
+		this.#cachedWidth = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
+		this.#cachedLines = undefined;
+		return this;
 	}
 
 	invalidate(): void {
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
-		this.#cachedWidthEpoch = undefined;
+		this.#cachedWidthConfigEpoch = undefined;
 		this.#cachedLines = undefined;
 	}
 
@@ -77,7 +110,7 @@ export class Text implements Component {
 			this.#cachedLines &&
 			this.#cachedText === this.#text &&
 			this.#cachedWidth === width &&
-			this.#cachedWidthEpoch === getWidthConfigEpoch()
+			this.#cachedWidthConfigEpoch === getWidthConfigEpoch()
 		) {
 			return this.#cachedLines;
 		}
@@ -87,13 +120,13 @@ export class Text implements Component {
 			const result: string[] = [];
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
-			this.#cachedWidthEpoch = getWidthConfigEpoch();
+			this.#cachedWidthConfigEpoch = getWidthConfigEpoch();
 			this.#cachedLines = result;
 			return result;
 		}
 
 		// Replace tabs with 3 spaces
-		const normalizedText = replaceTabs(this.#text);
+		const normalizedText = replaceTabs(this.#styleFn ? this.#styleFn(this.#text) : this.#text);
 
 		// Calculate content width (subtract left/right margins)
 		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
@@ -135,7 +168,7 @@ export class Text implements Component {
 
 		const result = [...emptyLines, ...contentLines, ...emptyLines];
 		if (resultWidths !== undefined) {
-			// Pad rows are exactly `width` cells wide.
+			// oxlint-disable-next-line unicorn/no-new-array -- line-width allocation
 			const emptyWidths = new Array<number>(emptyLines.length).fill(width);
 			publishLineWidths(result, [...emptyWidths, ...resultWidths, ...emptyWidths]);
 		}
@@ -143,7 +176,7 @@ export class Text implements Component {
 		// Update cache
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
-		this.#cachedWidthEpoch = getWidthConfigEpoch();
+		this.#cachedWidthConfigEpoch = getWidthConfigEpoch();
 		this.#cachedLines = result;
 
 		return result.length > 0 ? result : [""];

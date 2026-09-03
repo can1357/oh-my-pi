@@ -9,6 +9,7 @@ import type { AgentEvent, AgentMessage, ResolvedThinkingLevel, ThinkingLevel } f
 import type { Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { AgentSession, AgentSessionEvent, AuthStorage, SessionStats } from "@oh-my-pi/pi-coding-agent";
 import {
+	AgentRegistry,
 	type CreateAgentSessionResult,
 	createAgentSession,
 	discoverAuthStorage,
@@ -97,6 +98,11 @@ export class InProcessClient {
 			authStorage: shared?.authStorage,
 			modelRegistry: shared?.modelRegistry,
 			sessionManager: SessionManager.inMemory(this.#options.cwd),
+			// Benchmark tasks run many top-level sessions concurrently in one
+			// process. The global registry admits only one "Main" per process
+			// generation (later registrations replace earlier refs, which then
+			// fail session initialization), so each client gets its own registry.
+			agentRegistry: new AgentRegistry(),
 			systemPrompt: this.#options.appendSystemPrompt
 				? (defaultPrompt: string[]) => [...defaultPrompt, this.#options.appendSystemPrompt!]
 				: undefined,

@@ -8,6 +8,7 @@
   <title>Session Export</title>
   <template-css/>
   <theme-vars/>
+  <script>try{const t=localStorage.getItem("omp-export-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch{}</script>
 </head>
 <body>
   <button id="hamburger" title="Open sidebar" aria-label="Open sidebar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
@@ -17,6 +18,11 @@
       <div class="sidebar-header">
         <div class="sidebar-controls">
           <input type="text" class="sidebar-search" id="tree-search" placeholder="Search entries…" autocomplete="off" spellcheck="false">
+          <select class="theme-select" id="theme-select" title="Color theme" aria-label="Color theme">
+            <option value="auto">Auto</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
         </div>
         <div class="sidebar-filters">
           <button class="filter-btn active" data-filter="default" title="Hide settings entries">Default</button>

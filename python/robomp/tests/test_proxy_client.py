@@ -31,7 +31,7 @@ from robomp.github_client import (
 )
 from robomp.proxy.server import create_proxy_app
 from robomp.proxy_client import GitHubProxyClient, ProxyGitTransport
-from robomp.proxy_hmac import HEADER_SIGNATURE, HEADER_TIMESTAMP, verify
+from robomp.proxy_hmac import HEADER_SIGNATURE, HEADER_TIMESTAMP, sign, verify
 from robomp.sandbox import workspace_key
 
 _HMAC = "test-hmac-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -316,7 +316,15 @@ def round_trip_app(proxy_settings: Settings):
         if path == "/repos/octo/widget/pulls/2/files":
             return httpx.Response(
                 200,
-                json=[{"filename": "src/app.py", "status": "modified", "additions": 2, "deletions": 1}],
+                json=[
+                    {
+                        "filename": "src/app.py",
+                        "status": "modified",
+                        "additions": 2,
+                        "deletions": 1,
+                        "patch": "@@ -8,5 +8,6 @@\n ctx\n-old\n+new\n",
+                    }
+                ],
             )
         if path == "/repos/octo/widget/pulls/2/reviews" and req.method == "POST":
             body = json.loads(req.content)
@@ -340,7 +348,11 @@ def round_trip_app(proxy_settings: Settings):
                 json={
                     "number": 4,
                     "html_url": "https://example/4",
-                    "head": {"ref": "feat", "repo": {"full_name": "octo/widget"}},
+                    "head": {
+                        "ref": "feat",
+                        "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                        "repo": {"full_name": "octo/widget"},
+                    },
                     "base": {"ref": "main"},
                     "state": "open",
                     "user": {"login": "robomp-bot"},
@@ -405,6 +417,7 @@ async def test_round_trip_all_endpoints(round_trip_app) -> None:
     files = await client.list_pr_files("octo/widget", 2)
     assert len(files) == 1 and isinstance(files[0], PullRequestFileInfo)
     assert files[0].path == "src/app.py"
+    assert files[0].patch == "@@ -8,5 +8,6 @@\n ctx\n-old\n+new\n"
 
     submitted = await client.submit_pr_review(
         repo="octo/widget",
@@ -420,6 +433,7 @@ async def test_round_trip_all_endpoints(round_trip_app) -> None:
     existing_pr = await client.get_pull_request("octo/widget", 4)
     assert isinstance(existing_pr, PullRequestInfo)
     assert existing_pr.head_ref == "feat"
+    assert existing_pr.head_sha == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     assert existing_pr.author == "robomp-bot"
 
     posted = await client.post_comment("octo/widget", 1, "hi")
@@ -484,6 +498,144 @@ async def test_close_issue_round_trip(proxy_settings: Settings) -> None:
     )
     assert await client.close_issue("octo/widget", 7) is None
     assert captured["body"] == {"state": "closed", "state_reason": "completed"}
+
+
+def _capturing_app(app, path: str) -> tuple[Callable, list[dict[str, object]]]:
+    """ASGI wrapper recording raw JSON bodies POSTed to `path`."""
+    bodies: list[dict[str, object]] = []
+
+    async def middleware(scope, receive, send):
+        if scope["type"] == "http" and scope.get("path") == path:
+            raw = b""
+            while True:
+                message = await receive()
+                raw += message.get("body", b"")
+                if not message.get("more_body", False):
+                    break
+            bodies.append(json.loads(raw))
+
+            async def replay() -> dict[str, object]:
+                return {"type": "http.request", "body": raw, "more_body": False}
+
+            return await app(scope, replay, send)
+        return await app(scope, receive, send)
+
+    return middleware, bodies
+
+
+async def test_submit_pr_review_commit_id_reaches_wire(proxy_settings: Settings) -> None:
+    """commit_id must appear in the /gh/v1/submit_pr_review wire body the
+    proxy client POSTs, and the server must forward it to the direct client."""
+    app = create_proxy_app(proxy_settings)
+    app.state.settings = proxy_settings
+    upstream: dict[str, object] = {}
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/octo/widget/pulls/2/reviews" and req.method == "POST":
+            upstream["body"] = json.loads(req.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": 55,
+                    "user": {"login": "robomp-bot"},
+                    "body": "summary",
+                    "state": "COMMENTED",
+                    "submitted_at": "t",
+                },
+            )
+        return httpx.Response(404, json={"message": "unrouted"})
+
+    _attach_gh(app, gh)
+    middleware, wire_bodies = _capturing_app(app, "/gh/v1/submit_pr_review")
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.ASGITransport(app=middleware),
+    )
+    review = await client.submit_pr_review(
+        repo="octo/widget",
+        pr_number=2,
+        body="summary",
+        event="COMMENT",
+        comments=[{"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "finding"}],
+        commit_id="abc123",
+    )
+    assert review.id == 55
+    assert wire_bodies == [
+        {
+            "repo": "octo/widget",
+            "pr_number": 2,
+            "body": "summary",
+            "event": "COMMENT",
+            "comments": [{"path": "src/app.py", "line": 12, "side": "RIGHT", "body": "finding"}],
+            "commit_id": "abc123",
+        }
+    ]
+    # Server forwarded it to the direct client, which put it on the GitHub wire.
+    assert upstream["body"]["commit_id"] == "abc123"
+
+    # Without commit_id the key is omitted from the proxy wire body.
+    await client.submit_pr_review(
+        repo="octo/widget",
+        pr_number=2,
+        body="summary",
+        event="COMMENT",
+        comments=[],
+    )
+    assert "commit_id" not in wire_bodies[1]
+
+
+@pytest.mark.parametrize("bad_commit_id", [12345, ""])
+async def test_submit_pr_review_rejects_non_string_commit_id(proxy_settings: Settings, bad_commit_id: object) -> None:
+    """The proxy server must not forward a non-string or empty commit_id
+    upstream: a raw POST bypasses the proxy client, so assert on the
+    upstream-captured reviews body — the key must be absent and the request
+    still succeeds."""
+    app = create_proxy_app(proxy_settings)
+    app.state.settings = proxy_settings
+    upstream: dict[str, object] = {}
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/repos/octo/widget/pulls/3/reviews" and req.method == "POST":
+            upstream["body"] = json.loads(req.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": 56,
+                    "user": {"login": "robomp-bot"},
+                    "body": "summary",
+                    "state": "COMMENTED",
+                    "submitted_at": "t",
+                },
+            )
+        return httpx.Response(404, json={"message": "unrouted"})
+
+    app.state.github = GitHubClient(_TOKEN, transport=httpx.MockTransport(gh))
+    payload = {
+        "repo": "octo/widget",
+        "pr_number": 3,
+        "body": "summary",
+        "event": "COMMENT",
+        "comments": [],
+        "commit_id": bad_commit_id,
+    }
+    body = json.dumps(payload).encode()
+    timestamp, sig = sign(method="POST", path="/gh/v1/submit_pr_review", body=body, key=_HMAC_BYTES)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://proxy.test",
+    ) as client:
+        resp = await client.post(
+            "/gh/v1/submit_pr_review",
+            content=body,
+            headers={
+                HEADER_TIMESTAMP: timestamp,
+                HEADER_SIGNATURE: sig,
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    assert "commit_id" not in upstream["body"]
 
 
 # ============================================================================
@@ -593,6 +745,40 @@ def test_proxy_git_transport_push_slot_uid_body() -> None:
     assert "slot_uid" not in captured[1]
 
 
+def test_proxy_git_transport_push_release_body() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"head": "abc123", "branch": "main", "tag": "v1.2.3"})
+
+    transport = ProxyGitTransport(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+    )
+    result = transport.push_release(
+        repo="octo/widget",
+        workspace_key="octo__widget__release",
+        repo_dir=Path("/unused"),
+        branch="main",
+        tag="v1.2.3",
+        expected_head="abc123",
+        slot_uid=2001,
+    )
+
+    assert result.head == "abc123"
+    assert captured[0].url.path == "/gh/v1/git/push_release"
+    assert json.loads(captured[0].content) == {
+        "repo": "octo/widget",
+        "workspace_key": "octo__widget__release",
+        "branch": "main",
+        "tag": "v1.2.3",
+        "expected_head": "abc123",
+        "slot_uid": 2001,
+    }
+
+
 # Sanity: signed POST headers from ProxyGitTransport._post verify cleanly.
 def test_proxy_git_transport_post_headers_verify() -> None:
     captured: list[httpx.Request] = []
@@ -627,3 +813,76 @@ def test_proxy_git_transport_post_headers_verify() -> None:
     )
     assert result.ok, result.reason
     assert json.loads(req.content)["repo"] == "octo/widget"
+
+
+async def test_release_read_payloads_deserialize() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/gh/v1/workflow_runs":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 1,
+                            "name": "CI",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "head_branch": "main",
+                            "head_sha": "abc",
+                            "html_url": "https://example/run",
+                            "run_attempt": 1,
+                        }
+                    ]
+                },
+            )
+        if path == "/gh/v1/workflow_jobs":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": 2,
+                            "run_id": 1,
+                            "name": "test",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "html_url": "https://example/job",
+                            "failed_steps": ["tests"],
+                        }
+                    ]
+                },
+            )
+        if path == "/gh/v1/job_log_tail":
+            return httpx.Response(200, json={"text": "failure"})
+        if path == "/gh/v1/tag_ref":
+            return httpx.Response(200, json={"sha": "abc"})
+        assert path == "/gh/v1/release_by_tag"
+        return httpx.Response(
+            200,
+            json={
+                "tag": "v1.2.3",
+                "name": "1.2.3",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://example/release",
+                "asset_names": ["omp.tar.gz"],
+            },
+        )
+
+    client = GitHubProxyClient(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+    )
+    runs = await client.list_workflow_runs("octo/widget", head_sha="abc")
+    jobs = await client.list_workflow_jobs("octo/widget", 1)
+    log_tail = await client.get_job_log_tail("octo/widget", 2, tail_lines=120)
+    tag_sha = await client.get_tag_sha("octo/widget", "v1.2.3")
+    release = await client.get_release_by_tag("octo/widget", "v1.2.3")
+    assert runs[0].head_sha == "abc"
+    assert jobs[0].failed_steps == ("tests",)
+    assert log_tail == "failure"
+    assert tag_sha == "abc"
+    assert release is not None and release.asset_names == ("omp.tar.gz",)

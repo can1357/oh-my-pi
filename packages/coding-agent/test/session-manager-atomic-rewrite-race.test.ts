@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	IndexedSessionStorage,
+	type SessionStorageBackend,
+} from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import {
+	SessionManager,
+	SessionPersistenceIndeterminateError,
+} from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	MemorySessionStorage,
 	type SessionStorageWriter,
@@ -20,7 +27,10 @@ class DetachingRewriteStorage extends MemorySessionStorage {
 	guardRejections = 0;
 	readonly #writers = new Set<DetachableWriter>();
 
-	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
+	override openWriter(
+		path: string,
+		options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+	): SessionStorageWriter {
 		const inner = super.openWriter(path, options);
 		const writers = this.#writers;
 		const detachedLines = this.detachedLines;
@@ -170,6 +180,8 @@ describe("SessionManager atomic rewrite race", () => {
 		sessionManager.appendCompaction("older summary", "older", firstKeptEntryId, 100);
 		await sessionManager.flush();
 		sessionManager.appendCompaction("newer summary", "newer", firstKeptEntryId, 80);
+		// Kick off a full-file rewrite that parks inside the fake storage until released.
+		const rewritePublished = sessionManager.rewriteEntries();
 		await storage.rewriteStarted.promise;
 
 		sessionManager.appendMessage({ role: "user", content: "during rewrite prompt", timestamp: Date.now() });
@@ -178,6 +190,7 @@ describe("SessionManager atomic rewrite race", () => {
 		const titlePersisted = sessionManager.setSessionName("Post rewrite title", "user", "test");
 
 		storage.allowRewrite.resolve();
+		await rewritePublished;
 		await titlePersisted;
 		await sessionManager.flush();
 		sessionManager.appendMessage({
@@ -281,15 +294,16 @@ describe("SessionManager atomic rewrite race", () => {
 		if (!firstKeptEntryId) throw new Error("Expected seeded branch entry");
 		sessionManager.appendCompaction("older summary", "older", firstKeptEntryId, 100);
 		await sessionManager.flush();
-		// Second compaction elides the first, scheduling a full-file rewrite that
-		// parks inside the fake storage until we release it.
 		sessionManager.appendCompaction("newer summary", "newer", firstKeptEntryId, 80);
+		// Kick off a full-file rewrite that parks inside the fake storage until we
+		// release it.
+		const rewritePublished = sessionManager.rewriteEntries();
 		await storage.rewriteStarted.promise;
 
 		// Simulate a Ctrl+C teardown: append a session_exit custom entry (fenced
 		// because the atomic rewrite is active) and flushSync it.
 		sessionManager.appendCustomEntry("session_exit", { reason: "sigterm", kind: "signal" });
-		expect(() => sessionManager.flushSync()).not.toThrow();
+		sessionManager.flushSync();
 
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected session file");
@@ -301,8 +315,7 @@ describe("SessionManager atomic rewrite race", () => {
 		// stale body serialized before flushSync bumped the disk epoch; otherwise
 		// the async publish would overwrite the durable exit record.
 		storage.allowRewrite.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		await rewritePublished;
 
 		const afterRelease = await storage.readText(sessionFile);
 		expect(afterRelease).toContain('"customType":"session_exit"');
@@ -354,10 +367,16 @@ describe("SessionManager atomic rewrite fence spans writer.close()", () => {
 
 		sessionManager.appendMessage({ role: "user", content: "during close", timestamp: Date.now() });
 		sessionManager.appendCustomEntry("during_close_custom", { reason: "guard" });
-		// Pre-fix, #appendToSessionFile would take the hot path and call
-		// storage.openWriter here; the writer would then be caught by the pending
-		// writeTextAtomic detachment. Fence keeps writerOpens flat.
-		expect(storage.writerOpens).toBe(opensBeforeRewrite);
+		// First fenced append supersedes the in-flight atomic with a synchronous
+		// full-body rewrite (software-crash durable before return). That bumps
+		// `#diskEpoch`, so a second append may open a hot-path writer against the
+		// already-published body; the abandoned atomic's commitGuard must still
+		// refuse to clobber it, and nothing may land on a detached handle.
+		const sessionFileMid = sessionManager.getSessionFile();
+		if (!sessionFileMid) throw new Error("Expected session file");
+		const midContent = await storage.readText(sessionFileMid);
+		expect(midContent).toContain("during close");
+		expect(midContent).toContain('"customType":"during_close_custom"');
 
 		storage.allowClose.resolve();
 		storage.allowWrite.resolve();
@@ -369,6 +388,9 @@ describe("SessionManager atomic rewrite fence spans writer.close()", () => {
 		const content = await storage.readText(sessionFile);
 		expect(content).toContain("during close");
 		expect(content).toContain('"customType":"during_close_custom"');
+		// Superseding rewrite may finish before the paused atomic reaches its
+		// commitGuard; either way the fenced entries must remain and no append
+		// may land on a detached handle.
 		expect(storage.detachedLines).toEqual([]);
 	});
 });
@@ -433,15 +455,22 @@ describe("SessionManager title-change fallback fenced-append durability", () => 
 		const rename = sessionManager.setSessionName("second title", "user", "test");
 		await storage.writeStarted.promise;
 
-		// Fenced appends during the paused fallback rewrite: pre-fix these
-		// would be marked dirty and dropped from the serialized body because
-		// the fallback never looped on that flag.
+		// Fenced appends during the paused fallback rewrite supersede the atomic
+		// with a synchronous full-body rewrite, so they are on disk before the
+		// paused publish resumes. The abandoned atomic's body must not clobber
+		// them when released.
 		sessionManager.appendMessage({
 			role: "user",
 			content: "during title fallback",
 			timestamp: Date.now(),
 		});
 		sessionManager.appendCustomEntry("during_title_fallback_custom", { reason: "test" });
+
+		const sessionFileMid = sessionManager.getSessionFile();
+		if (!sessionFileMid) throw new Error("Expected session file");
+		const midContent = await storage.readText(sessionFileMid);
+		expect(midContent).toContain("during title fallback");
+		expect(midContent).toContain('"customType":"during_title_fallback_custom"');
 
 		storage.allowWrite.resolve();
 		await rename;
@@ -453,9 +482,10 @@ describe("SessionManager title-change fallback fenced-append durability", () => 
 		expect(content).toContain('"title":"second title"');
 		expect(content).toContain("during title fallback");
 		expect(content).toContain('"customType":"during_title_fallback_custom"');
-		// Loop must have executed at least twice: first pass paused, dirty from
-		// the fenced appends triggers a second pass that includes them.
-		expect(storage.writeTextAtomicCalls).toBeGreaterThanOrEqual(2);
+		// At least the failed title path's atomic fallback ran once; fenced
+		// appends may have superseded it via writeTextSync without a second
+		// atomic pass.
+		expect(storage.writeTextAtomicCalls).toBeGreaterThanOrEqual(1);
 	});
 });
 
@@ -498,7 +528,7 @@ describe("SessionManager fence relaxes when flushSync supersedes the atomic rewr
 
 		// (2) flushSync supersedes the pending atomic (bumps #diskEpoch) and
 		// publishes a synchronous body containing X1.
-		expect(() => sessionManager.flushSync()).not.toThrow();
+		sessionManager.flushSync();
 
 		// (3) Post-flushSync append MUST take the hot path: pre-fix, the fence
 		// stayed active and this entry was only marked dirty, then dropped when
@@ -642,7 +672,7 @@ describe("SessionManager fence handoff across superseded rewrites", () => {
 		// A fenced append flips fileIsCurrent so flushSync actually publishes,
 		// bumping the epoch to 1 with the fenced entry captured in the body.
 		sessionManager.appendCustomEntry("during_stale", { data: "X1" });
-		expect(() => sessionManager.flushSync()).not.toThrow();
+		sessionManager.flushSync();
 
 		// Newer rewrite scheduled at epoch=1. Parks at pauses[1]. Fence epoch = 1.
 		const newer = sessionManager.rewriteEntries();
@@ -677,5 +707,272 @@ describe("SessionManager fence handoff across superseded rewrites", () => {
 		expect(content).toContain('"customType":"during_newer"');
 		expect(storage.guardRejections).toBeGreaterThanOrEqual(1);
 		expect(storage.detachedLines).toEqual([]);
+	});
+});
+
+interface AtomicFailureHandle {
+	started: Promise<void>;
+	release: () => void;
+}
+
+class GatedAtomicFailureStorage extends MemorySessionStorage {
+	#nextFailure:
+		| {
+				error: Error;
+				started: ReturnType<typeof Promise.withResolvers<void>>;
+				release: ReturnType<typeof Promise.withResolvers<void>>;
+		  }
+		| undefined;
+
+	failNextAtomicWrite(error: Error): AtomicFailureHandle {
+		if (this.#nextFailure) throw new Error("Atomic failure already armed");
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		this.#nextFailure = { error, started, release };
+		return { started: started.promise, release: release.resolve };
+	}
+
+	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const failure = this.#nextFailure;
+		if (!failure) {
+			await super.writeTextAtomic(path, content, options);
+			return;
+		}
+		this.#nextFailure = undefined;
+		failure.started.resolve();
+		await failure.release.promise;
+		throw failure.error;
+	}
+}
+
+class ScriptedAtomicFailureStorage extends MemorySessionStorage {
+	readonly behaviors: Array<{ commit: boolean; error: Error }> = [];
+
+	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const behavior = this.behaviors.shift();
+		if (!behavior) {
+			await super.writeTextAtomic(path, content, options);
+			return;
+		}
+		if (behavior.commit) await super.writeTextAtomic(path, content, options);
+		throw behavior.error;
+	}
+}
+
+describe("SessionManager atomic entry batches", () => {
+	it("restores the exact active branch when an atomic batch publish fails", async () => {
+		const storage = new GatedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		const rootId = manager.appendCustomEntry("root");
+		manager.appendCustomEntry("abandoned-tail");
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		manager.branch(rootId);
+		const before = await storage.readText(sessionFile);
+		const failure = storage.failNextAtomicWrite(new Error("batch publish failed"));
+		const commit = manager.appendEntriesAtomically(() => manager.appendCustomEntry("staged-terminal"));
+		await failure.started;
+		failure.release();
+
+		await expect(commit).rejects.toThrow("batch publish failed");
+		expect(manager.getBranch().map(entry => entry.id)).toEqual([rootId]);
+		expect(
+			manager.getEntries().some(entry => entry.type === "custom" && entry.customType === "staged-terminal"),
+		).toBe(false);
+		expect(await storage.readText(sessionFile)).toBe(before);
+
+		await manager.appendEntriesAtomically(() => manager.appendCustomEntry("committed-terminal"));
+		expect(manager.getBranch().at(-1)).toMatchObject({ type: "custom", customType: "committed-terminal" });
+		await manager.close();
+	});
+
+	it("reparents and durably preserves a concurrent append when the staged batch rolls back", async () => {
+		const storage = new GatedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		const rootId = manager.appendCustomEntry("root");
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const notifiedIds: string[] = [];
+		manager.onEntryAppended = entry => notifiedIds.push(entry.id);
+		const failure = storage.failNextAtomicWrite(new Error("batch publish failed"));
+		let stagedId = "";
+		const commit = manager.appendEntriesAtomically(() => {
+			stagedId = manager.appendCustomEntry("staged-terminal");
+		});
+		await failure.started;
+		const concurrentId = manager.appendCustomEntry("concurrent-survivor");
+		failure.release();
+
+		await expect(commit).rejects.toThrow("batch publish failed");
+		expect(manager.getEntries().some(entry => entry.id === stagedId)).toBe(false);
+		expect(manager.getEntries().find(entry => entry.id === concurrentId)?.parentId).toBe(rootId);
+		expect(manager.getBranch().at(-1)?.id).toBe(concurrentId);
+		expect(notifiedIds).toEqual([concurrentId]);
+
+		const content = await storage.readText(sessionFile);
+		expect(content).not.toContain('"customType":"staged-terminal"');
+		expect(content).toContain('"customType":"concurrent-survivor"');
+		await manager.close();
+	});
+
+	it("repairs authoritative rollback after commit-then-throw, including a rejecting repair acknowledgement", async () => {
+		const storage = new ScriptedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		manager.appendCustomEntry("root");
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const before = await storage.readText(sessionFile);
+		storage.behaviors.push(
+			{ commit: true, error: new Error("batch committed but acknowledgement failed") },
+			{ commit: true, error: new Error("repair committed but acknowledgement failed") },
+		);
+
+		await expect(manager.appendEntriesAtomically(() => manager.appendCustomEntry("staged-terminal"))).rejects.toThrow(
+			"batch committed but acknowledgement failed",
+		);
+
+		expect(await storage.readText(sessionFile)).toBe(before);
+		expect(
+			manager.getEntries().some(entry => entry.type === "custom" && entry.customType === "staged-terminal"),
+		).toBe(false);
+		await manager.appendEntriesAtomically(() => manager.appendCustomEntry("retry-terminal"));
+		expect(await storage.readText(sessionFile)).toContain('"customType":"retry-terminal"');
+		await manager.close();
+	});
+
+	it("reserves concurrent atomic batches FIFO before their first await", async () => {
+		const storage = new GatedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		manager.appendCustomEntry("root");
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const failure = storage.failNextAtomicWrite(new Error("first batch failed"));
+		const first = manager.appendEntriesAtomically(() => manager.appendCustomEntry("batch-a"));
+		await failure.started;
+		let secondCallbackRan = false;
+		const second = manager.appendEntriesAtomically(() => {
+			secondCallbackRan = true;
+			return manager.appendCustomEntry("batch-b");
+		});
+		await Promise.resolve();
+		expect(secondCallbackRan).toBe(false);
+		failure.release();
+
+		await expect(first).rejects.toThrow("first batch failed");
+		await second;
+		expect(secondCallbackRan).toBe(true);
+		const content = await storage.readText(sessionFile);
+		expect(content).not.toContain('"customType":"batch-a"');
+		expect(content).toContain('"customType":"batch-b"');
+		await manager.close();
+	});
+
+	it("latches a typed indeterminate error when rollback repair cannot be verified", async () => {
+		const storage = new ScriptedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		manager.appendCustomEntry("root");
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		storage.behaviors.push(
+			{ commit: true, error: new Error("batch committed but acknowledgement failed") },
+			{ commit: false, error: new Error("authoritative repair failed before commit") },
+		);
+
+		const failure = await manager
+			.appendEntriesAtomically(() => manager.appendCustomEntry("possibly-durable-terminal"))
+			.catch(error => error);
+
+		expect(failure).toBeInstanceOf(SessionPersistenceIndeterminateError);
+		expect((failure as SessionPersistenceIndeterminateError).errors).toHaveLength(3);
+		expect(await storage.readText(sessionFile)).toContain('"customType":"possibly-durable-terminal"');
+		expect(
+			manager
+				.getEntries()
+				.some(entry => entry.type === "custom" && entry.customType === "possibly-durable-terminal"),
+		).toBe(false);
+		await expect(manager.flush()).rejects.toBeInstanceOf(SessionPersistenceIndeterminateError);
+
+		await manager.recoverPersistenceFromCurrentState();
+		expect(await storage.readText(sessionFile)).not.toContain('"customType":"possibly-durable-terminal"');
+		await manager.close();
+	});
+});
+
+class CommitThenThrowIndexedBackend implements SessionStorageBackend {
+	content: string | null = null;
+	readonly atomicWriteStarted = Promise.withResolvers<void>();
+	readonly releaseAtomicWrite = Promise.withResolvers<void>();
+	readonly newerWriteFinished = Promise.withResolvers<void>();
+	#writeCount = 0;
+	#atomicWriteFailed = false;
+
+	async init(): Promise<void> {}
+
+	async loadIndex(): Promise<[]> {
+		return [];
+	}
+
+	async readFull(): Promise<string | null> {
+		if (this.#atomicWriteFailed) await this.newerWriteFinished.promise;
+		return this.content;
+	}
+
+	async readSlices(): Promise<[string, string]> {
+		return [this.content ?? "", this.content ?? ""];
+	}
+
+	async writeFull(_path: string, content: string): Promise<void> {
+		this.#writeCount++;
+		if (this.#writeCount === 2) {
+			this.atomicWriteStarted.resolve();
+			await this.releaseAtomicWrite.promise;
+			this.content = content;
+			this.#atomicWriteFailed = true;
+			throw new Error("atomic write committed but acknowledgement failed");
+		}
+		this.content = content;
+		if (this.#writeCount === 3) this.newerWriteFinished.resolve();
+	}
+
+	async append(_path: string, line: string): Promise<void> {
+		this.content = (this.content ?? "") + line;
+	}
+
+	async updateSessionTitle(): Promise<void> {}
+
+	async truncate(): Promise<void> {
+		this.content = "";
+	}
+
+	async remove(): Promise<void> {
+		this.content = null;
+	}
+
+	async move(): Promise<void> {}
+}
+
+describe("IndexedSessionStorage atomic readback", () => {
+	it("preserves a newer synchronous takeover when failed-write readback sees its body", async () => {
+		const backend = new CommitThenThrowIndexedBackend();
+		const storage = new IndexedSessionStorage(backend);
+		const sessionPath = "/sessions/current.jsonl";
+		const newerBody = "newer-body-that-is-long";
+		await storage.initialize();
+		await storage.writeText(sessionPath, "old");
+
+		const failure = storage.writeTextAtomic(sessionPath, "atomic-body").catch(error => error);
+		await backend.atomicWriteStarted.promise;
+		storage.writeTextSync(sessionPath, newerBody);
+		backend.releaseAtomicWrite.resolve();
+
+		expect(await failure).toMatchObject({ message: "atomic write committed but acknowledgement failed" });
+		await storage.drain();
+		expect(await storage.readText(sessionPath)).toBe(newerBody);
+		expect(storage.statSync(sessionPath).size).toBe(Buffer.byteLength(newerBody));
 	});
 });

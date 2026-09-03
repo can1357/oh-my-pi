@@ -168,7 +168,18 @@ describe("internal-url-autocomplete", () => {
 
 		it("exposes the completion-capable schemes", () => {
 			const schemes = InternalUrlRouter.instance().completionSchemes().sort();
-			expect(schemes).toEqual(["agent", "artifact", "history", "local", "memory", "omp", "rule", "skill", "ssh"]);
+			expect(schemes).toEqual([
+				"agent",
+				"artifact",
+				"history",
+				"local",
+				"memory",
+				"omp",
+				"rule",
+				"security",
+				"skill",
+				"ssh",
+			]);
 		});
 	});
 

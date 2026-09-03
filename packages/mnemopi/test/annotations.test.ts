@@ -134,7 +134,8 @@ describe("AnnotationStore", () => {
 		try {
 			const store = new AnnotationStore({ conn: db });
 			store.add("mem-1", "has_source", "custom-tool");
-			const rows = db.prepare("SELECT memory_id, kind, value FROM annotations").all() as {
+			using statement = db.prepare("SELECT memory_id, kind, value FROM annotations");
+			const rows = statement.all() as {
 				memory_id: string;
 				kind: string;
 				value: string;

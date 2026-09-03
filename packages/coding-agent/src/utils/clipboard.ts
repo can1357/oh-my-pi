@@ -1,6 +1,14 @@
-import type { ClipboardImage } from "@oh-my-pi/pi-natives";
-import * as native from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import {
+	type ClipboardImage,
+	copyToClipboard as nativeCopyToClipboard,
+	readImageFromClipboard as nativeReadImageFromClipboard,
+} from "@oh-my-pi/pi-natives/clipboard";
+import { isWsl } from "@oh-my-pi/pi-utils";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
+import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
+
+type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
 
 /**
  * Run a subprocess and capture its stdout without blocking the event loop.
@@ -9,15 +17,20 @@ import { logger } from "@oh-my-pi/pi-utils";
  * path all shell out to CLI clipboard tools. The synchronous `execSync` API
  * parks the render loop until the child exits or the timeout fires, so a hung
  * clipboard daemon freezes the TUI for the full 2000ms budget (#4235). This
- * helper mirrors the previous semantics — read stdout as UTF-8, throw on
- * non-zero exit or timeout, forward optional stdin — but yields to the event
- * loop while the child runs.
+ * helper mirrors the previous semantics — capture stdout, throw on non-zero
+ * exit or timeout, forward optional stdin — but yields to the event loop while
+ * the child runs.
  *
  * @throws Error when the child fails to spawn, is killed by the timeout, or
- *   exits with a non-zero status. Callers rely on this to fall through to the
- *   outer catch and return an empty string / empty list.
+ *   exits with a non-zero status. Callers rely on this to use platform
+ *   fallbacks or report an empty clipboard.
  */
-async function spawnCapture(cmd: string[], options: { input?: string; timeoutMs?: number } = {}): Promise<string> {
+async function spawnCapture(cmd: string[], options: SpawnCaptureOptions & { encoding: "bytes" }): Promise<Uint8Array>;
+async function spawnCapture(cmd: string[], options?: SpawnCaptureOptions): Promise<string>;
+async function spawnCapture(
+	cmd: string[],
+	options: SpawnCaptureOptions & { encoding?: "bytes" } = {},
+): Promise<string | Uint8Array> {
 	const timeoutMs = options.timeoutMs ?? 2000;
 	const proc = Bun.spawn(cmd, {
 		stdout: "pipe",
@@ -30,7 +43,9 @@ async function spawnCapture(cmd: string[], options: { input?: string; timeoutMs?
 		proc.kill();
 	}, timeoutMs);
 	try {
-		const stdout = await new Response(proc.stdout).text();
+		const response = new Response(proc.stdout);
+		const stdout =
+			options.encoding === "bytes" ? new Uint8Array(await response.arrayBuffer()) : await response.text();
 		await proc.exited;
 		if (timedOut) {
 			throw new Error(`${cmd[0]} timed out after ${timeoutMs}ms`);
@@ -47,40 +62,6 @@ async function spawnCapture(cmd: string[], options: { input?: string; timeoutMs?
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
-
-function isWsl(): boolean {
-	return process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
-}
-
-// AppleScript that returns the POSIX paths of every file URL currently on the
-// macOS pasteboard, one path per line. `pbpaste(1)` only surfaces plain text,
-// EPS, or RTF, so a Finder `Cmd+C` (which puts only a `public.file-url`
-// representation on the pasteboard) makes `pbpaste` empty. AppleScript's
-// `«class furl»` coercion reaches the file-URL representation directly and
-// works for both single-file and multi-file selections. The `try` blocks
-// suppress the `-1700` "can't make … into type" error AppleScript raises when
-// the clipboard holds no file URLs, so the script's exit status only reflects
-// `osascript` itself.
-const MAC_FILE_URL_SCRIPT = [
-	"on run",
-	'\tset output to ""',
-	"\ttry",
-	"\t\tset theClip to the clipboard as «class furl»",
-	"\t\tif class of theClip is list then",
-	"\t\t\trepeat with anItem in theClip",
-	"\t\t\t\ttry",
-	"\t\t\t\t\tset output to output & POSIX path of anItem & linefeed",
-	"\t\t\t\tend try",
-	"\t\t\tend repeat",
-	"\t\telse",
-	"\t\t\ttry",
-	"\t\t\t\tset output to POSIX path of theClip & linefeed",
-	"\t\t\tend try",
-	"\t\tend if",
-	"\tend try",
-	"\treturn output",
-	"end run",
-].join("\n");
 
 /**
  * Read file paths from the macOS pasteboard's `public.file-url` representation.
@@ -154,7 +135,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 			}
 		}
 
-		await native.copyToClipboard(text);
+		await nativeCopyToClipboard(text);
 	} catch {
 		// Ignore — clipboard copy is best-effort
 	}
@@ -275,6 +256,14 @@ async function readTextViaPowerShell(): Promise<string | null> {
 	}
 }
 
+async function readTextFromX11Clipboard(): Promise<string> {
+	try {
+		return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+	} catch {
+		return await spawnCapture(["xsel", "--clipboard", "--output"]);
+	}
+}
+
 /**
  * Read an image from the system clipboard.
  *
@@ -284,7 +273,7 @@ async function readTextViaPowerShell(): Promise<string | null> {
  * because terminal clipboard paths can leave image payloads invisible to the
  * native bridge.
  *
- * @returns PNG payload or null when no image is available.
+ * @returns A supported image payload or null when no image is available.
  */
 export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 	if (process.env.TERMUX_VERSION) {
@@ -301,7 +290,7 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 
 	if (process.platform === "win32") {
 		try {
-			const image = await native.readImageFromClipboard();
+			const image = await nativeReadImageFromClipboard();
 			if (image) return image;
 		} catch (err) {
 			logger.warn("clipboard: native Windows image read failed", { error: String(err) });
@@ -309,11 +298,34 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 		return await readImageViaPowerShell();
 	}
 
+	if (process.platform === "linux" && process.env.WAYLAND_DISPLAY) {
+		try {
+			const offeredMimeTypes = new Set((await spawnCapture(["wl-paste", "--list-types"])).split(/\r?\n/));
+			for (const mimeType of SUPPORTED_IMAGE_MIME_TYPES) {
+				if (!offeredMimeTypes.has(mimeType)) continue;
+				const data = await spawnCapture(["wl-paste", "--type", mimeType], { encoding: "bytes" });
+				if (data.byteLength > 0) return { data, mimeType };
+			}
+		} catch {
+			// Fall through when wl-clipboard is absent or no advertised image payload can be read.
+		}
+	}
+
 	if (!hasDisplay()) {
 		return null;
 	}
 
-	return (await native.readImageFromClipboard()) ?? null;
+	try {
+		return (await nativeReadImageFromClipboard()) ?? null;
+	} catch (error) {
+		// Some selection owners make the native image read throw instead of
+		// reporting "no image" — e.g. an xclip-written text-only selection
+		// (arboard: "Unknown error ... incorrect type received from clipboard").
+		// Treat a failed image read as "no image" so the caller's smart-paste
+		// text fallback still delivers the clipboard content.
+		logger.warn("clipboard: failed to read clipboard image", { error: String(error) });
+		return null;
+	}
 }
 
 /**
@@ -343,11 +355,11 @@ export async function readTextFromClipboard(): Promise<string> {
 				return await spawnCapture(["wl-paste", "--type", "text/plain", "--no-newline"]);
 			} catch {
 				if (hasX11Display) {
-					return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+					return await readTextFromX11Clipboard();
 				}
 			}
 		} else if (hasX11Display) {
-			return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+			return await readTextFromX11Clipboard();
 		}
 	} catch (error) {
 		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });

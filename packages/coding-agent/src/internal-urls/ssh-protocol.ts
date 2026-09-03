@@ -30,6 +30,7 @@ import {
 	statRemotePath,
 	writeRemoteFile,
 } from "../ssh/file-transfer";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -44,11 +45,11 @@ const SSH_TEXT_MAX_BYTES = 1024 * 1024;
 
 /** POSIX-aware content type from the last path segment's extension. */
 function contentTypeFor(remotePath: string): InternalResource["contentType"] {
+	if (isMarkdownPath(remotePath)) return "text/markdown";
 	const slash = remotePath.lastIndexOf("/");
 	const base = slash === -1 ? remotePath : remotePath.slice(slash + 1);
 	const dot = base.lastIndexOf(".");
 	const ext = dot <= 0 ? "" : base.slice(dot).toLowerCase();
-	if (ext === ".md") return "text/markdown";
 	if (ext === ".json") return "application/json";
 	return "text/plain";
 }
@@ -288,7 +289,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 		}
 		if (kind === "other") {
 			throw new Error(
-				`ssh://: ${remotePath} is not a regular file (FIFO, socket, or device); ssh:// reads UTF-8 text files only — use the ssh tool for special files`,
+				`ssh://: ${remotePath} is not a regular file (FIFO, socket, or device); ssh:// reads UTF-8 text files only — use \`bash\` with a remote SSH command for special files`,
 			);
 		}
 		const fileResult = await readRemoteFile(target, remotePath, {
@@ -303,7 +304,7 @@ export class SshProtocolHandler implements ProtocolHandler {
 		const content = decodeUtf8Text(fileResult.bytes);
 		if (content === null) {
 			throw new Error(
-				`ssh://: ${remotePath} is a binary or non-UTF-8 file; ssh:// supports UTF-8 text only — use the ssh tool or an sshfs mount`,
+				`ssh://: ${remotePath} is a binary or non-UTF-8 file; ssh:// supports UTF-8 text only — use \`bash\` with a remote SSH command or an \`sshfs\` mount`,
 			);
 		}
 		// No `sourcePath`: keeps search on the virtual-resource path so the

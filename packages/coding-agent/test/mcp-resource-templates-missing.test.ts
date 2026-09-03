@@ -93,23 +93,39 @@ describe("MCPManager loads resources for a templates-less server", () => {
 
 		try {
 			await manager.connectServers({ docs: config }, {});
-
-			// Genuine integration wait: `#loadServerResourcesAndPrompts` runs
-			// fire-and-forget against a real spawned subprocess and exposes no
-			// completion promise or event to await, and fake timers cannot drive a
-			// child process. Poll the live manager with a generous ceiling, exiting
-			// the instant resources arrive (mirrors sdk-mcp-auto-discovery.test.ts).
-			const deadline = Date.now() + 10_000;
-			let resources = manager.getServerResources("docs");
-			while ((resources?.resources.length ?? 0) === 0 && Date.now() < deadline) {
-				await Bun.sleep(25);
-				resources = manager.getServerResources("docs");
-			}
+			await manager.ensureServerResources("docs");
+			const resources = manager.getServerResources("docs");
 
 			expect(resources).toBeDefined();
 			// The -32601 from templates/list must NOT discard the concrete resources.
 			expect(resources?.resources.map(r => r.uri).sort()).toEqual([...RESOURCE_URIS].sort());
 			// Templates are treated as empty, not an error.
+			expect(resources?.templates).toEqual([]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 20_000);
+
+	it("keeps concrete resources when resources/templates/list fails outright", async () => {
+		const manager = new MCPManager(workDir);
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [FIXTURE_PATH],
+			// Fixture answers resources/templates/list with -32603 instead of
+			// -32601 — a hard failure, not "method not found".
+			env: { FIXTURE_TEMPLATES_ERROR_CODE: "-32603" },
+		};
+
+		try {
+			await manager.connectServers({ docs: config }, {});
+			await manager.ensureServerResources("docs");
+			const resources = manager.getServerResources("docs");
+
+			expect(resources).toBeDefined();
+			// The still-in-flight resources/list result must not be discarded.
+			expect(resources?.resources.map(r => r.uri).sort()).toEqual([...RESOURCE_URIS].sort());
+			// Templates listing failed; treated as none until a later refresh.
 			expect(resources?.templates).toEqual([]);
 		} finally {
 			await manager.disconnectAll();

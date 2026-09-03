@@ -7,7 +7,7 @@ scope: "tool:edit(*.go), tool:write(*.go)"
 interruptMode: never
 ---
 
-`golang.org/x/exp/slices` and `golang.org/x/exp/maps` were promoted into the standard library as `slices` and `maps` in Go 1.21. Import the stdlib packages in new code instead of the experimental ones.
+Go 1.21: `golang.org/x/exp/slices` and `golang.org/x/exp/maps` → stdlib `slices` and `maps`. New code: stdlib imports, not experimental.
 
 ## Migration
 
@@ -25,16 +25,16 @@ import (
 )
 ```
 
-Most call sites are unchanged: `slices.Sort`, `slices.Contains`, `slices.Index`, `slices.Equal`, `maps.Clone`, etc.
+Most call sites unchanged: `slices.Sort`, `slices.Contains`, `slices.Index`, `slices.Equal`, `maps.Clone`, etc.
 
-## Watch the signature differences
+## Signature differences
 
-The promoted APIs were tweaked, so a blind path swap can break the build:
+Promoted APIs tweaked; blind path swap can break the build:
 
-- `x/exp/maps.Keys(m)` / `Values(m)` returned a slice; the stdlib `maps.Keys(m)` / `maps.Values(m)` return an **iterator** (`iter.Seq`). Use `slices.Collect(maps.Keys(m))` to recover a slice, or range over the iterator.
-- `slices.SortFunc` takes a comparison returning `int` (cmp-style), matching the stdlib signature.
+- `x/exp/maps.Keys(m)` and `x/exp/maps.Values(m)`: slice; stdlib `maps.Keys(m)` and `maps.Values(m)`: iterator (`iter.Seq`). Recover a slice: `slices.Collect(maps.Keys(m))`; or range over the iterator.
+- `slices.SortFunc`: comparison returns `int` (cmp-style), matching stdlib signature.
 
 ## Keep x/exp when
 
-- The module's `go` directive is below 1.21 (stdlib `slices`/`maps` don't exist yet).
-- You need an `x/exp` helper that was not promoted (e.g. parts of `x/exp/constraints` still live outside the stdlib).
+- Module `go` directive below 1.21 → stdlib `slices`/`maps` do not exist.
+- Need an unpromoted `x/exp` helper, e.g. parts of `x/exp/constraints` remain outside stdlib.

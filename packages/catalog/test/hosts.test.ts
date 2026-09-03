@@ -5,6 +5,7 @@ import {
 	isVertexExpressOpenAIUrl,
 	isVertexRawPredictUrl,
 	modelMatchesHost,
+	resolveVertexEndpointHost,
 } from "@oh-my-pi/pi-catalog/hosts";
 
 describe("hostMatchesUrl", () => {
@@ -64,6 +65,14 @@ describe("endpoint shape predicates", () => {
 				"https://aiplatform.googleapis.com/v1/projects/p/locations/us/publishers/anthropic/models/claude:streamRawPredict",
 			),
 		).toBe(true);
+	});
+
+	test("resolves Vertex endpoint hosts for global, multi-region, and regional locations", () => {
+		expect(resolveVertexEndpointHost("global")).toBe("aiplatform.googleapis.com");
+		expect(resolveVertexEndpointHost("eu")).toBe("aiplatform.eu.rep.googleapis.com");
+		expect(resolveVertexEndpointHost("us")).toBe("aiplatform.us.rep.googleapis.com");
+		expect(resolveVertexEndpointHost("europe-west4")).toBe("europe-west4-aiplatform.googleapis.com");
+		expect(resolveVertexEndpointHost("us-central1")).toBe("us-central1-aiplatform.googleapis.com");
 	});
 
 	test("requires all DashScope compatible-mode URL markers", () => {

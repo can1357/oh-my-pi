@@ -1,8 +1,16 @@
 import type { Model, ProviderResponseMetadata, RawSseEvent } from "@oh-my-pi/pi-ai";
+import { materializeString } from "@oh-my-pi/pi-utils";
 
 const MAX_RAW_SSE_EVENTS = 1_000;
 const MAX_RAW_SSE_CHARS = 512_000;
 const MAX_RAW_SSE_EVENT_CHARS = 64_000;
+// Reserve room for the `: omp-debug-truncated` / `: omp-debug-elided` marker
+// lines so a trimmed event stays within MAX_RAW_SSE_EVENT_CHARS overall.
+const TRIM_MARKER_RESERVE = 200;
+// Caps applied to individual tool entries when compacting a `tools` array
+// inside an oversized `data:` payload.
+const MAX_TOOL_SCHEMA_CHARS = 200;
+const MAX_TOOL_DESCRIPTION_CHARS = 200;
 
 export type RawSseDebugRecord =
 	| {
@@ -45,42 +53,164 @@ export interface RawSseDebugSnapshot {
 // path. The parallel array keeps records as plain monomorphic objects.
 type TrimResult = { raw: string[]; truncated: boolean; originalChars: number; chars: number };
 
-// Single-pass trim. Returns the final `chars` count using the historical
-// formula `reduce(line.length + 1, init = 1)` so the new accounting matches
-// the previous `countRecordChars` byte-for-byte (the trailing +1 covers the
-// record-level newline that `rawRecordText` appends in `toRawText`).
-//
-// When the event fits within budget the input `raw` array is returned
-// **by reference** — see the ownership contract documented at
-// `RawSseDebugBuffer.recordEvent` below.
-function trimRawLines(raw: string[]): TrimResult {
-	let originalChars = 0;
-	for (let i = 0; i < raw.length; i++) originalChars += raw[i].length + 1;
+// `chars` uses the historical formula `reduce(line.length + 1, init = 1)` so
+// the accounting matches the previous `countRecordChars` byte-for-byte (the
+// trailing +1 covers the record-level newline that `rawRecordText` appends in
+// `toRawText`).
+function countLines(lines: readonly string[]): number {
+	let chars = 0;
+	for (let i = 0; i < lines.length; i++) chars += lines[i].length + 1;
+	return chars;
+}
 
+function elideText(text: string, max: number): string {
+	if (text.length <= max) return text;
+	return `${text.slice(0, max)}… (+${text.length - max} chars)`;
+}
+
+// Shrinks one tool definition in place: schemas (`parameters` for OpenAI
+// shapes, `input_schema` for Anthropic) become elided JSON strings and long
+// descriptions are cut, while `name`/`type` survive untouched. Chat-completions
+// nests the payload under `function`.
+function compactToolEntry(tool: unknown): boolean {
+	if (typeof tool !== "object" || tool === null) return false;
+	const obj = tool as Record<string, unknown>;
+	let changed = false;
+	if (typeof obj.function === "object" && obj.function !== null) {
+		changed = compactToolEntry(obj.function);
+	}
+	for (const key of ["parameters", "input_schema"]) {
+		const schema = obj[key];
+		if (schema === undefined || schema === null) continue;
+		const text = typeof schema === "string" ? schema : JSON.stringify(schema);
+		if (text.length <= MAX_TOOL_SCHEMA_CHARS) continue;
+		obj[key] = elideText(text, MAX_TOOL_SCHEMA_CHARS);
+		changed = true;
+	}
+	if (typeof obj.description === "string" && obj.description.length > MAX_TOOL_DESCRIPTION_CHARS) {
+		obj.description = elideText(obj.description, MAX_TOOL_DESCRIPTION_CHARS);
+		changed = true;
+	}
+	return changed;
+}
+
+// Walks a parsed SSE payload and compacts every `tools` array it finds
+// (e.g. `response.tools` echoed back by the Responses API). Mutates `node`.
+function compactToolsDeep(node: unknown): boolean {
+	if (Array.isArray(node)) {
+		let changed = false;
+		for (const item of node) changed = compactToolsDeep(item) || changed;
+		return changed;
+	}
+	if (typeof node !== "object" || node === null) return false;
+	let changed = false;
+	const obj = node as Record<string, unknown>;
+	for (const key in obj) {
+		const value = obj[key];
+		if (key === "tools" && Array.isArray(value)) {
+			for (const tool of value) changed = compactToolEntry(tool) || changed;
+		} else {
+			changed = compactToolsDeep(value) || changed;
+		}
+	}
+	return changed;
+}
+
+// Rewrites oversized `data:` lines with tool schemas compacted. Returns null
+// when nothing changed (unparseable payloads or no tools to shrink). Only
+// invoked on events that already blew the budget, so the JSON round-trip is
+// off the streaming hot path.
+function compactToolLines(raw: readonly string[]): string[] | null {
+	let changed = false;
+	const out = raw.map(line => {
+		if (!line.startsWith("data:") || line.length <= MAX_TOOL_SCHEMA_CHARS) return line;
+		const start = line.charCodeAt(5) === 32 ? 6 : 5;
+		try {
+			const parsed = JSON.parse(line.slice(start));
+			if (!compactToolsDeep(parsed)) return line;
+			changed = true;
+			return `data: ${JSON.stringify(parsed)}`;
+		} catch {
+			return line;
+		}
+	});
+	return changed ? out : null;
+}
+
+// Keeps the first and last portions of an over-budget event and drops the
+// middle, so leading fields (id/model/status) AND trailing fields
+// (usage/finish_reason) both stay visible. A `: omp-debug-elided` comment
+// marks the cut; split lines carry `…` at the cut edge.
+function headTailTrim(lines: string[], budget: number, elidedTotal: number): string[] {
+	const headBudget = budget >> 1;
+	const tailBudget = budget - headBudget;
+
+	let i = 0;
+	let headRemaining = headBudget;
+	const out: string[] = [];
+	while (i < lines.length && lines[i].length + 1 <= headRemaining) {
+		headRemaining -= lines[i].length + 1;
+		out.push(lines[i]);
+		i++;
+	}
+
+	let j = lines.length - 1;
+	let tailRemaining = tailBudget;
+	const tail: string[] = [];
+	while (j >= i && lines[j].length + 1 <= tailRemaining) {
+		tailRemaining -= lines[j].length + 1;
+		tail.push(lines[j]);
+		j--;
+	}
+	tail.reverse();
+
+	let elided = elidedTotal - countLines(out) - countLines(tail);
+	if (i <= j) {
+		// lines[i..j] straddle the cut: keep a head slice of the first and a
+		// tail slice of the last (the same line when i === j).
+		const headSlice = lines[i].slice(0, Math.max(0, headRemaining - 2));
+		const tailStart =
+			i === j
+				? Math.max(headSlice.length, lines[j].length - tailRemaining + 2)
+				: Math.max(0, lines[j].length - tailRemaining + 2);
+		const tailSlice = lines[j].slice(tailStart);
+		elided -= headSlice.length + tailSlice.length;
+		if (headSlice.length > 0) out.push(`${headSlice}…`);
+		out.push(`: omp-debug-elided chars=${Math.max(0, elided)}`);
+		if (tailSlice.length > 0) out.push(`…${tailSlice}`);
+	} else if (elided > 0) {
+		out.push(`: omp-debug-elided chars=${elided}`);
+	}
+	out.push(...tail);
+	return out;
+}
+
+// Trim pipeline for one SSE event:
+//   1. fits → return `raw` **by reference** (ownership contract at
+//      `RawSseDebugBuffer.recordEvent` below).
+//   2. over budget → compact tool schemas inside `data:` JSON payloads;
+//      if that alone fits, the payload stays parseable JSON.
+//   3. still over → head+tail trim (middle elided).
+// Any trimmed result ends with the `: omp-debug-truncated` marker carrying
+// the original size.
+function trimRawLines(raw: string[]): TrimResult {
+	const originalChars = countLines(raw);
 	if (originalChars <= MAX_RAW_SSE_EVENT_CHARS) {
 		return { raw, truncated: false, originalChars, chars: originalChars + 1 };
 	}
 
-	const trimmed: string[] = [];
-	let remaining = MAX_RAW_SSE_EVENT_CHARS;
-	let chars = 1; // matches reduce(.., init = 1)
-	for (const line of raw) {
-		if (remaining <= 0) break;
-		if (line.length + 1 <= remaining) {
-			trimmed.push(line);
-			chars += line.length + 1;
-			remaining -= line.length + 1;
-			continue;
-		}
-		const slice = line.slice(0, Math.max(0, remaining));
-		trimmed.push(slice);
-		chars += slice.length + 1;
-		remaining = 0;
+	const budget = MAX_RAW_SSE_EVENT_CHARS - TRIM_MARKER_RESERVE;
+	let lines = compactToolLines(raw) ?? raw;
+	const compactedChars = lines === raw ? originalChars : countLines(lines);
+	if (compactedChars > budget) {
+		lines = headTailTrim(lines, budget, compactedChars);
+	} else if (lines === raw) {
+		lines = raw.slice();
 	}
-	const tail = `: omp-debug-truncated originalChars=${originalChars}`;
-	trimmed.push(tail);
-	chars += tail.length + 1;
-	return { raw: trimmed, truncated: true, originalChars, chars };
+	// Kept windows outlive the incoming frame; detach them from its backing storage.
+	lines = lines.map(materializeString);
+	lines.push(`: omp-debug-truncated originalChars=${originalChars}`);
+	return { raw: lines, truncated: true, originalChars, chars: countLines(lines) + 1 };
 }
 
 export function formatRawSseIsoTime(timestamp: number): string {
@@ -206,6 +336,24 @@ export class RawSseDebugBuffer {
 		if (this.#droppedRecords === 0) return body;
 		const dropped = `: omp-debug-dropped records=${this.#droppedRecords} chars=${this.#droppedChars}\n\n`;
 		return body.length > 0 ? `${dropped}${body}` : dropped;
+	}
+
+	/**
+	 * Drop every retained record and reset accounting. Called from
+	 * {@link AgentSession} teardown so a disposed (e.g. parked subagent) session
+	 * releases its bounded captured wire records. Notifies subscribers so a live
+	 * debug viewer redraws empty.
+	 */
+	clear(): void {
+		this.#records = [];
+		this.#recordChars = [];
+		this.#head = 0;
+		this.#totalChars = 0;
+		this.#droppedRecords = 0;
+		this.#droppedChars = 0;
+		this.#totalEvents = 0;
+		this.#lastUpdatedAt = undefined;
+		this.#emit();
 	}
 
 	#append(record: RawSseDebugRecord, chars: number): void {

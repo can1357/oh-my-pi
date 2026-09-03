@@ -96,7 +96,7 @@ renderResult(result, { expanded, isPartial }, theme) {
 **Use `z.enum` for discriminated string tool args:**
 
 ```typescript
-const { z } = pi.zod;
+const z = pi.zod;
 
 parameters: z.object({
 	action: z.enum(["list", "add"]),

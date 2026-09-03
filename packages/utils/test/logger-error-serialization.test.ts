@@ -47,7 +47,13 @@ async function waitForLogEntry(targetMessage: string): Promise<Record<string, un
 			const text = fs.readFileSync(path.join(tempDir, f), "utf8");
 			for (const line of text.split("\n")) {
 				if (line.length === 0) continue;
-				const entry = JSON.parse(line) as Record<string, unknown>;
+				let entry: Record<string, unknown>;
+				try {
+					entry = JSON.parse(line) as Record<string, unknown>;
+				} catch {
+					// Torn tail of an in-flight write; the line completes on a later poll.
+					continue;
+				}
 				if (entry.message === targetMessage) return entry;
 			}
 		}

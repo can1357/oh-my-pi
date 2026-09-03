@@ -7,6 +7,10 @@ Native Rust functionality via N-API.
 - **Grep**: Regex-based search powered by ripgrep's engine with native file walking and matching
 - **Find**: Glob-based file/directory discovery with gitignore support (pure TypeScript via `globPaths`)
 - **SIXEL**: Terminal image encoding for SIXEL-capable terminals (decode, resize, encode in one pass)
+- **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
+- **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
+- **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
+- **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
 
 General-purpose image processing (decode/resize/encode for files and buffers)
 lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
@@ -16,7 +20,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { grep, find, encodeSixel } from "@oh-my-pi/pi-natives";
+import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -35,6 +39,10 @@ const files = await find({
 
 // SIXEL encode for a terminal cell box (px)
 const sequence = encodeSixel(pngBytes, widthPx, heightPx);
+
+// Extract PDF text and identify pages that still need OCR
+const pdf = await pdfToMarkdown(pdfBytes);
+console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
 
 ## Building
@@ -67,9 +75,6 @@ native/                  # Core loader files and local/CI native build outputs
 npm/<platform>-<arch>/   # Generated at publish time, not committed
   package.json           # @oh-my-pi/pi-natives-<platform>-<arch>
   *.node                 # Only that platform's addon binary or x64 ISA variants
-src/                     # TypeScript wrappers and generated declarations source
-  native.ts
-  index.ts
 ```
 
 The published core package contains only the JS loader, declarations, README,

@@ -12,6 +12,8 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
+import { prompt } from "@oh-my-pi/pi-utils";
+import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
@@ -99,6 +101,54 @@ function parseYieldType(value: unknown): string | string[] | undefined {
 	if (value === undefined || value === null) return undefined;
 	if (isYieldType(value)) return value;
 	throw new Error("type must be a string or non-empty array of strings");
+}
+/** Parse a `{`/`[`-leading JSON string; undefined on non-container or parse failure. */
+function parseJsonContainerString(value: string): unknown {
+	const trimmed = value.trim();
+	if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return undefined;
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		return undefined;
+	}
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Resolve the `result` record from raw yield arguments, losslessly salvaging
+ * the envelope deviations weak tool callers actually produce (observed in
+ * Gemini-flash subagent traces):
+ * - `result` sent as a JSON-encoded string → parsed;
+ * - `data`/`error` at the top level with the `result` wrapper omitted → wrapped;
+ * - `type` present with `result` omitted entirely → `{}` — the tool description
+ *   documents omitted data as last-turn extraction, so an omitted wrapper means
+ *   the same thing.
+ * Returns undefined when no object-shaped result can be recovered; the caller
+ * surfaces the standard retryable format error.
+ */
+function resolveResultRecord(
+	raw: Record<string, unknown>,
+	yieldType: string | string[] | undefined,
+): Record<string, unknown> | undefined {
+	let result = raw.result;
+	if (typeof result === "string") {
+		const parsed = parseJsonContainerString(result);
+		if (isPlainRecord(parsed)) result = parsed;
+	}
+	if (isPlainRecord(result)) return result;
+	if (result === undefined || result === null) {
+		if (Object.hasOwn(raw, "data") || Object.hasOwn(raw, "error")) {
+			const wrapped: Record<string, unknown> = {};
+			if (Object.hasOwn(raw, "data")) wrapped.data = raw.data;
+			if (Object.hasOwn(raw, "error")) wrapped.error = raw.error;
+			return wrapped;
+		}
+		if (yieldType !== undefined) return {};
+	}
+	return undefined;
 }
 
 /**
@@ -213,10 +263,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly name = "yield";
 	readonly approval = "read" as const;
 	readonly label = "Submit Result";
-	readonly description =
-		"Submit subagent output. Omit `type` for the usual final structured result.\n\n" +
-		'Pass `type: ["section"]` to submit an incremental, non-terminal section that accumulates. Pass `type: "result"` to finalize; when `data` is omitted, your last assistant turn becomes the raw final result.\n' +
-		'Use `result: { data: <your output> }` for success, or `result: { error: "message" }` for failure. Keep the `result` wrapper.';
+	description: string;
 	readonly parameters: TSchema;
 	strict = true;
 	readonly intent = "omit" as const;
@@ -229,6 +276,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	#isKnownSection?: (label: string) => boolean;
 	#schemaValidationFailures = 0;
 	#emptyResultFailures = 0;
+	#hasIncrementalSections = false;
 
 	constructor(session: ToolSession) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
@@ -304,6 +352,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
 		this.#isKnownSection = isKnownSection;
+		this.description = prompt.render(yieldDescription, { hasOutputSchema: validate !== undefined });
 		this.parameters = parameters;
 	}
 
@@ -315,14 +364,13 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<YieldDetails>> {
 		const raw = params as Record<string, unknown>;
-		const rawResult = raw.result;
-		if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) {
+		const yieldType = parseYieldType(raw.type);
+		const resultRecord = resolveResultRecord(raw, yieldType);
+		if (resultRecord === undefined) {
 			throw new Error(`result must be an object containing either data or error. ${YIELD_RESULT_FORMAT_HINT}`);
 		}
-		const resultRecord = rawResult as Record<string, unknown>;
 		const errorMessage = typeof resultRecord.error === "string" ? resultRecord.error : undefined;
-		const data = resultRecord.data;
-		const yieldType = parseYieldType(raw.type);
+		let data = resultRecord.data;
 		const useLastTurn =
 			errorMessage === undefined && data === undefined && yieldType !== undefined && !("error" in resultRecord);
 		// Incremental array-typed sections carry partial data (one finding, one
@@ -374,15 +422,42 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				);
 			}
 		}
+		// A schema-bound terminal last-turn yield with no accumulated sections can
+		// only assemble raw prose, which finalization then rejects post-mortem as a
+		// fatal schema_violation the child can no longer correct. Catch it here as
+		// a retryable error instead. With sections present, a data-less finalize
+		// legitimately closes the incremental flow (assembly keeps the sections).
+		if (status === "success" && useLastTurn && !isIncremental && this.#validate && !this.#hasIncrementalSections) {
+			throw new Error(
+				"This task requires structured output matching the declared schema; a last-turn result cannot satisfy it. " +
+					`Submit the full object: {"result":{"data":<object matching the schema>}}.`,
+			);
+		}
 		if (status === "success" && !useLastTurn) {
 			if (data === null) {
 				throw new Error("data is required when yield indicates success");
 			}
-			const sectionFailure = isIncremental
-				? this.#validateIncrementalSection(yieldType as string[], data)
-				: this.#validate
-					? this.#validate(data)
-					: undefined;
+			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
+				isIncremental
+					? this.#validateIncrementalSection(yieldType as string[], value)
+					: this.#validate
+						? this.#validate(value)
+						: undefined;
+			let sectionFailure = validateData(data);
+			if (sectionFailure && !sectionFailure.success && typeof data === "string") {
+				// Lossless recovery: a JSON-encoded payload string parses to exactly
+				// the intended value (executor finalization already parses terminal
+				// yields the same way). Never the reverse — stringifying objects to
+				// fit string-typed fields is silent corruption.
+				const parsed = parseJsonContainerString(data);
+				if (parsed !== undefined) {
+					const revalidated = validateData(parsed);
+					if (revalidated === undefined || revalidated.success) {
+						data = parsed;
+						sectionFailure = revalidated;
+					}
+				}
+			}
 			if (sectionFailure && !sectionFailure.success) {
 				this.#schemaValidationFailures++;
 				if (this.#schemaValidationFailures <= MAX_SCHEMA_RETRIES) {
@@ -401,6 +476,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 
 		this.#emptyResultFailures = 0;
+		if (status === "success" && isIncremental) this.#hasIncrementalSections = true;
 		const responseText =
 			status === "aborted"
 				? `Task aborted: ${errorMessage}`

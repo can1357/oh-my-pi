@@ -1,0 +1,57 @@
+# Shipping pi_natives addons, one per (platform, arch, ISA-variant).
+# `bazel build //:natives-<target>` yields the canonically named .node file;
+# packages/natives/scripts/build-native.ts copies it into packages/natives/native/.
+# Note: musl addons intentionally reuse the plain linux-<arch> filenames — the
+# loader never sees gnu and musl side by side; release jobs keep them apart.
+
+load("//bazel:defs.bzl", "native_addon")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+    "rustfmt.toml",
+])
+_ADDONS = {
+    "linux-x64-baseline": ("//bazel/platforms:linux-x64-baseline", "pi_natives.linux-x64-baseline.node"),
+    "linux-x64-modern": ("//bazel/platforms:linux-x64-modern", "pi_natives.linux-x64-modern.node"),
+    "linux-arm64": ("//bazel/platforms:linux-arm64", "pi_natives.linux-arm64.node"),
+    "linux-musl-x64-baseline": ("//bazel/platforms:linux-musl-x64-baseline", "pi_natives.linux-x64-baseline.node"),
+    "linux-musl-arm64": ("//bazel/platforms:linux-musl-arm64", "pi_natives.linux-arm64.node"),
+    "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives.darwin-x64-baseline.node"),
+    "darwin-arm64": ("//bazel/platforms:darwin-arm64", "pi_natives.darwin-arm64.node"),
+    "win32-x64-baseline": ("//bazel/platforms:win32-x64-baseline", "pi_natives.win32-x64-baseline.node"),
+}
+
+[
+    native_addon(
+        name = "natives-" + target,
+        lib = "//crates/pi-natives:pi_natives",
+        out = out,
+        platform = platform,
+    )
+    for target, (platform, out) in _ADDONS.items()
+]
+
+# Every addon buildable from a linux-x64 host (the omp-kata pods): all linux
+# targets plus the msvc cross build. darwin addons build on mac hosts.
+filegroup(
+    name = "natives-linux-all",
+    srcs = [
+        ":natives-linux-arm64",
+        ":natives-linux-musl-arm64",
+        ":natives-linux-musl-x64-baseline",
+        ":natives-linux-x64-baseline",
+        ":natives-linux-x64-modern",
+        ":natives-win32-x64-baseline",
+    ],
+)
+
+filegroup(
+    name = "natives-darwin-all",
+    srcs = [
+        ":natives-darwin-arm64",
+        ":natives-darwin-x64-baseline",
+    ],
+)

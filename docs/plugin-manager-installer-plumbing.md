@@ -1,6 +1,6 @@
 # Plugin manager and installer plumbing
 
-This document describes how `omp plugin` npm/git/link operations mutate plugin state on disk and how installed npm/git/link plugins become runtime capabilities (tools and extensions today, hooks/commands path resolution available). Marketplace installs use separate marketplace registries and cache plumbing; see `docs/marketplace.md`.
+This document describes how `omp plugin` npm/git/link and marketplace operations mutate plugin state on disk and become runtime capabilities. Marketplace installs keep their own registries and cache, then register the cached plugin through the same `node_modules` and `omp-plugins.lock.json` runtime surfaces used by npm/git/link installs; see `docs/marketplace.md`.
 
 ## Scope and architecture
 
@@ -20,15 +20,16 @@ omp plugin <npm/link action> ...
   -> src/commands/plugin.ts
   -> runPluginCommand(...) in src/cli/plugin-cli.ts
   -> PluginManager method (install/list/uninstall/link/...)
-  -> mutate ~/.omp/plugins/{package.json,node_modules,omp-plugins.lock.json}
-  -> runtime discovery: discoverAndLoadCustomTools(...) and discoverAndLoadExtensions(...)
-  -> getAllPluginToolPaths(cwd) / getAllPluginExtensionPaths(cwd)
-  -> custom tool loader imports tool modules; extension loader imports extension modules
+  -> mutate user plugins data root {package.json,node_modules,omp-plugins.lock.json}
+  -> enabled-plugin enumeration discovers user and nearest project plugin roots
+  -> direct loaders resolve manifest-declared tool/extension entries
+  -> `omp-plugins` capability discovery scans conventional skills/hooks/tools/commands/rules/prompts/MCP content; task discovery scans `agents/`
 
 omp plugin install name@marketplace / omp install name@marketplace
   -> MarketplaceManager
-  -> mutate ~/.omp/marketplaces.json, ~/.omp/plugins/installed_plugins.json, cache dirs
-  -> installed marketplace plugin cache is surfaced as plugin roots/capabilities
+  -> mutate scope registry and shared cache
+  -> symlink the cached package into the scope's node_modules and update omp-plugins.lock.json
+  -> `claude-plugins` discovery loads marketplace skills/commands/hooks/tools/MCP; task discovery loads `agents/`; extension loader imports `package.json#omp.extensions`
 ```
 
 ### Command entrypoints
@@ -41,27 +42,27 @@ omp plugin install name@marketplace / omp install name@marketplace
 
 ## On-disk model
 
-Global plugin state lives under `~/.omp/plugins`:
+User plugin state lives under the plugins data root (`~/.omp/plugins` by default). On Linux and macOS, `omp config init-xdg` creates the XDG data, state, and cache roots but does not move existing data; after the relevant roots exist and the XDG variables are set, new user plugin state resolves under `$XDG_DATA_HOME/omp/plugins`:
 
 - `package.json` — dependency manifest used by `bun install`/`bun uninstall` for npm-installed plugins
-- `node_modules/` — installed npm plugin packages or symlinks
-- `omp-plugins.lock.json` — runtime state for npm/link plugins:
+- `node_modules/` — installed npm packages plus link and marketplace-cache symlinks
+- `omp-plugins.lock.json` — runtime state for npm/link/marketplace plugins:
   - enabled/disabled per plugin
   - selected feature set per plugin
   - persisted plugin settings
 
-Project-local overrides live at:
+When a project anchor (`.omp/` or `.git/`) exists at or above cwd, project runtime plugins live in `<anchor>/.omp/plugins/{node_modules,omp-plugins.lock.json}`. Marketplace project installs populate this root; enabled project packages shadow user packages with the same package name.
 
-- `<cwd>/.omp/plugin-overrides.json`
+Project-local overrides are searched through project config directories as `plugin-overrides.json` (normally `<project>/.omp/plugin-overrides.json`). Overrides are read-only from manager/loader perspective and can disable plugins or override features/settings.
 
-Overrides are read-only from manager/loader perspective (no write path here) and can disable plugins or override features/settings for this project.
+Marketplace installs add registry and cache state alongside those runtime entries:
 
-Marketplace registries live separately:
-
-- `~/.omp/marketplaces.json` — configured marketplace catalogs
-- `~/.omp/plugins/installed_plugins.json` — user-scoped marketplace installs
-- `<cwd>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs when available
-- `~/.omp/plugins/cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
+- user data root `marketplaces.json` (`~/.omp/marketplaces.json` by default) — configured marketplace catalogs
+- user plugins data root `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default) — user-scoped marketplace installs
+- `<anchor>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs
+- user plugins data root `cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
+- `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions` and tools to load
+- `<scope>/plugins/omp-plugins.lock.json` — enablement and feature state shared with the runtime plugin loader
 
 ## Plugin spec parsing and metadata interpretation
 
@@ -108,7 +109,7 @@ Malformed `package.json` JSON is a hard failure at read time; malformed manifest
    - `[a,b]`: validates each feature exists in manifest features map
    - `[]`: empty feature list
    - bare spec: `null` (use defaults policy later in loader)
-7. Validate declared extension entries (`#validateInstalledExtensions`): each manifest `extensions` entry must resolve on disk and import to a factory function. On failure, roll back the install — restore the previous `plugins/package.json`, remove the freshly installed package, and restore any prior version from a backup taken before `bun install` — then abort.
+7. Validate declared extension entries (`#validateInstalledExtensions`): each manifest `extensions` entry must resolve on disk, import to a factory function, and initialize successfully against a throwaway registration surface. On failure, roll back the install — restore the previous `plugins/package.json`, remove the freshly installed package, and restore any prior version from a backup taken before `bun install` — then abort.
 8. Upsert lockfile runtime state: `{ version, enabledFeatures, enabled: true }`.
 
 ### Update semantics
@@ -116,8 +117,9 @@ Malformed `package.json` JSON is a hard failure at read time; malformed manifest
 Because update is install-driven:
 
 - `omp plugin install pkg@newVersion` updates dependency and lockfile version.
-- Existing settings are preserved; state entry is overwritten for version/features/enabled.
-- No separate “check updates” or transactional migration logic exists.
+- Existing settings remain in the separate settings map; the plugin state entry is replaced with the new version/features and enabled state.
+- Install snapshots the prior package tree, `package.json`, and `bun.lock`. Any post-install failure, including feature validation, extension validation, or runtime-config save, attempts to restore all three.
+- No separate npm-plugin “check updates” or migration action exists.
 
 ## Remove flow (`PluginManager.uninstall`)
 
@@ -131,17 +133,17 @@ If uninstall command fails, runtime state is not changed.
 
 ## List flow (`PluginManager.list`)
 
-1. Read plugin dependency map from `~/.omp/plugins/package.json`.
-2. Load lockfile runtime config (missing file -> empty defaults).
-3. Load project overrides (`<cwd>/.omp/plugin-overrides.json`, parse/read errors -> empty object with warning).
-4. For each dependency with a resolvable package.json:
-   - build `InstalledPlugin` record
-   - merge feature/enable state:
-     - base from lockfile (or defaults)
-     - project overrides can replace feature selection
-     - project `disabled` list masks plugin as disabled
+1. Read the dependency map and lockfile runtime entries; their union includes npm installs and link-only plugins.
+2. Load project overrides.
+3. Resolve each package from `node_modules`; skip marketplace runtime symlinks because marketplace summaries are listed separately.
+4. Build `InstalledPlugin` records and merge effective state:
+   - base from lockfile (or defaults)
+   - project overrides can replace feature selection
+   - project `disabled` list masks the plugin as disabled
 
-This is the effective state used by CLI status output and settings/features operations.
+`omp plugin list` combines this result with `MarketplaceManager.listInstalledPlugins()`.
+
+`PluginManager.getPlugin()` resolves one runtime package directly, including a marketplace symlink intentionally omitted from `list()`. Config commands use this path so marketplace settings remain addressable without duplicating marketplace entries in list and status output.
 
 ## Link flow (`PluginManager.link`)
 
@@ -193,21 +195,24 @@ Each resolver includes base entries plus feature entries:
 
 Manifest entries may point to a file or to a directory containing `index.ts`, `index.js`, `index.mjs`, or `index.cjs`. Missing files are silently skipped (`statSync`/`existsSync` guard).
 
-## Current runtime wiring differences
+## Current runtime wiring
 
-- **Tools are wired into runtime today** via `discoverAndLoadCustomTools` (`custom-tools/loader.ts`), which calls `getAllPluginToolPaths(cwd)`.
-- **Extensions are wired into runtime today** via `discoverAndLoadExtensions` (`extensions/loader.ts`), which calls `getAllPluginExtensionPaths(cwd)`.
-- Paths are de-duplicated by resolved absolute path in custom tool and extension discovery (`seen` set, first path wins).
-- **Hooks/commands resolvers exist** and are exported, but this code path does not currently wire them into a runtime registry in the same way tools and extensions are wired.
+- Manifest-declared **tools** feed `discoverAndLoadCustomTools` through `getAllPluginToolPaths(cwd)`.
+- Manifest-declared **extensions** feed `discoverAndLoadExtensions` through `getAllPluginExtensionPaths(cwd)`.
+- The `omp-plugins` capability provider separately scans conventional `skills/`, `hooks/pre|post/`, `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` under enabled npm/link plugin roots. Task-agent discovery scans the same roots' `agents/`. Marketplace roots are excluded there and handled through `claude-plugins` plus marketplace task-agent discovery instead.
+- Manifest hook/command path resolvers remain exported, but runtime hook/slash discovery uses the conventional capability-provider scans rather than `getAllPluginHookPaths()` or `getAllPluginCommandPaths()`.
+- Direct custom-tool and extension path lists are de-duplicated by resolved absolute path (`seen`, first path wins).
 
 ## Lock/state management details
 
 `PluginManager` caches runtime config in memory per instance (`#runtimeConfig`) and lazily loads once.
 
-Load behavior:
+Manager load behavior:
 
 - lockfile missing -> `{ plugins: {}, settings: {} }`
-- lockfile read/parse failure -> warning + same empty defaults
+- lockfile read/parse failure -> warning + the same empty defaults
+
+Enabled-plugin discovery loads each user/project root independently: a missing lockfile is empty, while a non-ENOENT read/parse failure propagates.
 
 Save behavior:
 
@@ -246,14 +251,13 @@ Because CLI uses `PluginManager`, these stricter link guards are not currently o
 
 The plugin manager is not transactional.
 
-| Operation stage                                          | Failure behavior           | Rollback                                                                      |
-| -------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------- |
-| `bun install` fails                                      | install aborts with stderr | N/A (no state writes yet)                                                     |
-| Install succeeds, then feature validation fails          | command fails              | No uninstall rollback; dependency may remain in `node_modules`/`package.json` |
-| Install succeeds, then extension validation fails        | command fails              | Rolls back: restores `package.json`, removes installed package, restores prior version from backup |
-| Install succeeds, then lockfile write fails              | command fails              | No rollback of installed package                                              |
-| `bun uninstall` succeeds, lockfile write fails           | command fails              | Package removed, stale runtime state may remain                               |
-| `link` removes old target then symlink creation fails    | command fails              | No restoration of previous link/dir                                           |
+| Operation stage                                       | Failure behavior           | Rollback                                                                  |
+| ----------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------- |
+| `bun install` or follow-up git `bun update` fails     | install aborts with stderr | Restores prior `package.json`, `bun.lock`, and package snapshot           |
+| Feature or extension validation fails                 | command fails              | Same install rollback                                                     |
+| Runtime lockfile write fails                          | command fails              | Same install rollback; rollback failure is appended to the reported error |
+| `bun uninstall` succeeds, lockfile write fails        | command fails              | Package removed, stale runtime state may remain                           |
+| `link` removes old target then symlink creation fails | command fails              | No restoration of previous link/directory                                 |
 
 Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned config cleanup, invalid-feature cleanup), but it is best-effort.
 
@@ -279,8 +283,11 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 - [`src/cli/plugin-cli.ts`](../packages/coding-agent/src/cli/plugin-cli.ts) — action dispatch, user-facing command handlers
 - [`src/extensibility/plugins/manager.ts`](../packages/coding-agent/src/extensibility/plugins/manager.ts) — active install/remove/list/link/state/doctor implementation
 - [`src/extensibility/plugins/installer.ts`](../packages/coding-agent/src/extensibility/plugins/installer.ts) — legacy installer helpers and additional link safety checks
-- [`src/extensibility/plugins/loader.ts`](../packages/coding-agent/src/extensibility/plugins/loader.ts) — enabled-plugin discovery and tool/hook/command path resolution
+- [`src/extensibility/plugins/loader.ts`](../packages/coding-agent/src/extensibility/plugins/loader.ts) — enabled-plugin discovery and manifest tool/hook/command/extension path resolution
 - [`src/extensibility/plugins/parser.ts`](../packages/coding-agent/src/extensibility/plugins/parser.ts) — install spec and package-name parsing helpers
 - [`src/extensibility/plugins/types.ts`](../packages/coding-agent/src/extensibility/plugins/types.ts) — manifest/runtime/override type contracts
-- [`src/extensibility/custom-tools/loader.ts`](../packages/coding-agent/src/extensibility/custom-tools/loader.ts) — runtime wiring for plugin-provided tool modules
-- [`src/extensibility/extensions/loader.ts`](../packages/coding-agent/src/extensibility/extensions/loader.ts) — runtime wiring for plugin-provided extension modules
+- [`src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts) — conventional capability discovery for npm/link extension packages
+- [`src/task/discovery.ts`](../packages/coding-agent/src/task/discovery.ts) — conventional `agents/` discovery for extension and marketplace plugin roots
+- [`src/discovery/claude-plugins.ts`](../packages/coding-agent/src/discovery/claude-plugins.ts) — marketplace-plugin capability discovery
+- [`src/extensibility/custom-tools/loader.ts`](../packages/coding-agent/src/extensibility/custom-tools/loader.ts) — runtime wiring for manifest-declared plugin tool modules
+- [`src/extensibility/extensions/loader.ts`](../packages/coding-agent/src/extensibility/extensions/loader.ts) — runtime wiring for plugin extension modules

@@ -3,13 +3,10 @@
  */
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runCollabListCommand } from "../cli/collab-cli";
+import { collabHelp as commandHelp } from "../cli/command-help";
 
 export default class Collab extends Command {
-	static description =
-		"List active local Collab host sessions.\n\n" +
-		"By default each row prints the write-capable browser URL: anyone who obtains it " +
-		"can prompt and control the host agent, so treat the output (and anything you " +
-		"redirect it into) as secret. Use --view for view-only URLs.";
+	static description = commandHelp.description;
 
 	static args = {
 		action: Args.string({

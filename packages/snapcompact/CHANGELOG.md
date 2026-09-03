@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added a declarative compatibility rules system for consistent model identification, capabilities, policies, and provider-specific behavior across model classes, families, and revisions.
+- Added the compat-compiler CLI for managing model identity and capability rules through KDL configuration files.
+
+### Changed
+
+- Standardized model revision handling and compatibility resolution across model discovery and runtime behavior.
+
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- Restored `providerFrameBudget()` to allow callers to size archives according to the maximum frame budget the provider will send.
+
+### Fixed
+
+- Fixed an issue where character-based truncation could split inline base64 data URLs into corrupted payloads that were rejected by OpenAI-compatible providers. Data URLs are now replaced atomically with placeholders before truncation, and previously affected archives are healed during re-compaction.
+
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- Fixed image-based compaction confusing digit `0` with letter `O` and corrupting compacted identifiers (e.g. Slack IDs): the default frame fonts (X.org `8x13`, `6x12`, `5x8`) drew zero as a bare oval indistinguishable from `O`. Zero now carries a disambiguating interior slash (`8x13`) or bar (`6x12`/`5x8`); unscii-8 already shipped a slashed zero ([#8713](https://github.com/can1357/oh-my-pi/issues/8713)).
+
+## [17.2.15] - 2026-08-12
+
+### Fixed
+
+- Fixed Anthropic model ID parsing to be case-insensitive and extended the high-resolution 1932px frame tier to Claude Opus 5 and later, preventing sessions from falling back to lower-resolution 1568px frames and preserving full history per compaction.
+
+## [17.1.5] - 2026-07-27
+
+### Fixed
+
+- Fixed snapcompact resume guides reporting only the HQ grid width for mixed-width foveated archives ([#6712](https://github.com/can1357/oh-my-pi/issues/6712)).
+
+## [17.1.0] - 2026-07-24
+
+### Added
+
+- Added an `includeThinking` serialization option (defaulting to `true`) to allow excluding assistant reasoning (`¶think:` sections) from archived transcripts.
+
 ## [16.5.0] - 2026-07-13
 
 ### Changed

@@ -81,7 +81,7 @@ describe("settings layout", () => {
 	});
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths: SettingPath[] = ["advisor.subagents", "advisor.syncBacklog", "advisor.immuneTurns"];
+		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);
 		const defs = getSettingsForTab("model").filter(def => advisorDependentPathSet.has(def.path));
 
@@ -95,6 +95,17 @@ describe("settings layout", () => {
 		for (const def of defs) {
 			expect(def.condition?.()).toBe(true);
 		}
+	});
+
+	it("shows the unexpected-stop classifier setting only in smart mode", () => {
+		const def = getSettingsForTab("providers").find(item => item.path === "providers.unexpectedStopModel");
+		if (!def?.condition) throw new Error("Unexpected Stop Model should be smart-mode only");
+
+		expect(def.condition()).toBe(false);
+		Settings.instance.set("features.unexpectedStopDetection", "smart");
+		expect(def.condition()).toBe(true);
+		Settings.instance.set("features.unexpectedStopDetection", "none");
+		expect(def.condition()).toBe(false);
 	});
 
 	it("shows provider request limits as a providers services submenu setting", () => {
@@ -124,6 +135,21 @@ describe("settings layout", () => {
 		expect(description).toContain("json");
 		expect(description).toContain("fallback");
 		expect(description).toContain("selector");
+	});
+
+	it("exposes usage-aware fallback as an opt-in advanced policy", () => {
+		const defs = getSettingsForTab("model").filter(def => def.path.startsWith("retry.usage"));
+		expect(defs.map(def => def.path)).toEqual([
+			"retry.usageAwareFallback",
+			"retry.usageReservePct",
+			"retry.usageReservePolicy",
+		]);
+		expect(defs[0]).toMatchObject({ type: "boolean", label: "Usage-Aware Fallback" });
+		expect(defs[1]?.condition?.()).toBe(false);
+		expect(defs[2]?.condition?.()).toBe(false);
+		Settings.instance.set("retry.usageAwareFallback", true);
+		expect(defs[1]?.condition?.()).toBe(true);
+		expect(defs[2]?.condition?.()).toBe(true);
 	});
 
 	it("exposes ask.enabled as a boolean under Available Tools", () => {

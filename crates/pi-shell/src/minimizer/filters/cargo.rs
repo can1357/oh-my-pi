@@ -745,7 +745,7 @@ mod tests {
 		// Two separate groups, not merged
 		let unused_pos = out.find("unused_variables").unwrap();
 		let clone_pos = out.find("clippy::redundant_clone").unwrap();
-		assert!(unused_pos != clone_pos);
+		assert_ne!(unused_pos, clone_pos);
 	}
 
 	#[test]

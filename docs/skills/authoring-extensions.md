@@ -5,7 +5,7 @@ description: Use when creating a new omp extension. Covers ExtensionAPI, factory
 
 # Authoring Extensions
 
-Extensions are the primary way to add capabilities to `oh-my-pi`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file.
+Extensions are the primary way to add capabilities to `oh-my-pi`. A single extension module can register tools the LLM can call, slash commands users can invoke, and event handlers that run throughout the session lifecycle — all from one TypeScript file. Its default factory may initialize synchronously or return a promise.
 
 ## Minimum viable extension
 
@@ -81,10 +81,12 @@ omp loads extension modules from these sources:
    - `<cwd>/.omp/extensions/`
    - `~/.omp/agent/extensions/`
    - legacy extension paths listed in `.omp/settings.json#extensions` or `~/.omp/agent/settings.json#extensions`
-2. Installed plugins under `~/.omp/plugins/node_modules` (`omp plugin install` npm/git specs, or `omp plugin link`) via their `omp.extensions`/`pi.extensions` manifests. Marketplace cache installs do not feed extension modules — they surface skills/commands/hooks/tools/MCP only.
+2. Enabled installed plugins under `~/.omp/plugins/node_modules` or a project plugin root — including npm, marketplace, and `omp plugin link` installs — via their `omp.extensions`/`pi.extensions` manifests.
 3. Explicit configured paths passed by the CLI (`omp --extension ./my-ext.ts`, also `-e`; `--hook` is treated as an alias) and by the `extensions:` setting in config.
 
 The runtime de-duplicates by resolved absolute path — first seen wins.
+
+The user directory is the active profile's agent directory: the default is `~/.omp/agent`, while `omp --profile <name>` uses `~/.omp/profiles/<name>/agent` (and `PI_CODING_AGENT_DIR` overrides it).
 
 When a path points to a directory, omp resolves the entry point in this order:
 
@@ -129,6 +131,8 @@ Multiple entry points are supported:
 }
 ```
 
+Installed-plugin manifest entries may be `.ts`, `.js`, `.mjs`, or `.cjs`; a manifest entry naming a directory resolves `index.ts`, `index.js`, `index.mjs`, or `index.cjs`. Automatic scanning of native/configured extension directories remains limited to `.ts` and `.js`.
+
 ## Registering commands
 
 ```ts
@@ -158,7 +162,9 @@ pi.registerCommand("my-cmd", {
 
 ## Registering tools
 
-Tools are called by the LLM. Parameters use [Zod](https://zod.dev) schemas, available at `pi.zod`:
+Tools are called by the LLM. Parameter definitions may use the injected
+Zod-compatible omptype builder; `pi.arktype` and the legacy-compatible
+`pi.typebox` are also available:
 
 ```ts
 const z = pi.zod;
@@ -169,7 +175,7 @@ pi.registerTool({
   description: "Full-text search through project notes",
   parameters: z.object({
     query: z.string().describe("Search query"),
-    limit: z.number().default(10).describe("Max results").optional(),
+    limit: z.number().default(10).optional().describe("Max results"),
   }),
   async execute(toolCallId, params, signal, onUpdate, ctx) {
     if (signal?.aborted) {
@@ -184,6 +190,8 @@ pi.registerTool({
   },
 });
 ```
+
+Tool definitions may also set `loadMode: "essential" | "discoverable"` (`"discoverable"` by default), `approval: "read" | "write" | "exec"` (`"exec"` by default), and `strict` for provider structured-output grammar behavior.
 
 ## Subscribing to events
 
@@ -224,10 +232,10 @@ Extensions are a strict superset of hooks. New authoring should use `ExtensionAP
 
 ## Debugging
 
-omp writes structured logs to a rotating file under `~/.omp/logs/` (debug level is always on; nothing is written to the console, which would corrupt the TUI). Tail today's log to see extension load diagnostics:
+omp writes structured logs under the active state root's `logs/` directory (by default `~/.omp/logs/`; debug level is always on, and nothing is written to the console because that would corrupt the TUI). Each filename includes the process ID. Tail today's default-profile logs to see extension load diagnostics:
 
 ```
-tail -f ~/.omp/logs/omp.$(date +%F).log
+tail -f ~/.omp/logs/omp.$(date +%F).*.log
 ```
 
 Failed extension loads are logged with their path and error. Loaded extensions may also emit their own debug logs via `pi.logger`.

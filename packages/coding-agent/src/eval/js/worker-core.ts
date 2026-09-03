@@ -25,6 +25,8 @@ interface ActiveRun {
 
 type RunResult = Extract<WorkerOutbound, { type: "result" }>;
 
+export type RejectionInterceptor = (handler: (reason: unknown) => boolean) => () => void;
+
 export type WorkerCoreOptions =
 	| {
 			mode: "isolated";
@@ -36,10 +38,12 @@ export type WorkerCoreOptions =
 			 * mutate the host's own cwd on the inline fallback.
 			 */
 			chdir?: (cwd: string) => void;
+			/** Share the subprocess host's fatal-rejection guard when one is installed. */
+			interceptUnhandledRejections?: RejectionInterceptor;
 	  }
 	| {
 			mode: "inline";
-			interceptUnhandledRejections(handler: (reason: unknown) => boolean): () => void;
+			interceptUnhandledRejections: RejectionInterceptor;
 	  };
 
 /** Finished-cell filenames retained for attributing rejections that surface after the run settled. */
@@ -115,7 +119,7 @@ export class WorkerCore {
 	 * without a usable stack, while anything else keeps its default fatality.
 	 */
 	#installRejectionGuard(): () => void {
-		if (this.#options.mode === "inline") {
+		if (this.#options.interceptUnhandledRejections) {
 			return this.#options.interceptUnhandledRejections(reason => this.#consumeRejection(reason));
 		}
 		const onRejection = (reason: unknown): void => {

@@ -42,24 +42,60 @@ export type Edit =
 	| { kind: "delete"; anchor: Anchor; lineNum: number; index: number; oldAssertion?: string }
 	| {
 			/**
-			 * Deferred block edit (`replace_block N:` / `delete_block N` /
-			 * `insert_after_block N:`). The exact line span is unknown at parse
-			 * time — it is computed by {@link resolveBlockEdits} once file text +
-			 * path (→ language) are available, then expanded into concrete edits:
-			 * a non-empty `payloads` without `mode` (from `replace_block`) becomes
-			 * the same `replacement` inserts + deletes that `replace start.=end:`
-			 * produces; an empty `payloads` (from `delete_block`) becomes a pure
-			 * range deletion; `mode: "insert_after"` becomes plain `after_anchor`
-			 * inserts at the block's last line. `applyEdits` never sees this
-			 * variant.
+			 * Clipboard cut (`CUT N-M @r`, or the resolved form of `CUT N* @r`).
+			 * Captures the range's current lines into a {@link Clipboard}
+			 * register during the applier's clipboard pre-pass and lowers to one
+			 * `delete` per range line at parse/resolve time. `register` names the
+			 * target slot; absent means the batch-local anonymous register.
+			 */
+			kind: "cut";
+			range: ParsedRange;
+			register?: string;
+			lineNum: number;
+			index: number;
+	  }
+	| {
+			/**
+			 * Clipboard insertion or replacement (`PUT <N @r` / `PUT >N @r` /
+			 * `PUT N-M @r`, their `>N*` block-resolved forms, or the register-less
+			 * anonymous equivalents). Expanded by the clipboard pre-pass into one
+			 * plain insert per captured line; `span` targets additionally expand
+			 * into per-line deletes there — only after the register read
+			 * succeeds, so a dropped paste (streaming preview with an empty
+			 * register) never leaves destructive orphan deletes. `blockStart`
+			 * mirrors the insert variant's field for block-lowered gap pastes so
+			 * landing correction can slide the body across trailing closer lines.
+			 */
+			kind: "paste";
+			at: PasteTarget;
+			register?: string;
+			lineNum: number;
+			index: number;
+			blockStart?: number;
+	  }
+	| {
+			/**
+			 * Deferred block edit (`PUT N*:`, `PUT >N*:`, `CUT N*`, or their
+			 * `@register` forms). The exact line span is unknown at parse time;
+			 * {@link resolveBlockEdits} computes it once file text and language
+			 * are available, then expands it into concrete edits.
+			 * `mode: "insert_after"` becomes plain `after_anchor` inserts,
+			 * `"cut"` becomes a clipboard cut plus per-line deletes, and
+			 * `"paste_after"` becomes a gap paste after the resolved block. No
+			 * mode denotes a block replacement — from body payloads, or from
+			 * `register` when one is named (a span paste over the resolved block).
 			 */
 			kind: "block";
 			anchor: Anchor;
 			payloads: string[];
-			mode?: "insert_after";
+			mode?: "insert_after" | "cut" | "paste_after";
+			register?: string;
 			lineNum: number;
 			index: number;
 	  };
+
+/** Where a `paste` edit lands: an insertion gap, or a span it replaces. */
+export type PasteTarget = { kind: "gap"; cursor: Cursor } | { kind: "span"; range: ParsedRange };
 
 /** File-level operation parsed from a section body (`REM` / `MV`). */
 export type FileOp = { kind: "rem" } | { kind: "move"; dest: string };
@@ -73,15 +109,14 @@ export interface ApplyResult {
 	/** Diagnostic warnings collected by the parser, patcher, or recovery. */
 	warnings?: string[];
 	/**
-	 * Resolved spans for each `replace_block`/`delete_block` op in this apply,
-	 * in patch order. Present only when the apply matched the tagged content
-	 * (the common no-drift path), so the line numbers line up with what the
-	 * caller read. Absent when there were no block ops.
+	 * Resolved spans for each block op in this apply, in patch order. Present
+	 * only when the apply matched the tagged content, so the line numbers match
+	 * what the caller read. Absent when there were no block ops.
 	 */
 	blockResolutions?: BlockResolution[];
 }
 
-/** A parsed `[A.=B]` line range. */
+/** A parsed `A-B` inclusive line range. */
 export interface ParsedRange {
 	start: Anchor;
 	end: Anchor;
@@ -124,9 +159,7 @@ export interface CompactDiffOptions {
 	maxUnchangedRun?: number;
 }
 
-/**
- * Resolved 1-indexed inclusive line span of a `replace_block N:` target.
- */
+/** Resolved 1-indexed inclusive line span of a block target. */
 export interface BlockSpan {
 	/** First line of the block (1-indexed, inclusive). */
 	start: number;
@@ -135,11 +168,9 @@ export interface BlockSpan {
 }
 
 /**
- * One `replace_block N:` / `delete_block N` / `insert_after_block N:` anchor
- * resolved to its concrete line span. Surfaced on {@link ApplyResult} so the
- * host can echo "block N → lines start.=end" and let the model catch a wrong
- * opener — e.g. a decorator or doc-comment that sits in a separate node
- * outside the resolved block.
+ * One block-op anchor resolved to its concrete line span. Surfaced on
+ * {@link ApplyResult} so the host can echo the resolved range and let the
+ * model catch an anchor on the wrong opener.
  */
 export interface BlockResolution {
 	/** The 1-indexed line the block op was anchored on (the `N`). */
@@ -149,10 +180,10 @@ export interface BlockResolution {
 	/** Last line of the resolved span (1-indexed, inclusive). */
 	end: number;
 	/** Which block op produced this resolution. */
-	op: "replace" | "delete" | "insert_after";
+	op: "replace" | "insert_after" | "cut" | "paste_after";
 }
 
-/** Request handed to a {@link BlockResolver} to resolve one `replace_block N:` anchor. */
+/** Request handed to a {@link BlockResolver} to resolve one block-op anchor. */
 export interface BlockResolverRequest {
 	/** Target file path (used to infer language by extension). */
 	path: string;
@@ -163,10 +194,32 @@ export interface BlockResolverRequest {
 }
 
 /**
- * Resolves a `replace_block N:` anchor to the line span of the syntactic block
- * that begins on line N. Returns `null` when no block can be resolved
- * (unrecognized language, blank/out-of-range line, no node begins there, or the
- * resolved subtree has a syntax error). Pure seam: the hashline core declares
- * the contract; the host injects a tree-sitter-backed implementation.
+ * Resolves a block-op anchor to the line span of the syntactic block beginning
+ * on that line. Returns `null` for an unsupported language, invalid line, absent
+ * opener, or syntax error. The host injects the tree-sitter-backed implementation.
  */
 export type BlockResolver = (request: BlockResolverRequest) => BlockSpan | null;
+
+/**
+ * Mutable clipboard registers threaded through one patch application. Filled
+ * by `CUT` edits and read by register `PUT`s in patch source order, across
+ * sections, so content can move between files.
+ *
+ * The anonymous register (`lines`) is batch-local: {@link forkClipboard}
+ * never copies it in, so it exists only between a `CUT` and a paste inside
+ * one patch. Named registers (`named`) persist across batches when the host
+ * owns the Clipboard (`PatcherOptions.clipboard`) — the sanctioned way to
+ * move content across separate edit calls.
+ */
+export interface Clipboard {
+	/** Anonymous register: lines captured by the latest unlabeled `CUT` in this batch. */
+	lines?: readonly string[];
+	/** Named registers captured by `CUT … @name`. */
+	named?: Map<string, readonly string[]>;
+	/**
+	 * Headers of unlabeled `CUT`s seen since the last unlabeled paste in this
+	 * batch. Two or more make the next unlabeled paste ambiguous (which cut
+	 * did the author mean?) and fail it with a labeling hint.
+	 */
+	pendingAnonCuts?: string[];
+}

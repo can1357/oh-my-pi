@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
-// A models.dev "azure" payload: two OpenAI-family models (one reasoning), a
+// A stencil.so "azure" payload: two OpenAI-family models (one reasoning), a
 // non-tool-capable instruct model, and a Foundry-hosted third party served via
 // a per-model `provider` override (claude over .services.ai.azure.com).
 const AZURE_MODELS_DEV_FIXTURE = {
@@ -37,7 +37,7 @@ describe("azure catalog provider", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER.azure).toBe("gpt-5.5");
 	});
 
-	test("models.dev descriptor keeps only OpenAI-family Responses models, baseUrl resolved at runtime", () => {
+	test("stencil.so descriptor keeps only OpenAI-family Responses models, baseUrl resolved at runtime", () => {
 		const azure = mapModelsDevToModels(AZURE_MODELS_DEV_FIXTURE, MODELS_DEV_PROVIDER_DESCRIPTORS).filter(
 			model => model.provider === "azure",
 		);
@@ -55,7 +55,18 @@ describe("azure catalog provider", () => {
 	test("bundled-shape spec (provider id, empty baseUrl) resolves the Azure Responses compat flags", () => {
 		// The deployment host is only known at request time, so detection MUST key
 		// off the provider id, not the (empty) baseUrl.
-		const compat = buildOpenAIResponsesCompat({ provider: "azure", name: "GPT-5", baseUrl: "" });
+		const compat = resolveModelPolicy({
+			id: "gpt-5",
+			name: "GPT-5",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		}).compat;
 		expect(compat.strictResponsesPairing).toBe(true);
 		expect(compat.supportsStrictMode).toBe(true);
 		expect(compat.supportsDeveloperRole).toBe(true);
@@ -77,5 +88,23 @@ describe("azure catalog provider", () => {
 		const model = buildModel(spec);
 		expect(model.thinking?.mode).toBe("effort");
 		expect(model.thinking?.efforts).toContain(Effort.XHigh);
+	});
+	test("derives GA computer capability for GPT-5.4+ Azure Responses models and honors overrides", () => {
+		const base: ModelSpec<"azure-openai-responses"> = {
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: "",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		};
+		expect(buildModel(base).supportsComputerUse).toBe(true);
+		expect(buildModel({ ...base, id: "gpt-5.3", name: "GPT-5.3" }).supportsComputerUse).toBe(false);
+		expect(buildModel({ ...base, supportsComputerUse: false }).supportsComputerUse).toBe(false);
+		expect(buildModel({ ...base, id: "deployment-alias", requestModelId: "gpt-5.4" }).supportsComputerUse).toBe(true);
 	});
 });

@@ -1,9 +1,8 @@
-Sends a message to one of your worker sessions (by id from `vibe_spawn` / `vibe_list`). The session keeps its full conversation history — refer to earlier work naturally ("now do the same for the other module").
+Send a worker session message by id from `vibe_spawn`/`vibe_list`. Session retains full conversation history; refer naturally ("now do the same for the other module").
 
-Returns immediately with an ack telling you how the message landed:
+Returns immediately with an ack:
+- `turn`: worker idle → new turn; result self-delivers when done.
+- `steered`: worker mid-turn → message injected into the running turn as live steering.
+- `queued`: worker mid-turn and not currently steerable → message runs automatically as next turn.
 
-- `turn` — the worker was idle; a new turn started. Its result self-delivers when done.
-- `steered` — the worker was mid-turn; your message was injected into the running turn as live steering.
-- `queued` — the worker was mid-turn and not steerable right now; your message runs as the next turn automatically.
-
-Use it for follow-ups, corrections, scope changes, and review requests. Never re-explain prior context — the session already has it.
+Use for follow-ups, corrections, scope changes, review requests. NEVER re-explain prior context; session already has it.

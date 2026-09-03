@@ -9,31 +9,26 @@
 //! - `<case>.exit` — integer exit code (optional; defaults to 0).
 //! - `<case>.min`  — expected minimized snapshot (optional, see gate below).
 //!
-//! Gate per fixture (`raw` measured in bytes):
+//! Gate per fixture:
 //!
-//! - `raw.len() >= 500`: assert `minimized.len() <= 0.40 * raw.len()` — the
-//!   savings gate. A short output is not worth a filter round-trip, so the gate
-//!   only applies to buffers large enough to matter.
-//! - `raw.len() <  500`: a `.min` snapshot is REQUIRED and must match exactly.
-//!   Small buffers cannot meaningfully clear a ratio gate, so they are pinned
-//!   by an exact snapshot instead.
-//! - `.min` present alongside a `>= 500`-byte raw: assert BOTH the savings gate
-//!   and the exact snapshot.
+//! - `raw.chars().count() < MIN_MINIMIZE_CHARS`: the minimizer must return the
+//!   raw output unchanged; short output is never filtered.
+//! - `raw.chars().count() >= MIN_MINIMIZE_CHARS`: assert `minimized.len() <=
+//!   0.40 * raw.len()` — the savings gate, measured in bytes because the
+//!   output-size budget is byte-based.
+//! - `.min` present alongside an eligible raw buffer: assert BOTH the savings
+//!   gate and the exact snapshot.
 //!
 //! All fixture failures are collected before the harness panics so a single run
 //! reports every regression, not just the first.
 
 use std::{fmt::Write as _, fs, path::Path};
 
-use pi_shell::minimizer::{self, MinimizerConfig};
+use pi_shell::minimizer::{self, MinimizerConfig, engine::MIN_MINIMIZE_CHARS};
 
 /// Byte-savings gate: minimized output must be at most this fraction of the raw
 /// input for buffers large enough to be worth filtering.
 const SAVINGS_RATIO: f64 = 0.40;
-
-/// Raw buffers below this byte length are pinned by an exact `.min` snapshot
-/// instead of the ratio gate.
-const GATE_MIN_BYTES: usize = 500;
 
 /// A single discovered fixture: the `.cmd`/`.raw` pair plus its optional
 /// `.exit` and `.min` companions.
@@ -85,9 +80,20 @@ fn minimizer_fixtures_clear_savings_gate() {
 fn check_fixture(fixture: &Fixture, cfg: &MinimizerConfig) -> Result<(), String> {
 	let out = minimizer::apply(&fixture.command, &fixture.raw, fixture.exit, cfg);
 	let minimized = out.text.as_str();
-
+	let raw_chars = fixture.raw.chars().count();
 	let raw_len = fixture.raw.len();
 	let min_len = minimized.len();
+
+	if raw_chars < MIN_MINIMIZE_CHARS {
+		if minimized == fixture.raw {
+			return Ok(());
+		}
+		return Err(format!(
+			"[{}] cmd={:?} exit={} raw={} chars: short output was modified",
+			fixture.name, fixture.command, fixture.exit, raw_chars,
+		));
+	}
+
 	let ratio = if raw_len == 0 {
 		0.0
 	} else {
@@ -95,36 +101,20 @@ fn check_fixture(fixture: &Fixture, cfg: &MinimizerConfig) -> Result<(), String>
 	};
 
 	let mut problems: Vec<String> = Vec::new();
-
-	if raw_len >= GATE_MIN_BYTES {
-		let budget = (SAVINGS_RATIO * raw_len as f64).floor() as usize;
-		if min_len > budget {
-			problems.push(format!(
-				"savings gate: minimized {min_len} B > {budget} B budget ({:.1}% of {raw_len} B raw, \
-				 limit {:.0}%)",
-				ratio * 100.0,
-				SAVINGS_RATIO * 100.0
-			));
-		}
-		// A `.min` alongside a large raw pins the exact shape too.
-		if let Some(expected) = &fixture.expected
-			&& expected != minimized
-		{
-			problems.push(format!("snapshot mismatch:\n{}", diff_excerpt(expected, minimized)));
-		}
-	} else {
-		// Small buffers cannot meaningfully clear a ratio gate; require an exact
-		// snapshot instead.
-		match &fixture.expected {
-			None => problems.push(format!(
-				"raw is {raw_len} B (< {GATE_MIN_BYTES} B): a `.min` snapshot is required for \
-				 sub-threshold fixtures"
-			)),
-			Some(expected) if expected != minimized => {
-				problems.push(format!("snapshot mismatch:\n{}", diff_excerpt(expected, minimized)));
-			},
-			Some(_) => {},
-		}
+	let budget = (SAVINGS_RATIO * raw_len as f64).floor() as usize;
+	if min_len > budget {
+		problems.push(format!(
+			"savings gate: minimized {min_len} B > {budget} B budget ({:.1}% of {raw_len} B raw, \
+			 limit {:.0}%)",
+			ratio * 100.0,
+			SAVINGS_RATIO * 100.0
+		));
+	}
+	// A `.min` alongside an eligible raw buffer pins the exact shape too.
+	if let Some(expected) = &fixture.expected
+		&& expected != minimized
+	{
+		problems.push(format!("snapshot mismatch:\n{}", diff_excerpt(expected, minimized)));
 	}
 
 	if problems.is_empty() {
@@ -169,11 +159,16 @@ fn diff_excerpt(expected: &str, actual: &str) -> String {
 	excerpt.trim_end().to_string()
 }
 
-/// Absolute path to the fixtures tree, anchored at the crate manifest dir so
-/// the harness loads identically whether run as an integration test or under a
-/// different working directory.
+/// Absolute path to the fixtures tree. Under cargo the compile-time manifest
+/// dir exists at runtime; under Bazel the compile-time sandbox path is gone,
+/// so fall back to the runfiles-relative layout (test cwd is the workspace
+/// runfiles root and the fixtures ride along as `data`).
 fn fixtures_root() -> std::path::PathBuf {
-	Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minimizer")
+	let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minimizer");
+	if manifest.is_dir() {
+		return manifest;
+	}
+	Path::new("crates/pi-shell/tests/fixtures/minimizer").to_path_buf()
 }
 
 /// Walk `<root>/<family>/<case>.cmd` and assemble each fixture with its

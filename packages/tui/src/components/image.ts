@@ -29,6 +29,7 @@ export interface ImageOptions {
 
 const EMPTY_IDS: readonly number[] = [];
 const EMPTY_TRANSMITS: readonly string[] = [];
+const EMPTY_STALE_EPOCHS: ReadonlyArray<{ imageId: number; lastEpoch: number }> = [];
 const SAVE_CURSOR = "\x1b7";
 const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
@@ -38,6 +39,24 @@ const RESERVED_IMAGE_ROW = "\x1b[0m";
 /** Default count of inline images kept as live graphics before older ones fall back to text. */
 export const DEFAULT_MAX_INLINE_IMAGES = 8;
 
+/** Per-image direct-placement emit state tracked by {@link ImageBudget}. */
+interface PlacementEmitState {
+	widthPx: number;
+	heightPx: number;
+	/** Current placement-id (`p=`) generation. */
+	epoch: number;
+	/** First frame row the current epoch's last emit attached cells to. */
+	lastAttachTopFrameRow: number | undefined;
+	/**
+	 * Whether any cell attached by the current epoch's last emit has entered
+	 * native scrollback. Set by {@link ImageBudget.observeCommitWatermark}
+	 * comparing each frame's raw commit target against the attach top —
+	 * era-local comparisons, so a divergence recommit that rewinds and
+	 * re-advances the ledger is detected the moment it re-crosses the attach
+	 * top, and a stale pre-rewind peak can never re-trigger.
+	 */
+	cellsArchived: boolean;
+}
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
 function nextImageIdSeed(): number {
 	nextImageBudgetSeed = (nextImageBudgetSeed + 0x10000) & 0xffffff;
@@ -54,9 +73,9 @@ function nextImageIdSeed(): number {
  *
  * The budget keeps the most recent `cap` images live and demotes older ones to
  * their text fallback. Demotion needs a full redraw (so off-screen rows are
- * rewritten) plus an explicit graphics purge of the demoted ids — {@link Image}
- * reports display order via {@link observe}, and the TUI drives the purge +
- * redraw on the frame after a new image pushes the count past the cap.
+ * rewritten) plus an explicit graphics purge of the demoted ids. {@link Image}
+ * reports display order via {@link observe}; when that reveals a stricter split,
+ * the TUI repeats the pass before emitting its terminal frame.
  *
  * `cap <= 0` disables budgeting: every image stays a live graphic.
  */
@@ -68,6 +87,8 @@ export class ImageBudget {
 	#idToKey = new Map<number, string>();
 	/** Display-order image ids observed during the in-flight pass. */
 	#passIds: number[] = [];
+	/** Per-id suppression decision from the first observation in this pass. */
+	#passSuppression = new Map<number, boolean>();
 	/**
 	 * Suppress threshold reflected in the frame currently on the terminal: images
 	 * at display indices `[0, #onTerminal)` are shown as text there.
@@ -85,7 +106,7 @@ export class ImageBudget {
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
-	#pendingTransmits: string[] = [];
+	#pendingTransmits = new Map<number, string>();
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
@@ -96,6 +117,22 @@ export class ImageBudget {
 	// id so a partial pass reproduces the on-screen live/text split without a
 	// full, correctly-ordered walk.
 	#suppressedIds = new Set<number>();
+	/**
+	 * Per-image direct-placement emit state: source pixel geometry for the
+	 * renderer's clipped source rectangle, plus the placement-id epoch (see
+	 * {@link resolvePlacementEmit}). Entries deliberately live as long as the
+	 * terminal's own placement registry for the image — they are the ledger the
+	 * destructive-clear sweep uses to delete every registry entry an image ever
+	 * placed — and die with it on demotion purge (`d=I`) or full cleanup.
+	 */
+	#placementState = new Map<number, PlacementEmitState>();
+	/**
+	 * States with an un-archived live attach top — the only ones a frame's
+	 * commit watermark can affect. {@link observeCommitWatermark} runs every
+	 * rendered frame, so it scans this set (bounded by concurrently live
+	 * placements) instead of every image ever registered.
+	 */
+	#watchedPlacements = new Set<PlacementEmitState>();
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -150,6 +187,7 @@ export class ImageBudget {
 	 */
 	beginPass(stable = false): void {
 		this.#passIds.length = 0;
+		this.#passSuppression.clear();
 		this.#stablePass = stable;
 		this.#applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
 	}
@@ -164,46 +202,49 @@ export class ImageBudget {
 	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
 	 */
 	observe(imageId: number): boolean {
+		const existing = this.#passSuppression.get(imageId);
+		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
 			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
+			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
 		const suppressed = this.#cap > 0 && index < this.#planned;
+		this.#passSuppression.set(imageId, suppressed);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
 	}
 
 	/**
-	 * End a render pass. Returns true when this frame must purge graphics and
-	 * fully repaint to apply a stricter budget; read the ids via
-	 * {@link takePurgeIds}.
+	 * End a render pass. Returns true when the pass discovered a stricter budget
+	 * and must be repeated before its terminal frame is emitted.
 	 */
 	endPass(): boolean {
 		const total = this.#passIds.length;
 		this.#lastTotal = total;
-		let reset = false;
 		if (this.#applyingReset) {
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
-				this.#purgeIds.push(id);
-				// d=I frees the data too, so the image must re-transmit if it returns.
+				// A transmit queued by a discarded discovery pass never reached
+				// the terminal, so cancel it instead of transmitting then purging.
+				if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
 				this.#transmitted.delete(id);
+				this.#deletePlacementState(id);
 				this.#forgetKeyForId(id);
 			}
 			this.#onTerminal = this.#planned;
 			this.#applyingReset = false;
-			reset = true;
 		}
-		this.#reconcile(total);
+		const retry = this.#reconcile(total);
 		// Snapshot the committed display-order suppression by id: the prefix
 		// [0, #onTerminal) is what the terminal currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
 		this.#suppressedIds = new Set(this.#passIds.slice(0, this.#onTerminal));
-		return reset;
+		return retry;
 	}
 
 	/** Image ids to delete from the terminal this frame; clears the pending set. */
@@ -220,9 +261,11 @@ export class ImageBudget {
 		const ids = [...this.#transmitted];
 		this.#transmitted.clear();
 		this.#purgeIds = [];
-		this.#pendingTransmits = [];
+		this.#pendingTransmits.clear();
 		this.#keyToId.clear();
 		this.#idToKey.clear();
+		this.#placementState.clear();
+		this.#watchedPlacements.clear();
 		return ids;
 	}
 
@@ -232,18 +275,135 @@ export class ImageBudget {
 	}
 
 	/**
+	 * Record a direct-placement image's source pixel geometry so the renderer
+	 * can clip its placement to the visible slice at write time; cleared when
+	 * the image is purged from the terminal store.
+	 */
+	registerPlacementGeometry(imageId: number, widthPx: number, heightPx: number): void {
+		const state = this.#placementState.get(imageId);
+		if (state) {
+			state.widthPx = widthPx;
+			state.heightPx = heightPx;
+			return;
+		}
+		this.#placementState.set(imageId, {
+			widthPx,
+			heightPx,
+			epoch: 1,
+			lastAttachTopFrameRow: undefined,
+			cellsArchived: false,
+		});
+	}
+
+	/**
+	 * Record this frame's native-scrollback commit target (the frame-row count
+	 * that is committed once the frame's writes land). Called once per rendered
+	 * frame — including frames that emit no placements — so an epoch whose rows
+	 * commit while its line is never rewritten is still flagged before the next
+	 * re-emission.
+	 */
+	observeCommitWatermark(committedTo: number): void {
+		if (committedTo < 0 || this.#watchedPlacements.size === 0) return;
+		for (const state of this.#watchedPlacements) {
+			if (state.lastAttachTopFrameRow !== undefined && committedTo > state.lastAttachTopFrameRow) {
+				// Latched: the flag only clears when the next emit consumes it,
+				// so the state needs no further per-frame scans until then.
+				state.cellsArchived = true;
+				this.#watchedPlacements.delete(state);
+			}
+		}
+	}
+
+	/**
+	 * End the physical-row coordinate epoch after observing its final commit
+	 * watermark. Placement ids and latched archive state survive, but attachment
+	 * rows do not: the next placement emit records them in the new-width frame.
+	 */
+	beginPlacementCoordinateEpoch(): void {
+		for (const state of this.#placementState.values()) state.lastAttachTopFrameRow = undefined;
+		this.#watchedPlacements.clear();
+	}
+
+	/**
+	 * Resolve the placement id and geometry for a direct-placement emit whose
+	 * topmost attached cell sits at `attachTopFrameRow` — the first frame row
+	 * the placement covers, i.e. the block's first *visible* row, not its
+	 * origin (-1 when the writer has no frame-space position: alt-screen,
+	 * resize, ConPTY-truncated replays). `committedTo` is this frame's commit
+	 * target in the same frame-row space (-1 when unknown).
+	 *
+	 * Invariant: a placement id may be re-used (Kitty replace strips that id's
+	 * cells everywhere, scrollback included) only while none of the cells it
+	 * attached have entered native scrollback. The epoch — the `p=` id —
+	 * advances exactly when the archived flag says otherwise; rewrites with no
+	 * commit progression keep replacing the same id in place.
+	 */
+	resolvePlacementEmit(
+		imageId: number,
+		attachTopFrameRow: number,
+		committedTo: number,
+	): { placementId: number; widthPx: number; heightPx: number } | null {
+		const state = this.#placementState.get(imageId);
+		if (!state) return null;
+		// Frames that commit as they write (seam/full-paint chunk passes) pass
+		// their own commit target; fold it in before deciding, so a commit that
+		// lands in the same frame as the re-emission still advances the epoch.
+		if (committedTo >= 0 && state.lastAttachTopFrameRow !== undefined && committedTo > state.lastAttachTopFrameRow) {
+			state.cellsArchived = true;
+			this.#watchedPlacements.delete(state);
+		}
+		if (state.cellsArchived) {
+			state.epoch += 1;
+			state.cellsArchived = false;
+			state.lastAttachTopFrameRow = undefined;
+		}
+		if (attachTopFrameRow >= 0) {
+			state.lastAttachTopFrameRow = attachTopFrameRow;
+			this.#watchedPlacements.add(state);
+		}
+		return { placementId: state.epoch, widthPx: state.widthPx, heightPx: state.heightPx };
+	}
+
+	/**
+	 * Restart every placement epoch after a destructive history clear (`CSI 3 J`
+	 * full paint). The clear destroys all placement cells — scrollback rows are
+	 * gone and the replay rewrites the viewport — so no archive remains to
+	 * protect. Reverting to epoch 1 lets the replay recreate every visible
+	 * placement after the terminal-wide cleanup.
+	 */
+	resetPlacementEpochs(): ReadonlyArray<{ imageId: number; lastEpoch: number }> {
+		let stale: Array<{ imageId: number; lastEpoch: number }> | undefined;
+		for (const [imageId, state] of this.#placementState) {
+			stale ??= [];
+			stale.push({ imageId, lastEpoch: state.epoch });
+			state.epoch = 1;
+			state.lastAttachTopFrameRow = undefined;
+			state.cellsArchived = false;
+		}
+		this.#watchedPlacements.clear();
+		return stale ?? EMPTY_STALE_EPOCHS;
+	}
+
+	#deletePlacementState(imageId: number): void {
+		const state = this.#placementState.get(imageId);
+		if (!state) return;
+		this.#watchedPlacements.delete(state);
+		this.#placementState.delete(imageId);
+	}
+
+	/**
 	 * Queue a one-time transmit for `imageId`. No-op if already transmitted, so a
 	 * repeated call (e.g. a width-change re-render) never re-sends the data.
 	 */
 	enqueueTransmit(imageId: number, sequence: string): void {
 		if (this.#transmitted.has(imageId)) return;
 		this.#transmitted.add(imageId);
-		this.#pendingTransmits.push(sequence);
+		this.#pendingTransmits.set(imageId, sequence);
 	}
 
 	/** Whether a frame has image data queued but not yet written to the terminal. */
 	hasPendingTransmits(): boolean {
-		return this.#pendingTransmits.length > 0;
+		return this.#pendingTransmits.size > 0;
 	}
 
 	/**
@@ -255,7 +415,7 @@ export class ImageBudget {
 	get quiescent(): boolean {
 		return (
 			this.#lastTotal === 0 &&
-			this.#pendingTransmits.length === 0 &&
+			this.#pendingTransmits.size === 0 &&
 			this.#purgeIds.length === 0 &&
 			this.#planned === this.#onTerminal
 		);
@@ -263,9 +423,9 @@ export class ImageBudget {
 
 	/** Transmit sequences to write before this frame's placements; clears the queue. */
 	takeTransmits(): readonly string[] {
-		if (this.#pendingTransmits.length === 0) return EMPTY_TRANSMITS;
-		const sequences = this.#pendingTransmits;
-		this.#pendingTransmits = [];
+		if (this.#pendingTransmits.size === 0) return EMPTY_TRANSMITS;
+		const sequences = [...this.#pendingTransmits.values()];
+		this.#pendingTransmits.clear();
 		return sequences;
 	}
 
@@ -278,9 +438,9 @@ export class ImageBudget {
 	 * re-emit together; keeps no base64 in budget state (the transmit-once design).
 	 */
 	forgetTransmitted(): void {
-		if (this.#transmitted.size === 0 && this.#pendingTransmits.length === 0) return;
+		if (this.#transmitted.size === 0 && this.#pendingTransmits.size === 0) return;
 		this.#transmitted.clear();
-		this.#pendingTransmits = [];
+		this.#pendingTransmits.clear();
 	}
 
 	#forgetKeyForId(id: number): void {
@@ -290,15 +450,16 @@ export class ImageBudget {
 		if (this.#keyToId.get(key) === id) this.#keyToId.delete(key);
 	}
 
-	#reconcile(total: number): void {
+	#reconcile(total: number): boolean {
 		const desired = this.#cap > 0 ? Math.max(0, total - this.#cap) : 0;
 		if (desired === this.#planned) {
 			// Budget relaxed without a stricter frame (cap raised or images
 			// removed): surviving graphics are untouched and re-exposed rows
 			// repaint normally, so just track the looser threshold.
 			if (this.#planned < this.#onTerminal) this.#onTerminal = this.#planned;
-			return;
+			return false;
 		}
+		const retry = desired > this.#onTerminal;
 		this.#planned = desired;
 		// More images must be demoted than the terminal shows: schedule the purge +
 		// full-redraw frame. Fewer: no ghosts to clear, so just catch the tracking
@@ -306,6 +467,7 @@ export class ImageBudget {
 		// render is needed to apply the new threshold.
 		if (desired <= this.#onTerminal) this.#onTerminal = desired;
 		this.#requestRender();
+		return retry;
 	}
 }
 
@@ -350,6 +512,17 @@ export class Image implements Component {
 		this.#budget = options.budget;
 		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
 	}
+	/** Return source metadata without exposing the encoded image buffer. */
+	debugState(): Record<string, unknown> {
+		return {
+			mimeType: this.#mimeType,
+			widthPx: this.#dimensions.widthPx,
+			heightPx: this.#dimensions.heightPx,
+			filename: this.#options.filename ?? null,
+			imageId: this.#imageId ?? null,
+			suppressed: this.#cachedSuppressed,
+		};
+	}
 
 	invalidate(): void {
 		this.#cachedLines = undefined;
@@ -374,7 +547,8 @@ export class Image implements Component {
 			this.#cachedImageProtocol === imageProtocol &&
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
-			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders
+			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
+			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
 		) {
 			return this.#cachedLines;
 		}
@@ -407,9 +581,17 @@ export class Image implements Component {
 				// Direct placement: return `rows` lines so TUI accounts for image
 				// height. First (rows-1) lines are empty (TUI clears them); the last
 				// saves the final-row cursor, moves up to the image origin, emits the
-				// image sequence, then restores the final-row cursor. Save/restore is
-				// required because CUU clamps at the viewport top when leading rows are
-				// clipped away.
+				// image sequence, then restores the final-row cursor. When the block
+				// straddles the viewport top, the renderer rewrites this line to the
+				// visible slice (encodeKittyPlacementLine) from the geometry
+				// registered below.
+				if (this.#imageId != null && this.#budget !== undefined) {
+					this.#budget.registerPlacementGeometry(
+						this.#imageId,
+						this.#dimensions.widthPx,
+						this.#dimensions.heightPx,
+					);
+				}
 				lines = [];
 				for (let i = 0; i < result.rows - 1; i++) {
 					lines.push(RESERVED_IMAGE_ROW);

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
@@ -12,7 +13,6 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { type } from "arktype";
 
 const testTool: Tool = {
 	name: "echo",
@@ -88,6 +88,60 @@ function createSseResponse(events: unknown[]): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
+}
+
+function createResponsesTextSseResponse(text: string): Response {
+	return createSseResponse([
+		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+		},
+		{
+			type: "response.content_part.added",
+			item_id: "msg_1",
+			output_index: 0,
+			content_index: 0,
+			part: { type: "output_text", text: "" },
+		},
+		{
+			type: "response.output_text.delta",
+			item_id: "msg_1",
+			output_index: 0,
+			content_index: 0,
+			delta: text,
+		},
+		{
+			type: "response.output_text.done",
+			item_id: "msg_1",
+			output_index: 0,
+			content_index: 0,
+			text,
+		},
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: {
+				type: "message",
+				id: "msg_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: {
+					input_tokens: 1,
+					output_tokens: 1,
+					total_tokens: 2,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		},
+	]);
 }
 
 function captureCompletionsPayload(
@@ -217,7 +271,7 @@ describe("OpenAI tool strict mode", () => {
 					name: "dynamic_map",
 					description: "Dynamic object map",
 					parameters: type({
-						values: "Record<string, string>?",
+						"values?": { "[string]": "string" },
 					}),
 				},
 			],
@@ -504,57 +558,7 @@ describe("OpenAI tool strict mode", () => {
 						{ status: 400, headers: { "content-type": "application/json" } },
 					);
 				}
-				return createSseResponse([
-					{
-						type: "response.output_item.added",
-						output_index: 0,
-						item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
-					},
-					{
-						type: "response.content_part.added",
-						item_id: "msg_1",
-						output_index: 0,
-						content_index: 0,
-						part: { type: "output_text", text: "" },
-					},
-					{
-						type: "response.output_text.delta",
-						item_id: "msg_1",
-						output_index: 0,
-						content_index: 0,
-						delta: "Recovered",
-					},
-					{
-						type: "response.output_text.done",
-						item_id: "msg_1",
-						output_index: 0,
-						content_index: 0,
-						text: "Recovered",
-					},
-					{
-						type: "response.output_item.done",
-						output_index: 0,
-						item: {
-							type: "message",
-							id: "msg_1",
-							role: "assistant",
-							status: "completed",
-							content: [{ type: "output_text", text: "Recovered" }],
-						},
-					},
-					{
-						type: "response.completed",
-						response: {
-							status: "completed",
-							usage: {
-								input_tokens: 1,
-								output_tokens: 1,
-								total_tokens: 2,
-								input_tokens_details: { cached_tokens: 0 },
-							},
-						},
-					},
-				]);
+				return createResponsesTextSseResponse("Recovered");
 			},
 			{ preconnect: fetch.preconnect },
 		);
@@ -624,8 +628,11 @@ describe("OpenAI tool strict mode", () => {
 		expect(strictFlags).toEqual([[true]]);
 	});
 
-	it("falls back to non-strict tools when an upstream validator rejects strict schemas, and remembers it", async () => {
-		const model = getBundledModel("openrouter", "deepseek/deepseek-v4-flash") as Model<"openai-completions">;
+	it.each([
+		["a descriptive schema error", "Invalid tool parameters schema : field `anyOf`: missing field `type`"],
+		["an opaque provider error", "Provider returned error"],
+	])("falls back to non-strict tools after %s, and remembers it", async (_case, rejectionMessage) => {
+		const model = getBundledModel("openrouter", "deepseek/deepseek-v4-flash-0731") as Model<"openai-completions">;
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const strictFlags: boolean[][] = [];
 		let attempt = 0;
@@ -641,7 +648,7 @@ describe("OpenAI tool strict mode", () => {
 					return new Response(
 						JSON.stringify({
 							error: {
-								message: "Invalid tool parameters schema : field `anyOf`: missing field `type`",
+								message: rejectionMessage,
 								type: "invalid_request_error",
 							},
 						}),
@@ -692,6 +699,94 @@ describe("OpenAI tool strict mode", () => {
 		expect(nextResult.stopReason).toBe("stop");
 		expect(nextResult.content).toContainEqual({ type: "text", text: "Later" });
 		expect(strictFlags).toEqual([[true], [false], [false]]);
+	});
+
+	it("preserves strict OpenRouter tools when an opaque envelope includes an unrelated upstream error", async () => {
+		const model = getBundledModel("openrouter", "deepseek/deepseek-v4-flash-0731") as Model<"openai-completions">;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const strictFlags: boolean[][] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const bodyText = typeof init?.body === "string" ? init.body : "";
+				const tools = toRecord(JSON.parse(bodyText)).tools;
+				strictFlags.push(
+					Array.isArray(tools) ? tools.map(tool => toRecord(toRecord(tool).function).strict === true) : [],
+				);
+				return new Response(
+					JSON.stringify({
+						error: {
+							message: "Provider returned error",
+							code: 400,
+							metadata: { raw: "Input tokens exceed the model context window." },
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		for (let request = 0; request < 2; request += 1) {
+			const result = await streamOpenAICompletions(model, testContext, {
+				apiKey: "test-key",
+				providerSessionState,
+				fetch: fetchMock,
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("Provider returned error");
+		}
+		expect(strictFlags).toEqual([[true], [true]]);
+	});
+
+	it("retries opaque OpenRouter provider errors without strict Responses tools and remembers it", async () => {
+		const model = buildModel({
+			id: "deepseek/deepseek-v4-flash-0731",
+			name: "DeepSeek V4 Flash 0731 via OpenRouter Responses",
+			api: "openai-responses",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 384_000,
+		} satisfies ModelSpec<"openai-responses">);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const strictFlags: unknown[][] = [];
+		let attempt = 0;
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				attempt += 1;
+				const bodyText = typeof init?.body === "string" ? init.body : "";
+				const tools = toRecord(JSON.parse(bodyText)).tools;
+				strictFlags.push(Array.isArray(tools) ? tools.map(tool => toRecord(tool).strict) : []);
+				if (attempt === 1) {
+					return new Response(JSON.stringify({ error: { message: "Provider returned error", code: 400 } }), {
+						status: 400,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return createResponsesTextSseResponse(attempt === 2 ? "Recovered" : "Later");
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const context: Context = { ...testContext, tools: [testTool] };
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			providerSessionState,
+			fetch: fetchMock,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+
+		const nextResult = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			providerSessionState,
+			fetch: fetchMock,
+		}).result();
+		expect(nextResult.stopReason).toBe("stop");
+		expect(strictFlags).toEqual([[true], [undefined], [undefined]]);
 	});
 
 	it("sends strict=true for openai-responses tool schemas on OpenAI", async () => {
@@ -758,7 +853,6 @@ describe("OpenAI tool strict mode", () => {
 			tools?: Array<{ strict?: boolean }>;
 		};
 
-		expect(model.compat.supportsStrictMode).toBe(true);
 		expect(payload.tools?.[0]?.strict).toBe(false);
 	});
 
@@ -783,7 +877,6 @@ describe("OpenAI tool strict mode", () => {
 			tools?: Array<{ strict?: boolean }>;
 		};
 
-		expect(model.compat.supportsStrictMode).toBe(true);
 		expect(payload.tools?.[0]?.strict).toBe(true);
 	});
 

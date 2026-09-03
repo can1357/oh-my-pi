@@ -5,11 +5,15 @@ import {
 	resolveProviderCandidates,
 	resolveProviderChain,
 	setExcludedSearchProviders,
-	setPreferredSearchProvider,
+	setSearchProviderOrder,
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
-const authStorage = {} as AuthStorage;
+const authStorage = {
+	hasAuth(provider: string): boolean {
+		return provider === "jina" && Boolean(process.env.JINA_API_KEY);
+	},
+} as AuthStorage;
 const originalBraveApiKey = process.env.BRAVE_API_KEY;
 const originalJinaApiKey = process.env.JINA_API_KEY;
 
@@ -33,19 +37,32 @@ function restoreEnv(): void {
 }
 
 afterEach(() => {
-	setPreferredSearchProvider("auto");
 	setExcludedSearchProviders([]);
+	setSearchProviderOrder([]);
 	restoreEnv();
 });
 
 describe("resolveProviderCandidates", () => {
-	it("orders the preferred provider before unloaded fallbacks", () => {
-		const candidates = resolveProviderCandidates("exa");
+	it("orders the forced provider before configured and built-in fallbacks", () => {
+		setSearchProviderOrder(["gemini", "exa"]);
 
-		expect(candidates[0]).toEqual({ id: "exa", explicit: true });
-		expect(candidates.slice(1).map(candidate => candidate.id)).toEqual(
-			SEARCH_PROVIDER_ORDER.filter(id => id !== "exa"),
-		);
+		const candidates = resolveProviderCandidates("perplexity");
+
+		expect(candidates[0]).toEqual({ id: "perplexity", explicit: true });
+		expect(candidates.slice(1).map(candidate => candidate.id)).toEqual([
+			"gemini",
+			"exa",
+			...SEARCH_PROVIDER_ORDER.filter(id => id !== "perplexity" && id !== "gemini" && id !== "exa"),
+		]);
+	});
+
+	it("marks configured-order entries explicit so hand-listed providers keep explicit-selection semantics", () => {
+		setSearchProviderOrder(["perplexity"]);
+
+		const candidates = resolveProviderCandidates();
+
+		expect(candidates[0]).toEqual({ id: "perplexity", explicit: true });
+		expect(candidates[1]?.explicit).toBe(false);
 	});
 
 	it("omits excluded providers without resolving them", () => {
@@ -56,6 +73,16 @@ describe("resolveProviderCandidates", () => {
 		expect(candidates.map(candidate => candidate.id)).not.toContain("duckduckgo");
 		expect(candidates.map(candidate => candidate.id)).not.toContain("google");
 	});
+
+	it("applies live settings edits, filtering invalid and duplicate provider IDs", () => {
+		const controller = new SelectorController({} as unknown as ConstructorParameters<typeof SelectorController>[0]);
+
+		controller.handleSettingChange("providers.webSearchOrder", ["exa", "not-a-provider", "exa", "gemini"]);
+
+		const candidates = resolveProviderCandidates();
+		expect(candidates.slice(0, 2).map(candidate => candidate.id)).toEqual(["exa", "gemini"]);
+		expect(candidates).toHaveLength(SEARCH_PROVIDER_ORDER.length);
+	});
 });
 
 describe("resolveProviderChain", () => {
@@ -63,12 +90,12 @@ describe("resolveProviderChain", () => {
 		enableKeyBackedProviders();
 		setExcludedSearchProviders(SEARCH_PROVIDER_ORDER.filter(id => id !== "jina"));
 
-		const providers = await resolveProviderChain(authStorage, "auto");
+		const providers = await resolveProviderChain(authStorage);
 
 		expect(providers.map(provider => provider.id)).toEqual(["jina"]);
 	});
 
-	it("ignores the preferred provider when it is excluded", async () => {
+	it("ignores the forced provider when it is excluded", async () => {
 		enableKeyBackedProviders();
 		setExcludedSearchProviders(SEARCH_PROVIDER_ORDER.filter(id => id !== "jina"));
 
@@ -86,7 +113,7 @@ describe("resolveProviderChain", () => {
 			SEARCH_PROVIDER_ORDER.filter(id => id !== "jina"),
 		);
 
-		const providers = await resolveProviderChain(authStorage, "auto");
+		const providers = await resolveProviderChain(authStorage);
 
 		expect(providers.map(provider => provider.id)).toEqual(["jina"]);
 	});

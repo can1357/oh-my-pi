@@ -1,5 +1,5 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { getProjectDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page } from "puppeteer-core";
 import { applyStealthPatches, applyViewport } from "../../../tools/browser/launch";
 import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
@@ -26,12 +26,20 @@ interface BrowserFallbackOptions {
 export interface BrowserFetchOptions {
 	fetch?: FetchImpl;
 	signal: AbortSignal;
+	timeoutMs?: number;
 	randomizeHeaders?: boolean;
 	referer?: string;
 	init?: Omit<RequestInit, "headers" | "signal">;
 	headers?: Readonly<Record<string, string>>;
 	browser?: BrowserFallbackOptions;
 }
+
+/**
+ * Upper bound on `page.close()` during teardown. A dead CDP session leaves
+ * puppeteer's close pending forever; `.catch()` only covers rejection, not a
+ * hang, so cleanup needs its own deadline (issue #8865).
+ */
+const PAGE_CLOSE_TIMEOUT_MS = 5_000;
 
 async function fetchHtmlPage(url: string, options: BrowserFetchOptions, fetchImpl: FetchImpl): Promise<LoadedHtmlPage> {
 	const response = await fetchImpl(url, {
@@ -50,6 +58,7 @@ async function browseHtmlPage(
 	url: string,
 	options: BrowserFallbackOptions,
 	signal: AbortSignal,
+	timeoutMs = SEARCH_HARD_TIMEOUT_MS,
 ): Promise<LoadedHtmlPage> {
 	const { homeUrl, ready } = options;
 	const attempts = Math.max(1, options.attempts ?? 1);
@@ -57,7 +66,7 @@ async function browseHtmlPage(
 		acquireBrowser(
 			{ kind: "headless", headless: true },
 			{
-				cwd: process.cwd(),
+				cwd: getProjectDir(),
 				signal,
 			},
 		),
@@ -72,18 +81,24 @@ async function browseHtmlPage(
 	try {
 		const activePage = await untilAborted(signal, () => handle.browser.newPage());
 		page = activePage;
-		await applyViewport(activePage);
-		await applyStealthPatches(handle.browser, activePage, handle.stealth);
+		// Viewport and stealth setup talk to the same CDP session as the
+		// navigations below but were previously awaited raw. When the shared
+		// daemon or the page's target dies mid-setup, those puppeteer calls
+		// never settle and the provider promise hangs past
+		// SEARCH_HARD_TIMEOUT_MS — the abort signal had no listener at these
+		// await points (issue #8865).
+		await untilAborted(signal, () => applyViewport(activePage));
+		await untilAborted(signal, () => applyStealthPatches(handle.browser, activePage, handle.stealth));
 		if (homeUrl) {
 			await untilAborted(signal, () =>
-				activePage.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: SEARCH_HARD_TIMEOUT_MS }),
+				activePage.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
 			);
 		}
 		for (let attempt = 0; attempt < attempts; attempt++) {
 			if (attempt > 0 && options.retryDelayMs) await Bun.sleep(options.retryDelayMs);
 
 			const response = await untilAborted(signal, () =>
-				activePage.goto(url, { waitUntil: "domcontentloaded", timeout: SEARCH_HARD_TIMEOUT_MS }),
+				activePage.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
 			);
 			if (options.afterNavigation) await options.afterNavigation(activePage, signal);
 			if (ready) {
@@ -100,7 +115,12 @@ async function browseHtmlPage(
 		}
 		throw new Error("Browser fallback exhausted without a response");
 	} finally {
-		await page?.close().catch(() => undefined);
+		// Teardown must complete even when the caller's signal already fired
+		// (navigating away from a dead session leaves `close()` pending), so
+		// bound it with a fresh deadline instead of reusing `signal`.
+		if (page) {
+			await untilAborted(AbortSignal.timeout(PAGE_CLOSE_TIMEOUT_MS), () => page!.close()).catch(() => undefined);
+		}
 		await releaseBrowser(handle, { kill: false });
 	}
 }
@@ -113,11 +133,11 @@ export async function browserFetch(url: string, options: BrowserFetchOptions): P
 		page = await fetchHtmlPage(url, options, fetchImpl);
 	} catch (error) {
 		if (options.fetch || !options.browser) throw error;
-		return browseHtmlPage(url, options.browser, options.signal);
+		return browseHtmlPage(url, options.browser, options.signal, options.timeoutMs);
 	}
 
 	if (!options.browser || options.fetch) return page;
 	const isSuccessful = page.status >= 200 && page.status < 300;
 	if (isSuccessful && !options.browser.shouldFallback(page)) return page;
-	return browseHtmlPage(url, options.browser, options.signal);
+	return browseHtmlPage(url, options.browser, options.signal, options.timeoutMs);
 }

@@ -7,6 +7,8 @@ import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { SearchResponse } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { KagiApiError, searchWithKagi } from "../../kagi";
+import type { StructuredQuery } from "../query";
+import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -22,21 +24,29 @@ export async function searchKagi(params: {
 	query: string;
 	num_results?: number;
 	recency?: SearchParams["recency"];
+	parsedQuery?: StructuredQuery;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	authStorage: AuthStorage;
 	sessionId?: string;
 	fetch?: FetchImpl;
 }): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
+	// Kagi's index understands the classic Google operator set: canonicalize
+	// directives (domain: -> site:, until: -> before:YYYY-MM-DD, ...) and pass
+	// them through in the query string. Directive-free queries stay untouched.
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const query = parsed.hasDirectives ? formatQuery(parsed, GOOGLE_QUERY_SYNTAX) : params.query;
 
 	try {
 		const result = await searchWithKagi(
-			params.query,
+			query,
 			{
 				limit: numResults,
 				recency: params.recency,
 				sessionId: params.sessionId,
 				signal: params.signal,
+				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 			},
 			params.authStorage,
@@ -75,9 +85,11 @@ export class KagiProvider extends SearchProvider {
 
 		return searchKagi({
 			query: params.query,
+			parsedQuery: params.parsedQuery,
 			num_results: params.numSearchResults ?? params.limit,
 			recency: params.recency,
 			signal: params.signal,
+			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
 			sessionId: params.sessionId,
 			fetch: fetchImpl,

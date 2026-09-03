@@ -15,30 +15,15 @@
  * the original crash again.
  */
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
-import { createTinyTitleSubprocess } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { createTinyTitleSubprocess, smokeTestTinyTitleWorker } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 describe("issue #1606 — tiny model lives in an isolated subprocess", () => {
 	it("ping/pongs through the spawned worker subprocess and tears it down cleanly", async () => {
-		// `smokeTestTinyTitleWorker` is the runtime probe wired into
-		// `omp --smoke-test`. Run it in a child Bun process instead of this
-		// Bun-test worker: the test runner owns its own IPC channel and can
-		// starve nested Bun subprocess IPC on some Bun builds.
-		const repoRoot = path.resolve(import.meta.dir, "../../..");
-		const script =
-			'const { smokeTestTinyTitleWorker } = await import("@oh-my-pi/pi-coding-agent/tiny/title-client"); await smokeTestTinyTitleWorker({ timeoutMs: 15000 });';
-		const proc = Bun.spawn([process.execPath, "-e", script], {
-			cwd: repoRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-		expect(`${stdout}${stderr}`).toBe("");
-		expect(exitCode).toBe(0);
+		// Exercise the real subprocess worker directly. `resolveWorkerSpawnCmd`
+		// already uses the cwd-relative CLI entrypoint required for reliable IPC
+		// under bun test; wrapping this in a second Bun process only duplicated the
+		// coding-agent module graph and amplified native-process pressure.
+		await smokeTestTinyTitleWorker({ timeoutMs: 15_000 });
 	}, 30_000);
 
 	it("surfaces unexpected signal exits so in-flight callers don't await forever", async () => {
@@ -83,9 +68,6 @@ describe("issue #1606 — tiny model lives in an isolated subprocess", () => {
 		sub.intentionalExit.value = true;
 		sub.proc.kill("SIGKILL");
 		await sub.proc.exited;
-		// Give onExit a microtask to drain — Bun's exited promise resolves
-		// after onExit fires, but be defensive.
-		await Bun.sleep(20);
 		expect(errored).toBe(false);
 	}, 10_000);
 });

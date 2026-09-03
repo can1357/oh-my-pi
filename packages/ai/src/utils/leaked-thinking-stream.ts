@@ -7,6 +7,12 @@
  * provider stream into a fresh {@link AssistantMessageEventStream}, splitting the
  * leaked fences out into proper `thinking` blocks *live* as deltas arrive.
  *
+ * A reasoning block whose opener the chat template prefilled (DeepSeek-R1,
+ * Qwen3-Thinking) streams only its close tag. The projector owns the whole
+ * message, so when that bare close arrives it re-projects the leading text
+ * block — the only content so far — as a closed thinking block, replacing the
+ * block in place at its content index.
+ *
  * Applied to every provider stream *except* official first-party endpoints
  * (the official Anthropic API and the official OpenAI / OpenAI-Codex endpoints),
  * which return structured thinking and never leak — `healLeakedThinking` in
@@ -25,15 +31,25 @@
  * events are forwarded verbatim.
  */
 
-import type { AssistantMessage, ImageContent, TextContent, ThinkingContent, ToolCall } from "../types";
+import { ThinkingInbandScanner } from "../dialect/thinking";
+import type { InbandScanEvent } from "../dialect/types";
+import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
+import type {
+	AnthropicServerToolContent,
+	AssistantMessage,
+	ImageContent,
+	TextContent,
+	ThinkingContent,
+	ToolCall,
+} from "../types";
 import {
 	clearStreamingPartialJson,
+	copyCursorExecResolved,
 	getStreamingPartialJson,
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "./block-symbols";
 import { AssistantMessageEventStream } from "./event-stream";
-import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "./stream-markup-healing";
 
 type StreamingToolCall = ToolCall & StreamingPartialJsonCarrier;
 
@@ -41,6 +57,7 @@ function cloneToolCall(source: StreamingToolCall): StreamingToolCall {
 	const block: StreamingToolCall = { ...source, arguments: source.arguments };
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson !== undefined) setStreamingPartialJson(block, partialJson);
+	copyCursorExecResolved(block, source);
 	return block;
 }
 
@@ -49,6 +66,7 @@ function syncToolCall(target: StreamingToolCall, source: StreamingToolCall): voi
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson === undefined) clearStreamingPartialJson(target);
 	else setStreamingPartialJson(target, partialJson);
+	copyCursorExecResolved(target, source);
 }
 
 /**
@@ -69,7 +87,11 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 					case "text_delta": {
 						projector ??= new LeakedThinkingProjector(out, event.partial);
 						const block = event.partial.content[event.contentIndex];
-						projector.text(event.delta, block?.type === "text" ? block.textSignature : undefined);
+						projector.text(
+							event.contentIndex,
+							event.delta,
+							block?.type === "text" ? block.textSignature : undefined,
+						);
 						break;
 					}
 					case "thinking_delta": {
@@ -92,7 +114,7 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 					}
 					case "image_end":
 						projector ??= new LeakedThinkingProjector(out, event.partial);
-						projector.image(event.content);
+						projector.image(event.contentIndex, event.content);
 						break;
 					case "toolcall_start": {
 						projector ??= new LeakedThinkingProjector(out, event.partial);
@@ -140,6 +162,8 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 }
 
 type OpenBlock = { index: number } | undefined;
+type ProjectedContent = AssistantMessage["content"][number];
+type AnchoredContent = { block: ProjectedContent; sourceIndex: number; order: number };
 
 /**
  * Re-projects an inner stream's events into `out`, healing leaked reasoning out
@@ -147,12 +171,16 @@ type OpenBlock = { index: number } | undefined;
  */
 class LeakedThinkingProjector {
 	readonly #out: AssistantMessageEventStream;
-	readonly #healer = new StreamMarkupHealing({ pattern: "thinking" });
+	readonly #healer = new ThinkingInbandScanner({ impliedOpen: true });
 	#partial: AssistantMessage;
 	#text: OpenBlock;
 	#thinking: OpenBlock;
-	/** Total visible text length fed to the healer, to replay any un-streamed tail in {@link finish}. */
-	#fedLen = 0;
+	/** Visible text consumed per source block, used to recover terminal-only tails. */
+	#fedTextLengths = new Map<number, number>();
+	/** Source text block whose held healer output has not crossed a content boundary. */
+	#activeTextSourceIndex: number | undefined;
+	/** Original terminal content index for every projected block. */
+	#sourceAnchors = new Map<ProjectedContent, number>();
 	/** Latest non-undefined text signature seen, stamped onto held-back text flushed later. */
 	#lastTextSignature: string | undefined;
 	/** Forwarded native tool calls, keyed by the inner stream's `contentIndex`. */
@@ -169,10 +197,17 @@ class LeakedThinkingProjector {
 	}
 
 	/** Feed a visible-text delta through the healer, splitting leaked fences live. */
-	text(delta: string, signature: string | undefined): void {
-		this.#fedLen += delta.length;
-		if (signature !== undefined) this.#lastTextSignature = signature;
-		this.#apply(this.#healer.feedEvents(delta), this.#lastTextSignature);
+	text(srcIndex: number, delta: string, signature: string | undefined): void {
+		const startsSource = this.#activeTextSourceIndex !== srcIndex;
+		if (this.#activeTextSourceIndex !== undefined && startsSource) {
+			this.#flushHealer();
+			this.#closeText();
+			this.#closeThinking();
+		}
+		this.#activeTextSourceIndex = srcIndex;
+		this.#fedTextLengths.set(srcIndex, (this.#fedTextLengths.get(srcIndex) ?? 0) + delta.length);
+		if (startsSource || signature !== undefined) this.#lastTextSignature = signature;
+		this.#apply(this.#healer.feed(delta), this.#lastTextSignature, srcIndex);
 	}
 
 	/** Forward a native thinking delta, preserving its source block identity and signature. */
@@ -180,7 +215,7 @@ class LeakedThinkingProjector {
 		let index = this.#thinkingBlocks.get(srcIndex);
 		if (index === undefined) {
 			if (this.#thinking && this.#pendingThinkingEnds.has(this.#thinking.index)) this.#closeThinking();
-			index = this.#openThinking();
+			index = this.#openThinking(srcIndex);
 			this.#thinkingBlocks.set(srcIndex, index);
 			this.#pendingThinkingEnds.add(index);
 		}
@@ -194,10 +229,20 @@ class LeakedThinkingProjector {
 	 * Finalize a native thinking block by source identity. Its projected end is
 	 * deferred until this event so stream consumers observe the completed
 	 * signature before the block closes, even when later blocks started first.
+	 *
+	 * A block that never streamed a delta but closes with a signature is
+	 * projected here instead of dropped: Gemini thought signatures arrive via
+	 * OpenRouter's Responses translation as a text-less reasoning item whose id
+	 * is the following function call's `call_id`. Losing that signature makes
+	 * every current-turn function-call replay unsigned, which Gemini 3 punishes
+	 * with empty stops and `server_error: stream closed with reason: error`.
 	 */
 	thinkingEnd(srcIndex: number, signature: string | undefined): void {
 		const index = this.#thinkingBlocks.get(srcIndex);
-		if (index === undefined) return;
+		if (index === undefined) {
+			if (signature) this.#projectSignedThinking(srcIndex, "", signature);
+			return;
+		}
 		if (signature !== undefined) {
 			(this.#partial.content[index] as ThinkingContent).thinkingSignature = signature;
 		}
@@ -206,15 +251,35 @@ class LeakedThinkingProjector {
 		this.#emitThinkingEnd(index);
 	}
 
+	/**
+	 * Project a completed signature-bearing thinking block whose deltas never
+	 * reached the projector. Releases held-back text first (same boundary
+	 * semantics as {@link toolStart}) so block order survives for replay —
+	 * the signature item must precede the function call it signs.
+	 */
+	#projectSignedThinking(srcIndex: number, thinking: string, signature: string): void {
+		this.#flushHealer();
+		this.#closeText();
+		this.#closeThinking();
+		this.#partial.content.push({ type: "thinking", thinking, thinkingSignature: signature });
+		const index = this.#partial.content.length - 1;
+		this.#anchor(index, srcIndex);
+		this.#thinkingBlocks.set(srcIndex, index);
+		this.#out.push({ type: "thinking_start", contentIndex: index, partial: this.#partial });
+		this.#emitThinkingEnd(index);
+	}
+
 	/** Forward a completed native image after releasing held text. */
-	image(content: ImageContent): void {
-		this.#apply(this.#healer.flushEvents(), this.#lastTextSignature);
+	image(srcIndex: number, content: ImageContent): void {
+		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
 		this.#partial.content.push(content);
+		const index = this.#partial.content.length - 1;
+		this.#anchor(index, srcIndex);
 		this.#out.push({
 			type: "image_end",
-			contentIndex: this.#partial.content.length - 1,
+			contentIndex: index,
 			content,
 			partial: this.#partial,
 		});
@@ -223,12 +288,13 @@ class LeakedThinkingProjector {
 	/** Forward a native tool call's start, releasing any held-back text first. */
 	toolStart(srcIndex: number, source: StreamingToolCall | undefined): void {
 		if (!source) return;
-		this.#apply(this.#healer.flushEvents(), this.#lastTextSignature);
+		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
 		const block = cloneToolCall(source);
 		this.#partial.content.push(block);
 		const index = this.#partial.content.length - 1;
+		this.#anchor(index, srcIndex);
 		this.#toolBlocks.set(srcIndex, { index, block });
 		this.#out.push({ type: "toolcall_start", contentIndex: index, partial: this.#partial });
 	}
@@ -258,12 +324,13 @@ class LeakedThinkingProjector {
 			return;
 		}
 		// `end` without a matching `start` — release held text, then forward whole.
-		this.#apply(this.#healer.flushEvents(), this.#lastTextSignature);
+		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
 		const block = cloneToolCall(toolCall);
 		this.#partial.content.push(block);
 		const index = this.#partial.content.length - 1;
+		this.#anchor(index, srcIndex);
 		this.#out.push({ type: "toolcall_start", contentIndex: index, partial: this.#partial });
 		this.#out.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: this.#partial });
 	}
@@ -277,32 +344,67 @@ class LeakedThinkingProjector {
 			const block = message.content[srcIndex];
 			this.thinkingEnd(srcIndex, block?.type === "thinking" ? block.thinkingSignature : undefined);
 		}
-		let fullText = "";
-		let tailSignature: string | undefined;
-		for (const block of message.content) {
-			if (block.type === "text") {
-				fullText += block.text;
-				tailSignature = block.textSignature;
+		// Safety net: signature-bearing thinking blocks whose events never
+		// reached the projector at all (e.g. a terminal message assembled from
+		// blocks that skipped per-item events) must still survive with their
+		// text and signature intact.
+		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
+			const block = message.content[srcIndex];
+			if (block?.type !== "thinking" || !block.thinkingSignature) continue;
+			if (this.#thinkingBlocks.has(srcIndex)) continue;
+			this.#projectSignedThinking(srcIndex, block.thinking, block.thinkingSignature);
+		}
+		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
+			const block = message.content[srcIndex];
+			if (block?.type !== "text") continue;
+			const fedLength = this.#fedTextLengths.get(srcIndex) ?? 0;
+			if (block.text.length <= fedLength) continue;
+			if (this.#activeTextSourceIndex !== undefined && this.#activeTextSourceIndex !== srcIndex) {
+				this.#flushHealer();
+				this.#closeText();
+				this.#closeThinking();
 			}
+			this.#activeTextSourceIndex = srcIndex;
+			this.#lastTextSignature = block.textSignature;
+			this.#apply(this.#healer.feed(block.text.slice(fedLength)), this.#lastTextSignature, srcIndex);
 		}
-		if (tailSignature !== undefined) this.#lastTextSignature = tailSignature;
-		if (fullText.length > this.#fedLen) {
-			this.#apply(this.#healer.feedEvents(fullText.slice(this.#fedLen)), this.#lastTextSignature);
-		}
-		this.#apply(this.#healer.flushEvents(), this.#lastTextSignature);
+		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
-		return this.#partial.content;
+		return this.#mergeServerToolHistory(message);
 	}
 
-	#apply(events: readonly StreamMarkupHealingEvent[], signature?: string): void {
+	#apply(events: readonly InbandScanEvent[], signature: string | undefined, srcIndex: number): void {
 		for (const event of events) {
-			if (event.type === "text") this.#emitText(event.text, signature);
-			else if (event.type === "thinking") this.#emitHealedThinking(event.thinking);
+			if (event.type === "text") this.#emitText(event.text, signature, srcIndex);
+			else if (event.type === "thinkingDelta") this.#emitHealedThinking(event.delta, srcIndex);
+			else if (event.type === "impliedThinkingEnd") this.#closeImpliedThinking(srcIndex);
 		}
 	}
 
-	#emitText(text: string, signature: string | undefined): void {
+	/**
+	 * A bare reasoning close with no open in this stream. When the open text
+	 * block is the message's only content, everything in it was reasoning behind
+	 * a template-prefilled opener: re-project it as a closed thinking block at
+	 * the same index (`thinking_start` at an index replaces the block for
+	 * event-replaying consumers). Any other position — content already
+	 * preceded the text, or the text is blank — makes the tag a stray, which is
+	 * dropped so it never reaches the stored turn.
+	 */
+	#closeImpliedThinking(srcIndex: number): void {
+		if (!this.#text || this.#text.index !== 0 || this.#partial.content.length !== 1) return;
+		const text = (this.#partial.content[0] as TextContent).text;
+		if (text.trim().length === 0) return;
+		this.#closeText();
+		const block: ThinkingContent = { type: "thinking", thinking: text };
+		this.#partial.content[0] = block;
+		this.#anchor(0, srcIndex);
+		this.#out.push({ type: "thinking_start", contentIndex: 0, partial: this.#partial });
+		this.#out.push({ type: "thinking_delta", contentIndex: 0, delta: text, partial: this.#partial });
+		this.#emitThinkingEnd(0);
+	}
+
+	#emitText(text: string, signature: string | undefined, srcIndex: number): void {
 		if (text.length === 0) return;
 		this.#closeThinking();
 		if (!this.#text) {
@@ -310,6 +412,7 @@ class LeakedThinkingProjector {
 				signature === undefined ? { type: "text", text: "" } : { type: "text", text: "", textSignature: signature };
 			this.#partial.content.push(block);
 			this.#text = { index: this.#partial.content.length - 1 };
+			this.#anchor(this.#text.index, srcIndex);
 			this.#out.push({ type: "text_start", contentIndex: this.#text.index, partial: this.#partial });
 		} else if (signature !== undefined) {
 			(this.#partial.content[this.#text.index] as TextContent).textSignature = signature;
@@ -320,24 +423,72 @@ class LeakedThinkingProjector {
 	}
 
 	/** Healed (leaked) thinking carries no signature, matching the source fence. */
-	#emitHealedThinking(text: string): void {
+	#emitHealedThinking(text: string, srcIndex: number): void {
 		if (text.length === 0) return;
-		const index = this.#openThinking();
+		const index = this.#openThinking(srcIndex);
 		const block = this.#partial.content[index] as ThinkingContent;
 		block.thinking += text;
 		this.#out.push({ type: "thinking_delta", contentIndex: index, delta: text, partial: this.#partial });
 	}
 
-	#openThinking(): number {
+	#openThinking(srcIndex: number): number {
 		this.#closeText();
 		if (!this.#thinking) {
 			this.#partial.content.push({ type: "thinking", thinking: "" });
 			this.#thinking = { index: this.#partial.content.length - 1 };
+			this.#anchor(this.#thinking.index, srcIndex);
 			this.#out.push({ type: "thinking_start", contentIndex: this.#thinking.index, partial: this.#partial });
 		}
 		return this.#thinking.index;
 	}
 
+	#flushHealer(): void {
+		const srcIndex = this.#activeTextSourceIndex;
+		if (srcIndex !== undefined) {
+			this.#apply(this.#healer.flush(), this.#lastTextSignature, srcIndex);
+		}
+		this.#activeTextSourceIndex = undefined;
+	}
+
+	#anchor(index: number, srcIndex: number): void {
+		const block = this.#partial.content[index];
+		if (block) this.#sourceAnchors.set(block, srcIndex);
+	}
+
+	#mergeServerToolHistory(message: AssistantMessage): AssistantMessage["content"] {
+		const pendingCalls = new Map<string, number>();
+		const pairedIndexes = new Set<number>();
+		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
+			const content = message.content[srcIndex];
+			if (content?.type !== "anthropicServerTool" || !isAnthropicServerToolHistoryBlock(content.block)) continue;
+			if (content.block.type === "server_tool_use") {
+				pendingCalls.set(content.block.id, srcIndex);
+				continue;
+			}
+			const callIndex = pendingCalls.get(content.block.tool_use_id);
+			if (callIndex === undefined) continue;
+			pairedIndexes.add(callIndex);
+			pairedIndexes.add(srcIndex);
+			pendingCalls.delete(content.block.tool_use_id);
+		}
+
+		const anchored: AnchoredContent[] = this.#partial.content.map((block, order) => ({
+			block,
+			sourceIndex: this.#sourceAnchors.get(block) ?? message.content.length + order,
+			order,
+		}));
+		for (const srcIndex of pairedIndexes) {
+			const content = message.content[srcIndex];
+			if (content?.type !== "anthropicServerTool") continue;
+			const cloned: AnthropicServerToolContent = {
+				type: "anthropicServerTool",
+				block: structuredClone(content.block),
+			};
+			anchored.push({ block: cloned, sourceIndex: srcIndex, order: srcIndex });
+		}
+		anchored.sort((left, right) => left.sourceIndex - right.sourceIndex || left.order - right.order);
+		return anchored.map(({ block }) => block);
+	}
 	#closeText(): void {
 		if (!this.#text) return;
 		const block = this.#partial.content[this.#text.index] as TextContent;

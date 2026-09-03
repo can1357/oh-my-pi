@@ -1,0 +1,50 @@
+name: "Build native addons (bazel)"
+description: >
+   Build the requested //:natives-* targets with bazelisk and copy the .node
+   files into the destination directory. Cache wiring comes from the
+   bazel-cache action: in-cluster read-write on omp-kata, actions/cache-backed
+   disk cache on GitHub-hosted runners.
+
+inputs:
+   targets:
+      description: Space-separated scripts/bazel-natives.ts target names
+      required: true
+   dest:
+      description: Destination directory for the .node files
+      required: false
+      default: packages/natives/native
+   cache-scope:
+      description: Disk-cache key discriminator (see bazel-cache action)
+      required: false
+      default: natives
+
+runs:
+   using: composite
+   steps:
+      - id: cache
+        uses: ./.github/actions/bazel-cache
+        with:
+           scope: ${{ inputs.cache-scope }}
+
+      - name: Build native addons
+        shell: bash
+        env:
+           OMP_BAZEL_RC: ${{ steps.cache.outputs.rc }}
+           NATIVE_TARGETS: ${{ inputs.targets }}
+           NATIVE_DEST: ${{ inputs.dest }}
+        run: |
+           set -euo pipefail
+           # Raise-only fd guard: huge toolchain input trees exhaust low soft
+           # limits during sandbox setup.
+           if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+           read -r -a targets <<< "$NATIVE_TARGETS"
+           bun scripts/bazel-natives.ts "${targets[@]}" --dest "$NATIVE_DEST"
+      - name: Save bazel disk cache
+        if: steps.cache.outputs.save-needed == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+           # Must mirror the restore path list in the bazel-cache action.
+           path: |
+              ~/.cache/omp-bazel-disk
+              ~/.cache/omp-bazel-repo
+           key: ${{ steps.cache.outputs.cache-key }}

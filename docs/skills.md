@@ -6,7 +6,7 @@ Skills are file-backed capability packs discovered at startup and exposed to the
 - on-demand content via the `read` tool against `skill://...`
 - optional interactive `/skill:<name>` commands
 
-This document covers current runtime behavior in `src/extensibility/skills.ts`, `src/discovery/builtin.ts`, `src/internal-urls/skill-protocol.ts`, and `src/discovery/agents-md.ts`.
+This document covers current runtime behavior in `packages/coding-agent/src/extensibility/skills.ts`, `packages/coding-agent/src/discovery/builtin.ts`, `packages/coding-agent/src/internal-urls/skill-protocol.ts`, and `packages/coding-agent/src/discovery/agents-md.ts`.
 
 ## What a skill is in this codebase
 
@@ -70,11 +70,11 @@ Current runtime behavior:
 
 ## Discovery pipeline
 
-`loadSkills()` in `src/extensibility/skills.ts` does three passes:
+`loadSkills()` in `packages/coding-agent/src/extensibility/skills.ts` does three passes:
 
 1. **Capability providers** via `loadCapability("skills")` (the managed/auto-learn provider's skills are skipped here and handled in pass 3)
-2. **Custom directories** via `scanSkillsFromDir(..., { requireDescription: true })` (one-level directory enumeration)
-3. **Managed (auto-learn) skills** (`omp-managed` provider) resolved dead-last with first-wins, so any same-named authored skill from any provider or custom directory takes precedence
+2. **Custom directories** via `scanSkillsFromDir(..., { requireDescription: true })` (one-level directory enumeration). A custom-directory skill overrides a same-named default provider skill; duplicate custom-directory names remain first-wins.
+3. **Managed (auto-learn) skills** (`omp-managed` provider) resolved dead-last, so any same-named enabled authored skill from a provider or custom directory takes precedence
 
 If `skills.enabled` is `false`, discovery returns no skills.
 
@@ -113,7 +113,7 @@ Filter order is:
 3. not ignored
 4. included (if include list present)
 
-The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location and has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. For providers without a dedicated toggle (`claude-plugins`, `opencode`, `gemini`, `github`, …), enablement falls back to: enabled if **any** named source toggle is enabled.
+The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location and has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Providers without a dedicated toggle (`claude-plugins`, `opencode`, `github`, …) are enabled if **any** named third-party source toggle is enabled.
 
 ### Collision and duplicate handling
 
@@ -122,7 +122,7 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
   - de-duplicates identical files by `realpath` (symlink-safe)
   - emits collision warnings when a later skill name conflicts
   - keeps the convenience `loadSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
-- Custom-directory skills are merged after provider skills and follow the same collision behavior
+- Custom-directory skills are merged after provider skills and override same-named default-path provider skills. Among custom directories, the first same-named skill wins.
 
 ## Runtime usage behavior
 
@@ -145,15 +145,22 @@ If `skills.enableSkillCommands` is true, interactive mode registers one slash co
 
 `/skill:<name> [args]` behavior:
 
+- recognizes the traditional leading form and a whitespace-delimited `/skill:<name>` token embedded in ordinary prose
+- for an embedded token, removes the token and passes the surrounding prose as arguments
+- does not treat embedded tokens as invocations when the draft starts with another slash command or a local bash/Python execution sigil
 - reads the skill file directly from `filePath`
 - strips frontmatter
-- injects skill body as a custom message
+- wraps the body with skill name, base directory, and optional user arguments, then injects it as a custom message
 - delivery mode follows the **submission keybinding**:
   - **Enter** → invokes the skill on the `steer` queue while streaming (matches free-text Enter, which also steers), or as a normal idle prompt when the agent is not streaming
   - **Ctrl+Enter** (`app.message.followUp`) → invokes the skill on the `followUp` queue while streaming, or as a normal idle prompt when the agent is not streaming
-- appends metadata (`Skill: <path>`, optional `User: <args>`)
 
-There is no flag, mode-selector, or frontmatter knob to override this — the keybinding _is_ the choice, identical to how free text is routed during streaming (`input-controller.ts:562-568` for Enter, `input-controller.ts:961-966` for Ctrl+Enter; both dispatch through `#invokeSkillCommand`).
+There is no flag, mode-selector, or frontmatter knob to override delivery mode — the keybinding _is_ the choice, identical to free-text routing during streaming. Both submission paths dispatch through `#invokeSkillCommand` in `input-controller.ts`, which delegates to `invokeSkillCommandFromText` in `src/modes/skill-command.ts`.
+
+Invoked skill content is identified by invocation kind, each with its own prompt template (in `src/prompts/skills/`, rendered by `buildSkillPromptMessage` in `src/extensibility/skills.ts`):
+
+- **User-invoked** (`user-invocation.md`, used by `/skill:<name>`): the message opens by announcing that the user invoked the skill, embeds the skill body, and appends the skill directory (`[Skill directory: <baseDir>]`) with instructions to resolve the skill's relative paths (scripts, templates) against it, plus optional `User: <args>`.
+- **Autoloaded** (`autoload.md`): a minimal provenance-only format — body followed by `Skill: <path>` and optional `User: <args>` — used when subagents auto-inject skills declared via the `autoloadSkills` agent frontmatter field; these hidden messages must not claim the user invoked them.
 
 ## `skill://` URL behavior
 
@@ -200,7 +207,7 @@ No fallback search is performed for missing assets.
 - **Skills**: named, optional capability packs selected by task context or explicitly requested
 - **AGENTS.md/context files**: persistent instruction files loaded as context-file capability and merged by level/depth rules
 
-`src/discovery/agents-md.ts` specifically walks ancestor directories from `cwd` to discover standalone `AGENTS.md` files (stopping at the repo root, or home when no repo root is known), skipping files whose containing directory name starts with a dot.
+`src/discovery/agents-md.ts` walks ancestor directories from `cwd` to discover standalone `AGENTS.md` files. For repositories nested under the user's home directory, it continues through enclosing workspace directories up to but not including the home directory. With no repository root under home, the home boundary remains included. Otherwise it stops at the repository root, or at the filesystem root when no repository root is known outside home. Files in hidden owner directories are skipped.
 
 ### Skills vs slash commands
 

@@ -221,8 +221,8 @@ describe("applyExtensionFlags (single-parser flag resolution)", () => {
 	it("returns null when there is no runner", () => {
 		expect(applyExtensionFlags(undefined, ["--spawn-peer", "x", "task"])).toBeNull();
 	});
-	it("returns null when the runner registered no flags", () => {
-		expect(applyExtensionFlags(fakeRunner({}), ["--whatever", "task"])).toBeNull();
+	it("reparses with an empty extension registry so unknown flags remain visible", () => {
+		expect(applyExtensionFlags(fakeRunner({}), ["--whatever", "task"])?.unrecognizedFlags).toEqual(["--whatever"]);
 	});
 	it("applies and strips a string flag in space form", () => {
 		const runner = fakeRunner({ "spawn-peer": "string" });

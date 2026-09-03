@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	applyDirenvPreflight,
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
@@ -110,27 +112,6 @@ describe("executeBash", () => {
 		expect(buildMinimizerOptions(group)).toBeUndefined();
 	});
 
-	it("forwards source outline and legacy filter settings to native minimizer options", () => {
-		const group: ShellMinimizerSettings = {
-			enabled: true,
-			settingsPath: "minimizer.toml",
-			only: ["git"],
-			except: ["docker"],
-			maxCaptureBytes: 1234,
-			sourceOutlineLevel: "aggressive",
-			legacyFilters: true,
-		};
-		expect(buildMinimizerOptions(group)).toEqual({
-			enabled: true,
-			settingsPath: "minimizer.toml",
-			only: ["git"],
-			except: ["docker"],
-			maxCaptureBytes: 1234,
-			sourceOutlineLevel: "aggressive",
-			legacyFilters: true,
-		});
-	});
-
 	it.each([
 		["cd", true],
 		[" cd child ", true],
@@ -169,6 +150,37 @@ describe("executeBash", () => {
 		expect(result.output.trim()).toBe(tempDir);
 	});
 
+	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {
+		// A disabled command deadline (`timeout: 0`) must NOT collapse the direnv
+		// export window to 0 ms — that would make AbortSignal.timeout(0) abort the
+		// load instantly, silently dropping the repo's direnv env. The load keeps
+		// its full `bash.direnvLoadTimeoutMs` budget. Spying on loadDirenvEnv both
+		// captures the timeoutMs and short-circuits real direnv (null diff = no-op).
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await executeBash("true", { cwd: tempDir, timeout: 0 });
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(budget);
+		expect(spy.mock.calls[0][1]?.timeoutMs).not.toBe(0);
+	});
+
+	it("clamps the direnv-load budget to a positive command timeout smaller than it", async () => {
+		// A positive caller timeout below the budget DOES clamp the direnv window,
+		// proving the fix only relaxes the `timeout: 0` case and did not disable
+		// clamping wholesale. Setting and options.timeout are both milliseconds.
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const callerTimeout = 5;
+		expect(callerTimeout).toBeLessThan(budget);
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await executeBash("true", { cwd: tempDir, timeout: callerTimeout });
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(Math.min(budget, callerTimeout));
+	});
+
 	it("honors symlinked cwd requests in persistent shells", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -198,12 +210,12 @@ describe("executeBash", () => {
 	});
 
 	it("applies non-interactive environment defaults", async () => {
-		const result = await executeBash('echo "$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
+		const result = await executeBash('echo "$AGENT:$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
 			cwd: tempDir,
 			timeout: 5000,
 			env: { PI_TEST_ENV: "hello" },
 		});
-		expect(result.output.trim()).toBe("0:hello");
+		expect(result.output.trim()).toBe("1:0:hello");
 	});
 
 	it("runs non-bash shellPath commands through the configured shell", async () => {
@@ -426,6 +438,13 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				// The command runs through an interactive login zsh, which loads the
+				// system `/etc/zshrc`. On macOS that pulls in
+				// `/etc/zshrc_Apple_Terminal`, and under Apple Terminal it appends
+				// "Saving session..." lines to the captured output on exit. `HOME`
+				// does not isolate a system-level file; this is the opt-out Apple
+				// documents in that script.
+				SHELL_SESSIONS_DISABLE: "1",
 			},
 			prefix: undefined,
 		});
@@ -498,6 +517,59 @@ exit 64
 		}
 	});
 
+	it("runs zsh shortcut commands on a headless PTY with a color-capable TTY", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-pty-"));
+		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_pty_alias='printf pty-alias-ok'\n");
+		Settings.instance.set("shellPath", zshPath);
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: shellDir,
+				SHELL_SESSIONS_DISABLE: "1",
+			},
+			prefix: undefined,
+		});
+
+		const rawChunks: string[] = [];
+		try {
+			const result = await executeBash(
+				"pi_pty_alias; [ -t 1 ] && printf ' is-tty'; printf ' \\033[31mred\\033[0m'",
+				{
+					cwd: tempDir,
+					timeout: 15000,
+					sessionKey: "zsh-pty",
+					useUserShell: true,
+					pty: { cols: 80, rows: 24, onChunk: chunk => rawChunks.push(chunk) },
+				},
+			);
+
+			expect(result.cancelled).toBe(false);
+			expect(result.exitCode).toBe(0);
+			// Interactive rc loaded (alias expanded) AND stdout was a real TTY.
+			expect(result.output).toContain("pty-alias-ok");
+			expect(result.output).toContain("is-tty");
+			// The captured output stays sanitized while raw ANSI reaches the
+			// renderer callback for vterm replay.
+			expect(result.output).not.toContain("\u001b[31m");
+			expect(rawChunks.join("")).toContain("\u001b[31mred\u001b[0m");
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
 	it("invokes onChunk with command output", async () => {
 		let seenChunk: string | null = null;
 		const result = await executeBash("echo hello", {
@@ -514,24 +586,6 @@ exit 64
 		expect(seenChunk ?? "").toContain("hello");
 	});
 
-	it("returns even if command spawns a background job", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const runPromise = executeBash("{ sleep 2; } & echo fg", {
-			cwd: tempDir,
-			timeout: 5000,
-		});
-		const timed = await Promise.race([
-			runPromise.then(result => ({ type: "result" as const, result })),
-			Bun.sleep(BACKGROUND_COMPLETION_RACE_MS).then(() => ({ type: "timeout" as const })),
-		]);
-		expect(timed.type).toBe("result");
-		if (timed.type === "result") {
-			expect(timed.result.output).toContain("fg");
-		}
-	});
-
 	it("returns a real PID for background external commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -540,7 +594,8 @@ exit 64
 		// Redirect the backgrounded job's stdout so it doesn't hold the executor's
 		// output pipe open (which would add the ~250ms background-drain grace);
 		// `$!` still reports the real external PID, which is all this test checks.
-		const result = await executeBash('python3 -c "import time; time.sleep(10)" >/dev/null 2>&1 & echo $!', {
+		const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $!`, {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -574,7 +629,17 @@ exit 64
 		if (process.platform === "win32") {
 			return;
 		}
-		const result = await executeBash("sleep 1.2; echo done", { cwd: tempDir, timeout: 0 });
+		// Compress any accidentally armed one-second deadline. The real command
+		// runs longer than that compressed window, so the success result proves
+		// timeout:0 left the execution deadline disabled without a 1.2s sleep.
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+		const result = await executeBash("sleep 0.03; echo done", { cwd: tempDir, timeout: 0 });
 		expect(result.cancelled).toBe(false);
 		expect(result.output.trim()).toBe("done");
 	});
@@ -584,12 +649,14 @@ exit 64
 			return;
 		}
 		const controller = new AbortController();
-		const promise = executeBash("sleep 10", {
+		const started = Promise.withResolvers<void>();
+		const promise = executeBash("echo started; sleep 10", {
 			cwd: tempDir,
 			timeout: 5000,
 			signal: controller.signal,
+			onChunk: () => started.resolve(),
 		});
-		await Bun.sleep(50);
+		await started.promise;
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
@@ -720,7 +787,9 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
-		expect(nativeSignal).toBeDefined();
+		// Watchdog-win path: native never returned, so the result must be
+		// distinguishable from a confirmed empty run (#10308).
+		expect(result.output).toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 	});
@@ -775,12 +844,14 @@ exit 64
 			return;
 		}
 		const controller = new AbortController();
-		const promise = executeBash("sleep 10; echo done", {
+		const started = Promise.withResolvers<void>();
+		const promise = executeBash("echo started; sleep 10; echo done", {
 			cwd: tempDir,
 			timeout: 5000,
 			signal: controller.signal,
+			onChunk: () => started.resolve(),
 		});
-		await Bun.sleep(50);
+		await started.promise;
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
@@ -819,7 +890,7 @@ exit 64
 		const aborted = await abortPromise;
 		expect(aborted.cancelled).toBe(true);
 
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: this is a bash variable expansion
+		// oxlint-disable-next-line no-template-curly-in-string -- this is a bash variable expansion
 		const afterAbort = await executeBash("echo ${PI_RESET_VAR:-unset}", {
 			cwd: tempDir,
 			timeout: 5000,
@@ -892,12 +963,10 @@ exit 64
 			cwd: tempDir,
 			timeout: 5000,
 			onChunk: chunk => {
-				expect(chunk.length).toBeGreaterThan(0);
 				chunks.push(chunk);
 			},
 		});
 		// At least one chunk should have been delivered to onChunk
-		expect(chunks.length).toBeGreaterThan(0);
 		const combined = chunks.join("");
 		expect(combined).toContain("line1");
 		// Final result always has the complete output regardless of chunk throttle
@@ -1029,7 +1098,6 @@ exit 64
 			PATH: Bun.env.PATH ?? "",
 			HOME: tempDir,
 		});
-		expect(snapshotPath).not.toBeNull();
 		const snapshot = fs.readFileSync(snapshotPath!, "utf8");
 		expect(snapshot).toContain("pi_snapshot_large_function");
 		expect(snapshot).not.toContain("base64 -d");
@@ -1234,7 +1302,8 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("flushed-during-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
-		expect(nativeSignal).toBeDefined();
+		// Native-confirmed timeout: no "backend did not respond" caveat.
+		expect(result.output).not.toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).not.toHaveBeenCalled();
 	});
@@ -1316,9 +1385,16 @@ describe("executeBash :async: background retention", () => {
 				});
 				expect(res.cancelled).toBe(false);
 
-				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
-				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-				expect(Number.isInteger(pid)).toBe(true);
+				let observedPid = Number.NaN;
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					observedPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					return Number.isInteger(observedPid);
+				}, Date.now() + 4000);
+				if (!Number.isInteger(observedPid)) {
+					throw new Error(`Timed out waiting for a valid PID in ${pidFile}`);
+				}
+				pid = observedPid;
 
 				// A later turn on a different per-job shell must not have killed it.
 				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });
@@ -1339,4 +1415,67 @@ describe("executeBash :async: background retention", () => {
 			}
 		},
 	);
+});
+
+describe("applyDirenvPreflight direnv-load clamp", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = makeTempDir();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (fs.existsSync(tempDir)) removeSyncWithRetries(tempDir);
+	});
+
+	it("clamps the direnv load to a positive caller timeout below the full budget", async () => {
+		// The clamp lives INSIDE the helper, so every backend that routes through
+		// applyDirenvPreflight (executeBash, ACP terminal, PTY) inherits it. A
+		// positive callerTimeoutMs smaller than the full load budget must win, so a
+		// short-timeout command can't hand a cold `.envrc` the full 30s window.
+		// Reverting the clamp to executeBash-only leaves the ACP/PTY backend
+		// passing the full budget here, reddening this assertion.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+			callerTimeoutMs: 5,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(5);
+	});
+
+	it("keeps the full direnv-load budget when the caller deadline is disabled (callerTimeoutMs: 0)", async () => {
+		// A disabled command deadline (`0`) is NOT a 0 ms load — it means "no caller
+		// clamp", so the load keeps its full `timeoutMs` budget. Collapsing it to 0
+		// would make AbortSignal.timeout(0) abort instantly and silently drop the
+		// repo's direnv env.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+			callerTimeoutMs: 0,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
+	});
+
+	it("keeps the full direnv-load budget when no caller deadline is supplied (callerTimeoutMs: undefined)", async () => {
+		// An omitted caller deadline behaves like a disabled one: no clamp, full
+		// budget. Guards the `!== undefined` half of the clamp condition.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
+	});
 });

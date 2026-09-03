@@ -34,6 +34,8 @@ import { formatContextUsage } from "./status-line/context-thresholds";
 
 export interface AgentTranscriptViewerDeps {
 	agentId: string;
+	/** Persisted entry to reveal on first paint when opened from an activity row. */
+	initialEntryId?: string;
 	registry: AgentRegistry;
 	/** Collab guest: read transcript from the host instead of a local file. */
 	remote?: AgentHubRemote;
@@ -43,6 +45,8 @@ export interface AgentTranscriptViewerDeps {
 	lifecycle?: () => AgentLifecycleManager;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
+	/** Whether the active registry entry came from a built-in factory. */
+	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
@@ -156,11 +160,14 @@ export class AgentTranscriptViewer implements Component {
 	#model: string | undefined;
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
+	#initialEntryId: string | undefined;
 
 	constructor(private readonly deps: AgentTranscriptViewerDeps) {
+		this.#initialEntryId = deps.initialEntryId;
 		this.#builder = new ChatTranscriptBuilder({
 			ui: deps.ui,
 			getTool: deps.getTool,
+			isBuiltInTool: deps.isBuiltInTool,
 			getMessageRenderer: deps.getMessageRenderer,
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
@@ -182,10 +189,10 @@ export class AgentTranscriptViewer implements Component {
 		this.#pollTimer.unref?.();
 	}
 
-	/** Advisor transcripts are read-only; everything else may be messaged. */
+	/** Advisor and aborted-agent transcripts are read-only. */
 	get #sendable(): boolean {
 		const ref = this.deps.registry.get(this.deps.agentId);
-		if (!ref || ref.kind === "advisor") return false;
+		if (!ref || ref.kind === "advisor" || ref.status === "aborted") return false;
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 
@@ -577,7 +584,16 @@ export class AgentTranscriptViewer implements Component {
 			: this.#builder.container.render(contentWidth);
 		this.#scrollView.setLines(contentLines);
 		this.#scrollView.setHeight(viewportHeight);
-		if (this.#followBottom) this.#scrollView.scrollToBottom();
+		if (this.#initialEntryId) {
+			const targetRow = this.#builder.rowForEntry(this.#initialEntryId);
+			if (targetRow !== undefined) {
+				this.#followBottom = false;
+				this.#scrollView.setScrollOffset(Math.max(0, targetRow - 1));
+				this.#initialEntryId = undefined;
+			}
+		} else if (this.#followBottom) {
+			this.#scrollView.scrollToBottom();
+		}
 
 		const lines: string[] = [];
 		lines.push(...new DynamicBorder().render(width));
@@ -613,9 +629,7 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#statsLine(): string {
-		const observed: ObservableSession | undefined = this.deps.observers
-			?.getSessions()
-			.find(s => s.id === this.deps.agentId);
+		const observed: ObservableSession | undefined = this.deps.observers?.getSession(this.deps.agentId);
 		const progress = observed?.progress;
 		if (!progress) return "";
 		const stats: string[] = [];

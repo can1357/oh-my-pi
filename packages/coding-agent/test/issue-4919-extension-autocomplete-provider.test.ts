@@ -17,11 +17,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import type { AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { ModelRegistry } from "../src/config/model-registry";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { loadExtensions } from "../src/extensibility/extensions/loader";

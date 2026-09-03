@@ -2,12 +2,21 @@
 # .dockerignore for this file only. Robomp uses Dockerfile.robomp +
 # Dockerfile.robomp.dockerignore alongside.
 
-# Heavy build outputs — must never reach the build context. `target/` alone is
-# >100 GB on a dev machine.
-target/
+# Heavy build outputs — must never reach the build context. Patterns are
+# depth-agnostic (`**/`) to match .gitignore semantics: dockerignore anchors
+# bare `target/`/`dist/` at the context root only, which leaked
+# packages/*/dist (~600 MB) and go-port/*/target (~1.4 GB) into every build.
+# `bazel-*` symlinks point at the bazel output base.
+**/target/
+bazel-*
 **/node_modules
-dist/
+**/dist/
 runs/
+.xwin-cache/
+packages/coding-agent/binaries/
+packages/natives/npm/
+**/.cache/
+packages/snapcompact/research/results/
 
 # Per-host scratch the pi codebase uses for parallel agents / worktrees.
 .fallow/
@@ -39,18 +48,20 @@ runs/
 CPU.*
 
 # Build / test side outputs.
-*.tsbuildinfo
-coverage/
+**/*.tsbuildinfo
+**/coverage/
 .nyc_output/
-__pycache__/
+**/__pycache__/
 compaction-results/
 changes/
 
 # Generated files (the in-image build regenerates them).
 packages/coding-agent/src/internal-urls/docs-index.generated.ts
 packages/natives/native/.build/
-packages/natives/native/pi_natives.darwin-*.node
-packages/natives/native/pi_natives.dev.node
+# Every host-built addon: natives-builder compiles its own, and a stale host
+# `pi_natives.linux-*.node` riding in would be copied to /out alongside it.
+# (Also drops the ~760 MB of dev addons a working checkout accumulates.)
+**/*.node
 packages/ai/test/.temp-images/
 python/omp-rpc/src/omp_rpc.egg-info/
 python/robomp/data/
@@ -64,5 +75,9 @@ out.jsonl
 out.html
 pi-*.html
 
-# Secrets. Should never be in the image regardless.
-.env
+# Host virtualenvs — the image installs its own interpreter deps.
+**/.venv/
+
+# Secrets. Should never be in the image regardless. Depth-agnostic: a bare
+# `.env` misses `python/robomp/.env`, which `COPY . /pi/` would bake in.
+**/.env

@@ -159,13 +159,8 @@ describe("openPath", () => {
 			// on Windows boxes where the machine PATH no longer references
 			// System32.
 			expect(call?.cmd[0]).toBe(powershellPath);
-			expect(call?.cmd.slice(1, -1)).toEqual([
-				"-NoProfile",
-				"-NonInteractive",
-				"-WindowStyle",
-				"Hidden",
-				"-EncodedCommand",
-			]);
+			expect(call?.cmd.slice(1, -1)).toEqual(["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+			expect(call?.options.windowsHide).toBe(true);
 			// The target rides inside the UTF-16LE payload: no cmd/PowerShell
 			// metacharacter parsing ever sees the `&` in the query string, and the
 			// terminating error preference makes Start-Process failures exit 1 so

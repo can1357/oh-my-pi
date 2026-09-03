@@ -582,7 +582,7 @@ function renderGeneric(text: string, lines: string[], expanded: boolean, theme: 
 		for (let i = 0; i < lines.length; i++) {
 			const isLast = i === lines.length - 1;
 			const branch = isLast ? theme.tree.last : theme.tree.branch;
-			output += `\n ${theme.fg("dim", branch)} ${lines[i]}`;
+			output += `\n ${theme.fg("dim", branch)} ${truncateToWidth(replaceTabs(lines[i]), TRUNCATE_LENGTHS.CONTENT)}`;
 		}
 		return output.split("\n");
 	}

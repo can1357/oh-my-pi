@@ -11,10 +11,11 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
+import { parseExportArgs } from "../../export/html/args";
 import { shareSession } from "../../export/share";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
@@ -27,8 +28,8 @@ import {
 	seedAlreadyExists,
 	summarizeMentalModel,
 } from "../../hindsight";
-import { resolveMemoryBackend } from "../../memory-backend";
-import { BashExecutionComponent } from "../../modes/components/bash-execution";
+import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
+import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
@@ -43,8 +44,15 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
+import {
+	createSessionWorktree,
+	defaultSessionWorktreeBranch,
+	formatSessionWorktreeSummary,
+	type SessionWorktree,
+} from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
+import { formatProviderName } from "../../slash-commands/helpers/format";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
@@ -57,6 +65,10 @@ import {
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+
+function formatCreditValue(value: number): string {
+	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
 
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	const block = new TranscriptBlock();
@@ -71,25 +83,91 @@ function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown:
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
+	async #restoreAfterMoveFailure(
+		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
+		initialError?: unknown,
+	): Promise<void> {
+		if (initialError !== undefined) {
+			this.ctx.showError(
+				`Failed to switch workspace: ${initialError instanceof Error ? initialError.message : String(initialError)}`,
+			);
+		}
+
+		try {
+			await this.ctx.sessionManager.rollbackMove(previousState);
+		} catch (rollbackError) {
+			const actual = this.ctx.sessionManager.getCwd();
+			let realigned = false;
+			try {
+				realigned = await this.ctx.applyCwdChange(actual);
+			} catch {}
+			if (!realigned) {
+				this.ctx.showError(
+					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
+				);
+				await this.ctx.shutdown();
+				return;
+			}
+			this.ctx.showError(
+				`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (workspace remains at ${actual})`,
+			);
+			return;
+		}
+
+		let sourceRestored = false;
+		try {
+			sourceRestored = await this.ctx.applyCwdChange(previousState.cwd);
+		} catch {}
+		if (sourceRestored) return;
+
+		const actual = this.ctx.sessionManager.getCwd();
+		let realigned = false;
+		try {
+			realigned = await this.ctx.applyCwdChange(actual);
+		} catch {}
+		if (!realigned) {
+			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
+			await this.ctx.shutdown();
+			return;
+		}
+		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
+	}
+
 	openInBrowser(urlOrPath: string): void {
 		openPath(urlOrPath);
 	}
 
 	async handleExportCommand(text: string): Promise<void> {
-		const parts = text.split(/\s+/);
-		const arg = parts.length > 1 ? parts[1] : undefined;
-
-		if (arg === "--copy" || arg === "clipboard" || arg === "copy") {
-			this.ctx.showWarning("Use /dump to copy the session to clipboard.");
-			return;
-		}
-
 		try {
-			const filePath = await this.ctx.session.exportToHtml(arg);
+			const { outputPath, useUserThemes } = parseExportArgs(text.slice("/export".length));
+			if (outputPath === "--copy" || outputPath === "clipboard" || outputPath === "copy") {
+				this.ctx.showWarning("Use /dump to copy the session to clipboard.");
+				return;
+			}
+
+			const filePath = await this.ctx.session.exportToHtml(outputPath, useUserThemes);
 			this.ctx.showStatus(`Session exported to: ${filePath}`);
 			this.openInBrowser(filePath);
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+	async handleTraceCommand(): Promise<void> {
+		const sessionFile = this.ctx.session.sessionFile;
+		if (!sessionFile) {
+			this.ctx.showWarning("No session file yet — send a message first.");
+			return;
+		}
+		try {
+			// Lazy: the stats dashboard (server + sqlite) loads on demand only,
+			// matching src/cli/stats-cli.ts, to keep CLI startup fast.
+			const { formatStatsDashboardUrl, startServer } = await import("@oh-my-pi/omp-stats");
+			const { hostname, port } = await startServer();
+			const url = `${formatStatsDashboardUrl(hostname, port)}/#/traces?s=${encodeURIComponent(sessionFile)}`;
+			this.openInBrowser(url);
+			this.ctx.showStatus(`Trace: ${url}`);
+		} catch (error: unknown) {
+			this.ctx.showError(`Failed to open trace: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
 
@@ -253,9 +331,9 @@ export class CommandController {
 				: this.ctx.session.sessionManager.getUsageStatistics().premiumRequests;
 		const normalizedPremiumRequests = Math.round((premiumRequests + Number.EPSILON) * 100) / 100;
 
-		let info = `${theme.bold("Session Info")}\n\n`;
+		let info = "";
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
-		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
+		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
 		info += `\n${theme.bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
@@ -278,6 +356,14 @@ export class CommandController {
 				providerSessionState: this.ctx.session.providerSessionState,
 			});
 			info += renderProviderSection(providerDetails, theme);
+			if (stats.routedModels !== undefined) {
+				const routed = Object.entries(stats.routedModels)
+					.sort(([aId, aCount], [bId, bCount]) => bCount - aCount || aId.localeCompare(bId))
+					.map(
+						([id, count]) => `${replaceTabs(sanitizeText(id))}${count > 1 ? theme.fg("dim", ` ×${count}`) : ""}`,
+					);
+				info += `${theme.fg("dim", "Served:")} ${routed.join(", ")}\n`;
+			}
 		}
 		info += `\n`;
 		info += `${theme.bold("Messages")}\n`;
@@ -306,13 +392,18 @@ export class CommandController {
 		}
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0) {
+		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
 			info += `\n${theme.bold("Cost")}\n`;
 			if (stats.cost > 0) {
 				info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
 			}
 			if (normalizedPremiumRequests > 0) {
 				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
+			}
+			if (stats.credits !== undefined) {
+				info += `${theme.fg("dim", "Credits:")} ${formatCreditValue(stats.credits.cost)}\n`;
+				info += `${theme.fg("dim", "Committed Credits:")} ${formatCreditValue(stats.credits.committedCost)}\n`;
+				info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
 			}
 		}
 
@@ -347,7 +438,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.present([new Spacer(1), new Text(info, 1, 0)]);
+		this.ctx.showSessionInfo(info);
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
@@ -369,7 +460,7 @@ export class CommandController {
 	async handleAdvisorStatusCommand(): Promise<void> {
 		const stats = this.ctx.session.getAdvisorStats();
 		if (!stats.configured) {
-			this.ctx.present([new Spacer(1), new Text("Advisor is disabled.", 1, 0)]);
+			this.ctx.presentCommandOutput([new Spacer(1), new Text("Advisor is disabled.", 1, 0)]);
 			return;
 		}
 		// Fetch live quota data (cached 5 min by the auth-gateway) so we can show
@@ -435,7 +526,7 @@ export class CommandController {
 				info += `${theme.fg("dim", "Tokens:")} ${stats.tokens.total.toLocaleString()}\n`;
 				if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
 			}
-			this.ctx.present([new Spacer(1), new Text(info, 1, 0)]);
+			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 			return;
 		}
 		// Single active advisor — detailed view.
@@ -481,7 +572,7 @@ export class CommandController {
 			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
 		}
 		if (stats.cost > 0) info += `${theme.fg("dim", "Cost:")} $${stats.cost.toFixed(4)}\n`;
-		this.ctx.present([new Spacer(1), new Text(info, 1, 0)]);
+		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 	}
 
 	async handleJobsCommand(): Promise<void> {
@@ -498,7 +589,7 @@ export class CommandController {
 
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
 			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.present([new Spacer(1), new Text(info, 1, 0)]);
+			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 			return;
 		}
 
@@ -518,7 +609,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.present([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
+		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -542,18 +633,7 @@ export class CommandController {
 			return;
 		}
 
-		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
-		const currentProvider = this.ctx.session.model?.provider;
-		const activeAccount = currentProvider
-			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-					currentProvider,
-					this.ctx.session.sessionId,
-				)
-			: undefined;
-		const output = renderUsageReports(usageReports, theme, Date.now(), availableWidth, provider =>
-			provider === currentProvider ? activeAccount : undefined,
-		);
-		this.ctx.present([new Spacer(1), new Text(output, 1, 0)]);
+		this.ctx.showUsageDashboard(usageReports);
 	}
 
 	async handleChangelogCommand(showFull = false): Promise<void> {
@@ -573,7 +653,7 @@ export class CommandController {
 		block.addChild(new Spacer(1));
 		block.addChild(new Markdown(changelogMarkdown + hint, 1, 1, getMarkdownTheme()));
 		block.addChild(new DynamicBorder());
-		this.ctx.present(block);
+		this.ctx.presentCommandOutput(block);
 	}
 
 	handleHotkeysCommand(): void {
@@ -602,7 +682,7 @@ export class CommandController {
 		block.addChild(new Spacer(1));
 		block.addChild(new Text(output, 1, 0));
 		block.addChild(new DynamicBorder());
-		this.ctx.present(block);
+		this.ctx.presentCommandOutput(block);
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -623,7 +703,7 @@ export class CommandController {
 			block.addChild(new Spacer(1));
 			block.addChild(new Markdown(payload, 1, 1, getMarkdownTheme()));
 			block.addChild(new DynamicBorder());
-			this.ctx.present(block);
+			this.ctx.presentCommandOutput(block);
 			return;
 		}
 
@@ -647,13 +727,40 @@ export class CommandController {
 			}
 			return;
 		}
+		if (action === "queue") {
+			try {
+				const payload = await backend.queuePreview?.({
+					agentDir,
+					cwd: this.ctx.sessionManager.getCwd(),
+					session: this.ctx.session,
+				});
+				if (!payload) {
+					this.ctx.showWarning(`Memory queue is not available for the ${backend.id} backend.`);
+					return;
+				}
+				showMarkdownPanel(this.ctx, "Memory Queue", payload);
+			} catch (error) {
+				this.ctx.showError(`Memory queue failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
+
+		if (action === "sync") {
+			try {
+				await backend.enqueue(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
+				this.ctx.showStatus("Memory consolidation ran.");
+			} catch (error) {
+				this.ctx.showError(`Memory sync failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
 
 		if (action === "stats" || action === "diagnose") {
 			const hook = action === "stats" ? backend.stats : backend.diagnose;
 			try {
 				const payload = await hook?.(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
 				if (!payload) {
-					this.ctx.showWarning(`Memory ${action} is not available for the ${backend.id} backend.`);
+					this.ctx.showWarning(memoryStatsUnavailableMessage(backend.id, action));
 					return;
 				}
 				showMarkdownPanel(this.ctx, `Memory ${action === "stats" ? "Stats" : "Diagnostics"}`, payload);
@@ -668,7 +775,7 @@ export class CommandController {
 			return;
 		}
 
-		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|mm ...>");
+		this.ctx.showError("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild|queue|sync|mm ...>");
 	}
 
 	async #handleMentalModelsSubcommand(argumentText: string): Promise<void> {
@@ -956,6 +1063,37 @@ export class CommandController {
 		this.ctx.showStatus(`Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`);
 	}
 
+	async handleResetContextCommand(): Promise<void> {
+		if (this.ctx.session.isCompacting) {
+			this.ctx.session.abortCompaction();
+			while (this.ctx.session.isCompacting) {
+				await Bun.sleep(10);
+			}
+		}
+		const result = await this.ctx.session.resetSessionContext();
+		if (!result) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before resetting the context.");
+			return;
+		}
+		// Drop the rendered transcript so the UI matches the now-empty model
+		// context (mirrors #runNewSessionFlow's teardown, minus the new session —
+		// the session id, title, and transcript file all survive).
+		this.ctx.clearTransientSessionUi();
+		this.ctx.resetTranscript();
+		this.ctx.statusLine.invalidate();
+		this.ctx.updateEditorBorderColor();
+		const noun = result.droppedCount === 1 ? "message" : "messages";
+		this.ctx.present([
+			new Spacer(1),
+			new Text(
+				`${theme.fg("accent", `${theme.status.success} Context reset — ${result.droppedCount} ${noun} dropped; session continues.`)}`,
+				1,
+				1,
+			),
+		]);
+		this.ctx.ui.requestRender(true, { clearScrollback: true });
+	}
+
 	async handleDropCommand(): Promise<void> {
 		if (!this.ctx.sessionManager.getSessionFile()) {
 			this.ctx.showError("Nothing to drop (in-memory session)");
@@ -1060,29 +1198,96 @@ export class CommandController {
 				return;
 			}
 		}
+		if (await this.#relocateSession(resolvedPath)) {
+			this.ctx.present([
+				new Spacer(1),
+				new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
+			]);
+		}
+	}
+
+	/**
+	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
+	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along,
+	 * then relocate the session there like `/move`.
+	 */
+	async handleWorktreeCommand(branch?: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before creating a worktree.");
+			return;
+		}
+		const branchName = branch?.trim() || defaultSessionWorktreeBranch();
+		const cwd = this.ctx.sessionManager.getCwd();
+		this.ctx.statusContainer.disposeChildren();
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			`Creating worktree on ${branchName}…`,
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(loader);
+		this.ctx.ui.requestRender();
+		let worktree: SessionWorktree;
+		try {
+			worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName);
+		} catch (err) {
+			this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		} finally {
+			loader.stop();
+			this.ctx.statusContainer.disposeChildren();
+		}
+		if (worktree.cloneError) {
+			logger.warn("worktree clone fell back to plain checkout", { path: worktree.path, error: worktree.cloneError });
+		}
+		if (await this.#relocateSession(worktree.path)) {
+			this.ctx.present([
+				new Spacer(1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree)}`)}`,
+					1,
+					1,
+				),
+			]);
+		}
+	}
+
+	/**
+	 * Move the session and process cwd to an existing directory, rolling back
+	 * on failure. Returns true when the session now lives at `resolvedPath`.
+	 */
+	async #relocateSession(resolvedPath: string): Promise<boolean> {
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
 			this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
 
+		const previousState = this.ctx.sessionManager.captureState();
 		try {
-			await this.ctx.sessionManager.moveTo(resolvedPath);
+			await this.ctx.session.moveSession(resolvedPath);
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
-			return;
+			return false;
 		}
-		await this.ctx.applyCwdChange(resolvedPath);
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return false;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return false;
+		}
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender();
-
-		this.ctx.present([
-			new Spacer(1),
-			new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
-		]);
+		return true;
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
@@ -1125,7 +1330,16 @@ export class CommandController {
 						this.ctx.bashComponent.appendOutput(chunk);
 					}
 				},
-				{ excludeFromContext, useUserShell: true },
+				{
+					excludeFromContext,
+					useUserShell: true,
+					// User-shell zsh/fish `!` commands run on a headless PTY; raw
+					// bytes render through the component's vterm replay (color-safe).
+					pty: {
+						...bashPtyViewport(this.ctx.ui),
+						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+					},
+				},
 			);
 			if (this.ctx.bashComponent) {
 				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
@@ -1155,8 +1369,20 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		const previousState = this.ctx.sessionManager.captureState();
 		await this.ctx.sessionManager.moveTo(resolvedPath);
-		await this.ctx.applyCwdChange(resolvedPath);
+		let applied = false;
+		try {
+			applied = await this.ctx.applyCwdChange(resolvedPath);
+		} catch (error) {
+			await this.#restoreAfterMoveFailure(previousState, error);
+			return;
+		}
+		if (!applied) {
+			await this.#restoreAfterMoveFailure(previousState);
+			return;
+		}
+
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
 	}
@@ -1247,8 +1473,9 @@ export class CommandController {
 	}
 
 	/**
-	 * TUI handler for `/shake`. `elide` drops heavy structural content and
-	 * `images` strips image blocks. Rebuilds the chat and reports counts.
+	 * TUI handler for `/shake`. `elide` drops heavy structural content,
+	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
+	 * Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -1259,7 +1486,11 @@ export class CommandController {
 			return;
 		}
 
-		const dropped = result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0);
+		const dropped =
+			result.toolResultsDropped +
+			result.blocksDropped +
+			(result.imagesDropped ?? 0) +
+			(result.thinkingBlocksDropped ?? 0);
 		if (dropped === 0) {
 			this.ctx.showStatus("Nothing to shake.");
 			return;
@@ -1376,7 +1607,8 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 
 		try {
-			// Handoff generation runs as a oneshot request; the new session is shown after it completes.
+			// Handoff generation runs as a oneshot request; the document is then
+			// committed as a compaction entry on this session.
 			const result = await this.ctx.session.handoff(customInstructions);
 
 			if (!result) {
@@ -1384,25 +1616,35 @@ export class CommandController {
 				return;
 			}
 
-			// Rebuild chat from the new session (which now contains the handoff document).
+			// Rebuild chat from the session, which now shows the handoff compaction divider.
 			this.ctx.clearTransientSessionUi();
-			this.ctx.renderInitialMessages();
+			await this.ctx.renderInitialMessages();
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
 			await this.ctx.reloadTodos();
 
 			this.ctx.present([
 				new Spacer(1),
-				new Text(`${theme.fg("accent", `${theme.status.success} New session started with handoff context`)}`, 1, 1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} Context handed off and compacted in place`)}`,
+					1,
+					1,
+				),
 			]);
 			if (result.savedPath) {
 				this.ctx.showStatus(`Handoff document saved to: ${result.savedPath}`);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (message === "Handoff cancelled" || (error instanceof Error && error.name === "AbortError")) {
+			// `session.handoff()` normalizes genuine cancellations to this exact message; a
+			// provider error (even one named AbortError) is re-thrown verbatim so it surfaces
+			// as a real failure instead of a false "cancelled".
+			if (message === "Handoff cancelled") {
 				this.ctx.showError("Handoff cancelled");
 			} else {
+				// Persist the real failure so it is debuggable after the transient
+				// TUI error clears (#7993).
+				logger.error("Handoff failed", { error: message });
 				this.ctx.showError(`Handoff failed: ${message}`);
 			}
 		} finally {
@@ -1441,13 +1683,6 @@ function truncateJobLabel(label: string, maxWidth: number): string {
 	}
 
 	return `${out}…`;
-}
-
-function formatProviderName(provider: string): string {
-	return provider
-		.split(/[-_]/g)
-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
-		.join(" ");
 }
 
 function formatNumber(value: number, maxFractionDigits = 1): string {
@@ -1593,11 +1828,28 @@ function padColumn(text: string, width: number): string {
 	return `${text}${padding(width - visible)}`;
 }
 
-function resolveAggregateStatus(limits: UsageLimit[]): UsageLimit["status"] {
+type AggregateDisplayStatus = NonNullable<UsageLimit["status"]> | "neutral";
+
+function isUsedOnlyAbsoluteAmount(limit: UsageLimit): boolean {
+	const amount = limit.amount;
+	return (
+		amount.unit !== "percent" &&
+		amount.unit !== "unknown" &&
+		amount.used !== undefined &&
+		Number.isFinite(amount.used) &&
+		amount.limit === undefined &&
+		amount.remaining === undefined &&
+		resolveUsedFraction(limit) === undefined
+	);
+}
+
+function resolveAggregateStatus(limits: UsageLimit[]): AggregateDisplayStatus {
 	const hasOk = limits.some(limit => limit.status === "ok");
 	const hasWarning = limits.some(limit => limit.status === "warning");
 	const hasExhausted = limits.some(limit => limit.status === "exhausted");
-	if (!hasOk && !hasWarning && !hasExhausted) return "unknown";
+	if (!hasOk && !hasWarning && !hasExhausted) {
+		return limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount) ? "neutral" : "unknown";
+	}
 	if (hasOk) {
 		return hasWarning || hasExhausted ? "warning" : "ok";
 	}
@@ -1625,6 +1877,8 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 		return `${formatNumber(remainingPct)}% free`;
 	}
 
+	if (limits.length > 0 && limits.every(isUsedOnlyAbsoluteAmount)) return "";
+
 	// Count unique accounts from limit scopes — not limits.length.
 	const uniqueAccountIds = new Set(
 		limits.map(limit => limit.scope.accountId).filter((id): id is string => typeof id === "string" && id.length > 0),
@@ -1636,17 +1890,24 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 }
 
 function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
-	const absolute = limits
-		.map(limit => limit.window?.resetsAt)
-		.filter((value): value is number => value !== undefined && Number.isFinite(value) && value > nowMs);
-	if (absolute.length === 0) return null;
-	const offsets = absolute.map(value => value - nowMs);
+	const windows = limits
+		.map(limit => limit.window)
+		.filter(
+			(window): window is NonNullable<UsageLimit["window"]> =>
+				window?.resetsAt !== undefined && Number.isFinite(window.resetsAt) && window.resetsAt > nowMs,
+		);
+	if (windows.length === 0) return null;
+	// Use the shared verb when every contributing window agrees (e.g. all "tick");
+	// mixed or absent labels fall back to the generic "resets".
+	const labels = new Set(windows.map(window => window.resetLabel ?? "resets"));
+	const verb = labels.size === 1 ? [...labels][0]! : "resets";
+	const offsets = windows.map(window => window.resetsAt! - nowMs);
 	const minReset = Math.min(...offsets);
 	const maxReset = Math.max(...offsets);
 	if (maxReset - minReset > 60_000) {
-		return `resets in ${formatDuration(minReset)}–${formatDuration(maxReset)}`;
+		return `${verb} in ${formatDuration(minReset)}–${formatDuration(maxReset)}`;
 	}
-	return `resets in ${formatDuration(minReset)}`;
+	return `${verb} in ${formatDuration(minReset)}`;
 }
 /**
  * Compact one-line quota summary for a single advisor's provider.
@@ -1700,7 +1961,8 @@ export function formatCompactQuota(
 	return `Quota: ${lines.join(" │ ")}`;
 }
 
-function resolveStatusIcon(status: UsageLimit["status"], uiTheme: typeof theme): string {
+function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: typeof theme): string {
+	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
 	if (status === "exhausted") return uiTheme.fg("error", uiTheme.status.error);
 	if (status === "warning") return uiTheme.fg("warning", uiTheme.status.warning);
 	if (status === "ok") return uiTheme.fg("success", uiTheme.status.success);
@@ -1715,6 +1977,14 @@ function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning"
 }
 
 function renderUsageBar(limit: UsageLimit, uiTheme: typeof theme, barWidth: number): string {
+	const usedAmount = limit.amount.used;
+	if (usedAmount !== undefined && isUsedOnlyAbsoluteAmount(limit)) {
+		const used =
+			limit.amount.unit === "usd"
+				? `$${usedAmount.toFixed(2)}`
+				: `${formatNumber(usedAmount, 2)} ${limit.amount.unit}`;
+		return uiTheme.fg("dim", truncateJobLabel(`${used} used`, barWidth));
+	}
 	const fraction = resolveUsedFraction(limit);
 	if (fraction === undefined) {
 		return uiTheme.fg("dim", "·".repeat(barWidth));
@@ -1752,6 +2022,7 @@ export function renderUsageReports(
 	nowMs: number,
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
+	usageModelSelectors: readonly string[] = [],
 ): string {
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
@@ -1804,6 +2075,13 @@ export function renderUsageReports(
 		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
 		if (activeAccountLabel) {
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
+		}
+		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
+		if (reportingModels.length > 0) {
+			lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
+			for (const selector of reportingModels) {
+				lines.push(`    ${replaceTabs(truncateToWidth(sanitizeText(selector), availableWidth - 4))}`);
+			}
 		}
 
 		// Provider-wide disclaimers (e.g. "OMP-observed spend only") render once

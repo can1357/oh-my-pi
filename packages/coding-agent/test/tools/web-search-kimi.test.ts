@@ -110,3 +110,50 @@ describe("searchKimi credential resolution", () => {
 		});
 	});
 });
+
+describe("searchKimi query directives", () => {
+	afterEach(() => {
+		restoreSearchApiKeyEnv();
+		vi.restoreAllMocks();
+	});
+
+	function captureBodyFetch(capture: { body?: { text_query?: string } }): FetchImpl {
+		return (_url, init) => {
+			capture.body = JSON.parse(String(init?.body)) as { text_query?: string };
+			return Promise.resolve(
+				new Response(JSON.stringify({ search_results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
+	}
+
+	it("sends directive-free queries upstream unchanged", async () => {
+		process.env.KIMI_SEARCH_API_KEY = "test-key";
+		const capture: { body?: { text_query?: string } } = {};
+		await withLocalAuthStorage(async authStorage => {
+			await searchKimi({ query: "bun test runner docs", authStorage, fetch: captureBodyFetch(capture) });
+		});
+		expect(capture.body?.text_query).toBe("bun test runner docs");
+	});
+
+	it("rebuilds directive queries with Bing-style operators and drops date directives", async () => {
+		process.env.KIMI_SEARCH_API_KEY = "test-key";
+		const capture: { body?: { text_query?: string } } = {};
+		await withLocalAuthStorage(async authStorage => {
+			await searchKimi({
+				query: 'site:github.com intitle:changelog filetype:md after:2024-01-01 "bun runtime" -deprecated',
+				authStorage,
+				fetch: captureBodyFetch(capture),
+			});
+		});
+		const sent = capture.body?.text_query ?? "";
+		expect(sent).toContain("site:github.com");
+		expect(sent).toContain("intitle:changelog");
+		expect(sent).toContain("filetype:md");
+		expect(sent).toContain('"bun runtime"');
+		expect(sent).toContain("-deprecated");
+		expect(sent).not.toContain("after:");
+	});
+});

@@ -19,10 +19,10 @@
  *               → brush-core::execute_external_command (the patched code)
  *                 → spawned child reports getsid()/getpid()
  *
- * The assistant's first turn is a scripted `bash` tool call asking Python to
- * print `getsid(0) getpid()`. The second scripted turn is a stop. After the
- * loop settles, we extract the child's session ID from the persisted
- * `toolResult` message and compare it against the test runner's session ID.
+ * The assistant's first turn is one scripted `bash` tool call that runs both
+ * the session-ID probe and a two-stage pipeline. The second scripted turn is a
+ * stop. We inspect the resulting `toolResult` for the child's session identity
+ * and the pipeline's output.
  *
  * Pre-fix (`new_pg=false` skipped `detach_session()`), the spawned child
  * inherits the test runner's session, so `child_sid === host_sid`.
@@ -47,11 +47,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { BashTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /** Scripted assistant turn that issues a single `bash` tool call. */
 function bashCall(command: string, callId: string): MockResponse {
@@ -136,7 +137,7 @@ describe("BashTool through AgentSession runs children in their own session (e2e)
 		// developer's real config (snapshots, shell prefix, etc).
 		await Settings.init({ inMemory: true, cwd: tempDir });
 
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -206,19 +207,22 @@ describe("BashTool through AgentSession runs children in their own session (e2e)
 		resetSettingsForTest();
 	});
 
-	it.skipIf(skip)("spawned child runs as its own session leader, not in the host's session", async () => {
-		const callId = "call_bash_probe";
-		scriptedResponses = [bashCall(PYTHON_PROBE, callId), stopReply("ok")];
+	it.skipIf(skip)("preserves detached children and pipeline execution through BashTool", async () => {
+		const callId = "call_bash_lifecycle";
+		const command =
+			`${PYTHON_PROBE}; ` +
+			"python3 -c \"print('stage_a')\" | " +
+			"python3 -c \"import sys; data=sys.stdin.read().strip(); print('stage_b', data)\"";
+		scriptedResponses = [bashCall(command, callId), stopReply("ok")];
 
-		await session.prompt("probe child session id");
-		await session.waitForIdle();
+		await session.prompt("probe child session id and pipeline");
 
 		const resultText = getToolResultText(session.agent.state.messages, callId);
-		expect(resultText, "expected a toolResult for the bash call").toBeDefined();
+		expect(resultText, "expected a toolResult for the bash lifecycle probe").toBeDefined();
 
-		// `executeBash` wraps its own metadata around the raw output. We only
-		// care about the `<sid> <pid>` line the Python probe emitted. Pull the
-		// first whitespace-separated pair of positive integers.
+		// The standalone probe covers the embedded-host DetachSession path. The
+		// following pipeline in the same real BashTool invocation guards against
+		// setsid breaking multi-process commands.
 		const match = resultText!.match(/(\d+)\s+(\d+)/);
 		expect(match, `expected '<sid> <pid>' in tool result, saw: ${JSON.stringify(resultText)}`).not.toBeNull();
 		const childSid = Number.parseInt(match![1]!, 10);
@@ -226,44 +230,13 @@ describe("BashTool through AgentSession runs children in their own session (e2e)
 
 		expect(childSid).toBeGreaterThan(0);
 		expect(childPid).toBeGreaterThan(0);
-
-		// Pre-fix behavior: child inherits host's session.
 		expect(
 			childSid,
 			`child sid (${childSid}) equals host sid (${hostSid}) — embedded-host detach regressed`,
 		).not.toBe(hostSid);
-
-		// Post-fix: brush ran setsid() so the child is its own session leader.
 		expect(childSid, `child sid (${childSid}) !== child pid (${childPid}) — child is not session leader`).toBe(
 			childPid,
 		);
-	});
-
-	it.skipIf(skip)("pipelines through BashTool still produce both stages' output (no setsid breakage)", async () => {
-		// Sanity check that the embedded-host detach (which calls `setsid` on solo
-		// children) does not break multi-process commands. The brush-core fix carves
-		// out the `in_pipeline_group` case in `child_session_action`; this test asserts
-		// that pipelines run end-to-end through the agent and produce both stages'
-		// output with exit code 0.
-		//
-		// Note: the `in_pipeline_group=true` branch is unreachable from a non-
-		// interactive embedded brush (every stage spawns with `process_group_id=None`
-		// and falls into the embedded-host `DetachSession` rule). The fact that the
-		// pipeline still works is the load-bearing assertion: `setsid` is benign for
-		// stages that are already kernel-default pgroup leaders. The pgroup carve-out
-		// matters only for the interactive shell path, which is unit-tested in the
-		// rust truth-table.
-		const callId = "call_bash_pipeline";
-		const command =
-			"python3 -c \"print('stage_a')\" | " +
-			"python3 -c \"import sys; data=sys.stdin.read().strip(); print('stage_b', data)\"";
-		scriptedResponses = [bashCall(command, callId), stopReply("ok")];
-
-		await session.prompt("probe pipeline");
-		await session.waitForIdle();
-
-		const resultText = getToolResultText(session.agent.state.messages, callId);
-		expect(resultText, "expected a toolResult for the pipeline bash call").toBeDefined();
 		expect(resultText, `pipeline output missing 'stage_b stage_a': ${JSON.stringify(resultText)}`).toContain(
 			"stage_b stage_a",
 		);

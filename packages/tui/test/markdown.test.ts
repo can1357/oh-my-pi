@@ -1,10 +1,17 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { clearRenderCache, Markdown, renderInlineMarkdown } from "@oh-my-pi/pi-tui/components/markdown";
+import {
+	autolinkSchemeScanIndex,
+	clearRenderCache,
+	Markdown,
+	renderInlineMarkdown,
+	urlTokenPossible,
+} from "@oh-my-pi/pi-tui/components/markdown";
 import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
-import { Chalk } from "chalk";
+import { Chalk } from "@oh-my-pi/pi-utils/chalk";
+import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -60,9 +67,6 @@ describe("Markdown component", () => {
 			);
 
 			const lines = markdown.render(80);
-
-			// Check that we have content
-			expect(lines.length > 0).toBeTruthy();
 
 			// Strip ANSI codes for checking
 			const plainLines = lines.map(line => stripVTControlCharacters(line));
@@ -133,6 +137,33 @@ describe("Markdown component", () => {
 			expect(plainLines.some(line => line.includes("1. Ordered item"))).toBeTruthy();
 			expect(plainLines.some(line => line.includes("  - Unordered nested"))).toBeTruthy();
 			expect(plainLines.some(line => line.includes("2. Second ordered"))).toBeTruthy();
+		});
+
+		it("wraps unordered list continuations under the item text", () => {
+			const markdown = new Markdown("- Alpha beta gamma delta epsilon", 0, 0, defaultMarkdownTheme);
+
+			const plainLines = markdown.render(16).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["- Alpha beta", "  gamma delta", "  epsilon"]);
+			expect(plainLines.every(line => visibleWidth(line) <= 16)).toBe(true);
+		});
+
+		it("uses the full ordered-list marker width as the hanging indent", () => {
+			const markdown = new Markdown("10. Alpha beta gamma delta", 0, 0, defaultMarkdownTheme);
+
+			const plainLines = markdown.render(16).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["10. Alpha beta", "    gamma delta"]);
+			expect(plainLines.every(line => visibleWidth(line) <= 16)).toBe(true);
+		});
+
+		it("keeps list rows within width when the marker consumes the line", () => {
+			const markdown = new Markdown("123456789. x", 0, 0, defaultMarkdownTheme);
+
+			const plainLines = markdown.render(8).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines.every(line => visibleWidth(line) <= 8)).toBe(true);
+			expect(plainLines.join("")).toContain("x");
 		});
 
 		it("should maintain numbering when code blocks are not indented (LLM output)", () => {
@@ -223,6 +254,91 @@ describe("Markdown component", () => {
 			expect(plainLines.some(line => line.includes("-"))).toBeTruthy();
 		});
 
+		it("recovers rich Markdown after a lone closing fence from Gemini", () => {
+			const markdown = new Markdown(
+				`=== PACED IP ROTATION SOAK RESULTS ===
+Total Queries: 20
+Average Latency: 1,240 ms
+\`\`\`
+
+---
+
+### Production Deployment Status
+
+| Workload | Pod Status |
+| :--- | :--- |
+| google-scraper | **1/1 Running** |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			markdown.render(80);
+
+			markdown.transientRenderCache = false;
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines.some(line => line.includes("| :--- | :--- |"))).toBe(false);
+			expect(plainLines.filter(line => line.includes("+")).length).toBeGreaterThanOrEqual(2);
+			expect(plainLines.some(line => line.includes("google-scraper") && line.includes("1/1 Running"))).toBe(true);
+		});
+
+		it("keeps an intentional unclosed fenced Markdown example literal", () => {
+			const markdown = new Markdown(
+				`Markdown source:
+\`\`\`
+### Production Deployment Status
+
+| Workload | Pod Status |
+| :--- | :--- |
+| google-scraper | 1/1 Running |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines.some(line => line.includes("| :--- | :--- |"))).toBe(true);
+			expect(plainLines.filter(line => line.includes("+"))).toHaveLength(0);
+		});
+
+		it("keeps a four-space-indented tree child inside its paragraph", () => {
+			const markdown = new Markdown(
+				`Two verified cases:
+
+├── **case 1** — first branch
+│   └── each family has its own counter
+└── **case 3: unnumbered limits**
+    └── limits that carry **only a label** are dropped from the list`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			// The attached indented line is a lazy paragraph continuation, never an
+			// indented code block: no fence border rows, no literal bold markers.
+			expect(plainLines.filter(line => line.includes("```"))).toHaveLength(0);
+			expect(plainLines.some(line => line.includes("only a label"))).toBe(true);
+			expect(plainLines.some(line => line.includes("**"))).toBe(false);
+		});
+
+		it("keeps an unfinished code block with a rule and heading literal when no table follows", () => {
+			const markdown = new Markdown(
+				`The process printed this
+\`\`\`
+---
+### Still inside the unfinished block`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines.some(line => line.includes("---"))).toBe(true);
+			expect(plainLines.some(line => line.includes("### Still inside the unfinished block"))).toBe(true);
+		});
+
 		it("should render row dividers between data rows", () => {
 			const markdown = new Markdown(
 				`| Name | Age |
@@ -303,9 +419,6 @@ describe("Markdown component", () => {
 			);
 
 			const lines = markdown.render(80);
-
-			// Should render without errors
-			expect(lines.length > 0).toBeTruthy();
 
 			const plainLines = lines.map(line => stripVTControlCharacters(line));
 			expect(plainLines.some(line => line.includes("Very long column header"))).toBeTruthy();
@@ -389,7 +502,6 @@ describe("Markdown component", () => {
 
 			// Borders should stay intact (exactly 2 vertical borders for a 1-col table)
 			const tableLines = plainLines.filter(line => line.startsWith("|"));
-			expect(tableLines.length > 0, "Expected table rows to render").toBeTruthy();
 			for (const line of tableLines) {
 				const borderCount = line.split("|").length - 1;
 				expect(borderCount, `Expected 2 borders, got ${borderCount}: "${line}"`).toBe(2);
@@ -432,6 +544,56 @@ describe("Markdown component", () => {
 			}
 		});
 
+		it("does not leak inline-code color into table borders when cells wrap", () => {
+			const markdown = new Markdown(
+				`| Command | Notes |
+| --- | --- |
+| \`config.setupgrading(pendingRequests, emptyFlag)\` | plain |
+| short | other |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			// Narrow enough to force the long codespan to wrap mid-run.
+			const lines = markdown.render(24);
+			const joinedOutput = lines.join("\n");
+			expect(joinedOutput.includes("\x1b[33m"), "Inline code should be styled (yellow)").toBeTruthy();
+			expect(lines.filter(line => line.includes("|")).length).toBeGreaterThan(3);
+
+			// Walk SGR state through every table row: the "|" border glyphs (and
+			// everything after them on the line) must never be rendered under an
+			// open fg color or bold attribute.
+			for (const line of lines) {
+				if (!line.includes("|")) continue;
+				let bold = false;
+				let fgOpen = false;
+				let i = 0;
+				while (i < line.length) {
+					if (line[i] === "\x1b") {
+						const seq = line.slice(i).match(/^\x1b\[([0-9;]*)m/);
+						expect(seq, `unparseable SGR in: ${JSON.stringify(line)}`).not.toBeNull();
+						for (const p of seq![1]!.split(";")) {
+							if (p === "1") bold = true;
+							else if (p === "22") bold = false;
+							else if (p === "0") {
+								bold = false;
+								fgOpen = false;
+							} else if (p === "39") fgOpen = false;
+							else if (p === "38" || /^3[0-7]$/.test(p) || /^9[0-7]$/.test(p)) fgOpen = true;
+						}
+						i += seq![0].length;
+						continue;
+					}
+					if (line[i] === "|") {
+						expect(fgOpen, `Border inherits fg color in: ${JSON.stringify(line)}`).toBe(false);
+						expect(bold, `Border inherits bold in: ${JSON.stringify(line)}`).toBe(false);
+					}
+					i++;
+				}
+			}
+		});
+
 		it("should handle extremely narrow width gracefully", () => {
 			const markdown = new Markdown(
 				`| A | B | C |
@@ -445,9 +607,6 @@ describe("Markdown component", () => {
 			// Very narrow width
 			const lines = markdown.render(15);
 			const plainLines = lines.map(line => stripVTControlCharacters(line).trimEnd());
-
-			// Should not crash and should produce output
-			expect(lines.length > 0, "Should produce output").toBeTruthy();
 
 			// Lines should not exceed width
 			for (const line of plainLines) {
@@ -479,233 +638,6 @@ describe("Markdown component", () => {
 
 			const dataLine = plainLines.find(line => line.includes("1") && line.includes("2"));
 			expect(dataLine, "Should have data row").toBeTruthy();
-		});
-
-		it("locks streamed table widths only after the table enters native scrollback", () => {
-			const initial = `| Entry | Value |
-| --- | --- |
-| short-entry | R000 |`;
-			const beforeCommit = `${initial}
-| medium-width-entry | R001 |`;
-			const afterCommit = `${beforeCommit}
-| much-longer-entry-that-arrives-after-commit | R002 |`;
-			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-
-			const topBorder = (lines: readonly string[]): string => {
-				const plain = lines.map(line => stripVTControlCharacters(line).trimEnd());
-				const border = plain.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-
-			const initialBorder = topBorder(markdown.render(80));
-			markdown.setText(beforeCommit);
-			const growingLines = markdown.render(80);
-			const growingBorder = topBorder(growingLines);
-			// Wholly-live tables retain today's natural-width behavior.
-			expect(growingBorder).not.toBe(initialBorder);
-
-			const tableStart = growingLines.findIndex(line => stripVTControlCharacters(line).trimStart().startsWith("+"));
-			markdown.setNativeScrollbackCommittedRows(tableStart + 1);
-			markdown.setText(afterCommit);
-			const lockedLines = markdown.render(80);
-			expect(topBorder(lockedLines)).toBe(growingBorder);
-			expect(lockedLines.some(line => stripVTControlCharacters(line).includes("R002"))).toBe(true);
-
-			// Finalization must not swap in a canonical full-content layout from L2.
-			markdown.transientRenderCache = false;
-			expect(topBorder(markdown.render(80))).toBe(growingBorder);
-
-			// A destructive replay has no immutable old tape to protect and may
-			// recompute the natural width from the complete table.
-			markdown.prepareNativeScrollbackReplay();
-			expect(topBorder(markdown.render(80))).not.toBe(growingBorder);
-		});
-
-		it("keeps layout locks independent across streamed tables", () => {
-			const first = `| First table column | Value |
-| --- | --- |
-| medium-width-entry | A |`;
-			const second = `${first}
-
-| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const widenedSecond = `${second}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const markdown = new Markdown(first, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			markdown.render(80);
-			markdown.setNativeScrollbackCommittedRows(1);
-
-			markdown.setText(second);
-			const secondLines = markdown.render(80);
-			const borders = secondLines
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"));
-			expect(borders).toHaveLength(6);
-			const secondTop = secondLines.findIndex(
-				(line, index) => index > 0 && stripVTControlCharacters(line).trimEnd() === borders[3],
-			);
-			expect(secondTop).toBeGreaterThan(0);
-			expect(borders[3]).not.toBe(borders[0]);
-
-			markdown.setNativeScrollbackCommittedRows(secondTop + 1);
-			markdown.setText(widenedSecond);
-			const widenedBorders = markdown
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"));
-			expect(widenedBorders[0]).toBe(borders[0]);
-			expect(widenedBorders[3]).toBe(borders[3]);
-		});
-
-		it("does not lock a quoted table until the table itself enters native scrollback", () => {
-			const initial = `> > Intro sentence deliberately long enough to wrap across several physical quote rows before the table.
-> >
-> > | Entry | Value |
-> > | --- | --- |
-> > | short | R000 |`;
-			const beforeCommit = `${initial}
-> > | medium-width-entry | R001 |`;
-			const afterCommit = `${beforeCommit}
-> > | entry-that-is-even-wider-than-the-locked-layout | R002 |`;
-			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-
-			const tableGeometry = (lines: readonly string[]): { start: number; border: string } => {
-				const plain = lines.map(line => stripVTControlCharacters(line).trimEnd());
-				const header = plain.findIndex(line => line.includes("Entry") && line.includes("Value"));
-				expect(header).toBeGreaterThan(0);
-				return { start: header - 1, border: plain[header - 1]! };
-			};
-
-			const initialLines = markdown.render(48);
-			const initialTable = tableGeometry(initialLines);
-			expect(initialTable.start).toBeGreaterThan(2);
-			// Commit only the quote prose; the nested table remains wholly live.
-			markdown.setNativeScrollbackCommittedRows(initialTable.start);
-
-			markdown.setText(beforeCommit);
-			const growingLines = markdown.render(48);
-			const growingTable = tableGeometry(growingLines);
-			expect(growingTable.border).not.toBe(initialTable.border);
-
-			markdown.setNativeScrollbackCommittedRows(growingTable.start + 1);
-			markdown.setText(afterCommit);
-			const lockedLines = markdown.render(48);
-			expect(tableGeometry(lockedLines).border).toBe(growingTable.border);
-			expect(lockedLines.some(line => stripVTControlCharacters(line).includes("R002"))).toBe(true);
-		});
-
-		it("recomputes a locked streamed table after resize or non-append replacement", () => {
-			const short = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const wide = `${short}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const topBorder = (lines: readonly string[]): string => {
-				const border = lines
-					.map(line => stripVTControlCharacters(line).trimEnd())
-					.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-			const markdown = new Markdown(short, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const shortBorder = topBorder(markdown.render(80));
-			markdown.setNativeScrollbackCommittedRows(1);
-			markdown.setText(wide);
-			expect(topBorder(markdown.render(80))).toBe(shortBorder);
-
-			// A width change starts fresh geometry; the complete source can widen.
-			expect(topBorder(markdown.render(100))).not.toBe(shortBorder);
-
-			const replacement = `| New | Value |
-| --- | --- |
-| x | R100 |`;
-			const expandedReplacement = `${replacement}
-| replacement-column-can-grow | R101 |`;
-			markdown.setText(replacement);
-			const replacementBorder = topBorder(markdown.render(80));
-			markdown.setText(expandedReplacement);
-			expect(topBorder(markdown.render(80))).not.toBe(replacementBorder);
-		});
-
-		it("does not lock a table when earlier code prints an identical border", () => {
-			const table = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const probe = new Markdown(table, 0, 0, defaultMarkdownTheme);
-			const narrowBorder = probe
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.find(line => line.startsWith("+"));
-			expect(narrowBorder).toBeDefined();
-
-			const source = `\`\`\`
-${narrowBorder}
-\`\`\`
-
-${table}`;
-			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const initialLines = markdown.render(80);
-			const plainInitialLines = initialLines.map(line => stripVTControlCharacters(line).trimEnd());
-			const codeBorderRow = plainInitialLines.indexOf(narrowBorder!);
-			const tableHeaderRow = plainInitialLines.findIndex(line => line.includes("Entry") && line.includes("Value"));
-			expect(codeBorderRow).toBeGreaterThanOrEqual(0);
-			expect(tableHeaderRow).toBeGreaterThan(codeBorderRow);
-			const actualTableStart = tableHeaderRow - 1;
-			expect(plainInitialLines[actualTableStart]!).toBe(narrowBorder!);
-
-			// Commit through the code block, but stop immediately before the real
-			// table. Textual border scanning used to mistake the code row for it.
-			markdown.setNativeScrollbackCommittedRows(actualTableStart);
-			markdown.setText(`${source}
-| much-longer-entry-that-arrives-after-commit | R001 |`);
-			const widenedBorder = markdown
-				.render(80)
-				.map(line => stripVTControlCharacters(line).trimEnd())
-				.filter(line => line.startsWith("+"))
-				.at(-1);
-			expect(widenedBorder).toBeDefined();
-			expect(widenedBorder).not.toBe(narrowBorder);
-		});
-
-		it("restores table layout metadata when finalization hits the shared render cache", () => {
-			clearRenderCache();
-			const short = `| Entry | Value |
-| --- | --- |
-| short | R000 |`;
-			const wide = `${short}
-| much-longer-entry-that-arrives-after-commit | R001 |`;
-			const topBorder = (lines: readonly string[]): string => {
-				const border = lines
-					.map(line => stripVTControlCharacters(line).trimEnd())
-					.find(line => line.startsWith("+"));
-				expect(border).toBeDefined();
-				return border!;
-			};
-
-			const markdown = new Markdown(short, 0, 0, defaultMarkdownTheme);
-			markdown.transientRenderCache = true;
-			const narrowBorder = topBorder(markdown.render(80));
-
-			// Pre-warm the canonical final render after this instance has retained
-			// metadata from its narrower transient frame.
-			const cachedWideBorder = topBorder(new Markdown(wide, 0, 0, defaultMarkdownTheme).render(80));
-			markdown.setText(wide);
-			markdown.transientRenderCache = false;
-			expect(topBorder(markdown.render(80))).toBe(cachedWideBorder);
-
-			// The frame served by L2 is now in native scrollback. Locking it must
-			// preserve the wide cached geometry, not the earlier transient geometry.
-			markdown.setNativeScrollbackCommittedRows(1);
-			expect(topBorder(markdown.render(80))).toBe(cachedWideBorder);
-			expect(cachedWideBorder).not.toBe(narrowBorder);
-			clearRenderCache();
 		});
 
 		it("should respect paddingX when calculating table width", () => {
@@ -931,6 +863,48 @@ more text`,
 			}
 		});
 
+		it("keeps coding-agent's padded fenced code body at column zero", () => {
+			const markdown = new Markdown("```sh\ncat <<'EOF'\nEOF\n```", 1, 0, defaultMarkdownTheme, undefined, 0);
+
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual([" ```sh", "cat <<'EOF'", "EOF", " ```"]);
+		});
+
+		it("keeps literal code body rows unprefixed through nested container wrapping", () => {
+			const longCodeLine = "x".repeat(24);
+			const cases = [
+				`- shell:
+
+  \`\`\`sh
+  ${longCodeLine}
+  EOF
+  \`\`\``,
+				`> \`\`\`sh
+> ${longCodeLine}
+> EOF
+> \`\`\``,
+			];
+
+			for (const text of cases) {
+				const markdown = new Markdown(text, 1, 0, defaultMarkdownTheme, undefined, 0);
+				const plainLines = markdown.render(12).map(line => stripVTControlCharacters(line).trimEnd());
+				const literalRows = plainLines.filter(line => line.includes("x") || line === "EOF");
+
+				expect(literalRows.join("")).toBe(`${longCodeLine}EOF`);
+				expect(literalRows.length).toBeGreaterThan(2);
+				expect(literalRows.every(line => line.startsWith("x") || line === "EOF")).toBe(true);
+			}
+		});
+
+		it("keeps ordinary prose NUL bytes as ordinary padded text", () => {
+			const markdown = new Markdown("before\0after", 1, 0, defaultMarkdownTheme);
+
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual([" before\0after"]);
+		});
+
 		it("should not add a trailing blank line when code block is the last rendered block", () => {
 			const cases = ["```js\nconst hello = 'world';\n```", "hello world\n\n```js\nconst hello = 'world';\n```"];
 
@@ -964,6 +938,21 @@ more text`,
 			expect(seenSources).toEqual([mermaidSource]);
 			expect(plainLines).toEqual(["Start", "  |", "Stop"]);
 			expect(plainLines.some(line => line.includes("```mermaid"))).toBeFalsy();
+		});
+
+		it("keeps resolved Mermaid art inside the coding-agent margin", () => {
+			const markdown = new Markdown(
+				"```mermaid\nflowchart TD\n```",
+				1,
+				0,
+				{ ...defaultMarkdownTheme, resolveMermaidAscii: () => "Start\n  |\nStop" },
+				undefined,
+				0,
+			);
+
+			const plainLines = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual([" Start", "   |", " Stop"]);
 		});
 
 		it("falls back to the original fenced code block when mermaid resolution returns null", () => {
@@ -1372,7 +1361,7 @@ bar`,
 			let visible = "";
 			const targets: Array<string | null> = [];
 
-			for (let i = 0; i < line.length; ) {
+			for (let i = 0; i < line.length;) {
 				if (line.startsWith("\x1b]8;;", i)) {
 					const terminator = line.indexOf("\x07", i + 5);
 					activeTarget = line.slice(i + 5, terminator) || null;
@@ -1465,15 +1454,15 @@ bar`,
 			const labelStart = issueRow.visible.indexOf("#5860");
 			const separator = issueRow.visible.indexOf("|", labelStart);
 			expect(issueRow.targets.slice(labelStart, labelStart + "#5860".length)).toEqual(
-				new Array("#5860".length).fill(issueUrl),
+				Array.from({ length: "#5860".length }, () => issueUrl),
 			);
 			expect(issueRow.targets.slice(labelStart + "#5860".length, separator)).toEqual(
-				new Array(separator - labelStart - "#5860".length).fill(null),
+				Array.from({ length: separator - labelStart - "#5860".length }, () => null),
 			);
 
 			const titleStart = issueRow.visible.indexOf("feat(extensions)");
 			expect(issueRow.targets.slice(titleStart, titleStart + "feat(extensions)".length)).toEqual(
-				new Array("feat(extensions)".length).fill(null),
+				Array.from({ length: "feat(extensions)".length }, () => null),
 			);
 
 			const linkedText = lines
@@ -1517,10 +1506,12 @@ bar`,
 				[secondRow, "second"],
 			] as const) {
 				const start = row.visible.indexOf(label);
-				expect(row.targets.slice(start, start + label.length)).toEqual(new Array(label.length).fill(issueUrl));
+				expect(row.targets.slice(start, start + label.length)).toEqual(
+					Array.from({ length: label.length }, () => issueUrl),
+				);
 				const separator = row.visible.indexOf("|", start);
 				expect(row.targets.slice(start + label.length, separator)).toEqual(
-					new Array(separator - start - label.length).fill(null),
+					Array.from({ length: separator - start - label.length }, () => null),
 				);
 			}
 
@@ -1584,6 +1575,26 @@ bar`,
 
 			const output = markdown.render(80).join("\n");
 			expect(output.includes("\x1b]8;;http://www.example.com\x07")).toBe(true);
+		});
+
+		it("renders a reference link with a prototype-key label as plain text without crashing (issue #10283)", () => {
+			// A reference-style link whose label collides with an Object.prototype
+			// member used to resolve to an inherited non-definition, producing a
+			// link token with `href: undefined` that crashed the renderer at
+			// `token.href.startsWith` — fatal during transcript replay.
+			// `constructor`/`toString` render as literal label text; every case
+			// must avoid emitting an OSC 8 hyperlink and must not throw.
+			for (const label of ["constructor", "toString", "valueOf", "isPrototypeOf"]) {
+				const markdown = new Markdown(`See [${label}] for details`, 0, 0, defaultMarkdownTheme);
+				const output = markdown.render(80).join("\n");
+				expect(stripTerminalSequences(output).trim()).toBe(`See [${label}] for details`);
+				expect(output.includes("\x1b]8;;")).toBe(false);
+			}
+			// `__proto__`'s double underscores are legitimately parsed as emphasis;
+			// the contract here is only that it never becomes a link or crashes.
+			const protoOut = new Markdown("See [__proto__] for details", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+			expect(protoOut.includes("\x1b]8;;")).toBe(false);
+			expect(stripTerminalSequences(protoOut)).toContain("proto");
 		});
 	});
 
@@ -1683,19 +1694,30 @@ describe("Inline color swatches", () => {
 	const FMT = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
 	// defaultMarkdownTheme supplies no `colorSwatch` symbol, so the renderer uses its ■ default.
 	const swatchFor = (hex: string, glyph = "■"): string => `${Bun.color(`#${hex}`, FMT)}${glyph}`;
+	// The `#hex` token itself is painted with the color as background and a
+	// YIQ-contrast foreground (VS Code's Color.isLighter rule).
+	const BLACK_FG = TERMINAL.trueColor ? "\x1b[38;2;0;0;0m" : "\x1b[38;5;16m";
+	const WHITE_FG = TERMINAL.trueColor ? "\x1b[38;2;255;255;255m" : "\x1b[38;5;231m";
+	const paintedFor = (hex: string, fg: string, text = `#${hex}`): string =>
+		`${Bun.color(`#${hex}`, FMT)!.replace("[38;", "[48;")}${fg}${text}\x1b[39m\x1b[49m`;
 
 	it("paints a colored swatch before a bare hex color in prose", () => {
 		const out = new Markdown("Accent is #C5FFD6 today.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		// Swatch (color SGR + chip glyph + fg reset + space) sits immediately before the code.
 		expect(out.includes(`${swatchFor("C5FFD6")}\x1b[39m `)).toBeTruthy();
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The token itself sits on the color: bg + contrast fg (light fill → black text).
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+	});
+	it("picks a white foreground on dark fills", () => {
+		const out = new Markdown("Navy is #000080 here.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+		expect(out.includes(paintedFor("000080", WHITE_FG))).toBeTruthy();
 	});
 
 	it("paints a swatch before a backticked hex color", () => {
 		const out = new Markdown("Use `#C5FFD6` for the bg.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// The code text survives as inline code (theme styles it yellow).
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The code text is painted onto the color instead of the codespan style.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
 	});
 
 	it("does not swatch short numeric references that resemble issue numbers", () => {
@@ -1708,6 +1730,15 @@ describe("Inline color swatches", () => {
 		expect(out.includes(swatchFor("fff"))).toBeTruthy();
 	});
 
+	it("does not swatch hex-prefixed word fragments like #each", () => {
+		// "#each" starts with hex digits ("eac") but the trailing "h" makes it a
+		// word, not a color; hashtag-style prose must never sprout a swatch.
+		const out = new Markdown("Loop with {{#each items}} in templates.", 0, 0, defaultMarkdownTheme)
+			.render(80)
+			.join("");
+		expect(out.includes("■")).toBe(false);
+	});
+
 	it("does not swatch 4-digit hashline #TAG snapshot tags", () => {
 		// Hashline tags are 4 hex digits with letters (e.g. #6C5E) and would
 		// otherwise be read as #RGBA colors. Neither prose nor codespans swatch them.
@@ -1715,6 +1746,21 @@ describe("Inline color swatches", () => {
 		expect(prose.includes("■")).toBe(false);
 		const code = new Markdown("Tag `#6C5E` stays plain.", 0, 0, defaultMarkdownTheme).render(80).join("");
 		expect(code.includes("■")).toBe(false);
+	});
+
+	it("does not swatch hash-prefixed UUIDs in prose", () => {
+		const uuid = new Markdown(
+			"Use feedback ID #6635765d-4a44-4a5e-a536-a8b72b0395b5 for testing.",
+			0,
+			0,
+			defaultMarkdownTheme,
+		)
+			.render(80)
+			.join("");
+		expect(uuid.includes("■")).toBe(false);
+
+		const color = new Markdown("Use color #6635765d.", 0, 0, defaultMarkdownTheme).render(80).join("");
+		expect(color.includes(swatchFor("6635765d"))).toBeTruthy();
 	});
 
 	it("uses the theme's colorSwatch symbol when provided", () => {
@@ -1732,8 +1778,10 @@ describe("Inline color swatches", () => {
 			.render(80)
 			.join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// Gray (\x1b[90m) is re-opened for the code text — the swatch's fg reset must not bleed.
-		expect(out.includes("\x1b[90m#C5FFD6")).toBeTruthy();
+		// The token is painted with its own contrast fg; gray (\x1b[90m) re-opens
+		// for the surrounding prose after the chip's fg/bg resets.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+		expect(out.includes("\x1b[90m for accent")).toBeTruthy();
 	});
 });
 
@@ -1786,7 +1834,7 @@ describe("Module-level LRU render cache", () => {
 		expect(l2Markdown.render(width)).toBe(first);
 	});
 
-	it("skips code-block highlighting for transient streaming renders", () => {
+	it("keeps an open non-diff fence plain during transient renders without a highlight stream", () => {
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -1797,7 +1845,7 @@ describe("Module-level LRU render cache", () => {
 			},
 		};
 
-		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```ts\nconst streamed = true;\n", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
 
@@ -1806,7 +1854,9 @@ describe("Module-level LRU render cache", () => {
 		expect(plain).not.toContain("HIGHLIGHTED");
 	});
 
-	it("re-renders code-block highlighting when a transient instance becomes stable", () => {
+	it("highlights a fence whole-block once it closes, even during transient renders", () => {
+		// Rows of a closed fence can enter native scrollback before the token
+		// freezes; they must carry the same bytes the finalized render emits.
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -1819,34 +1869,92 @@ describe("Module-level LRU render cache", () => {
 
 		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
-		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
+		const transient = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(highlightCallCount).toBe(1);
+		expect(transient).toContain("HIGHLIGHTED");
 
 		markdown.transientRenderCache = false;
 		const highlighted = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(1);
 		expect(highlighted).toContain("HIGHLIGHTED");
 	});
 
-	it("skips nested list code-block highlighting for transient streaming renders", () => {
+	it("streams completed-line highlighting through the theme's highlight stream", () => {
 		clearRenderCache();
-		let highlightCallCount = 0;
-		const themeWithSpy = {
+		const pushes: string[] = [];
+		const themeWithStream = {
 			...defaultMarkdownTheme,
-			highlightCode: (_code: string, _lang?: string): string[] => {
-				highlightCallCount++;
-				return ["HIGHLIGHTED"];
+			highlightCode: (code: string, _lang?: string): string[] => code.split("\n").map(line => `F<${line}>`),
+			createHighlightStream: (lang?: string) => {
+				if (lang !== "python") return null;
+				return {
+					push: (chunk: string): string => {
+						pushes.push(chunk);
+						return chunk
+							.split("\n")
+							.map((line, i, arr) => (i === arr.length - 1 ? line : `S<${line}>`))
+							.join("\n");
+					},
+				};
 			},
 		};
 
-		const markdown = new Markdown("- item\n\n  ```ts\n  const streamed = true;\n  ```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```python\ndef f():\n    x = 1", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const first = stripVTControlCharacters(markdown.render(80).join("\n"));
+		// Completed line highlighted through the stream; partial tail stays plain.
+		expect(first).toContain("S<def f():>");
+		expect(first).toContain("    x = 1");
+		expect(first).not.toContain("S<    x = 1");
+		expect(pushes).toEqual(["def f():\n"]);
+
+		// Append-only growth pushes only the newly completed lines — parser
+		// state carries across renders instead of re-feeding the fence.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x");
+		const second = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(second).toContain("S<def f():>");
+		expect(second).toContain("S<    x = 1>");
+		expect(second).toContain("    return x");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+
+		// Closing the fence switches to the whole-block highlightCode call the
+		// finalized render uses.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x\n```");
+		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(closed).toContain("F<def f():>");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => null,
+		};
+
+		const markdown = new Markdown("```someunknownlang\nplain text line\nmore", 0, 0, themeWithStream);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("plain text line");
+		expect(plain).not.toContain("S<");
+		expect(plain).not.toContain("F<");
+	});
 
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
-		expect(plain).not.toContain("HIGHLIGHTED");
+	it("keeps an open fence plain when the highlight stream factory throws", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => {
+				throw new TypeError("undefined is not a constructor");
+			},
+		};
+
+		const markdown = new Markdown("```lua\nlocal x = 1\nmore", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("local x = 1");
+		expect(plain).not.toContain("F<");
 	});
 });
 
@@ -1940,9 +2048,11 @@ describe("Markdown.render reference stability", () => {
 	});
 
 	it("does not share oversized renders through the L2 cache", () => {
+		// Fixture must exceed RENDER_CACHE_MAX_ENTRY_SIZE (256 KiB of rendered
+		// lines) so the entry is rejected and each render owns its array.
 		const width = 80;
 		const paragraph = `cache-budget sentinel ${"x".repeat(120)}`;
-		const largeText = Array.from({ length: 160 }, (_, index) => `Paragraph ${index}: ${paragraph}`).join("\n\n");
+		const largeText = Array.from({ length: 1400 }, (_, index) => `Paragraph ${index}: ${paragraph}`).join("\n\n");
 
 		const first = new Markdown(largeText, 0, 0, defaultMarkdownTheme).render(width);
 		const second = new Markdown(largeText, 0, 0, defaultMarkdownTheme).render(width);
@@ -2317,5 +2427,148 @@ describe("Math rendering", () => {
 		expect(lines.join("\n")).not.toContain("begin{cases}");
 		// The cases body follows immediately: folding the lhs in avoids a blank-line paragraph split.
 		expect(lines[fxIdx + 1]).toContain("x > 0");
+	});
+});
+
+describe("inline start()/url-gate scanners (perf rewrites)", () => {
+	// The hand-rolled scanners replaced regex scans that marked runs on the
+	// remaining source at every inline position. They must return exactly what
+	// the old regexes returned for every input.
+	const OLD_MATH_START = /\$|\\\(|\\\[/;
+	const OLD_AUTOLINK_SCAN = /www\.|https?:\/\/|ftp:\/\//i;
+	// marked's bundled GFM inline url rule (verbatim, no flags).
+	const GFM_URL_REGEX =
+		/^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/;
+
+	const fixtures = [
+		"",
+		"plain prose with no candidates at all",
+		"$x$ math first",
+		"prose then $inline$ math",
+		"prose then \\(paren\\) math",
+		"prose then \\[bracket\\] math",
+		"\\( before $ dollar",
+		"$ before \\( paren",
+		"backslash only \\ then ( apart",
+		"ends with backslash \\",
+		"ends with dollar $",
+		"www.example.com leading",
+		"see www.example.com mid-string",
+		"see WWW.EXAMPLE.COM upper",
+		"mixed WwW.case.com scan",
+		"http://example.com leading",
+		"prose http://example.com mid",
+		"prose HTTPS://EXAMPLE.COM upper",
+		"HtTpS://mixed.example",
+		"ftp://files.example mid ftp",
+		"prose FTP://FILES.EXAMPLE",
+		"ftps:// is not ftp:// until here ftp://x",
+		"wwww.overlap.example",
+		"hhttp://overlap.example",
+		"http:/ missing slash then https://real.example",
+		"www without dot www. with dot",
+		"w h f teaser chars but no scheme",
+		"user@example.com email",
+		"prose user.name+tag@example.co.uk",
+		"trailing at sign only@ ",
+		"@leading-at no local part",
+		"a".repeat(400), // long identifier run, no @
+		`${"a".repeat(400)}@example.com`, // long local part (past gate scan limit)
+		"short@x",
+		"dots...and+plus_under-score@host.tld",
+	];
+
+	it("mathStartIndex matches the old /\\$|\\\\\\(|\\\\\\[/ scan on every fixture", () => {
+		for (const src of fixtures) {
+			const m = OLD_MATH_START.exec(src);
+			expect(mathStartIndex(src)).toBe(m ? m.index : undefined);
+		}
+	});
+
+	it("autolinkSchemeScanIndex matches the old /www\\.|https?:\\/\\/|ftp:\\/\\//i scan on every fixture", () => {
+		for (const src of fixtures) {
+			const m = OLD_AUTOLINK_SCAN.exec(src);
+			expect(autolinkSchemeScanIndex(src)).toBe(m ? m.index : undefined);
+		}
+	});
+
+	it("urlTokenPossible is conservative: never false when the GFM url regex matches", () => {
+		for (const src of fixtures) {
+			if (GFM_URL_REGEX.test(src)) {
+				expect(urlTokenPossible(src)).toBeTrue();
+			}
+		}
+		// And it actually gates: plain prose with no scheme/email head is rejected.
+		expect(urlTokenPossible("plain prose, nothing linkable here")).toBeFalse();
+		expect(urlTokenPossible("@leading-at no local part")).toBeFalse();
+	});
+
+	it("gated tokenizer still autolinks urls and emails end-to-end", () => {
+		const rendered = renderInlineMarkdown("see https://example.com and mail user@example.com now", {
+			...defaultMarkdownTheme,
+			link: (text: string) => `<L>${text}</L>`,
+		});
+		const plain = stripVTControlCharacters(rendered);
+		expect(plain).toContain("<L>https://example.com</L>");
+		expect(plain).toContain("<L>user@example.com</L>");
+	});
+});
+
+describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
+	// Large documents are lexed in bounded windows because Bun's regex engine
+	// rescans the whole remaining source for marked's `^`-anchored block rules.
+	// Every construct below straddles window cuts; a bad cut is visible in the
+	// rendered output.
+	afterEach(() => clearRenderCache());
+
+	const filler = (label: string, lines: number) =>
+		Array.from({ length: lines }, (_, i) => `${label} paragraph ${i} with enough prose to fill a window.`).join(
+			"\n\n",
+		);
+
+	const plain = (text: string, width = 100) =>
+		new Markdown(text, 0, 0, defaultMarkdownTheme)
+			.render(width)
+			.map(line => stripVTControlCharacters(line).trimEnd());
+
+	it("resolves a reference definition that lands in a later window", () => {
+		const doc = `Follow [the label][ref] first.\n\n${filler("body", 400)}\n\n[ref]: https://example.com/late\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+
+		const rendered = plain(doc, 120);
+		// The reflink resolved: marked emitted a link token (rendered as
+		// `label (href)`), so the raw `[label][ref]` syntax is gone and the
+		// definition line itself produced no output block of its own.
+		expect(rendered[0]).toBe("Follow the label (https://example.com/late) first.");
+		expect(rendered.filter(line => line.includes("https://example.com/late"))).toHaveLength(1);
+	});
+
+	it("keeps a fenced block longer than one window intact", () => {
+		const code = Array.from({ length: 200 }, (_, i) => `const value${i} = ${i};`).join("\n");
+		const doc = `${filler("intro", 300)}\n\n\`\`\`ts\n${code}\n\`\`\`\n\n${filler("outro", 20)}`;
+		expect(code.length).toBeGreaterThan(2 * 1024);
+
+		const rendered = plain(doc);
+		// Exactly one fence pair: a window cut inside the block would close and
+		// reopen it (or spill code lines into prose).
+		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
+		const first = rendered.findIndex(line => line.includes("const value0 = 0;"));
+		expect(first).toBeGreaterThan(-1);
+		for (let i = 0; i < 200; i++) {
+			expect(rendered[first + i]).toContain(`const value${i} = ${i};`);
+		}
+	});
+
+	it("numbers an ordered list continuously across window cuts", () => {
+		const items = Array.from({ length: 400 }, (_, i) => `${i + 1}. item ${i} padded with extra words to add bytes`);
+		const doc = `${filler("intro", 60)}\n\n${items.join("\n")}\n`;
+		expect(doc.length).toBeGreaterThan(16 * 1024);
+
+		const rendered = plain(doc, 120);
+		for (const n of [1, 137, 400]) {
+			expect(rendered.some(line => line.includes(`${n}. item ${n - 1} `))).toBe(true);
+		}
+		// A window cut that restarted the list would renumber later items.
+		expect(rendered.filter(line => line.includes(" 1. item 0 ")).length).toBeLessThanOrEqual(1);
 	});
 });

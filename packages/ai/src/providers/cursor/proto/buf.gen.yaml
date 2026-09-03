@@ -1,6 +1,0 @@
-version: v2
-plugins:
-   - local: /work/pi/node_modules/.bin/protoc-gen-es
-     out: ../gen
-     opt:
-        - target=ts

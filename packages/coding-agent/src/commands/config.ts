@@ -1,15 +1,16 @@
 /**
  * Manage configuration settings.
  */
+
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { configHelp as commandHelp } from "../cli/command-help";
 import { type ConfigAction, type ConfigCommandArgs, runConfigCommand } from "../cli/config-cli";
 import { initTheme } from "../modes/theme/theme";
 
 const ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
 
 export default class Config extends Command {
-	static description = "Manage configuration settings";
-
+	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
 			description: "Config action",

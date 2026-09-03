@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type } from "arktype";
 
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
-// `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
+// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
 // `context`) is gated by the `task.batch` setting (default on, covered by
 // test/task/task-batch.test.ts).
 
@@ -61,7 +61,7 @@ describe("task spawn validation", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": false }),
+			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": false }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;

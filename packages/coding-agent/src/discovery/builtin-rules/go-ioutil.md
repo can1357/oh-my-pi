@@ -5,20 +5,20 @@ scope: "tool:edit(*.go), tool:write(*.go)"
 interruptMode: never
 ---
 
-`io/ioutil` has been deprecated since Go 1.16. Every function moved to `io` or `os` with the same behavior. Do not import it in new code.
+`io/ioutil`: deprecated since Go 1.16. All functions moved to `io` or `os`; same behavior except `ReadDir`. New code: NEVER import `io/ioutil`.
 
 ## Mapping
 
-| io/ioutil | Replacement |
-| --- | --- |
-| `ioutil.ReadAll` | `io.ReadAll` |
-| `ioutil.ReadFile` | `os.ReadFile` |
-| `ioutil.WriteFile` | `os.WriteFile` |
-| `ioutil.ReadDir` | `os.ReadDir` (returns `[]os.DirEntry`, not `[]os.FileInfo`) |
-| `ioutil.TempFile` | `os.CreateTemp` |
-| `ioutil.TempDir` | `os.MkdirTemp` |
-| `ioutil.NopCloser` | `io.NopCloser` |
-| `ioutil.Discard` | `io.Discard` |
+|io/ioutil|Replacement|
+|---|---|
+|`ioutil.ReadAll`|`io.ReadAll`|
+|`ioutil.ReadFile`|`os.ReadFile`|
+|`ioutil.WriteFile`|`os.WriteFile`|
+|`ioutil.ReadDir`|`os.ReadDir`|
+|`ioutil.TempFile`|`os.CreateTemp`|
+|`ioutil.TempDir`|`os.MkdirTemp`|
+|`ioutil.NopCloser`|`io.NopCloser`|
+|`ioutil.Discard`|`io.Discard`|
 
 ## Migration
 
@@ -34,4 +34,4 @@ data, err := os.ReadFile(path)
 _ = os.WriteFile(out, data, 0o644)
 ```
 
-`os.ReadDir` returns `[]os.DirEntry` rather than `[]os.FileInfo` — call `entry.Info()` if you need the old `FileInfo`. Everything else is a drop-in rename.
+`os.ReadDir`: returns `[]os.DirEntry`, not `[]os.FileInfo`; for old `FileInfo`, call `entry.Info()`. Other mappings: drop-in renames.

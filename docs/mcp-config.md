@@ -26,6 +26,21 @@ OMP also accepts fallback standalone files in the project root:
 
 Use `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want OMP to own the configuration. Use root `mcp.json` / `.mcp.json` only when you want a portable fallback file that other MCP clients may also read.
 
+### Imported tool configs
+
+OMP also translates these current tool-native sources:
+
+- Claude Code: `~/.claude.json`, `~/.claude/mcp.json`, and project `.claude/.mcp.json` / `.claude/mcp.json`
+- Codex: `~/.codex/config.toml` and `.codex/config.toml` (`[mcp_servers.*]`)
+- Gemini CLI: `~/.gemini/settings.json` and `.gemini/settings.json`
+- OpenCode: `~/.config/opencode/opencode.json` and project-root `opencode.json`
+- Cursor: `~/.cursor/mcp.json` and `.cursor/mcp.json`
+- Windsurf: `~/.codeium/windsurf/mcp_config.json` and `.windsurf/mcp_config.json`
+- VS Code: project-only `.vscode/mcp.json` using `mcp.servers`
+- installed Claude marketplace plugins and OMP extension packages that declare MCP servers
+
+For Claude Code, Codex, Gemini CLI, Cursor, and Windsurf, the project entry is encountered before its same-named user entry — matching OMP-native config, whose project entry precedes its active-profile user entry — so a project `enabled: false` suppresses a same-named user server. OpenCode currently encounters the user entry first. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
+
 ### Profiles
 
 Named profiles (`omp --profile <name>`, the `--alias` shortcut, or `OMP_PROFILE`/`PI_PROFILE`) isolate user-level MCP config. When a profile is active, the **user** scope resolves to the profile's agent directory instead of the default one:
@@ -74,20 +89,22 @@ Top-level keys:
 
 - `$schema` — optional JSON Schema URL for tooling
 - `mcpServers` — map of server name to server config
-- `disabledServers` — user-level denylist used to turn off discovered servers by name; runtime loading reads this list from the active profile's user MCP file (`~/.omp/agent/mcp.json`, or `~/.omp/profiles/<name>/agent/mcp.json` under a named profile)
+- `disabledServers` — active-profile user denylist; it hides a discovered server by name regardless of the source entry's `enabled` value
+- `enabledServers` — active-profile user allowlist; it can force-enable a same-named entry whose source says `enabled: false`, but `disabledServers` still wins
 
-Server names must match `^[a-zA-Z0-9_.-]{1,100}$`.
+The config writer accepts names up to 100 characters containing letters, numbers, `_`, `-`, `.`, and `:`. The bundled schema currently omits `:` from its name pattern, so an OMP-managed namespaced plugin entry such as `cloudflare:cloudflare-api` may be valid at runtime while an editor reports a schema error.
 
 ## Supported server fields
 
 Shared fields for every transport:
 
-- `enabled?: boolean` — skip this server when `false`
+- `enabled?: boolean` — skip this server when `false`, unless the active-profile user `enabledServers` allowlist names it
 - `timeout?: number` — MCP request timeout in milliseconds; `0` disables client-side MCP timeouts
-- `auth?: { ... }` — auth metadata used by OMP for OAuth/API-key flows
-- `oauth?: { ... }` — explicit OAuth client settings used during auth/reauth
+- `requestIdFormat?: "number" | "string"` — outgoing JSON-RPC request-id encoding; defaults to per-transport integers. `"string"` uses collision-resistant snowflake IDs. This OMP-specific field is read only from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages; configs translated from other tools ignore it.
+- `auth?: { ... }` — stored-credential metadata; managed credential injection is implemented for OAuth
+- `oauth?: { ... }` — explicit OAuth client and callback settings used during auth/reauth
 
-Set `OMP_MCP_TIMEOUT_MS=0` to disable the client-side timeout for every MCP server in the current process. Set it to a positive millisecond value, such as `OMP_MCP_TIMEOUT_MS=120000`, to apply one global timeout without editing each server entry.
+`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 
 ### `stdio` transport
 
@@ -187,7 +204,7 @@ OMP understands two auth-related objects.
 
 ```json
 {
-  "type": "oauth" | "apikey",
+  "type": "oauth",
   "credentialId": "optional-stored-credential-id",
   "tokenUrl": "optional-token-endpoint",
   "clientId": "optional-client-id",
@@ -196,13 +213,10 @@ OMP understands two auth-related objects.
 }
 ```
 
-Use this when OMP should remember how to rehydrate credentials for a server.
+For managed OAuth, `auth` tells OMP how to find and refresh a stored credential. Although `"apikey"` is an accepted `type`, it does not load or inject an API key from auth storage. Put API keys directly in stdio `env` or remote `headers` (prefer an environment-variable or `!command` indirection described below).
 
-You normally do not need to write this block: when OMP completes an OAuth flow
-for an `http`/`sse` server it stores the credential under a deterministic id
-derived from the active profile and server URL
-(`mcp_oauth:profile:<profile>:<url>`), with the refresh material embedded. Any
-config that points at the same URL — including a *definition-only* entry in a
+You normally do not need to write this block: when OMP completes an OAuth flow for an `http`/`sse` server, it stores the credential under a deterministic id derived from the active profile and server URL (`mcp_oauth:profile:<profile>:<url>`), with the refresh material embedded. Any
+config that points at the same URL — including a _definition-only_ entry in a
 shared project `mcp.json` with no `auth` block at all — resolves the active
 profile's own credential automatically, including when auth storage is backed by
 a shared auth broker. This is what makes project-scoped servers safe across
@@ -218,7 +232,7 @@ picks up local auth state. An explicitly
 configured `Authorization` header always wins over the url-keyed binding.
 
 The binding is per profile but not per project: once a profile has authorized
-a URL, *any* checkout whose `mcp.json` defines a server at that URL connects
+a URL, _any_ checkout whose `mcp.json` defines a server at that URL connects
 with that profile's credential automatically. Committed MCP definitions are
 trusted input — the same already applies to `stdio` entries, which run
 arbitrary commands — so review a repository's `mcp.json` before opening it
@@ -238,11 +252,9 @@ profile for untrusted checkouts.
 }
 ```
 
-Use this when the MCP server requires explicit OAuth client settings.
+Use `oauth` when the MCP server requires explicit OAuth client or callback settings. The callback listener defaults to port `3000` and path `/callback`; an HTTP loopback `redirectUri` supplies its own port/path unless explicitly overridden. An HTTPS loopback redirect requires a distinct `callbackPort` for the local HTTP listener behind your TLS terminator.
 
-`prompt` controls the OAuth `prompt` parameter sent with the authorization request. It defaults to `"consent"` so the provider always shows its consent/account screen — without it, a provider with an active browser session silently re-approves the same account, making it impossible to switch accounts or workspaces when reauthorizing (e.g. to use a different Linear workspace per OMP profile). Set it to `""` to omit the parameter for providers that reject it, or to another value the provider understands (e.g. `"select_account"`).
-
-Slack is the clearest current example. Slack's MCP server is hosted at `https://mcp.slack.com/mcp`, uses Streamable HTTP, and requires confidential OAuth with your Slack app's client credentials.
+`prompt` controls the OAuth `prompt` authorization parameter. By default OMP omits it, except that a requested `offline_access` scope defaults to `"consent"` so the provider can issue refresh access. Set it explicitly to a provider-supported value such as `"consent"` or `"select_account"`, or to `""` to force omission.
 
 Example:
 
@@ -387,9 +399,9 @@ Example:
 
 Before OMP launches a stdio server or makes an HTTP/SSE request, it resolves stdio `env` values and HTTP/SSE `headers` values like this:
 
-1. If a value starts with `!`, OMP runs the rest as a shell command with a 10s timeout and uses trimmed stdout.
+1. If a value starts with `!`, OMP runs the rest as a shell command with a 10s timeout and uses trimmed stdout. Successful results are cached for the lifetime of the process.
 2. If the command fails, times out, or prints only whitespace, that `env`/`headers` entry is omitted.
-3. Otherwise OMP checks whether the value names an environment variable.
+3. Otherwise OMP checks whether the whole value names an environment variable.
 4. If that environment variable is set to a non-empty value, OMP uses the environment value; otherwise it uses the string literally.
 
 Examples:
@@ -411,18 +423,22 @@ That means this is valid and convenient for local secrets:
 - `"Authorization": "Bearer hardcoded-token"` → use the literal value
 - `"Authorization": "!printf 'Bearer %s' \"$GITHUB_TOKEN\""` → build the header from a command
 
-## `disabledServers`
+## User-level enable and disable overrides
 
-`disabledServers` is read from the user config file (`~/.omp/agent/mcp.json`) when a server is discovered from any source and you want OMP to ignore it without editing that other tool's config.
+The active profile's user file supplies two cross-source overrides:
 
-Example:
+- `disabledServers` is the highest-precedence denylist. It hides a same-named server from any source.
+- `enabledServers` force-enables a same-named entry whose source has `enabled: false`; it cannot override `disabledServers`.
 
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
-  "disabledServers": ["github", "slack"]
+  "disabledServers": ["github"],
+  "enabledServers": ["tool-owned-server"]
 }
 ```
+
+`/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
 
 ## `/mcp add` vs editing JSON directly
 
@@ -440,6 +456,7 @@ After editing, use:
 - `/mcp list` to see which config file a server came from
 - `/mcp test <name>` to test a single server
 - `/mcp reconnect <name>` to reconnect one server without rediscovering all configs
+- `/mcp reauth <name>` to replace managed OAuth credentials, or `/mcp unauth <name>` to remove them
 - `/mcp resources`, `/mcp prompts`, and `/mcp notifications` to inspect non-tool MCP capabilities
 
 ## Validation rules OMP enforces
@@ -459,13 +476,26 @@ Practical implications:
 
 ## Discovery and precedence
 
-OMP does not merge duplicate server definitions across files. Discovery providers are prioritized, and the higher-priority definition wins. Separately, `disabledServers` from `~/.omp/agent/mcp.json` can suppress a discovered server by name.
+OMP loads providers in descending priority. The MCP-capable order is:
 
-In practice:
+1. OMP native config
+2. OMP extension packages
+3. Claude Code
+4. Claude marketplace plugins and Codex
+5. Gemini CLI
+6. OpenCode
+7. Cursor and Windsurf
+8. VS Code
+9. root `mcp.json` / `.mcp.json` fallback files
 
-- prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want an OMP-specific override
-- keep server names unique across tools when possible
-- use `disabledServers` in the user config when a third-party config keeps reintroducing a server you do not want
+The first definition wins. Duplicate names are not merged. A differently named definition is also shadowed when its transport, endpoint/command inputs, auth, and request-id mode are equivalent to a higher-priority definition.
+
+Within OMP native config, project `.omp/mcp.json` precedes `.omp/.mcp.json`, then the active profile's user `mcp.json` and `.mcp.json`. Root fallback `mcp.json` precedes root `.mcp.json`. In practice:
+
+- prefer `.omp/mcp.json` or the active profile's user `mcp.json` for an OMP-specific override
+- keep names and endpoint definitions unique across tools when possible
+- use the user `disabledServers` list when a third-party config keeps reintroducing an unwanted server
+- set `mcp.enableProjectConfig: false` to exclude every project-level source before deduplication, allowing a same-named user entry to survive
 
 ## Troubleshooting
 
@@ -489,6 +519,14 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 ### The server exists in another tool's config but not in OMP
 
 Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+
+### A namespaced server works but the editor rejects its name
+
+The runtime/config writer accepts `:` in names used by marketplace plugins. The bundled JSON schema's `propertyNames` pattern currently does not; this is a schema/runtime mismatch rather than a connection failure.
+
+### A config file is silently absent from the list
+
+Malformed JSON or a missing/invalid server map makes that provider contribute no entries from the file; depending on the provider, OMP records a discovery warning or logs the parse failure rather than failing the session. Correct the JSON shape, then run `/mcp reload` and `/mcp list`.
 
 ## References
 

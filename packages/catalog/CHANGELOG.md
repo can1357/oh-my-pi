@@ -2,6 +2,547 @@
 
 ## [Unreleased]
 
+## [18.1.5] - 2026-09-03
+
+### Added
+
+- Added the Abliteration (abliteration.ai) provider, including its documented abliterated-model catalog and live model discovery.
+- Added the GLM 5.3 Promo 50 model.
+- Added computer-use capability metadata to model configurations.
+- Added declarative provider authentication policies covering login, refresh, environment-key, and credential behavior, with generated compatibility data and typed accessors.
+
+### Changed
+
+- Gemini 3.8 Flash now supports reasoning modes and image inputs.
+- Updated the GitHub Copilot API version to 2026-08-01.
+- Reduced input pricing for the minimax/minimax-m2 model.
+- Renamed Meta Model API contributor SKUs to use the Muse Spark 1.x (C) naming.
+
+### Fixed
+
+- GitHub Copilot model discovery now respects the Copilot CLI identity, ensuring eligible enterprise and experimental models are available.
+- Fixed startup failures when discovering Bedrock-style Mistral Mixtral models.
+- Fixed Muse Spark 1.3 contributor models on OpenCode gateways so they use the correct Responses API route.
+- Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
+
+## [18.1.4] - 2026-09-02
+
+### Changed
+
+- Enabled Cursor tool schema projection for supported models
+
+### Fixed
+
+- Antigravity and Gemini CLI now collapse every Gemini Flash generation from 3.6 on (`gemini-3.8-flash-low/-medium/-high` and the `-tiered` alias, and future revisions) into one routed `gemini-<rev>-flash` entry via a revision-templated `variant-family`, instead of surfacing raw per-level ids until a per-revision rule lands.
+
+## [18.1.3] - 2026-09-02
+
+### Added
+
+- Added support for Claude Fable 5.1
+
+### Changed
+
+- Updated pricing and context limits for various Claude models
+
+### Fixed
+
+- Claude Sonnet 5 no longer advertises unsupported mid-conversation system messages.
+- Custom GLM 5.2 models on `alibaba-coding-plan` (and other blanket-GLM hosts) no longer crash startup with `AmbiguousOverlapError` ([#10553](https://github.com/can1357/oh-my-pi/issues/10553)).
+- Gemini 3.7 Flash no longer offers the `minimal` thinking effort on direct google-level hosts (`google`, `google-vertex`, `opencode-zen`), which reject `thinkingLevel: MINIMAL` with a 400; budget and reasoning-effort resellers keep the tier ([#10543](https://github.com/can1357/oh-my-pi/issues/10543)).
+- Fixed Alibaba Token Plan discovery for `qwen3.8-flash` to include its context limits, reasoning support, and image input.
+- Z.AI GLM-5.3-Flash now uses the native API instead of failing through the unsupported Anthropic-compatible route ([#10539](https://github.com/can1357/oh-my-pi/issues/10539)).
+
+## [18.1.2] - 2026-09-01
+
+### Added
+
+- Added support for turn-scoped system messages, changing tools during a conversation, and setting effort on individual messages.
+- Added support for Claude Fable 5.1 models, with improved thinking-prefix handling across supported Claude models.
+- Added DeepSeek V4 Flash Vision Exp, Mercury 2.5 Preview, and Xiaomi MiMo V2.5 Pro UltraSpeed models.
+
+### Changed
+
+- Updated model pricing and context-window limits.
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added GitLab Duo model support.
+- Added provider support for Llama.cpp, LM Studio, and Minimax.
+- Added catalog entries for Qwen 3.8 27B, Granite 4.2 8B, Abliterated variants, GLM 5.3, and Qwen 3.8 Flash Next.
+- Added compatibility metadata for context management and reasoning summaries on supported provider-compatible model endpoints.
+- Added the native ClinePass provider with live model discovery, subscription and free-tier model listings, current limits and pricing, model modalities, and per-model reasoning controls. Subscription models display API-equivalent pricing while free-tier models display as free.
+- Added native Devin provider discovery with current Cascade model capabilities, pricing, limits, reasoning controls, selector aliases, and model descriptions and recommendation/beta metadata. Added static SWE-1.6 defaults so the provider can resolve a default model before account-scoped discovery completes.
+- Added per-tier model pricing and long-context pricing support, along with expanded catalog metadata for model limits, API routes, input modalities, and provider-specific model aliases.
+
+### Changed
+
+- Updated pricing data across the catalog to reflect current provider rates.
+- Standardized model display names for greater consistency.
+- Improved model compatibility classification and variant selection using structured model identities, providing more reliable detection of model families, revisions, reasoning variants, and provider-specific capabilities.
+
+### Fixed
+
+- Fixed compatibility detection for vendor-prefixed GLM models on Mistral and Cerebras, restoring the appropriate tokenizer and reasoning-history behavior.
+- Removed an obsolete OpenCode provider entry that exposed unavailable Zen models in the model picker.
+- Fixed model revision detection for parameterized model IDs, including correct classification of Qwen, Fireworks Kimi, and Cursor-wrapped Grok models.
+- Fixed Kimi K3 reasoning-effort handling on OpenAI-compatible hosts such as LiteLLM and vLLM.
+- Fixed pricing for Codex Daybreak aliases, including worker variants.
+- Fixed reasoning-effort variants for local Ollama models and DeepSeek V4, and corrected prompt-cache support for applicable Bedrock Nova deployments.
+- Fixed Devin model variants with separate thinking and context-size options so all supported routing combinations and context limits are preserved.
+- Corrected Devin SWE-1.6 and SWE-1.6 Fast capability metadata so image attachments use the appropriate text-only fallback instead of being silently discarded.
+- Devin discovery now warns when the service returns an empty native model catalog, helping identify stale or incompatible CLI credentials.
+
+### Removed
+
+- Removed legacy DeepSeek V3 variants from the Novita catalog.
+
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed Baseten GLM models, including GLM-5.3-Flash, being incorrectly classified as non-reasoning models.
+- Fixed Cloudflare AI Gateway catalog refreshes so active Workers AI chat models, including newly released models, are discovered correctly.
+- Fixed Cursor Kimi K3, Grok 4, and Composer 2.5 models being incorrectly treated as text-only when they support image attachments.
+- Fixed OpenRouter routed model variants, including GLM-5.3 and dated DeepSeek V4 Pro, so their reasoning effort options are preserved correctly.
+- Fixed MiniMax-M3 max output regressing to the upstream 512K pricing-tier boundary; all MiniMax providers keep the documented 128K output cap.
+- Fixed GLM-5.3-Flash bundling the 50%-off launch promotion price; the catalog stays on the documented list price.
+- Fixed Synthetic model discovery re-adding image input from the bundled reference when the route advertises text-only modalities.
+
+## [18.0.9] - 2026-08-28
+
+### Added
+
+- Added Z.AI GLM-5.3-Flash to the bundled GLM Coding Plan catalog, with a 1M-token context window, 131,072-token output limit, native image input, and low/high/max thinking levels. It is now available through model discovery and the model picker.
+
+### Fixed
+
+- Fixed Google Antigravity Gemini 3.7 Flash tiered models failing with HTTP 400 errors at minimal or disabled thinking levels; those tiers now use the compatible Gemini 3.7 Flash model routing.
+- Fixed OpenCode Go and Zen GLM-5.3 Flash models exposing an unsupported extra-high reasoning level; they now use the supported low/high/max reasoning levels.
+- Fixed Cloudflare AI Gateway credential handling so stored credentials and routing metadata are parsed and used correctly.
+
+## [18.0.8] - 2026-08-27
+
+### Fixed
+
+- Fixed the thinking control mode for OpenAI models served over Bedrock Converse (`global.openai.gpt-5.6-luna`, `-sol`, `-terra`), which are now classified as `effort` rather than `budget` so requests use OpenAI's reasoning schema.
+- Fixed LiteLLM discovery leaking a colliding bundled model's provider-specific transport onto custom endpoints: a discovered alias (e.g. `kimi-k3`) matching a bundled Fireworks model no longer inherits that model's wire-id transform, which had caused requests to POST a model id the endpoint never advertised and return HTTP 400 ([#9938](https://github.com/can1357/oh-my-pi/issues/9938)).
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added cached background refresh from the shared models.dev catalog so newly published models for known providers can appear without a new OMP release, while bundled models remain the offline fallback.
+
+### Fixed
+
+- Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added built-in DeepInfra provider support (`deepinfra`, `DEEPINFRA_API_KEY`) with live model discovery, including chat models, context windows, pricing, cache-read pricing, vision input, and reasoning-effort capabilities.
+- Added built-in Yolo-Auto provider support with the flat-rate `deepseek-flash-v4` model and live model discovery.
+
+### Fixed
+
+- Fixed the Synthetic provider’s default model to use `hf:zai-org/GLM-5.2` instead of the retired `hf:zai-org/GLM-5.1`.
+
+## [18.0.4] - 2026-08-24
+
+### Fixed
+
+- Fixed default reasoning effort for `cursor/cursor-grok-4.5` and `cursor/cursor-grok-4.6` so requests without an explicit effort setting default to `-medium` instead of `-low`, preventing rate limit rejections on Cursor's Start plan ([#9478](https://github.com/can1357/oh-my-pi/issues/9478)).
+- Fixed aliased OpenCode Zen Ox Alpha models exposing incorrect effort levels, ensuring the gateway's native `low`, `high`, and `max` tiers are correctly mapped and reachable ([#9349](https://github.com/can1357/oh-my-pi/issues/9349)).
+- Fixed missing rate card tier for public xAI and SuperGrok models with prompt lengths exceeding 200K tokens ([#9512](https://github.com/can1357/oh-my-pi/issues/9512)).
+
+## [18.0.2] - 2026-08-23
+
+### Fixed
+
+- Fixed OpenRouter auxiliary requests (e.g. session-title generation) failing with `400 Reasoning is mandatory for this endpoint and cannot be disabled` on mandatory-reasoning models such as `stealth/ox-alpha`. Live discovery now honors the endpoint's `reasoning.mandatory` flag, clamping thinking-off to the lowest supported effort instead of sending `reasoning: { enabled: false }` ([#9415](https://github.com/can1357/oh-my-pi/issues/9415)).
+
+## [18.0.1] - 2026-08-23
+
+### Added
+
+- Fixed `google-gemini-cli` model refresh returning only bundled models for Gemini Code Assist Standard accounts, whose credential is not authorized for the Antigravity `fetchAvailableModels` endpoint (HTTP 403). Discovery now falls back to the account's own `retrieveUserQuota` list on Cloud Code Assist, surfacing models such as `gemini-3.5-flash` ([#9315](https://github.com/can1357/oh-my-pi/issues/9315)).
+- Added Amazon Bedrock guardrail metadata to model definitions for Converse requests.
+
+### Fixed
+
+- Fixed `opencode-go/ox-alpha-free` sending `reasoning_effort: "xhigh"` for the top thinking tier, which the OpenCode Go gateway rejects; the model now uses the gateway's wire-exact `low`/`high`/`max` ladder with mandatory thinking so `--thinking max` reaches the real max tier ([#9349](https://github.com/can1357/oh-my-pi/issues/9349)).
+- Fixed Venice-hosted Qwen models (e.g. `venice/qwen3-6-35b-a3b`) failing with `400 Invalid request parameters`. Reasoning levels now use the accepted OpenAI-style `reasoning_effort` field, while Thinking Off sends Venice's explicit `venice_parameters.disable_thinking` flag ([#9345](https://github.com/can1357/oh-my-pi/issues/9345)).
+- Fixed gateway-first OpenCode Zen and Go models missing context, output, image, and reasoning metadata by enriching live discovery from the current stencil catalog ([#9272](https://github.com/can1357/oh-my-pi/issues/9272)).
+- Fixed `opencode-go/deepseek-v4-flash` exposing the generic `minimal`/`low`/`medium`/`high`/`xhigh` thinking ladder instead of DeepSeek V4's real `low`/`high`/`max` tiers. The model is pinned to the Responses transport (the Go gateway serves it only at `/responses`), which the DeepSeek effort branch did not admit, so it fell through to the default ladder; the branch now covers the `openai-responses` transport like every other host ([#9134](https://github.com/can1357/oh-my-pi/issues/9134)).
+- Fixed protobuf map decoding corrupting entries when a key is `__proto__`, which dropped that argument and replayed spurious numeric arguments ([#9394](https://github.com/can1357/oh-my-pi/issues/9394)).
+
+## [18.0.0] - 2026-08-22
+
+### Added
+
+- Added model capability metadata for reversible private-use glyph tokenization on Claude-compatible models, so provider request handling can apply the compatibility layer without inferring from transport details.
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Added identification of provider-side image fetchers (OpenAI, Anthropic, xAI, Google), so a server hosting images by URL can attribute an inbound fetch to the vendor that issued it.
+
+### Fixed
+
+- Fixed Cursor model discovery showing separate picker rows for pure effort-suffixed models beyond GPT-5.6 by collapsing each standard and Fast lane into one reasoning-effort model ([#9237](https://github.com/can1357/oh-my-pi/issues/9237)).
+
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.
+
+### Changed
+
+- Preserved API-advertised `tool_mode` metadata (such as `code_mode_only` for GPT-5.6 Code Mode models) on Codex catalog models and types ([#9069](https://github.com/can1357/oh-my-pi/pull/9069)).
+- Added an optional `tokenizer` family field across bundled, discovered, and custom catalog models (`claude-v3`/`v47`/`v5`, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+), which can also be explicitly overridden in model configuration.
+- Updated subscription Codex GPT-5.6 Sol, Terra, and Luna models to include first-party `cost.longContext` pricing tiers for token inputs exceeding 272K tokens.
+
+### Fixed
+
+- Fixed Vercel AI Gateway Muse Spark 1.2 Contributor requests failing with HTTP 400 errors by capping advertised output allowances to the model's 131K limit.
+- Fixed LiteLLM model discovery to route OpenAI models through the Responses API for reasoning summaries in thinking blocks ([#9085](https://github.com/can1357/oh-my-pi/pull/9085)).
+- Fixed OpenCode Console Go and Zen Responses providers rejecting forced tool choices by automatically downgrading forced or named tool selections to `auto`.
+- Fixed OpenCode Go Muse Spark 1.2 and Muse Spark 1.2 Contributor models failing during tool calls or missing reasoning effort levels, ensuring they correctly route to the Responses API with full thinking, context, and multimodal support ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+- Improved OpenCode gateway model discovery to automatically infer the Responses API route for unlisted models from sibling gateways and billing base variants.
+- Fixed Cursor GPT-5.6 (Luna, Sol, and Terra) model discovery creating duplicate rows for each thinking tier by collapsing tiers into unified models with configurable reasoning effort ([#9025](https://github.com/can1357/oh-my-pi/issues/9025)).
+- Fixed Google Gemini CLI model discovery failing with `403 PERMISSION_DENIED` by directing catalog refresh requests to the appropriate Antigravity discovery endpoints ([#8885](https://github.com/can1357/oh-my-pi/issues/8885)).
+
+## [17.4.0] - 2026-08-20
+
+### Added
+
+- Models now include an optional `tokenizer` family field across bundled, discovered, and custom models (supporting Claude, Qwen, DeepSeek, Kimi, and GLM families), with support for explicit overrides in model configuration.
+- Added long-context cost tiers (`cost.longContext`) to subscription Codex GPT-5.6 models (Sol, Terra, Luna) matching first-party API pricing above 272K input tokens.
+
+### Changed
+
+- Bundled model metadata is prebuilt during generation, reducing catalog startup work.
+
+### Fixed
+
+- Fixed tool-call turn failures for `opencode-go/muse-spark-1.2` and related variants by ensuring API transport pins apply to live discovery and automatically inferring response routes for gateway-first OpenCode models ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+
+## [17.3.8] - 2026-08-19
+
+### Added
+
+- Added a Cursor variant-collapse table folding the per-effort Grok siblings (`cursor-grok-4.5` low/medium/high and `cursor-grok-4.6` low/medium/high/xhigh, plus their `-fast` service-tier lanes) into one logical model per lane with effort routing onto the live wire ids, matching Devin's `grok-4-5` collapse ([#8803](https://github.com/can1357/oh-my-pi/issues/8803)).
+- Regenerated the Cursor agent protobufs to model hosted WebFetch permission queries (`interaction_query` / `interaction_response` field 9) and the matching `ToolCall` variant (field 37).
+
+### Fixed
+
+- Fixed a physically corrupt `models.db` (`SQLITE_CORRUPT*` / `SQLITE_NOTADB`, "database disk image is malformed") permanently disabling the model cache. The shared read/write paths swallowed unrecoverable SQLite corruption as a best-effort miss and cached the broken handle, so a successful live catalog could never overwrite the corrupt cache and every later process repeated the miss — a runtime provider extension with no bundled catalog was left with only its bootstrap model. Corruption now self-heals: the cache closes the handle, quarantines `models.db`(+`-wal`/`-shm`) aside, recreates a fresh database, and retries the operation once; `SQLITE_BUSY`, permission, and unrelated errors keep their existing best-effort paths ([#8867](https://github.com/can1357/oh-my-pi/issues/8867)).
+- Fixed local Qwen 3.8+ models (llama.cpp, vLLM, loopback custom providers) exposing the generic `minimal..high` thinking ladder instead of the chat template's real `low`/`medium`/`xhigh` `reasoning_effort` tiers. The derived metadata now marks thinking as mandatory (the official 3.8 template raises on `enable_thinking: false`), vLLM-served Qwen routes through the `chat_template_kwargs` dialect (top-level `enable_thinking` is ignored by vLLM), and vLLM discovery lights up the reasoning dial for Qwen 3.8+ ids its `/v1/models` endpoint reports as non-reasoning.
+- Fixed `deepseek-v4-pro-0813` surfacing from Alibaba Token Plan discovery with `contextWindow`/`maxTokens` of `null`. The dated DeepSeek V4 Pro snapshot was missing from `ALIBABA_TOKEN_PLAN_DISCOVERED_MODEL_LIMITS`, so unlike its `deepseek-v4-flash-0731` sibling it fell through to unknown limits ([#8847](https://github.com/can1357/oh-my-pi/issues/8847)).
+- Cloud Code Assist Gemini 3.6/3.7 Flash no longer maps user `minimal` to wire `thinkingLevel: MINIMAL` when that effort is aliased onto the `-low` SKU. The request now sends `LOW`, which those SKUs accept.
+- Fixed SuperGrok (`xai-oauth`) Grok 4.6 hiding the thinking-level picker: the Responses effort-capable allowlist now includes `grok-4.6`, so `/model` can select the documented `low`/`medium`/`high`/`xhigh` ladder (`max` is rejected by api.x.ai).
+- Marked CoreWeave runtime discovery as authoritative so stale bundled model ids that the endpoint no longer serves stop appearing as selectable models.
+- ChatGPT Codex discovery that advertises only worker `-wm` SKUs now also registers the plain model route, so a configured `openai-codex/<model>` keeps resolving instead of fuzzy-falling-back to the `-wm` SKU some accounts reject.
+- Fixed `opencode-go/muse-spark-1.2` (and `muse-spark-1.2-contributor`) failing every tool-call turn with `OpenAI completions stream closed before a finish_reason was received`. The Go gateway serves these ids only at `/zen/go/v1/responses`, but the `/zen/go/v1/models` discovery omits the `provider.npm` hint, so the resolver fell through to `openai-completions`; both ids are now pinned to `openai-responses` like `deepseek-v4-flash` ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+- Fixed GitHub Copilot `grok-4.6` / `grok-4.6-1m` failing with HTTP 400 `unsupported_api_for_model` by routing them through the OpenAI Responses API (`/responses`) instead of `/chat/completions`, matching `grok-4.5`. Stale cached completion routes are invalidated on refresh ([#8807](https://github.com/can1357/oh-my-pi/issues/8807)).
+- Fixed Cursor Grok 4.5/4.6 discovery classifying the versioned ids as non-reasoning: `GetUsableModels` ships no `thinkingDetails` and the bundled references read `reasoning: false`, so the picker hid the effort ladder. Discovery now marks `cursor-grok-<version>` ids as reasoning models (the non-reasoning `grok-code-*` ids stay out) ([#8803](https://github.com/can1357/oh-my-pi/issues/8803)).
+- Fixed GMI Cloud (`gmi-cloud`) models resolved via `/v1/models` discovery surfacing with `null` context windows, zero pricing, and no reasoning/thinking metadata for every model except the bundled `deepseek-ai/DeepSeek-V4-Flash` seed. GMI's endpoint returns only bare `{id}` rows, so the mapper now recovers intrinsic capability metadata (context window, output limit, reasoning, thinking ladder) for resold open-weight models from the cross-provider canonical reference index — matching the SiliconFlow behavior — while never borrowing another provider's pricing ([#8890](https://github.com/can1357/oh-my-pi/issues/8890)).
+
+## [17.3.6] - 2026-08-17
+
+### Changed
+
+- Changed the paid xAI (XAI_API_KEY) and SuperGrok (xai-oauth) default models to grok-4.6.
+
+### Fixed
+
+- Raised the GPT-5.6 Sol/Terra/Luna context window on the Codex transport (openai-codex) from 372K to 1M tokens: OpenAI enabled the 1M window for subscription Codex on 2026-08-16, but the Codex model registry still reports the stale 272,000, so discovery now floors these SKUs at 1,000,000 instead of trusting the reported value ([openai/codex#38917](https://github.com/openai/codex/issues/38917)).
+
+## [17.3.5] - 2026-08-16
+
+### Added
+
+- Added support for GLM-5.3 on the z.AI provider, featuring a unified low/high/max reasoning-effort ladder across all hosts, mandatory thinking mode, 1M context, and default-model status for the z.AI provider.
+
+### Changed
+
+- Switched the paid xAI provider (xai / XAI_API_KEY) from Chat Completions to the OpenAI Responses API, aligning it with SuperGrok (xai-oauth) for prompt-cache affinity, reasoning-effort handling, and encrypted-reasoning replay.
+- Changed the paid xAI (XAI_API_KEY) default model to grok-4.5.
+- Changed the SuperGrok (xai-oauth) default model to grok-4.5.
+- Improved reasoning continuity for xAI models by requesting and replaying encrypted reasoning content across multi-turn Responses API calls.
+
+### Fixed
+
+- Fixed Codex Daybreak Blue and Red model discovery reporting zero token prices, which incorrectly labeled the models as free in the model picker.
+- Fixed Baseten's moonshotai/Kimi-K3 catalog metadata so its low/high/max thinking levels are available.
+- Fixed opencode-go/deepseek-v4-flash Responses requests sending forced named tool_choice selectors that are rejected while thinking mode is active.
+
+## [17.3.4] - 2026-08-14
+
+### Added
+
+- Added wire constants for Codex V2 remote-compaction feature negotiation.
+
+### Fixed
+
+- Fixed raw `COPILOT_GITHUB_TOKEN` credentials skipping plan-specific endpoint discovery, which routed GitHub Copilot Business model requests to the personal endpoint and returned HTTP 403. The GitHub Copilot model cache is now scoped per credential, so switching the token no longer serves another account's stale endpoint for the cache TTL ([#8507](https://github.com/can1357/oh-my-pi/issues/8507)).
+- Fixed the OpenRouter `deepseek/deepseek-v4-pro-0813` route silently clamping the reasoning effort to `high`: the dated SKU advertises (and accepts) the wire-exact `low`/`high`/`max` ladder, so its effort override no longer collapses to `high`-only. The undated `deepseek/deepseek-v4-pro` OpenRouter route stays `high`-only. ([#8517](https://github.com/can1357/oh-my-pi/issues/8517))
+
+## [17.3.2] - 2026-08-13
+
+### Added
+
+- Added support for the `deepseek-v4-pro:preview` model
+- Added support for the `gemini-3.7-flash` model
+- Added dynamic Antigravity client-version discovery from the official update manifest (darwin/arm64 channel), so version-gated models appear without a code change; `PI_AI_ANTIGRAVITY_VERSION` remains available as an override.
+
+### Fixed
+
+- Fixed Antigravity discovery missing Gemini 3.7 Flash: Cloud Code Assist gates newer models on the client version in the `User-Agent`, and the pinned `antigravity/hub/2.1.4` was too old. The user-agent now matches the captured 2.8.0 client format (`antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)`); os_type/arch stay pinned to the darwin/arm64 reference client. Overridable via `PI_AI_ANTIGRAVITY_VERSION` / `PI_AI_ANTIGRAVITY_CL` / `PI_AI_ANTIGRAVITY_OS` / `PI_AI_ANTIGRAVITY_ARCH`.
+
+### Removed
+
+- Removed `ANTIGRAVITY_SYSTEM_INSTRUCTION` from `wire/gemini-headers`; the Antigravity transport and web search no longer inject a fake identity prompt.
+
+## [17.3.1] - 2026-08-13
+
+### Added
+
+- Added dynamic Antigravity and Gemini CLI discovery support for Gemini 3.7 Flash, with low/medium/high thinking-level routing.
+
+### Changed
+
+- Updated model metadata, context windows, pricing, and configurations in the catalog
+
+## [17.3.0] - 2026-08-13
+
+### Breaking Changes
+
+- Removed `OpenAICompat.enableGeminiThinkingLoopGuard`; thinking-loop eligibility is derived solely from the `model.id` family.
+
+### Added
+
+- Added first-party OpenAI Daybreak Blue, Daybreak Red, and GPT-5.6 Cyber models with full support for their documented API pricing (including long-context rates above 272K input), token limits, tools, and reasoning effort controls (off/low/medium/high/xhigh/max).
+- Added calculateUncachedInputCost() to calculate prompt pricing against active context-length tiers without prompt caching.
+
+### Fixed
+
+- Fixed Anthropic cache-write pricing to correctly honor mixed 5-minute and 1-hour TTL usage instead of incorrectly charging all writes at the 5-minute rate.
+- Fixed Ollama Cloud DeepSeek V4 Flash and older reasoners to correctly apply the DeepSeek effort contract (e.g., low/high/max) instead of the generic effort ladder.
+- Added a default request timeout to OpenAI-compatible model discovery to prevent stalled provider endpoints from hanging startup indefinitely.
+- Fixed Anthropic cache-write pricing to honor mixed 5-minute and 1-hour TTL usage instead of charging every write at the 5-minute rate.
+- Fixed Ollama Cloud DeepSeek V4 Flash (including dated/preview tags like `deepseek-v4-flash:0731`) exposing the generic `minimal`/`low`/`medium`/`high`/`xhigh` effort ladder without `max`; the `ollama-chat` transport now applies the DeepSeek effort contract (Flash → `low`/`high`/`max`, older reasoners → `high`/`max`), matching the direct API and every other host ([#8334](https://github.com/can1357/oh-my-pi/issues/8334)).
+- Exposed the `low` reasoning-effort tier for DeepSeek V4 Pro on the direct API and faithful aggregator routes, matching DeepSeek's updated API contract advertising `reasoning_effort` `low`/`high`/`max` for both V4 SKUs; OpenRouter's non-Flash route still exposes only `high`, and the older V3.x/R1 reasoners remain `high`/`max` ([#8405](https://github.com/can1357/oh-my-pi/issues/8405)).
+- Bounded OpenAI-compatible model discovery with a default request timeout so a stalled provider `/models` endpoint can no longer hang startup indefinitely in `resolveModelDiscoveryFallback` ([#8315](https://github.com/can1357/oh-my-pi/issues/8315)).
+- Fixed Codex-discovered `gpt-daybreak-*` aliases being treated as unknown models, restoring the GPT-5.6 `low`/`medium`/`high`/`xhigh`/`max` effort ladder and its 372K fallback only when the Codex registry omits `context_window`.
+- Fixed first-party OpenAI GPT-5.6 aliases to preserve wire-level `off` through generated pro aliases and to price requests above 272K input at each SKU's documented long-context rates.
+
+## [17.2.15] - 2026-08-12
+
+### Fixed
+
+- Fixed classification of model IDs with large minor versions (e.g., `claude-opus-5-11`) or three-part versions, ensuring they no longer fall back to stale default configurations.
+
+## [17.2.13] - 2026-08-11
+
+### Changed
+
+- Standardized catalog discovery User-Agent headers on `omp/<version>` via the shared `USER_AGENT` utility.
+
+### Fixed
+
+- Marked `meta/muse-spark-1.2` and `muse-spark-1.2-contributor` as image-capable (`input: ["text", "image"]`) with the same Responses reasoning, thinking, and cost metadata as `muse-spark-1.1` (contributor uses its discounted 0.1/0.2 pricing), so `omp models` no longer lists them as text-only.
+- Fixed GLM-5.2 thinking levels across Baseten, CoreWeave, HuggingFace, and other uppercase-ID resellers, which were getting the generic `xhigh` effort ladder instead of the GLM-5.2-specific tiers. Also added Baseten `zai-org/GLM-5.2-Fast` and Fireworks `glm-5.2-fast` as reasoning models ([#8200](https://github.com/can1357/oh-my-pi/pull/8200) by [@jcfrancisco](https://github.com/jcfrancisco)).
+
+## [17.2.12] - 2026-08-08
+
+### Fixed
+
+- Fixed dynamically discovered `alibaba-token-plan/qwen3.8-max` metadata so thinking controls and image input are available ([#8019](https://github.com/can1357/oh-my-pi/issues/8019)).
+- Routed `opencode-go/deepseek-v4-flash` through the OpenAI responses API — the OpenCode Go gateway does not serve this model at `/zen/go/v1/chat/completions`, only at `/zen/go/v1/responses` (`deepseek-v4-pro` keeps chat completions).
+
+## [17.2.11] - 2026-08-07
+
+### Fixed
+
+- Increased the default stream idle-timeout floor on Amazon Bedrock to 900 seconds for reasoning and adaptive-thinking models (such as Claude) to prevent premature watchdog timeouts during long reasoning stretches.
+- Fixed Devin model families (including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling) to correctly group as logical models with reasoning-effort routing instead of separate wire variants.
+- Added missing context-window and output-token limits for dynamically discovered Alibaba Token Plan models.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Removed the zod dependency by migrating GitLab Duo Workflow discovery schemas to omptype.
+
+### Fixed
+
+- Corrected thinking-effort tiers for deepseek-v4-flash to include the low tier alongside high and max.
+
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Fixed Amazon Bedrock catalog generation omitting AWS GovCloud `us-gov.*` Claude inference-profile IDs, so selectors like `amazon-bedrock/us-gov.anthropic.claude-sonnet-4-5-…` resolve instead of failing model lookup (or misrouting commercial `us.*` geos onto `us-east-1` with GovCloud credentials).
+
+## [17.2.7] - 2026-08-03
+
+### Fixed
+
+- Fixed an issue where setting `thinking-level: off` failed to disable reasoning on direct DeepSeek V4 requests.
+
+## [17.2.6] - 2026-08-03
+
+### Added
+
+- Added the `bedrock-mantle` provider with authenticated model discovery for OpenAI GPT-5.4, GPT-5.5, and GPT-5.6 models (including Luna and Terra variants with corrected pricing) served through Amazon Bedrock's Responses endpoint.
+
+### Fixed
+
+- Fixed dynamic discovery for the `deepseek-v4` model family (such as `deepseek-v4-flash-0731`) under `alibaba-token-plan` missing reasoning configuration and maximum thinking effort.
+- Fixed GitHub Copilot dynamic discovery retaining stale bundled prices for default-context models instead of using the provider's reported default-tier prices.
+
+## [17.2.5] - 2026-08-03
+
+### Fixed
+
+- Fixed an issue where newly advertised chat models were dropped during dynamic discovery for the `alibaba-token-plan` provider.
+- Fixed a `400` error when forcing a specific tool with DeepSeek reasoning models on OpenCode Zen/Go gateways by automatically downgrading the tool selection mode to `auto` while keeping the tool advertised.
+
+## [17.2.4] - 2026-08-01
+
+### Added
+
+- Added `AnthropicCompat.streamIdleTimeoutMs` and propagated it through `buildAnthropicCompat` so direct Anthropic provider streams can configure their inter-event idle watchdog.
+- Fixed Ollama Cloud DeepSeek V4 Pro/Flash models (including dated tag variants such as `deepseek-v4-flash:0731`) reporting an incorrect max-output-tokens figure by pinning it to the deployment's enforced 65536-token output ceiling ([#7266](https://github.com/can1357/oh-my-pi/issues/7266)).
+
+### Fixed
+
+- Fixed `gen:models` Codex discovery to union models across every stored OAuth account and fail closed on partial resolution, matching runtime discovery ([#6265](https://github.com/can1357/oh-my-pi/issues/6265)); restored the bundled `gpt-5.4`, `gpt-5.6-sol`, and `gpt-5.3-codex-spark` entries a single-account regen had dropped.
+- Fixed `google-antigravity` models always reporting $0 cost: Antigravity discovery carries no pricing, so the generator now back-fills each model with its Google list price (Gemini ids from the `google` provider, including `-preview` id aliases; Claude ids from `google-vertex`, falling back to `anthropic`).
+- Fixed OpenRouter `deepseek/deepseek-v4-flash-0731` exposing only `high` thinking effort by consuming the live `reasoning.supported_efforts` and `default_effort` metadata and bundling its `low`/`high`/`max` ladder. ([#7307](https://github.com/can1357/oh-my-pi/issues/7307))
+
+## [17.2.3] - 2026-08-01
+
+### Added
+
+- Added support for the ai& provider (`aiand`), an OpenAI-compatible inference API with dynamic model discovery (context windows, capabilities, reasoning efforts, and USD pricing from `/v1/models`) and API-key authentication via the `AIAND_API_KEY` environment variable.
+
+## [17.2.2] - 2026-07-31
+
+### Added
+
+- Added support for the GMI Cloud provider (`gmi-cloud`), an OpenAI-compatible inference gateway with dynamic model discovery and API-key authentication via the `GMI_API_KEY` environment variable.
+- Added optional authoritative context occupancy to usage records for providers with separate checkpoint telemetry and billable token buckets.
+
+### Fixed
+
+- Fixed classification of dynamically discovered Cursor Kimi K3 effort variants as non-reasoning models when `thinkingDetails` is omitted.
+- Fixed Google AI Studio OpenAI-compatible requests failing with HTTP 400 by omitting the unsupported `store` field.
+- Fixed Synthetic models losing capabilities (such as reasoning/thinking selectors, vision input, output limits, and pricing) by correcting how the discovery mapper parses Synthetic's advertised features, effort vocabularies, and pricing structures.
+- Fixed Cursor model discovery to correctly expose the 1M-token context window for supported models (including Claude, GPT, Kimi K3, and GLM 5.2+ families) instead of defaulting to 200k.
+- Fixed GitHub Copilot routing for `grok-4.5` to use the correct Responses endpoint instead of the unsupported Chat Completions endpoint.
+
+## [17.2.1] - 2026-07-30
+
+### Fixed
+
+- Fixed Ollama model-manager caches being reused after the configured base URL changed by scoping cache namespaces to the normalized native discovery endpoint, including reverse-proxy path prefixes ([#7087](https://github.com/can1357/oh-my-pi/issues/7087)).
+
+## [17.2.0] - 2026-07-30
+
+### Added
+
+- Regenerated the Cursor agent protobufs (`discovery/cursor-gen/agent_pb.ts`) against the modern `agent.proto`, adding the message and enum families current Cursor CLI builds emit: Pi tool exec frames, hook queries and responses, subagents, allowlist prechecks, MCP state, smart-mode classification, canvas diagnostics, conversation search, agent-store conflicts and git diff. Purely additive — no existing exported symbol changed shape.
+
+### Fixed
+
+- Fixed an issue where LM Studio first turns failed with a 400 Invalid tool_choice error when a named tool was forced, by using the supported tool_choice: "required" string selector.
+
+## [17.1.8] - 2026-07-28
+
+### Added
+
+- Added `resolveVertexEndpointHost(location)` utility to resolve the correct Vertex AI API endpoint hostnames for global, multi-region, and regional locations.
+
+### Fixed
+
+- Fixed an issue where `calculateCost` under-reported Anthropic cache-write costs by honoring the `usage.cttl` breakdown to correctly price 1-hour retention writes at 2x the base input rate.
+
+## [17.1.7] - 2026-07-27
+
+### Added
+
+- Added support for moonshotai/Kimi-K3 and kimi-k3-fast models
+- Added umans-kimi-k3 prerelease model configuration
+
+### Changed
+
+- Updated pricing and token limits for selected models
+
+## [17.1.6] - 2026-07-27
+
+### Added
+
+- Added SiliconFlow providers (`siliconflow`, `siliconflow-cn`) with dynamic-only OpenAI-compatible model discovery: no bundled catalog — the model list is fetched live from each region's `/v1/models` endpoint, with non-chat entries (embedding, reranker, image, audio, video) filtered out. Discovery hydrates pricing, context/output limits, and reasoning metadata from the provider's models.dev catalog at runtime (with bundled upstream references as a reasoning-only fallback for ids models.dev has not indexed), so reasoning models keep thinking enabled and sessions compact against real context windows. `SILICONFLOW_API_KEY` / `SILICONFLOW_CN_API_KEY` environment variables are wired into `getEnvApiKey`.
+
+## [17.1.5] - 2026-07-27
+
+### Fixed
+
+- Fixed Kimi Code (`kimi-code`) reporting `maxTokens: 32000` for every model — its `/coding/v1/models` discovery mapper and the bundled catalog applied a blanket constant, truncating `k3`/`k3-256k` output at ~4x below their real 131072 ceiling and `kimi-for-coding`/`kimi-for-coding-highspeed` below their 32768 ceiling. Output caps are now derived per family, and the model cache is invalidated so upgrades drop the stale `maxTokens: 32000` rows (including the discovery-only `k3-256k`) instead of serving them until the next network refresh ([#6711](https://github.com/can1357/oh-my-pi/issues/6711)).
+- Fixed Anthropic model discovery 404ing when the registry derived the provider base URL from a bundled model without the `/v1` suffix (`https://api.anthropic.com/models` instead of `/v1/models`), which let a stale text-only cache row shadow fresh models.dev vision metadata — surfacing as snapcompact refusing to run on `claude-opus-5`. Discovery now always targets `/v1/models` while model rows keep the provider base URL ([#6563](https://github.com/can1357/oh-my-pi/issues/6563)).
+
+## [17.1.4] - 2026-07-26
+
+### Added
+
+- Added Claude Opus 5 model entries for Amazon Bedrock: `anthropic.claude-opus-5` plus its `us.`, `eu.`, `au.`, and `global.` regional/geo IDs.
+
+### Fixed
+
+- Fixed `alibaba-token-plan` locking out China (Beijing) 百炼 Token Plan subscribers: the provider hardcoded the international Singapore endpoint, so Beijing-issued `sk-sp-` keys got `401 invalid_api_key`. The wire credential now carries an optional region base URL, and model discovery targets the credential's region ([#6682](https://github.com/can1357/oh-my-pi/issues/6682)).
+- Fixed forced `tool_choice` 400s (`tool_choice 'specified' is incompatible with thinking enabled`) on Kimi Code's Anthropic-compatible endpoint for the `kimi-for-coding`, `kimi-for-coding-highspeed`, and `k3` aliases: the Anthropic-surface compat matcher only recognised Moonshot's native `kimi-k2.7-code*` ids, so thinking-locked kimi-code models kept `supportsForcedToolChoice: true` and the forced selector was sent to a host that always thinks. These models now resolve `requiresThinkingEnabled`, keeping thinking on and downgrading forced choices to `auto`.
+- Retried empty successful provider discovery responses after the short non-authoritative interval instead of caching them for the full catalog TTL ([#6620](https://github.com/can1357/oh-my-pi/issues/6620)).
+- Fixed GitHub Copilot Claude models with no bundled catalog reference (e.g. a freshly served `claude-opus-5`) discovering with `reasoning: false`/`thinking: null` and no effort dial, and disappearing along with their synthesized `-1m` sibling on offline reads: reference-less Copilot models on the anthropic-messages proxy now derive the adaptive reasoning ladder from the model id, and the cache restores their compile-time `COPILOT_API_HEADERS` by value instead of dropping them as unrestorable ([#6664](https://github.com/can1357/oh-my-pi/issues/6664)).
+
+## [17.1.3] - 2026-07-24
+
+### Fixed
+
+- Disabled the first-event watchdog for local OpenAI-compatible backends while retaining the 300-second inter-event watchdog, so long llama.cpp prompt prefill is not canceled and retried ([#6524](https://github.com/can1357/oh-my-pi/issues/6524)).
+
+## [17.1.1] - 2026-07-24
+
+### Added
+
+- Added catalog metadata for models that support native computer-use requests.
+- Added resolved Bedrock Converse prompt-cache compatibility limits, including explicit 5-minute checkpoint support for bundled Nova Lite, Micro, Pro, Premier, and Nova 2 Lite models plus their documented in-region, regional, and global IDs, and model-specific 1-hour Claude retention.
+- Added resolved Bedrock Converse prompt-cache compatibility limits, including explicit 5-minute checkpoint support for bundled Nova Lite, Micro, Pro, and Premier models plus Nova Premier's documented in-region model ID, and model-specific 1-hour Claude retention.
+- Added the native Meta Model API provider and Muse Spark 1.1 with Responses API reasoning replay, image input, and the full supported reasoning-effort ladder ([#4941](https://github.com/can1357/oh-my-pi/issues/4941)).
+- Added an opt-in Vercel AI Gateway automatic prompt-cache compatibility option alongside provider routing preferences.
+- Added Vercel AI Gateway Responses cache-anchor and cache-lifetime compatibility controls.
+- Added resolved OpenAI GPT-5.6 prompt-cache breakpoint capability metadata, keeping older models and compatible endpoints opt-in only.
+- Added the native `alibaba-token-plan` provider with QwenCloud Token Plan Individual discovery and a curated chat-model fallback catalog ([#6151](https://github.com/can1357/oh-my-pi/issues/6151)).
+
+## [17.1.0] - 2026-07-24
+
+### Added
+
+- Added Bedrock Converse prompt-cache compatibility limits, including 5-minute checkpoint support for Nova models (Lite, Micro, Pro, Premier, Nova 2 Lite) and 1-hour Claude retention.
+- Added native Meta Model API provider and Muse Spark 1.1 support, featuring Responses API reasoning replay, image input, and reasoning-effort controls.
+- Added Vercel AI Gateway integration features, including opt-in automatic prompt-cache compatibility, provider routing preferences, and Responses cache-anchor and cache-lifetime controls.
+- Added prompt-cache breakpoint capability metadata for OpenAI GPT-5.6, with opt-in support for older models and compatible endpoints.
+- Added native alibaba-token-plan provider with QwenCloud Token Plan Individual discovery and a curated chat-model fallback catalog.
+
+## [17.0.9] - 2026-07-23
+
 ### Changed
 
 - Renamed `codex-auto-review` model to `GPT-5.3 Codex Spark` with updated pricing and capabilities
@@ -425,7 +966,7 @@
 
 ### Fixed
 
-- Fixed direct Anthropic Claude Sonnet/Haiku 4.5 advisor/agent turns crashing every call with HTTP 400 `This model does not support the effort parameter.` The catalog classified the whole Claude 4.5 family on `anthropic-messages` (and `bedrock-converse-stream`) as `anthropic-budget-effort`, which made the Anthropic provider serialize `output_config.effort` alongside `thinking.budget_tokens`. Anthropic only honors `output_config.effort` on Opus 4.5 and adaptive (4.6+) Messages-API models, so Sonnet 4.5 / Haiku 4.5 rejected the field. `inferThinkingControlMode` now gates `anthropic-budget-effort` to `parsedModel.kind === "opus" && semverGte(version, "4.5")` on both Anthropic-routed APIs, so Sonnet 4.5 / Haiku 4.5 on direct Anthropic + Cloudflare-AI-Gateway + Vertex + GitLab-Duo + Copilot + Bedrock fall through to plain `mode: "budget"` (thinking budget still scales with the selected effort tier). Opus 4.5 keeps `anthropic-budget-effort`. `anthropic-budget-effort` also stays in use for Anthropic-compatible third-party backends that natively support the field (Umans GLM 5.2). ([#3497](https://github.com/can1357/oh-my-pi/issues/3497))
+- Fixed direct Anthropic Claude Sonnet/Haiku 4.5 advisor/agent turns crashing every call with HTTP 400 `This model does not support the effort parameter.` The catalog classified the whole Claude 4.5 family on `anthropic-messages` (and `bedrock-converse-stream`) as `anthropic-budget-effort`, which made the Anthropic provider serialize `output_config.effort` alongside `thinking.budget_tokens`. Anthropic only honors `output_config.effort` on Opus 4.5 and adaptive (4.6+) Messages-API models, so Sonnet 4.5 / Haiku 4.5 rejected the field. `inferThinkingControlMode` now gates `anthropic-budget-effort` to the structured Opus family at revision 4.5+ on both Anthropic-routed APIs, so Sonnet 4.5 / Haiku 4.5 on direct Anthropic + Cloudflare-AI-Gateway + Vertex + GitLab-Duo + Copilot + Bedrock fall through to plain `mode: "budget"` (thinking budget still scales with the selected effort tier). Opus 4.5 keeps `anthropic-budget-effort`. `anthropic-budget-effort` also stays in use for Anthropic-compatible third-party backends that natively support the field (Umans GLM 5.2). ([#3497](https://github.com/can1357/oh-my-pi/issues/3497))
 
 ## [16.1.17] - 2026-06-24
 
@@ -560,7 +1101,7 @@
 - Fixed local Ollama (`provider: "ollama"`) reasoning turns still failing with HTTP 400 `invalid reasoning value: "minimal"` when the model was selected from a stale `~/.omp/models.db` cache row or a hand-written config: the `minimal → low` / `xhigh → max` remap was only stamped during fresh discovery, so cached and custom specs reached the wire unmapped. The remap now lives in the OpenAI chat-completions and Responses compat builders, so every `buildModel` (including cache loads, custom specs, and the `whenThinking` variant) backfills it — no `omp models refresh` required. Custom OpenAI-compatible providers registered under a non-`ollama` provider id still need their own `compat.reasoningEffortMap`.
 - Advertised Ollama Cloud GLM-5.2 reasoning efforts as high/xhigh-only and mapped `xhigh` to native max effort ([#2911](https://github.com/can1357/oh-my-pi/pull/2911) by [@serverinspector](https://github.com/serverinspector))
 - Fixed OpenRouter pseudo-API model construction so bundled OpenRouter models resolve shared OpenAI compatibility metadata instead of an undefined compat record.
-- Fixed custom/direct `xai-oauth` Responses model specs (e.g. `grok-build`) emitting `reasoning.effort` and hitting xAI's HTTP 400: `buildOpenAIResponsesCompat` now defaults `supportsReasoningEffort` to `false` for `xai-oauth` Grok models that are off the effort-capable allowlist (`grok-3-mini`/`grok-4.20-multi-agent`/`grok-4.3`), matching the curated discovery path; explicit `compat.supportsReasoningEffort` still overrides. The allowlist moved to a shared `isGrokReasoningEffortCapable` identity helper consumed by both the compat builder and provider-model curation so the two cannot drift.
+- Fixed custom/direct `xai-oauth` Responses model specs (e.g. `grok-build`) emitting `reasoning.effort` and hitting xAI's HTTP 400: `buildOpenAIResponsesCompat` now defaults `supportsReasoningEffort` to `false` for `xai-oauth` Grok models that are off the effort-capable allowlist (`grok-3-mini`/`grok-4.20-multi-agent`/`grok-4.3`), matching the curated discovery path; explicit `compat.supportsReasoningEffort` still overrides. The reviewed allowlist moved into shared compat rules consumed by both the compat builder and provider-model curation so the two cannot drift.
 
 ## [16.0.5] - 2026-06-17
 
@@ -650,13 +1191,13 @@
 ### Changed
 
 - Kept non-tool-capable Fireworks serverless models in discovery results and marked them with `supportsTools: false` for fallback-aware handling
-- Extended `modelFamilyToken(modelId)` to classify Claude/OpenAI ids the structured parser misses (older dated forms such as `claude-3-5-sonnet-20241022` and `gpt-4o`), returning `anthropic`/`openai` instead of an empty token.
+- Extended structured classification to cover older Claude/OpenAI forms such as `claude-3-5-sonnet-20241022` and `gpt-4o`.
 
 ## [15.13.1] - 2026-06-15
 
 ### Added
 
-- Added `modelFamilyToken(modelId)` to `@oh-my-pi/pi-catalog/identity`: a coarse vendor-lineage token (`anthropic`/`openai`/`gemini`/`kimi`/…) for "are two models the same family?" comparisons, backed by `parseKnownModel` canonical-id normalization. Opaque and comparison-only; kind/variant collapsed onto the vendor token ([#2406](https://github.com/can1357/oh-my-pi/issues/2406))
+- Added coarse vendor-lineage classification (`anthropic`/`openai`/`gemini`/`kimi`/…) to `@oh-my-pi/pi-catalog/identity` for "are two models the same family?" comparisons, with namespace normalization and kind/variant collapse ([#2406](https://github.com/can1357/oh-my-pi/issues/2406))
 
 ### Changed
 
@@ -680,7 +1221,7 @@
 ### Changed
 
 - Pinned zai `glm-5.2` to 1M context during catalog generation so endpoint discovery and older fallbacks cannot regress it to 200k.
-- Replaced the hand-maintained `zhipu-coding-plan` GLM reasoning allowlist and vision regex with a `parseGlmModel` family classifier in `identity/classify.ts` (variant + vision + version), surfaced as `isReasoningGlmModelId` / `isGlmVisionModelId`. Discovery now derives reasoning/vision capability from the GLM family instead of a per-id list, so newly-bumped integers (`glm-5.3`, `glm-6`, …) are covered automatically while `-flash`/`-preview` and the vision `…v` shape stay correctly classified.
+- Replaced the hand-maintained `zhipu-coding-plan` GLM reasoning allowlist and vision regex with structured GLM class, family, and revision facts. Discovery now derives reasoning/vision capability from the GLM family instead of a per-id list, so newly-bumped integers (`glm-5.3`, `glm-6`, …) are covered automatically while `-flash`/`-preview` and the vision `…v` shape stay correctly classified.
 
 ## [15.12.4] - 2026-06-13
 
@@ -793,7 +1334,7 @@
 - Added `ResolvedAnthropicCompat.supportsSamplingParams` (Opus 4.7+/Fable/Mythos reject `temperature`/`top_p`/`top_k` with a 400), baked at build time from model identity so the request path stops re-parsing model ids.
 - Compat detection gained model-time flags so handlers stop sniffing baseUrl: completions `supportsReasoningParams`, `alwaysSendMaxTokens`, `isOpenRouterHost`, `isVercelGatewayHost`, `streamIdleTimeoutMs`, and a precomputed `whenThinking` alternate view (OpenCode `reasoning_content` gating, #1071/#1484); responses `strictResponsesPairing`, `supportsLongPromptCacheRetention`, `supportsReasoningEffort`; anthropic `officialEndpoint`, `requiresToolResultId`, `replayUnsignedThinking`.
 - New `@oh-my-pi/pi-catalog` package: the model catalog extracted from `@oh-my-pi/pi-ai`. Owns the bundled `models.json` and its generation pipeline (`scripts/generate-models.ts`), the core model data types (`Model`, `Api`, `ThinkingConfig`, `Effort`, `Usage`, compat interfaces), thinking metadata enrichment and generated policies (`model-thinking.ts`), the SQLite model cache and model manager, per-provider discovery factories (`provider-models/`), the discovery protocol clients (`discovery/`), and the new `CATALOG_PROVIDERS` table — the single source of truth for provider ids, default models, and discovery wiring (`KnownProvider`, `PROVIDER_DESCRIPTORS`, and `DEFAULT_MODEL_PER_PROVIDER` are derived from it).
-- New `identity/` module centralizing model-identity concerns that were previously duplicated across packages: family classification and version parsing (`identity/classify.ts`, extracted from pi-ai's `model-thinking` internals), canonical model equivalence with injected reference data (`identity/equivalence.ts`, from coding-agent's `model-equivalence`), proxy/reseller reference lookup (`identity/reference.ts`, from coding-agent's `model-registry`), bracket-affix and id-segment helpers (`identity/id.ts`), a single trailing-marker vocabulary with canonical vs reference flavors (`identity/markers.ts` — `search` stays reference-only so Perplexity's `sonar-pro-search` remains canonical-distinct), and provider priority ordering (`identity/priority.ts`).
+- New `identity/` module centralizing model-identity concerns that were previously duplicated across packages: structured taxonomy classification and revisions, proxy/reseller reference lookup (`identity/reference.ts`), bracket-affix and id-segment helpers (`identity/id.ts`), and provider priority ordering (`identity/priority.ts`).
 - Memoized bundled-reference accessors (`getBundledCanonicalReferenceData` / `getBundledModelReferenceIndex` in `identity/bundled.ts`): one lazy walk of the bundled catalog feeds both canonical equivalence and proxy-reference lookup, so consumers no longer hand-roll the glue.
 - `identity/selection.ts`: pure canonical-variant selection (`resolveCanonicalVariant`, `buildCanonicalModelOrder`, `CanonicalVariantPreferences`) extracted from the coding-agent registry — provider rank, then exact-id match, variant source, id length, and candidate order.
 
@@ -805,14 +1346,14 @@
 - `Model`'s api parameter now defaults to `Api` instead of `any` (`Model<TApi extends Api = Api>`), so bare `Model` no longer behaves as `Model<any>` at call sites.
 - `ThinkingConfig` is now explicit and total: an ordered `efforts` array replaces the `minLevel`/`maxLevel`/`levels` range encoding, and the wire facts are baked alongside it — `effortMap` (anthropic-adaptive 4-tier vs 5-tier scale, shared with the OpenRouter completions remap) and `supportsDisplay` (adaptive `display` field support). Explicit spec thinking owns the capability surface (`mode`/`efforts`/`defaultLevel`) and wins over inference; missing wire facts are backfilled from identity so configs never need to know Anthropic's tier tables. Reasoning models that reject the wire effort param (`compat.supportsReasoningEffort: false` on openai-responses*) are encoded as `thinking: undefined` ("thinks, no control surface") instead of the removed `modelOmitsReasoningEffort` special case. `models.json` was re-baked in the new vocabulary behind a 3196-model behavioral parity gate, and the model cache schema bumped to v4 to invalidate old-shape rows.
 - `mapEffortToGoogleThinkingLevel(effort)` is now a static map (model parameter dropped — validation stays at the `requireSupportedEffort` call sites), and `mapEffortToAnthropicAdaptiveEffort` reads the baked `thinking.effortMap` instead of re-classifying the model id per request.
-- Generator-only policy code moved out of the runtime bundle into `scripts/generated-policies.ts`: `applyGeneratedModelPolicies` (now policy fixups + thinking re-bake via the shared deriver), `linkOpenAIPromotionTargets`, the Copilot context-window table, minimax/opencode-go compat fixups, and `CLOUDFLARE_FALLBACK_MODEL`. The anthropic id predicates (`hasOpus47ApiRestrictions`, `supportsMidConversationSystemMessages`, `isAnthropicFableOrMythosModel`) moved to `identity/family` for build-time use by the compat/thinking derivers only.
+- Generator-only policy code moved out of the runtime bundle into `scripts/generated-policies.ts`: `applyGeneratedModelPolicies` (now policy fixups + thinking re-bake via the shared deriver), `linkOpenAIPromotionTargets`, the Copilot context-window table, minimax/opencode-go compat fixups, and `CLOUDFLARE_FALLBACK_MODEL`. Anthropic generation checks moved to structured class, family, and revision facts for build-time use by the compat/thinking derivers only.
 
 ### Fixed
 
 - Fixed Anthropic official-endpoint detection to require strict HTTPS hostname matching so non-official or lookalike URLs are no longer treated as official Anthropic hosts
 - Fixed Ollama Cloud dynamic discovery so same-id matches from other providers no longer supply context-window or max-output-token limits for discovered models.
 - Wired `@oh-my-pi/pi-catalog` into the release publish package list, tarball install smoke test, and root `bun generate-models` script.
-- Fixed `supportsAdaptiveThinkingDisplay` only matching dash-form version ids: dotted ids (`claude-opus-4.7`) now classify through `identity/classify` like every other anthropic predicate, so six bundled dotted Opus 4.7/4.8 entries (github-copilot, vercel-ai-gateway, zenmux) regain adaptive `display` support; bare dated ids (`claude-opus-4-20250514` = Opus 4.0) stay excluded.
+- Fixed adaptive-display classification only matching dash-form version ids: dotted ids (`claude-opus-4.7`) now classify through the structured taxonomy, so six bundled dotted Opus 4.7/4.8 entries (github-copilot, vercel-ai-gateway, zenmux) regain adaptive `display` support; bare dated ids (`claude-opus-4-20250514` = Opus 4.0) stay excluded.
 - Fixed the OpenRouter anthropic adaptive-effort map misclassifying bare dated Opus ids (`claude-opus-4-20250514` parsed as version 4.20 → wrongly adaptive); the map now derives from the shared classifier and the shared 4-/5-tier tables.
 
 ### Removed

@@ -1286,10 +1286,9 @@ fn try_get_variable_completions(
 			return None;
 		}
 		(prefix, true)
-	} else if let Some(prefix) = token.strip_prefix('$') {
-		(prefix, false)
 	} else {
-		return None;
+     let prefix = token.strip_prefix('$')?;
+		(prefix, false)
 	};
 
 	// If there's a path separator, this is a path like $HOME/foo, not a variable to

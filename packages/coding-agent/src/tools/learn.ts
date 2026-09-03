@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type } from "arktype";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { localBackend } from "../memory-backend/local-backend";

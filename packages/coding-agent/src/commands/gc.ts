@@ -1,12 +1,13 @@
 /**
  * Run on-disk storage maintenance.
  */
+
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { gcHelp as commandHelp } from "../cli/command-help";
 import { collectGcErrors, type GcCommandArgs, runGcCommand } from "../cli/gc-cli";
 
 export default class Gc extends Command {
-	static description = "Run storage garbage collection";
-
+	static description = commandHelp.description;
 	static flags = {
 		apply: Flags.boolean({ description: "Apply changes (default is dry-run)" }),
 		json: Flags.boolean({ description: "Output JSON" }),

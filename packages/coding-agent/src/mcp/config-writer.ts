@@ -3,9 +3,11 @@
  *
  * Utilities for reading/writing .omp/mcp.json files at user or project level.
  */
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 
 import { validateServerConfig } from "./config";
@@ -16,6 +18,20 @@ function withSchema(config: MCPConfigFile): MCPConfigFile {
 		$schema: config.$schema ?? MCP_CONFIG_SCHEMA_URL,
 		...config,
 	};
+}
+
+/**
+ * Serialize a read-modify-write against one config file.
+ *
+ * Wraps {@link withFileLock} but first ensures the config's parent directory
+ * exists, because the lock directory (`${filePath}.lock`) is created with a
+ * non-recursive `mkdir` — without this the very first write (before the config
+ * file or its parent exists) would fail to acquire the lock with ENOENT.
+ */
+function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+	return fs.promises
+		.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
+		.then(() => withFileLock(filePath, fn));
 }
 
 /**
@@ -45,13 +61,20 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	// Write to temp file first (atomic write)
-	const tmpPath = `${filePath}.tmp`;
+	// Write to a per-writer temp file, then atomically rename into place. The
+	// temp name is unique (pid + random) so two concurrent writers to the same
+	// config never share one `.tmp` path and rename each other's file out from
+	// under them (which surfaced as ENOENT or a clobbered final file).
+	const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 	const content = JSON.stringify(withSchema(config), null, 2);
-	await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-
-	// Rename to final path (atomic on most systems)
-	await fs.promises.rename(tmpPath, filePath);
+	try {
+		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		// Rename to final path (atomic on most systems)
+		await fs.promises.rename(tmpPath, filePath);
+	} catch (error) {
+		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+		throw error;
+	}
 	// Invalidate the capability fs cache so subsequent reads see the new content
 	invalidateFsCache(filePath);
 }
@@ -97,25 +120,26 @@ export async function addMCPServer(filePath: string, name: string, config: MCPSe
 		throw new Error(`Invalid server config: ${errors.join("; ")}`);
 	}
 
-	// Read existing config
-	const existing = await readMCPConfigFile(filePath);
+	// Serialize the read-modify-write under a per-file lock so a concurrent
+	// mutation cannot overwrite this one (lost update). The lock also guards
+	// against cross-process writers sharing the same config file.
+	await withConfigLock(filePath, async () => {
+		const existing = await readMCPConfigFile(filePath);
 
-	// Check for duplicate name
-	if (existing.mcpServers?.[name]) {
-		throw new Error(`Server "${name}" already exists in ${filePath}`);
-	}
+		// Check for duplicate name
+		if (existing.mcpServers?.[name]) {
+			throw new Error(`Server "${name}" already exists in ${filePath}`);
+		}
 
-	// Add server
-	const updated: MCPConfigFile = {
-		...existing,
-		mcpServers: {
-			...existing.mcpServers,
-			[name]: config,
-		},
-	};
-
-	// Write back
-	await writeMCPConfigFile(filePath, updated);
+		const updated: MCPConfigFile = {
+			...existing,
+			mcpServers: {
+				...existing.mcpServers,
+				[name]: config,
+			},
+		};
+		await writeMCPConfigFile(filePath, updated);
+	});
 }
 
 /**
@@ -137,20 +161,19 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
 		throw new Error(`Invalid server config: ${errors.join("; ")}`);
 	}
 
-	// Read existing config
-	const existing = await readMCPConfigFile(filePath);
+	// Serialize the read-modify-write (see addMCPServer).
+	await withConfigLock(filePath, async () => {
+		const existing = await readMCPConfigFile(filePath);
 
-	// Update server
-	const updated: MCPConfigFile = {
-		...existing,
-		mcpServers: {
-			...existing.mcpServers,
-			[name]: config,
-		},
-	};
-
-	// Write back
-	await writeMCPConfigFile(filePath, updated);
+		const updated: MCPConfigFile = {
+			...existing,
+			mcpServers: {
+				...existing.mcpServers,
+				[name]: config,
+			},
+		};
+		await writeMCPConfigFile(filePath, updated);
+	});
 }
 
 /**
@@ -159,23 +182,21 @@ export async function updateMCPServer(filePath: string, name: string, config: MC
  * @throws Error if server doesn't exist
  */
 export async function removeMCPServer(filePath: string, name: string): Promise<void> {
-	// Read existing config
-	const existing = await readMCPConfigFile(filePath);
+	// Serialize the read-modify-write (see addMCPServer).
+	await withConfigLock(filePath, async () => {
+		const existing = await readMCPConfigFile(filePath);
 
-	// Check if server exists
-	if (!existing.mcpServers?.[name]) {
-		throw new Error(`Server "${name}" not found in ${filePath}`);
-	}
+		if (!existing.mcpServers?.[name]) {
+			throw new Error(`Server "${name}" not found in ${filePath}`);
+		}
 
-	// Remove server
-	const { [name]: _removed, ...remaining } = existing.mcpServers;
-	const updated: MCPConfigFile = {
-		...existing,
-		mcpServers: remaining,
-	};
-
-	// Write back
-	await writeMCPConfigFile(filePath, updated);
+		const { [name]: _removed, ...remaining } = existing.mcpServers;
+		const updated: MCPConfigFile = {
+			...existing,
+			mcpServers: remaining,
+		};
+		await writeMCPConfigFile(filePath, updated);
+	});
 }
 
 /**
@@ -207,25 +228,28 @@ export async function readDisabledServers(filePath: string): Promise<string[]> {
  * Add or remove a server name from the disabled servers list.
  */
 export async function setServerDisabled(filePath: string, name: string, disabled: boolean): Promise<void> {
-	const config = await readMCPConfigFile(filePath);
-	const current = new Set(config.disabledServers ?? []);
+	// Serialize the read-modify-write (see addMCPServer).
+	await withConfigLock(filePath, async () => {
+		const config = await readMCPConfigFile(filePath);
+		const current = new Set(config.disabledServers ?? []);
 
-	if (disabled) {
-		current.add(name);
-	} else {
-		current.delete(name);
-	}
+		if (disabled) {
+			current.add(name);
+		} else {
+			current.delete(name);
+		}
 
-	const updated: MCPConfigFile = {
-		...config,
-		disabledServers: current.size > 0 ? Array.from(current).sort() : undefined,
-	};
+		const updated: MCPConfigFile = {
+			...config,
+			disabledServers: current.size > 0 ? Array.from(current).sort() : undefined,
+		};
 
-	if (!updated.disabledServers) {
-		delete updated.disabledServers;
-	}
+		if (!updated.disabledServers) {
+			delete updated.disabledServers;
+		}
 
-	await writeMCPConfigFile(filePath, updated);
+		await writeMCPConfigFile(filePath, updated);
+	});
 }
 
 /**
@@ -243,25 +267,28 @@ export async function readEnabledServers(filePath: string): Promise<string[]> {
  * NOT override the `disabledServers` denylist.
  */
 export async function setServerForceEnabled(filePath: string, name: string, force: boolean): Promise<void> {
-	const config = await readMCPConfigFile(filePath);
-	const current = new Set(config.enabledServers ?? []);
+	// Serialize the read-modify-write (see addMCPServer).
+	await withConfigLock(filePath, async () => {
+		const config = await readMCPConfigFile(filePath);
+		const current = new Set(config.enabledServers ?? []);
 
-	if (force) {
-		current.add(name);
-	} else {
-		current.delete(name);
-	}
+		if (force) {
+			current.add(name);
+		} else {
+			current.delete(name);
+		}
 
-	const updated: MCPConfigFile = {
-		...config,
-		enabledServers: current.size > 0 ? Array.from(current).sort() : undefined,
-	};
+		const updated: MCPConfigFile = {
+			...config,
+			enabledServers: current.size > 0 ? Array.from(current).sort() : undefined,
+		};
 
-	if (!updated.enabledServers) {
-		delete updated.enabledServers;
-	}
+		if (!updated.enabledServers) {
+			delete updated.enabledServers;
+		}
 
-	await writeMCPConfigFile(filePath, updated);
+		await writeMCPConfigFile(filePath, updated);
+	});
 }
 
 /** Paths and target state for toggling one MCP server across known config files. */

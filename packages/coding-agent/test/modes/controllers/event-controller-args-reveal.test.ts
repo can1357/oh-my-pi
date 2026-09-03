@@ -6,9 +6,11 @@
  * how assistant text snaps at message_end.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EDIT_MODE_STRATEGIES } from "@oh-my-pi/pi-coding-agent/edit";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { STREAMING_REVEAL_FRAME_MS } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
@@ -40,8 +42,17 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 	};
 }
 
-function createFixture(streamingMessage: AssistantMessage) {
+function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 	const pendingTools = new Map<string, ToolExecutionComponent>();
+	let approvalWaiter: ((toolCallId: string) => Promise<void>) | undefined;
+	const extensionRunner = {
+		setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>) {
+			approvalWaiter = waiter;
+			return () => {
+				if (approvalWaiter === waiter) approvalWaiter = undefined;
+			};
+		},
+	};
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
@@ -56,12 +67,16 @@ function createFixture(streamingMessage: AssistantMessage) {
 		noteDisplayableThinkingContent: vi.fn(() => false),
 		chatContainer: { addChild: vi.fn() },
 		toolOutputExpanded: false,
-		session: { getToolByName: () => undefined },
-		viewSession: { getToolByName: () => undefined },
+		session: { getToolByName: () => tool, hasBuiltInTool: () => true, extensionRunner },
+		viewSession: { getToolByName: () => tool, hasBuiltInTool: () => true },
 		sessionManager: { getCwd: () => process.cwd() },
 	} as unknown as InteractiveModeContext;
 
-	return { controller: new EventController(ctx), pendingTools };
+	return {
+		controller: new EventController(ctx),
+		pendingTools,
+		getApprovalWaiter: () => approvalWaiter,
+	};
 }
 
 async function dispatch(controller: EventController, message: AssistantMessage) {
@@ -214,5 +229,47 @@ describe("EventController paces streamed tool args", () => {
 		// back to a streaming prefix.
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
 		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
+	});
+	it("holds approval until the final edit preview is ready", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const compute = Promise.withResolvers<void>();
+		vi.spyOn(EDIT_MODE_STRATEGIES.replace, "computeDiffPreview").mockImplementation(async () => {
+			await compute.promise;
+			return [
+				{
+					path: "/tmp/approval.ts",
+					diff: "@@ -1 +1 @@\n-old\n+ISSUE_7957_PROPOSED_EDIT",
+					firstChangedLine: 1,
+				},
+			];
+		});
+		const args = {
+			path: "/tmp/approval.ts",
+			old_string: "old",
+			new_string: "ISSUE_7957_PROPOSED_EDIT",
+		};
+		const streaming = makeStreamingMessage([{ type: "toolCall", id: "tc-approval", name: "edit", arguments: args }]);
+		const tool = { mode: "replace" } as unknown as AgentTool;
+		const { controller, pendingTools, getApprovalWaiter } = createFixture(streaming, tool);
+		await dispatch(controller, streaming);
+
+		const waiter = getApprovalWaiter();
+		if (!waiter) throw new Error("expected the TUI approval-preview waiter");
+		let approvalReady = false;
+		const waiting = waiter("tc-approval").then(() => {
+			approvalReady = true;
+		});
+		await dispatchToolStart(controller, {
+			toolCallId: "tc-approval",
+			toolName: "edit",
+			args,
+		});
+		await Promise.resolve();
+		expect(approvalReady).toBe(false);
+
+		compute.resolve();
+		await waiting;
+		const rendered = pendingTools.get("tc-approval")?.render(100).join("\n") ?? "";
+		expect(Bun.stripANSI(rendered)).toContain("ISSUE_7957_PROPOSED_EDIT");
 	});
 });

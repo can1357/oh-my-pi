@@ -5,16 +5,21 @@
  * `xd://report_issue`, and the system prompt tells the model to write
  * `<tool>: <concise description>` there when auto-QA is enabled.
  *
- * Enabled by default; gated behind PI_AUTO_QA=1 / `dev.autoqa` so a user who
- * flips the setting off short-circuits injection entirely.
+ * Enabled by default (`dev.autoqa` defaults to true); `PI_AUTO_QA=0` or an
+ * explicit `dev.autoqa: false` short-circuits injection entirely. When the
+ * user is only enabled by default (never configured `dev.autoqa` themselves),
+ * a persisted `dev.autoqaConsent: "denied"` also disables injection so a "No"
+ * in the consent dialog fully turns the feature off.
  * Records grievances to a local SQLite database; never throws from the device
  * dispatch path.
  *
- * Before the first record lands, the user's consent is checked. If they've
- * never been asked (`dev.autoqaConsent === "unset"`) the process-global
- * consent handler — wired by `InteractiveMode` to a Yes/No popup — is invoked
- * exactly once and the decision is persisted. Subsequent calls (including from
- * subagents) read the cached decision without prompting.
+ * Nothing is written until consent resolves. If the user has never been asked
+ * (`dev.autoqaConsent === "unset"`) the process-global consent handler —
+ * wired by `InteractiveMode` to a Yes/No popup — is invoked exactly once and
+ * the decision is persisted; a denial (or dismissal) drops the pending report
+ * without touching the database. Subsequent calls (including from subagents)
+ * read the cached decision without prompting. `PI_AUTO_QA_PUSH=1` bypasses
+ * the dialog for headless environments.
  *
  * When the user grants consent, push is automatically active against the
  * bundled endpoint (`dev.autoqaPush.endpoint`, default `qa.omp.sh`). Each
@@ -24,11 +29,13 @@
  * the network and never throws.
  */
 import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { $env, $flag, getAutoQaDbDir, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { Settings } from "..";
 import type { Theme } from "../modes/theme/theme";
 import { renderStatusLine, truncateToWidth } from "../tui";
@@ -88,8 +95,23 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 	throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
 }
 
+/**
+ * Whether Auto-QA is active for this session.
+ *
+ * Precedence: `PI_AUTO_QA` env flag > explicit `dev.autoqa` setting >
+ * default-on unless the user previously denied consent. The denial veto only
+ * applies to the default: explicitly configuring `dev.autoqa: true` re-enables
+ * injection (recording still no-ops until consent is granted).
+ */
 export function isAutoQaEnabled(settings?: Settings): boolean {
-	return $flag("PI_AUTO_QA", !!settings?.get("dev.autoqa"));
+	let fallback = false;
+	if (settings) {
+		const enabled = !!settings.get("dev.autoqa");
+		fallback = settings.isConfigured("dev.autoqa")
+			? enabled
+			: enabled && settings.get("dev.autoqaConsent") !== "denied";
+	}
+	return $flag("PI_AUTO_QA", fallback);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -233,15 +255,18 @@ let cachedDb: Database | null = null;
 
 /**
  * Open (or return the cached handle for) the auto-QA SQLite database at
- * `~/.omp/agent/autoqa.db`, creating the schema lazily. Returns `null` when
- * the agent data dir cannot be resolved.
+ * `~/.omp/autoqa.db` (XDG: `$XDG_DATA_HOME/omp/autoqa.db`), creating the
+ * schema lazily. Returns `null` when the path cannot be resolved or opened.
  */
 export function openAutoQaDb(): Database | null {
 	if (cachedDb) return cachedDb;
-	const dir = getAutoQaDbDir();
-	if (!dir) return null;
+	const dbPath = getAutoQaDbPath();
+	if (!dbPath) return null;
 	try {
-		const db = new Database(`${dir}/autoqa.db`, { create: true });
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+		const db = new Database(dbPath, { create: true });
+		// Install the busy handler BEFORE any lock-taking statement. See #2421.
+		db.run("PRAGMA busy_timeout = 5000");
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS grievances (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +277,17 @@ export function openAutoQaDb(): Database | null {
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				pushed INTEGER NOT NULL DEFAULT 0
 			);
+		`);
+		// Legacy DBs (May 2026) predate `created_at`. ALTER TABLE only accepts
+		// constant defaults, so add it empty and backfill before the index below.
+		const hasCreatedAt = db.prepare("SELECT 1 FROM pragma_table_info('grievances') WHERE name = 'created_at'").get();
+		if (!hasCreatedAt) {
+			db.exec(`
+				ALTER TABLE grievances ADD COLUMN created_at TEXT NOT NULL DEFAULT '';
+				UPDATE grievances SET created_at = CURRENT_TIMESTAMP WHERE created_at = '';
+			`);
+		}
+		db.exec(`
 			CREATE INDEX IF NOT EXISTS grievances_pushed_created_at_idx
 			ON grievances (pushed, created_at, id);
 		`);
@@ -471,23 +507,38 @@ export async function flushGrievances(
 	}
 }
 
-/** Record a grievance row and trigger the background consent/flush pipeline. */
-async function recordToolIssue(session: ToolSession, tool: string, report: string): Promise<void> {
+/**
+ * Most recently scheduled record pipeline. Never rejects (the pipeline
+ * swallows its own errors); retained so tests can await the fire-and-forget
+ * work deterministically via {@link __awaitAutoQaRecordPipelineForTests}.
+ */
+let lastRecordPipeline: Promise<void> = Promise.resolve();
+
+/** Test-only: await the last consent → insert → flush pipeline. */
+export function __awaitAutoQaRecordPipelineForTests(): Promise<void> {
+	return lastRecordPipeline;
+}
+
+/**
+ * Queue a grievance for recording. The consent → insert → flush pipeline is
+ * fire-and-forget: nothing is written until the user grants consent (or
+ * `PI_AUTO_QA_PUSH=1` forces headless recording), and the device result
+ * returns immediately so the model never waits on the dialog or the network.
+ */
+function recordToolIssue(session: ToolSession, tool: string, report: string): void {
 	const canonicalTool = tool.startsWith("proxy_") ? tool.slice("proxy_".length) : tool;
-	const db = openAutoQaDb();
-	if (!db) return;
-	db.prepare("INSERT INTO grievances (model, version, tool, report) VALUES (?, ?, ?, ?)").run(
-		session.getActiveModelString?.() ?? "unknown",
-		VERSION,
-		canonicalTool,
-		report,
-	);
-	void (async () => {
+	const model = session.getActiveModelString?.() ?? "unknown";
+	lastRecordPipeline = (async () => {
 		try {
-			await resolveAutoQaConsent(session.settings);
+			if (!$flag("PI_AUTO_QA_PUSH") && !(await resolveAutoQaConsent(session.settings))) return;
+			const db = openAutoQaDb();
+			if (!db) return;
+			db.prepare(
+				"INSERT INTO grievances (model, version, tool, report, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+			).run(model, VERSION, canonicalTool, report);
 			await flushGrievances(db, session.settings);
 		} catch (error) {
-			logger.debug("autoqa post-insert pipeline failed", { error: String(error) });
+			logger.debug("autoqa consent pipeline failed", { error: String(error) });
 		}
 	})();
 }
@@ -504,7 +555,7 @@ export async function dispatchReportIssueDevice(
 	try {
 		if (isAutoQaEnabled(session.settings)) {
 			const { tool, report } = parseReportIssueBody(text);
-			await recordToolIssue(session, tool, report);
+			recordToolIssue(session, tool, report);
 		}
 	} catch (error) {
 		if (error instanceof ToolError) throw error;

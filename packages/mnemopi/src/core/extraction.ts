@@ -387,7 +387,10 @@ export async function extractFactCategories(
 	if (configuredLlmWillHandleCall()) {
 		diag.recordAttempt("host");
 		try {
-			const raw = await callConfiguredCompletion(prompt, 0, { maxTokens: llmMaxTokens() });
+			const raw = await callConfiguredCompletion(prompt, 0, {
+				maxTokens: llmMaxTokens(),
+				task: { kind: "memory-extraction", input: text },
+			});
 			if (typeof raw === "string" && raw.trim() !== "") {
 				const extracted = parseExtractedFactCategories(raw);
 				const count = countExtractedFactCategories(extracted);

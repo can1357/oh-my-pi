@@ -121,7 +121,7 @@ function kindCounts(rows: readonly TripleCandidateRow[]): Record<string, number>
 
 function migrateRows(db: Database, rows: readonly TripleCandidateRow[]): number {
 	if (rows.length === 0) return 0;
-	const insert = db.prepare(`
+	using insert = db.prepare(`
 		INSERT OR IGNORE INTO annotations (memory_id, kind, value, source, confidence, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`);

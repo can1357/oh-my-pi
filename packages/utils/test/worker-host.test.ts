@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { EventEmitter } from "node:events";
-import { consumeWorkerInbox, installWorkerInbox } from "../src/worker-host";
+import {
+	consumeWorkerInbox,
+	installWorkerInbox,
+	isWorkerHostSelector,
+	WORKER_HOST_SELECTOR_PREFIX,
+} from "../src/worker-host";
 
 /**
  * Regression for JS/tab eval workers always stalling until the init timeout.
@@ -14,6 +19,16 @@ import { consumeWorkerInbox, installWorkerInbox } from "../src/worker-host";
  * buffers until the worker module `bind`s the real handler; these tests pin that
  * buffer-replay contract.
  */
+describe("worker-host selectors", () => {
+	it("recognizes the shared selector namespace without claiming ordinary CLI arguments", () => {
+		expect(WORKER_HOST_SELECTOR_PREFIX).toBe("__omp_worker_");
+		expect(isWorkerHostSelector("__omp_worker_stats_sync")).toBeTrue();
+		expect(isWorkerHostSelector("__omp_worker_computer")).toBeTrue();
+		expect(isWorkerHostSelector("--version")).toBeFalse();
+		expect(isWorkerHostSelector(undefined)).toBeFalse();
+	});
+});
+
 describe("worker-host inbox", () => {
 	// State is a module-global stash (one worker per process); drain it around
 	// each test so nothing leaks into the next.

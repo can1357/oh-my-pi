@@ -15,7 +15,7 @@ import { currentLoopPhase, logger, popLoopPhase, pushLoopPhase, takeRecentLoopPh
  * ticks by hand; firing re-arms via schedule, so the captured callback always
  * advances to the next pending tick.
  */
-function harness(options: Partial<{ intervalMs: number; thresholdMs: number }> = {}) {
+function harness(options: Partial<{ intervalMs: number; thresholdMs: number; sleepMs: number }> = {}) {
 	let nowValue = 0;
 	let scheduled: (() => void) | undefined;
 	const now = () => nowValue;
@@ -87,6 +87,24 @@ describe("LoopWatchdog", () => {
 		fireTick();
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	test("treats a long missed interval as system sleep, not an event-loop block", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { wd, setNow, fireTick } = harness({ sleepMs: 5_000 });
+
+		wd.start(); // deadline at 250
+		setNow(10_250); // blockedMs = 10_000 exceeds the sleep cutoff, and no CPU was burned
+		fireTick();
+
+		expect(warnSpy).not.toHaveBeenCalled();
+
+		setNow(10_760); // next deadline is 10_500 → a real 260ms stall still reports
+		fireTick();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const [event, ctx] = warnSpy.mock.calls[0] as [string, { blockedMs: number; phase: string }];
+		expect(event).toBe("ui.loop-blocked");
+		expect(ctx.blockedMs).toBe(260);
 	});
 
 	test("emits nothing for a tick that fires after stop()", () => {
@@ -205,5 +223,80 @@ describe("LoopWatchdog", () => {
 		wd.stop();
 
 		expect(cancel).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * A long overshoot is classified by CPU time, not by duration. System sleep and
+ * a CPU-bound wedge both produce an arbitrarily large gap, so duration alone
+ * cannot separate them — and suppressing on duration discards exactly the worst
+ * stalls. Issue #5372 reported an 82,391ms block that older builds logged and
+ * current builds drop silently.
+ */
+describe("LoopWatchdog long-block classification", () => {
+	function cpuHarness(options: Partial<{ intervalMs: number; thresholdMs: number; sleepMs: number }> = {}) {
+		let nowValue = 0;
+		let cpuValue = 0;
+		let scheduled: (() => void) | undefined;
+		const wd = new LoopWatchdog({
+			now: () => nowValue,
+			cpuNow: () => cpuValue,
+			schedule: (cb: () => void) => {
+				scheduled = cb;
+				return {};
+			},
+			...options,
+		});
+		return {
+			wd,
+			set(now: number, cpu: number): void {
+				nowValue = now;
+				cpuValue = cpu;
+			},
+			fireTick(): void {
+				const cb = scheduled;
+				if (!cb) throw new Error("no tick was scheduled");
+				cb();
+			},
+		};
+	}
+
+	test("reports a CPU-bound wedge longer than sleepMs instead of discarding it", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const h = cpuHarness();
+
+		h.wd.start(); // deadline 250, cpu baseline 0
+		// 82,391ms of wall clock, essentially all of it burned on a core.
+		h.set(82_641, 82_000);
+		h.fireTick();
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const ctx = warnSpy.mock.calls[0]![1] as { blockedMs: number; cpuMs: number };
+		expect(ctx.blockedMs).toBe(82_391);
+		expect(ctx.cpuMs).toBeGreaterThan(80_000);
+	});
+
+	test("still suppresses a suspend/resume gap of the same duration", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const h = cpuHarness();
+
+		h.wd.start();
+		// Same wall gap, but the process was suspended: no CPU consumed.
+		h.set(82_641, 3);
+		h.fireTick();
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	test("reports a long CPU-bound block when the process is CPU throttled", () => {
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const h = cpuHarness();
+
+		h.wd.start();
+		// Ten percent CPU is still real work, not suspension.
+		h.set(82_641, 8_200);
+		h.fireTick();
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
 	});
 });

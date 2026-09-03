@@ -2,16 +2,20 @@
 # requires-python = ">=3.10"
 # dependencies = ["pillow"]
 # ///
-"""Kimi K2.6 chunked benchmark runner (KimiK26Bench scratch file).
+"""Kimi-line chunked benchmark runner over PRODUCTION-rendered frames.
 
 mono_prod protocol (same flow/questions/seed) but every request carries <=8
 frames: OpenRouter silently drops images after the first 8, and kimi itself
 dilutes >8 genuine frames. Chunk plan = windows of 8 frames, overlap >=1,
 evenly spread (reproduces the diag [(0,8),(6,14),(13,21)] plan for 21 frames
-so the .973 anchor is a cache hit). Questions are routed to the chunk where
-their answer position is most interior.
+so the k2.6 .973 anchor is a cache hit). Questions are routed to the chunk
+where their answer position is most interior.
 
-  uv run --with pillow python bench_kimi.py --shape-json '<Shape>' --name <label>
+  uv run bench_kimi.py --shape 8on16-bw                        # k2.6 anchor
+  uv run bench_kimi.py --model moonshotai/kimi-k3 --shape 8on22-bw
+
+--shape takes a settings variant name from mono_prod.SHAPES (the production
+SHAPE_VARIANTS payloads); --shape-json + --name still accept a raw Shape.
 """
 
 import argparse
@@ -26,10 +30,11 @@ sys.path.insert(0, str(HERE))
 
 import squad  # noqa: E402
 from final import MODELS, cached  # noqa: E402
+from mono_prod import SHAPES  # noqa: E402
 from providers import _png_b64, _post, load_env_key, llm_complete  # noqa: E402
 from run import CACHE, RESULTS, load_prompt, sha8  # noqa: E402
 
-OR_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_MODEL = "moonshotai/kimi-k2.6"
 FW_MODEL = "accounts/fireworks/models/kimi-k2p6"
 FW_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 FW_PRICE = (0.95, 4.00)  # $/M in, out — fireworks.ai/models/fireworks/kimi-k2p6
@@ -94,8 +99,14 @@ def plan_chunks(n: int) -> list[tuple[int, int]]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--shape-json", required=True)
-    ap.add_argument("--name", required=True)
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument(
+        "--shape", choices=sorted(SHAPES), help="named shape from mono_prod.SHAPES"
+    )
+    ap.add_argument(
+        "--shape-json", help="raw production Shape JSON (alternative to --shape)"
+    )
+    ap.add_argument("--name", help="condition label; required with --shape-json")
     ap.add_argument(
         "--route", default="openrouter", choices=["openrouter", "fireworks"]
     )
@@ -112,7 +123,18 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true")
     args = ap.parse_args()
 
-    shape, label = json.loads(args.shape_json), args.name
+    if args.shape_json:
+        if not args.name:
+            ap.error("--name is required with --shape-json")
+        shape, label = json.loads(args.shape_json), args.name
+    elif args.shape:
+        shape, label = SHAPES[args.shape], args.shape
+    else:
+        ap.error("pass --shape or --shape-json")
+    if args.route == "fireworks" and args.model != DEFAULT_MODEL:
+        ap.error("the fireworks route is wired to kimi-k2.6 only")
+    if args.route == "openrouter" and args.model not in MODELS:
+        ap.error(f"model {args.model} not in final.MODELS; add its prices there")
     keys = {
         "openrouter": load_env_key("OPENROUTER_API_KEY"),
         "anthropic": "",
@@ -144,8 +166,13 @@ def main() -> None:
     pngs = sorted(frame_dir.glob("page-*.png"))
     n_frames = len(pngs)
     size = shape["frameSize"]
-    cols = size // shape["cellWidth"]
-    rows = size // shape["cellHeight"]
+    repeat = shape.get("lineRepeat", 1)
+    cols = (
+        (size // shape["cellWidth"] - 3) // 2
+        if shape.get("columns") == 2
+        else size // shape["cellWidth"]
+    )
+    rows = size // shape["cellHeight"] // repeat
     chunks = plan_chunks(n_frames)
     print(f"{label}: {n_frames} frames @{size}px, chunks={chunks}")
 
@@ -170,6 +197,17 @@ def main() -> None:
         preamble = load_prompt("qa-image-multi.md").format(
             k=len(chunk_pngs), cols=cols, rows=rows
         )
+        if shape.get("columns") == 2:
+            preamble += (
+                "\nNote: each image lays text out as two word-wrapped newspaper columns separated by a gutter; "
+                "read the left column top to bottom, then the right column."
+            )
+        if repeat > 1:
+            preamble += (
+                f"\nNote: every text line is rendered {repeat} times consecutively - first on the plain "
+                "background, then repeated on a pale highlight band. The copies show identical characters; "
+                "cross-check between them when a glyph is hard to read, and do not treat copies as separate text."
+            )
         ctx = [
             {"text": preamble},
             *({"image_path": p} for p in chunk_pngs),
@@ -187,7 +225,7 @@ def main() -> None:
                 zip(
                     ("text", "usage", "stop"),
                     llm_complete(
-                        keys, OR_MODEL, m, max_tokens=args.max_tokens, effort=None
+                        keys, args.model, m, max_tokens=args.max_tokens, effort=None
                     ),
                 )
             )
@@ -196,7 +234,7 @@ def main() -> None:
                 zip(("text", "usage", "stop"), fireworks_complete(m, args.max_tokens))
             )
         qa = cached(
-            OR_MODEL, tag, {"messages": messages, "effort": None}, fn, args.fresh
+            args.model, tag, {"messages": messages, "effort": None}, fn, args.fresh
         )
         for q, a in zip(qs, squad.parse_numbered(qa["text"], len(qs))):
             answers_by_q[q["q"]] = a
@@ -208,7 +246,7 @@ def main() -> None:
 
     rows_out = [
         {
-            "model": OR_MODEL,
+            "model": args.model,
             "cond": f"bench-{label}",
             "pos_rel": q["pos_rel"],
             "q": q["q"],
@@ -224,7 +262,9 @@ def main() -> None:
         k: sum(x[k] for x in usages)
         for k in ("in", "out", "cache_w", "cache_r", "reasoning")
     }
-    price_in, price_out = MODELS[OR_MODEL] if args.route == "openrouter" else FW_PRICE
+    price_in, price_out = (
+        MODELS[args.model] if args.route == "openrouter" else FW_PRICE
+    )
     cost = u["in"] / 1e6 * price_in + u["out"] / 1e6 * price_out
     quart = []
     for lo, hi in ((0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.01)):
@@ -258,7 +298,7 @@ def main() -> None:
         "q3": quart[2],
         "q4": quart[3],
     }
-    out_dir = RESULTS / f"bench-kimi-{label}"
+    out_dir = RESULTS / f"bench-{args.model.split('/')[-1]}-{label}"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "records.jsonl").write_text("\n".join(json.dumps(r) for r in rows_out))
     (out_dir / "summary.json").write_text(json.dumps([summary], indent=1))

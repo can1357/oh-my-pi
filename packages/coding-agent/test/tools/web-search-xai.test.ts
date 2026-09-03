@@ -149,17 +149,60 @@ describe("xAI web search provider", () => {
 			Authorization: "Bearer test-xai-key",
 		});
 		expect(capture.capturedRequest?.body).toMatchObject({
-			model: "grok-4.3",
+			model: "grok-4.5",
 			input: [
 				{ role: "system", content: "Use web search for current xAI facts." },
 				{ role: "user", content: "latest xAI web search" },
 			],
 			tools: [{ type: "web_search" }],
+			reasoning: { effort: "low" },
 			max_output_tokens: 512,
 			temperature: 0.2,
 		});
 		expect(capture.capturedRequest?.body?.tools).toEqual([{ type: "web_search" }]);
 		expect(capture.capturedRequest?.body).not.toHaveProperty("search_parameters");
+	});
+
+	it("maps site: onto web_search allowed_domains and strips it from the query", async () => {
+		const capture = captureFetch({ id: "resp_directives", model: "grok-4.3", output_text: "directive answer" });
+
+		await searchXAI({
+			...makeParams(capture.fetchMock),
+			query: "grok api site:docs.x.ai after:2025-01-01",
+		});
+
+		const body = capture.capturedRequest?.body;
+		expect(body?.tools).toEqual([{ type: "web_search", filters: { allowed_domains: ["docs.x.ai"] } }]);
+		// The Responses web_search tool has no from_date/to_date, so the date
+		// bound stays in the query text for the agent while site: is stripped.
+		const input = body?.input as { role: string; content: string }[];
+		expect(input[1]?.content).toBe("grok api after:2025-01-01");
+	});
+
+	it("maps -site: onto excluded_domains as bare hosts only when no allow list is present", async () => {
+		const capture = captureFetch({ id: "resp_excludes", model: "grok-4.3", output_text: "exclude answer" });
+
+		await searchXAI({
+			...makeParams(capture.fetchMock),
+			query: "grok changelog -site:reddit.com/r/grok -site:news.ycombinator.com",
+		});
+
+		const body = capture.capturedRequest?.body;
+		expect(body?.tools).toEqual([
+			{ type: "web_search", filters: { excluded_domains: ["reddit.com", "news.ycombinator.com"] } },
+		]);
+		const input = body?.input as { role: string; content: string }[];
+		expect(input[1]?.content).toBe("grok changelog");
+
+		await searchXAI({
+			...makeParams(capture.fetchMock),
+			query: "grok changelog site:docs.x.ai -site:reddit.com",
+		});
+		// allowed_domains and excluded_domains are mutually exclusive per
+		// request: the allow list wins, exclusions fall to the central filter.
+		expect(capture.capturedRequest?.body?.tools).toEqual([
+			{ type: "web_search", filters: { allowed_domains: ["docs.x.ai"] } },
+		]);
 	});
 
 	it("uses dedicated xAI OAuth credentials for Responses API bearer auth", async () => {
@@ -420,6 +463,7 @@ describe("xAI web search provider", () => {
 		expect(capture.capturedRequest).not.toBeNull();
 		const body = capture.capturedRequest?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
+		expect(body?.reasoning).toEqual({ effort: "low" });
 		expect(body).not.toHaveProperty("search_parameters");
 	});
 
@@ -441,7 +485,7 @@ describe("xAI web search provider", () => {
 		const body = capture.capturedRequest?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
 		expect(body).not.toHaveProperty("search_parameters");
-		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "tools"]);
+		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "reasoning", "tools"]);
 	});
 
 	it("rejects deprecated live-search 410 responses without retrying", async () => {
@@ -468,7 +512,7 @@ describe("xAI web search provider", () => {
 		const body = capture.capturedRequests[0]?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
 		expect(body).not.toHaveProperty("search_parameters");
-		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "tools"]);
+		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "reasoning", "tools"]);
 	});
 
 	it("maps output_text, URL citation annotations, top-level citations, id, model, usage, and auth mode", async () => {
@@ -597,7 +641,7 @@ describe("xAI web search provider", () => {
 		const body = capture.capturedRequest?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
 		expect(body).not.toHaveProperty("search_parameters");
-		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "tools"]);
+		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "reasoning", "tools"]);
 	});
 
 	it("clamps oversized xAI local cap requests to 30 sources and citations", async () => {
@@ -623,7 +667,7 @@ describe("xAI web search provider", () => {
 		const body = capture.capturedRequest?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
 		expect(body).not.toHaveProperty("search_parameters");
-		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "tools"]);
+		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "reasoning", "tools"]);
 	});
 
 	it("caps parsed sources and citations locally without changing Agent Tools request shape", async () => {
@@ -691,7 +735,7 @@ describe("xAI web search provider", () => {
 		const body = capture.capturedRequest?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
 		expect(body).not.toHaveProperty("search_parameters");
-		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "tools"]);
+		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "reasoning", "tools"]);
 	});
 
 	it("uses numSearchResults before limit for the local xAI output cap", async () => {
@@ -735,7 +779,7 @@ describe("xAI web search provider", () => {
 		const body = capture.capturedRequest?.body;
 		expect(body?.tools).toEqual([{ type: "web_search" }]);
 		expect(body).not.toHaveProperty("search_parameters");
-		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "tools"]);
+		expect(Object.keys(body ?? {}).sort()).toEqual(["input", "model", "reasoning", "tools"]);
 	});
 
 	it("falls back to output content parts when output_text is absent", async () => {
@@ -755,6 +799,67 @@ describe("xAI web search provider", () => {
 		const response = await searchXAI(makeParams(capture.fetchMock));
 		expect(response).toMatchObject({
 			answer: "First content part\nSecond content part",
+		});
+	});
+
+	it("extracts offset snippets and raw sources from web_search_call output", async () => {
+		const answer = "Context before [cited source](https://example.com/cited) context after.";
+		const start = answer.indexOf("[cited source]");
+		const capture = captureFetch({
+			id: "resp_raw_sources",
+			output: [
+				{
+					type: "message",
+					content: [
+						{
+							type: "output_text",
+							text: answer,
+							annotations: [
+								{
+									type: "url_citation",
+									url: "https://example.com/cited",
+									title: "Cited result",
+									start_index: start,
+									end_index: start + "[cited source]".length,
+								},
+							],
+						},
+					],
+				},
+				{
+					type: "web_search_call",
+					action: {
+						sources: [
+							{ url: "https://example.com/raw", title: "Raw result" },
+							{ source_website_url: "https://example.com/fallback", caption: "Fallback result" },
+						],
+					},
+					results: [{ url: "https://example.com/cited", title: "Duplicate result" }],
+				},
+			],
+		});
+
+		const response = await searchXAI(makeParams(capture.fetchMock));
+
+		expect(response.answer).toBe(answer);
+		expect(response.sources).toEqual([
+			{
+				title: "Cited result",
+				url: "https://example.com/cited",
+				snippet: "Context before cited source context after.",
+			},
+			{ title: "Raw result", url: "https://example.com/raw", snippet: undefined },
+			{ title: "Fallback result", url: "https://example.com/fallback", snippet: undefined },
+		]);
+	});
+
+	it("rejects successful responses with no answer or sources", async () => {
+		const capture = captureFetch({ id: "resp_empty", output: [] });
+
+		await expect(searchXAI(makeParams(capture.fetchMock))).rejects.toMatchObject({
+			provider: "xai",
+			status: 502,
+			message: "xAI web_search returned no answer or sources",
 		});
 	});
 

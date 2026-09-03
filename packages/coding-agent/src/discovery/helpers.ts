@@ -11,14 +11,19 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "../capability";
+import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import { resolveClaudePaths } from "../config/claude-paths";
+import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
+import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 
 /**
@@ -84,17 +89,28 @@ export const SOURCE_PATHS = {
 export type SourceId = keyof typeof SOURCE_PATHS;
 
 /**
- * Get user-level path for a source.
+ * Resolve a user-level path for a source without the `~/` opt-in gate.
+ * Only for callers that hold their own explicit opt-in (a per-capability
+ * `skills.enable*User` / `commands.enable*User` toggle); everything else
+ * goes through {@link getUserPath}.
  */
-export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+export function resolveUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
 	// Native user config is profile-scoped via getAgentDir() (the active profile's
-	// agent dir), matching builtin.ts and getMCPConfigPath("user"). External tools
-	// (~/.claude, ~/.gemini, …) are intentionally not profile-scoped, so they keep
-	// resolving against ctx.home below.
+	// agent dir), matching builtin.ts and getMCPConfigPath("user").
 	if (source === "native") return path.join(getAgentDir(), subpath);
+	if (source === "claude") return path.join(resolveClaudePaths(ctx.home).configDir, subpath);
 	const paths = SOURCE_PATHS[source];
 	if (!paths.userAgent) return null;
 	return path.join(ctx.home, paths.userAgent, subpath);
+}
+
+/**
+ * Get user-level path for a source, or null when its `~/` config is not
+ * opted in (see {@link isUserSourceEnabled}).
+ */
+export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+	if (!isUserSourceEnabled(source, ctx)) return null;
+	return resolveUserPath(ctx, source, subpath);
 }
 
 /**
@@ -137,6 +153,15 @@ export function parseBoolean(value: unknown): boolean | undefined {
 		if (normalized === "true") return true;
 		if (normalized === "false") return false;
 	}
+	return undefined;
+}
+
+/**
+ * Parse an MCP `requestIdFormat` value. Unrecognized values are dropped so a typo
+ * degrades to the default integer ids rather than reaching a transport.
+ */
+export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undefined {
+	if (value === "string" || value === "number") return value;
 	return undefined;
 }
 
@@ -234,6 +259,8 @@ export interface ParsedAgentFields {
 	blocking?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;
+	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
+	advisor?: boolean | string;
 }
 
 /**
@@ -248,7 +275,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools = parseArrayOrCSV(frontmatter.tools);
+	let tools =
+		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
@@ -294,6 +322,12 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		const trimmed = frontmatter.prewalk.trim();
 		if (trimmed) prewalk = trimmed;
 	}
+	// advisor: true → advise with the default advisor-role model; "<pattern>" → custom advisor model.
+	let advisor: boolean | string | undefined = parseBoolean(frontmatter.advisor);
+	if (advisor === undefined && typeof frontmatter.advisor === "string") {
+		const trimmed = frontmatter.advisor.trim();
+		if (trimmed) advisor = trimmed;
+	}
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
@@ -309,6 +343,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		autoloadSkills,
 		readSummarize,
 		prewalk,
+		advisor,
 	};
 }
 
@@ -420,13 +455,32 @@ export async function scanSkillsFromDir(
 }
 
 /**
+ * Resolve a placeholder name against `extraEnv`, then the ambient environment.
+ *
+ * Inherited members of either map (`__proto__`, `constructor`, `toString`, …)
+ * are never substitutable: `extraEnv` is consulted by own property only, and
+ * `Bun.env`'s getter falls through to `Object.prototype`, so `${constructor}`
+ * would otherwise stringify into the value as `function Object() { [native
+ * code] }`. Every real variable is a string, so a non-string ambient hit means
+ * the name resolved to a prototype member and counts as unset.
+ */
+function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): string | undefined {
+	if (extraEnv !== undefined && Object.hasOwn(extraEnv, varName)) return extraEnv[varName];
+	const ambient = Bun.env[varName];
+	return typeof ambient === "string" ? ambient : undefined;
+}
+
+/**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
-		if (envValue !== undefined) return envValue;
+		const envValue = lookupEnvValue(varName, extraEnv);
+		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
+		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
+		// (even an empty one) and stays literal when unset.
+		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;
 	});
@@ -492,6 +546,11 @@ export async function loadFilesFromDir<T>(
 			gitignore: true,
 			hidden: false,
 			fileType: FileType.File,
+			// Thread the caller's non-recursive intent explicitly: the native glob
+			// defaults `recursive` to true and rewrites `*.{ts,js}` -> `**/*.{ts,js}`,
+			// which would walk the entire subtree (e.g. a venv's site-packages under
+			// ~/.codex/tools) and import arbitrary frontend assets as tools (#8552).
+			recursive,
 		});
 		matches = result.matches;
 	} catch {
@@ -538,6 +597,102 @@ export async function loadFilesFromDir<T>(
  */
 export function calculateDepth(cwd: string, targetDir: string, separator: string): number {
 	return cwd.split(separator).length - targetDir.split(separator).length;
+}
+// =============================================================================
+// Standalone context-file walker (AGENTS.md, CLAUDE.md, …)
+// =============================================================================
+
+/**
+ * Compare paths while tolerating Windows drive casing.
+ */
+function samePath(left: string, right: string): boolean {
+	const normalizedLeft = path.resolve(left);
+	const normalizedRight = path.resolve(right);
+	return process.platform === "win32"
+		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+/**
+ * Return whether `child` is at or below `parent`.
+ */
+function isWithin(parent: string, child: string): boolean {
+	const normalizedParent = path.resolve(parent);
+	const normalizedChild = path.resolve(child);
+	const relative = path.relative(
+		process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
+		process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
+	);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+/**
+ * Load standalone context files (e.g. AGENTS.md, CLAUDE.md) by walking up from
+ * cwd. Shared across providers whose files live in project root rather than
+ * config directories (which their own providers handle).
+ *
+ * When a repository is nested below the user's home directory, continue past
+ * the Git root to discover workspace-level files, but stop before loading the
+ * home directory's own copy as project context. A repository rooted at the
+ * home directory itself is not "nested below" it, so the home-level file
+ * remains project context.
+ */
+export async function loadStandaloneContextFiles(
+	ctx: LoadContext,
+	providerId: string,
+	fileName: string,
+): Promise<LoadResult<ContextFile>> {
+	const items: ContextFile[] = [];
+	const warnings: string[] = [];
+	const home = path.resolve(ctx.home);
+	const cwd = path.resolve(ctx.cwd);
+	const repoRoot = ctx.repoRoot ? path.resolve(ctx.repoRoot) : null;
+	const filesystemRoot = path.parse(cwd).root;
+	const cwdIsUnderHome = isWithin(home, cwd);
+	const repoIsHome = repoRoot !== null && samePath(home, repoRoot);
+	const repoIsUnderHome = repoRoot !== null && isWithin(home, repoRoot) && !repoIsHome;
+	const scanToHome = repoRoot !== null && cwdIsUnderHome && repoIsUnderHome;
+	const boundary = scanToHome ? home : (repoRoot ?? (cwdIsUnderHome ? home : filesystemRoot));
+	const includeBoundary = repoRoot === null ? cwdIsUnderHome : !samePath(boundary, home) || repoIsHome;
+	const excludeHome = scanToHome;
+
+	let current = cwd;
+	while (true) {
+		const atBoundary = samePath(current, boundary);
+		const atHome = excludeHome && samePath(current, home);
+		if (!(atHome || (atBoundary && !includeBoundary))) {
+			const candidate = path.join(current, fileName);
+			const content = await readFile(candidate);
+
+			// Empty files contribute nothing and must not claim the depth scope:
+			// at a priority tie, an empty first-registered file would shadow a
+			// non-empty sibling (e.g. an empty AGENTS.md shadowing CLAUDE.md).
+			if (content !== null && content !== "") {
+				const parent = path.dirname(candidate);
+				const baseName = parent.split(path.sep).pop() ?? "";
+
+				if (!baseName.startsWith(".")) {
+					const fileDir = path.dirname(candidate);
+					const calculatedDepth = calculateDepth(cwd, fileDir, path.sep);
+
+					items.push({
+						path: candidate,
+						content,
+						level: "project",
+						depth: calculatedDepth,
+						_source: createSourceMeta(providerId, candidate, "project"),
+					});
+				}
+			}
+		}
+		if (atBoundary) break;
+
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+
+	return { items, warnings };
 }
 
 interface ExtensionModuleManifest {
@@ -741,7 +896,7 @@ export function buildExtensionModuleItems(
  * Entry for an installed Claude Code plugin.
  */
 export interface ClaudePluginEntry {
-	/** Claude registry scope; local entries are restricted to their project path. */
+	/** Claude registry scope; project and local entries are restricted to their project path. */
 	scope?: "user" | "project" | "local";
 	installPath: string;
 	version: string;
@@ -749,7 +904,7 @@ export interface ClaudePluginEntry {
 	lastUpdated: string;
 	gitCommitSha?: string;
 	enabled?: boolean;
-	/** Project root recorded by Claude for a local installation. */
+	/** Project root recorded by Claude for a project-bound installation. */
 	projectPath?: string;
 }
 
@@ -873,6 +1028,40 @@ async function canonicalClaudeProjectPath(projectPath: string): Promise<string |
 	}
 }
 
+/**
+ * Claude Code `enabledPlugins` overrides, merged across the same settings
+ * layers Claude Code itself consults: `<claude-config>/settings.json`, then
+ * `<dir>/.claude/settings.json` and `<dir>/.claude/settings.local.json` for
+ * each project directory (later layers win, `.local` wins within a layer).
+ *
+ * Returns `pluginId -> boolean` for the ids the user toggled explicitly, and
+ * the list of settings files that contributed (for cache keying).
+ */
+async function readClaudeEnabledPlugins(
+	claudeConfigDir: string,
+	projectDirs: string[],
+): Promise<{ enabled: Map<string, boolean>; sources: string[] }> {
+	const enabled = new Map<string, boolean>();
+	const sources: string[] = [];
+	const candidates = [path.join(claudeConfigDir, "settings.json")];
+	for (const dir of projectDirs) {
+		candidates.push(path.join(dir, ".claude", "settings.json"), path.join(dir, ".claude", "settings.local.json"));
+	}
+	for (const file of candidates) {
+		const content = await readFile(file);
+		if (!content) continue;
+		const data = tryParseJson<{ enabledPlugins?: unknown }>(content);
+		if (!data || typeof data !== "object") continue;
+		const map = data.enabledPlugins;
+		if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+		sources.push(file);
+		for (const [pluginId, value] of Object.entries(map as Record<string, unknown>)) {
+			if (typeof value === "boolean") enabled.set(pluginId, value);
+		}
+	}
+	return { enabled, sources };
+}
+
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
 const pluginCacheInvalidators = new Set<() => void>();
@@ -883,20 +1072,24 @@ export function registerPluginCacheInvalidator(invalidator: () => void): void {
 }
 
 /**
- * List all installed Claude Code plugin roots from the plugin cache.
- * Reads ~/.claude/plugins/installed_plugins.json and ~/.omp/plugins/installed_plugins.json,
- * and optionally the nearest project-scoped registry resolved from `cwd`.
+ * List all installed Claude Code plugin roots from its active plugin cache and
+ * ~/.omp/plugins/installed_plugins.json, plus the nearest project registry when present.
  *
- * Results are cached per home, project registry, and canonical active project.
+ * Results are cached per Claude and OMP config directories, project registry, and canonical active project.
  */
 export async function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const claudeConfigDir = resolveClaudePaths(home).configDir;
+	const ompRegistryPath = path.join(getPluginsDir(home), "installed_plugins.json");
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
 	const projectRoot = resolvedProjectPath ? path.dirname(path.dirname(path.dirname(resolvedProjectPath))) : cwd;
 	const activeClaudeProjectPath = projectRoot ? await canonicalClaudeProjectPath(projectRoot) : null;
-	const cacheKey = `${home}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}`;
+	const canonicalCwd = cwd ? await canonicalClaudeProjectPath(cwd) : null;
+	const settingsDirs = [...new Set([activeClaudeProjectPath, canonicalCwd].filter((d): d is string => !!d))];
+	const enabledOverrides = await readClaudeEnabledPlugins(claudeConfigDir, settingsDirs);
+	const cacheKey = `${claudeConfigDir}:${ompRegistryPath}:${resolvedProjectPath ?? ""}:${activeClaudeProjectPath ?? ""}:${canonicalCwd ?? ""}:${enabledOverrides.sources.join("|")}`;
 	const cached = pluginRootsCache.get(cacheKey);
 	if (cached) return cached;
 
@@ -906,7 +1099,7 @@ export async function listClaudePluginRoots(
 	const canonicalClaudeProjectPaths = new Map<string, string | null>();
 
 	// ── Claude Code registry ──────────────────────────────────────────────────
-	const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
+	const registryPath = path.join(claudeConfigDir, "plugins", "installed_plugins.json");
 	const content = await readFile(registryPath);
 
 	if (content) {
@@ -935,7 +1128,13 @@ export async function listClaudePluginRoots(
 						continue;
 					}
 					if (entry.enabled === false) continue;
-					if (entry.scope === "local") {
+					// Claude Code's own on/off switch: `enabledPlugins` in settings.json /
+					// settings.local.json. `false` hides the plugin here even though it is
+					// installed; `true` opts a project-bound install into this project even
+					// when its recorded projectPath is a different directory.
+					const override = enabledOverrides.enabled.get(pluginId);
+					if (override === false) continue;
+					if ((entry.scope === "local" || entry.scope === "project") && override !== true) {
 						if (!entry.projectPath || !activeClaudeProjectPath) continue;
 						let entryProjectPath = canonicalClaudeProjectPaths.get(entry.projectPath);
 						if (entryProjectPath === undefined) {
@@ -963,7 +1162,7 @@ export async function listClaudePluginRoots(
 	// In production `home` is `os.homedir()`, so `getPluginsDir(home)` resolves to the
 	// same XDG-aware path the marketplace writer uses (reads and writes always agree).
 	// Tests pass a temp dir, which short-circuits the resolver for deterministic isolation.
-	const ompRegistryPath = path.join(getPluginsDir(home), "installed_plugins.json");
+	// Computed before the cache lookup because isolated SDK homes select distinct OMP registries.
 	const ompContent = await readFile(ompRegistryPath);
 	if (ompContent) {
 		const ompRegistry = parseClaudePluginsRegistry(ompContent);
@@ -1087,7 +1286,7 @@ export function clearClaudePluginRootsCache(): void {
  * installing/uninstalling/enabling/disabling plugins.
  */
 export function clearPluginRootsAndCaches(extraPaths?: readonly string[]): void {
-	invalidateFsCache(path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json"));
+	invalidateFsCache(path.join(resolveClaudePaths().configDir, "plugins", "installed_plugins.json"));
 	invalidateFsCache(path.join(getPluginsDir(), "installed_plugins.json"));
 	for (const p of extraPaths ?? []) invalidateFsCache(p);
 	clearClaudePluginRootsCache();
@@ -1131,17 +1330,30 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 	const injected: ClaudePluginRoot[] = [];
 	for (const dir of dirs) {
 		const resolved = path.resolve(dir);
-		// Read plugin name from manifest
+		// Read plugin name from manifest: Claude marketplace layout first, then
+		// the Agent Plugins standard root manifest (agent-plugins.org). Each
+		// manifest is resolved and proven inside the plugin directory BEFORE the
+		// read (Agent Plugins §4.1) — an escaping symlink falls back to the
+		// directory basename without consuming outside content.
 		let pluginName = path.basename(resolved);
-		try {
-			const manifestPath = path.join(resolved, ".claude-plugin", "plugin.json");
-			const content = await Bun.file(manifestPath).text();
-			const manifest = JSON.parse(content);
-			if (typeof manifest.name === "string" && manifest.name) {
-				pluginName = manifest.name;
+		const realRoot = await realpathIfExists(resolved);
+		if (realRoot !== null) {
+			for (const manifestPath of [
+				path.join(realRoot, ".claude-plugin", "plugin.json"),
+				path.join(realRoot, "plugin.json"),
+			]) {
+				const contained = await resolveContainedPath(realRoot, manifestPath);
+				if (contained.status !== "ok") continue;
+				try {
+					const manifest = await Bun.file(contained.realPath).json();
+					if (typeof manifest?.name === "string" && manifest.name) {
+						pluginName = manifest.name;
+						break;
+					}
+				} catch {
+					// Invalid manifest — try next, fall back to directory name
+				}
 			}
-		} catch {
-			// No manifest or invalid — use directory name
 		}
 
 		injected.push(buildPluginDirRoot(resolved, pluginName));

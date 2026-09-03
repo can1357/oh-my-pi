@@ -31,3 +31,20 @@ export class EventBus {
 		this.#listeners.clear();
 	}
 }
+
+/**
+ * Publishes a subagent frame on the session bus and the observability bus.
+ * SDK embedders may pass the same EventBus for both slots; the identity check
+ * skips the aliased re-emit so listeners never see duplicate frames.
+ */
+export function emitSubagentFrame(
+	eventBus: EventBus | undefined,
+	subagentEventBus: EventBus | undefined,
+	channel: string,
+	payload: unknown,
+): void {
+	eventBus?.emit(channel, payload);
+	if (subagentEventBus && subagentEventBus !== eventBus) {
+		subagentEventBus.emit(channel, payload);
+	}
+}

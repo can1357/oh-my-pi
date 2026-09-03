@@ -5,7 +5,7 @@
  */
 
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
@@ -130,8 +130,15 @@ ${chalk.bold("Options:")}
   --compact           Render condensed output
   -h, --help          Show this help
 
+${chalk.bold("Query directives:")}
+  site:/-site:  after:/before: (YYYY-MM-DD)  inurl:  intitle:  filetype:
+  "exact phrase"  -term  OR
+  Mapped to native provider filters where available, otherwise applied as a
+  lenient post-filter (a constraint matching nothing is relaxed, not fatal).
+
 ${chalk.bold("Examples:")}
   ${APP_NAME} q --provider=exa "what's the color of the sky"
   ${APP_NAME} q --provider=brave --recency=week "latest TypeScript 5.7 changes"
+  ${APP_NAME} q 'transformer scaling site:arxiv.org after:2024 -site:reddit.com'
 `);
 }

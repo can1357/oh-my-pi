@@ -6,6 +6,8 @@
 		"moduleResolution": "Bundler",
 		"moduleDetection": "force",
 		"strict": true,
+		"noImplicitOverride": true,
+		"noFallthroughCasesInSwitch": true,
 		"skipLibCheck": true,
 		"allowArbitraryExtensions": true,
 		"verbatimModuleSyntax": true,

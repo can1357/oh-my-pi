@@ -3,10 +3,20 @@
  */
 
 import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
-import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	getAgentDir,
+	getGpuCachePath,
+	getProjectDir,
+	hasFsCode,
+	isEnoent,
+	logger,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
@@ -16,6 +26,7 @@ import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
+import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -25,7 +36,6 @@ import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import { usesCodexTaskPrompt } from "./task/prompt-policy";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
-import { formatLocalCalendarDate } from "./utils/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -35,6 +45,31 @@ const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
 	friendly: friendlyPersonality,
 	pragmatic: pragmaticPersonality,
 };
+
+/**
+ * Load the user-level PERSONALITY.md override for the system prompt's
+ * personality block from `<agentDir>/PERSONALITY.md` (`~/.omp/agent` by
+ * default; profile, XDG, and `PI_CODING_AGENT_DIR` aware). Returns null when
+ * the file is absent, empty, or unreadable; callers then render the configured
+ * preset. Read failures other than a missing file warn instead of failing the
+ * build.
+ */
+async function loadPersonalityOverride(): Promise<string | null> {
+	const filePath = path.join(getAgentDir(), "PERSONALITY.md");
+	try {
+		const content = (await Bun.file(filePath).text()).trim();
+		if (content) return content;
+		logger.warn("PERSONALITY.md is empty; using the configured personality preset", { path: filePath });
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Failed to read PERSONALITY.md; using the configured personality preset", {
+				path: filePath,
+				error: String(error),
+			});
+		}
+	}
+	return null;
+}
 
 interface AlwaysApplyRule {
 	name: string;
@@ -49,23 +84,49 @@ function normalizePromptBlock(content: string): string {
 function splitComparablePromptBlocks(content: string | null | undefined): string[] {
 	const normalized = firstNonEmpty(content);
 	if (!normalized) return [];
-
-	return normalizePromptBlock(normalized)
-		.split(/\n{2,}/)
-		.map(block => block.trim())
-		.filter(block => block.length > 0);
+	const rendered = normalizePromptBlock(normalized);
+	// Split on blank-line paragraph boundaries, but not inside fenced code
+	// blocks. A rule that appears only inside a fenced example in another file
+	// is an example, not an instruction, so it must not count as containment.
+	const blocks: string[] = [];
+	let current: string[] = [];
+	let inFence = false;
+	for (const line of rendered.split("\n")) {
+		if (/^\s*(```|~~~)/.test(line)) {
+			inFence = !inFence;
+			current.push(line);
+			continue;
+		}
+		if (!inFence && line.trim() === "" && current.length > 0 && current[current.length - 1].trim() !== "") {
+			const block = current.join("\n").trim();
+			if (block.length > 0) blocks.push(block);
+			current = [];
+			continue;
+		}
+		current.push(line);
+	}
+	const tail = current.join("\n").trim();
+	if (tail.length > 0) blocks.push(tail);
+	return blocks;
 }
 
-function promptSourceContainsRule(source: string | null | undefined, ruleContent: string): boolean {
-	const sourceBlocks = splitComparablePromptBlocks(source);
-	const ruleBlocks = splitComparablePromptBlocks(ruleContent);
-	if (sourceBlocks.length === 0 || ruleBlocks.length === 0 || ruleBlocks.length > sourceBlocks.length) return false;
-
+/**
+ * Check whether `ruleBlocks` appears as a contiguous subsequence of
+ * `sourceBlocks`. Both inputs must already be normalized and split via
+ * {@link splitComparablePromptBlocks}.
+ */
+function promptBlocksContain(sourceBlocks: string[], ruleBlocks: string[]): boolean {
+	if (sourceBlocks.length === 0 || ruleBlocks.length === 0 || ruleBlocks.length > sourceBlocks.length) {
+		return false;
+	}
 	for (let start = 0; start <= sourceBlocks.length - ruleBlocks.length; start += 1) {
 		if (ruleBlocks.every((block, offset) => sourceBlocks[start + offset] === block)) return true;
 	}
-
 	return false;
+}
+
+function promptSourceContainsRule(source: string | null | undefined, ruleContent: string): boolean {
+	return promptBlocksContain(splitComparablePromptBlocks(source), splitComparablePromptBlocks(ruleContent));
 }
 
 function dedupeAlwaysApplyRules(
@@ -103,13 +164,18 @@ function renderActiveRepoContextPrompt(activeRepoContext: ActiveRepoContext | nu
 		.trim();
 }
 
-function parseWmicTable(output: string, header: string): string | null {
-	const lines = output
+function parseWindowsGpuModel(output: string): string | null {
+	const adapters = output
 		.split("\n")
 		.map(line => line.trim())
-		.filter(Boolean);
-	const filtered = lines.filter(line => line.toLowerCase() !== header.toLowerCase());
-	return filtered[0] ?? null;
+		.filter(line => Boolean(line) && line.toLowerCase() !== "name");
+	const physicalAdapters = adapters.filter(adapter => !/\b(?:virtual|mirror|remote|citrix)\b/i.test(adapter));
+	return (
+		physicalAdapters.find(adapter => /\b(?:nvidia|amd|radeon|intel)\b/i.test(adapter)) ??
+		physicalAdapters[0] ??
+		adapters[0] ??
+		null
+	);
 }
 
 const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
@@ -163,7 +229,7 @@ async function getGpuModel(): Promise<string | null> {
 	switch (process.platform) {
 		case "win32": {
 			const output = await runGpuProbe(["wmic", "path", "win32_VideoController", "get", "name"]);
-			return output ? parseWmicTable(output, "Name") : null;
+			return output ? parseWindowsGpuModel(output) : null;
 		}
 		case "linux": {
 			const output = await runGpuProbe(["lspci"]);
@@ -216,6 +282,14 @@ function getTerminalName(): string | undefined {
 	return term ?? undefined;
 }
 
+/**
+ * On-disk cache schema version. Bumped when detection logic changes so stored
+ * selections from an older parser are rejected and re-probed instead of served
+ * indefinitely — e.g. the Windows virtual-adapter filtering added for #9675,
+ * which would otherwise keep returning a cached virtual GPU after upgrade.
+ */
+const GPU_CACHE_VERSION = 1;
+
 /** Cached GPU probe result. */
 interface GpuCache {
 	gpu: string | null;
@@ -225,7 +299,7 @@ async function loadGpuCache(): Promise<GpuCache | null> {
 	try {
 		const cachePath = getGpuCachePath();
 		const content = await Bun.file(cachePath).json();
-		if (content && typeof content === "object" && "gpu" in content) {
+		if (content && typeof content === "object" && content.version === GPU_CACHE_VERSION && "gpu" in content) {
 			const gpu = content.gpu;
 			return { gpu: typeof gpu === "string" ? gpu : null };
 		}
@@ -238,7 +312,7 @@ async function loadGpuCache(): Promise<GpuCache | null> {
 async function saveGpuCache(info: GpuCache): Promise<void> {
 	try {
 		const cachePath = getGpuCachePath();
-		await Bun.write(cachePath, JSON.stringify(info, null, "\t"));
+		await Bun.write(cachePath, JSON.stringify({ version: GPU_CACHE_VERSION, gpu: info.gpu }, null, "\t"));
 	} catch {
 		// Silently ignore cache write failures
 	}
@@ -330,18 +404,43 @@ export async function resolvePromptInput(input: string | undefined, description:
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
+	/** Disabled extension IDs to honor instead of the process-global settings. */
+	disabledExtensions?: string[];
 }
 
-function dedupeExactContextFiles(
+/**
+ * Deduplicate context files by paragraph containment.
+ *
+ * Files are sorted by depth descending (farther from cwd first) so that a
+ * file is omitted only when a more-authoritative (closer-to-cwd) file
+ * contains its entire normalized paragraph sequence as a contiguous run.
+ * This makes the function self-contained — it does not rely on callers
+ * pre-sorting the array, which matters because some callers concatenate
+ * independently sorted workspace roots where array position does not reflect
+ * authority. Files whose paragraphs are merely paraphrased or interleaved are
+ * kept — containment is exact after normalization, not fuzzy.
+ *
+ * @internal Exported for testing.
+ */
+export function dedupeContainedContextFiles(
 	contextFiles: Array<{ path: string; content: string; depth?: number }>,
 ): Array<{ path: string; content: string; depth?: number }> {
-	const lastIndexByContent = new Map<string, number>();
-	for (const [index, file] of contextFiles.entries()) {
-		// Keep the closest matching context entry when content is byte-for-byte identical.
-		lastIndexByContent.set(file.content, index);
-	}
-
-	return contextFiles.filter((file, index) => lastIndexByContent.get(file.content) === index);
+	// Sort by depth descending: higher depth (farther from cwd, less
+	// authoritative) first, lower depth (closer to cwd, more authoritative)
+	// last. Stable sort preserves caller order among equal-depth files.
+	const sorted = [...contextFiles].sort((a, b) => {
+		const depthA = a.depth ?? Number.POSITIVE_INFINITY;
+		const depthB = b.depth ?? Number.POSITIVE_INFINITY;
+		return depthB - depthA;
+	});
+	const blocks = sorted.map(file => splitComparablePromptBlocks(file.content));
+	return sorted.filter(
+		(_file, index) =>
+			!blocks.some(
+				(candidateBlocks, candidateIndex) =>
+					candidateIndex > index && promptBlocksContain(candidateBlocks, blocks[index]),
+			),
+	);
 }
 
 /**
@@ -354,7 +453,10 @@ export async function loadProjectContextFiles(
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
 
-	const result = await loadCapability(contextFileCapability.id, { cwd: resolvedCwd });
+	const result = await loadCapability(contextFileCapability.id, {
+		cwd: resolvedCwd,
+		disabledExtensions: options.disabledExtensions,
+	});
 
 	// Materialize ContextFile items, expanding any `@path/to/file` includes
 	// in their content. The expansion uses the file's own directory as the
@@ -379,7 +481,7 @@ export async function loadProjectContextFiles(
 		return depthB - depthA;
 	});
 
-	return dedupeExactContextFiles(files);
+	return dedupeContainedContextFiles(files);
 }
 
 /**
@@ -415,30 +517,62 @@ export interface SystemPromptToolMetadata {
 	examples?: readonly ToolExample[];
 }
 
+export type SystemPromptToolMetadataProjection =
+	| {
+			mode: "compact";
+			toolNames: readonly string[];
+			overrides?: Partial<Record<string, Partial<SystemPromptToolMetadata>>>;
+	  }
+	| {
+			mode: "full";
+			overrides?: Partial<Record<string, Partial<SystemPromptToolMetadata>>>;
+	  };
+
 export function buildSystemPromptToolMetadata(
 	tools: Map<string, AgentTool>,
 	overrides: Partial<Record<string, Partial<SystemPromptToolMetadata>>> = {},
 ): Map<string, SystemPromptToolMetadata> {
-	return new Map(
-		Array.from(tools.entries(), ([name, tool]) => {
-			const toolRecord = tool as AgentTool & { label?: string; description?: string };
-			const override = overrides[name];
-			const wireName =
-				override?.wireName ??
-				(typeof toolRecord.customWireName === "string" ? toolRecord.customWireName : undefined);
-			return [
-				name,
-				{
-					label: override?.label ?? (typeof toolRecord.label === "string" ? toolRecord.label : ""),
-					description:
-						override?.description ?? (typeof toolRecord.description === "string" ? toolRecord.description : ""),
-					parameters: toolRecord.parameters,
-					examples: toolRecord.examples,
-					wireName,
-				},
-			] as const;
-		}),
-	);
+	return projectSystemPromptToolMetadata(tools, { mode: "full", overrides });
+}
+
+/** Builds a mode-specific metadata snapshot for internal prompt assembly. */
+export function projectSystemPromptToolMetadata(
+	tools: Map<string, AgentTool>,
+	projection: SystemPromptToolMetadataProjection,
+): Map<string, SystemPromptToolMetadata> {
+	const metadata = new Map<string, SystemPromptToolMetadata>();
+	const addTool = (name: string, tool: AgentTool): void => {
+		const override = projection.overrides?.[name];
+		const labelValue = override?.label ?? tool.label;
+		const wireNameValue = override?.wireName ?? tool.customWireName;
+		const label = typeof labelValue === "string" ? labelValue : "";
+		const wireName = typeof wireNameValue === "string" ? wireNameValue : undefined;
+
+		if (projection.mode === "compact") {
+			metadata.set(name, { label, description: "", wireName });
+			return;
+		}
+
+		const descriptionValue = override?.description ?? tool.description;
+		metadata.set(name, {
+			label,
+			description: typeof descriptionValue === "string" ? descriptionValue : "",
+			parameters: tool.parameters,
+			examples: tool.examples,
+			wireName,
+		});
+	};
+
+	if (projection.mode === "compact") {
+		for (const name of projection.toolNames) {
+			const tool = tools.get(name);
+			if (tool) addTool(name, tool);
+		}
+	} else {
+		for (const [name, tool] of tools) addTool(name, tool);
+	}
+
+	return metadata;
 }
 
 export interface BuildSystemPromptOptions {
@@ -450,6 +584,13 @@ export interface BuildSystemPromptOptions {
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
 	toolNames?: string[];
+	/**
+	 * Names actually exposed as provider-callable tools. Defaults to `toolNames`.
+	 * Code Mode passes its direct keep-set so the rendered tool inventory matches
+	 * the wire surface while capability and safety gates still see every
+	 * bridge-reachable tool in `toolNames`.
+	 */
+	directToolNames?: readonly string[];
 	/** Text to append to system prompt. */
 	appendSystemPrompt?: string;
 	/** Already-loaded append prompt text; bypasses path resolution. */
@@ -459,13 +600,16 @@ export interface BuildSystemPromptOptions {
 	/**
 	 * Whether provider-native tool calling is active (no owned/in-band syntax).
 	 * When true and `inlineToolDescriptors` is false, the inventory renders as a
-	 * compact tool-name list; otherwise it renders full `# Tool:` sections. Default: true
+	 * compact tool-name list; otherwise it renders the full Harmony-style
+	 * `namespace functions { … }` catalog. Default: true
 	 */
 	nativeTools?: boolean;
 	/** Skills settings for discovery. */
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
+	/** Additional workspace directories beyond cwd (multi-root), absolute. Injected into the project prompt. */
+	additionalWorkspaceRoots?: string[];
 	/** Pre-loaded context files (skips discovery if provided). */
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Skills provided directly to system prompt construction. */
@@ -484,6 +628,9 @@ export interface BuildSystemPromptOptions {
 	taskMaxConcurrency?: number;
 	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
 	taskIrcEnabled?: boolean;
+	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
+	scoutAvailable?: boolean;
+
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
@@ -492,6 +639,8 @@ export interface BuildSystemPromptOptions {
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Whether the local memory://root summary is active. */
 	memoryRootEnabled?: boolean;
+	/** Whether the read-only security:// resource namespace is active. */
+	securityEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") used by prompt policy and optionally surfaced. */
 	model?: string;
 	/** Whether to surface `model` in the workstation block. Model-specific prompt policy still uses it. Default: true. */
@@ -504,18 +653,28 @@ export interface BuildSystemPromptOptions {
 	renderMermaid?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
-	/** Tools mounted under `xd://`; renders the protocol section when non-empty. */
-	xdevTools?: Array<{ name: string; summary: string }>;
+	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
+	xdevTools?: Array<{ name: string; summary: string; dynamic?: boolean }>;
 	/** Full docs + JSON schema for every `xd://`-mounted tool, inlined into the protocol section so no discovery `read` is needed. */
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
+	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
+	writeTransportOnly?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
+	/**
+	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
+	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
+	 * prompt template that omits the section). Lets the session fold these devices
+	 * into its announced-mount baseline so a same-turn mount notice does not re-list
+	 * a catalog the prompt already carries (issue #7139).
+	 */
+	xdevCatalogNames?: readonly string[];
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -534,7 +693,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		nativeTools = true,
 		skillsSettings,
 		toolNames: providedToolNames,
+		directToolNames,
 		cwd,
+		additionalWorkspaceRoots = [],
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 		rules,
@@ -547,7 +708,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskIrcEnabled = false,
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
+		scoutAvailable = true,
 		memoryRootEnabled = false,
+		securityEnabled = false,
 		model,
 		includeModelInPrompt = true,
 		personality = "default",
@@ -556,6 +719,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevTools = [],
 		xdevDocs = "",
 		autoQaEnabled = false,
+		writeTransportOnly = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -565,7 +729,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedCustomPrompt: undefined as string | undefined,
 		resolvedAppendPrompt: undefined as string | undefined,
 		systemPromptCustomization: null as string | null,
-		contextFiles: dedupeExactContextFiles(providedContextFiles ?? []),
+		contextFiles: dedupeContainedContextFiles(providedContextFiles ?? []),
 		skills: providedSkills ?? ([] as Skill[]),
 		workspaceTree: {
 			rootPath: resolvedCwd,
@@ -619,23 +783,42 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
 		? Promise.resolve(null)
 		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
-	const contextFilesPromise = providedContextFiles
-		? Promise.resolve(providedContextFiles)
-		: logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
-	const workspaceTreePromise =
-		providedWorkspaceTree !== undefined
-			? Promise.resolve(providedWorkspaceTree)
-			: includeWorkspaceTree
-				? logger.time("buildWorkspaceTree", () =>
-						buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
-					)
-				: Promise.resolve({
-						rootPath: resolvedCwd,
-						rendered: "",
-						truncated: false,
-						totalLines: 0,
-						agentsMdFiles: [],
-					});
+	const contextFilesPromise = (async () => {
+		const primary = providedContextFiles
+			? providedContextFiles
+			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
+		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
+		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
+		if (additionalRoots.length === 0) return primary;
+		const extra = await Promise.all(
+			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
+		);
+		return dedupeContainedContextFiles([...primary, ...extra.flat()]);
+	})();
+	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
+	const workspaceTreePromise = (async () => {
+		const primary =
+			providedWorkspaceTree !== undefined
+				? await Promise.resolve(providedWorkspaceTree)
+				: includeWorkspaceTree
+					? await logger.time("buildWorkspaceTree", () =>
+							buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
+						)
+					: { rootPath: resolvedCwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
+		if (additionalRootsForTree.length === 0 || !includeWorkspaceTree) return primary;
+		const extraTrees = await Promise.all(
+			additionalRootsForTree.map(root =>
+				buildWorkspaceTree(root, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }).catch(() => ({
+					rootPath: root,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				})),
+			),
+		);
+		return { ...primary, agentsMdFiles: [...primary.agentsMdFiles, ...extraTrees.flatMap(t => t.agentsMdFiles)] };
+	})();
 	const skillsPromise: Promise<readonly Skill[]> =
 		providedSkills !== undefined
 			? Promise.resolve(providedSkills)
@@ -648,6 +831,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: logger.time("resolveActiveRepoContext", () => resolveActiveRepoContext(resolvedCwd));
 	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
 	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
+	// "none" (explicit off — and every subagent) omits the block and skips the file lookup.
+	const bundledPersonality = personality === "none" ? "" : PERSONALITY_SPECS[personality].trim();
+	const personalityPromise: Promise<string> =
+		personality === "none"
+			? Promise.resolve("")
+			: logger
+					.time("loadPersonalityOverride", loadPersonalityOverride)
+					.then(override => override ?? bundledPersonality);
 
 	const [
 		resolvedCustomPrompt,
@@ -659,6 +850,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		activeRepoContext,
 		cpuModel,
 		gpu,
+		personalityBlock,
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
@@ -676,13 +868,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		),
 		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
 		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
-			dedupeExactContextFiles,
+			dedupeContainedContextFiles,
 		),
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
 		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
 		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
+		withDeadline("loadPersonalityOverride", personalityPromise, bundledPersonality),
 	]);
 	clearTimeout(deadlineTimer);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
@@ -707,8 +900,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		}
 	}
 
-	const date = formatLocalCalendarDate();
-	const dateTime = date;
 	const promptCwd = normalizePromptPath(resolvedCwd);
 	const activeRepoContextPrompt = renderActiveRepoContextPrompt(activeRepoContext);
 
@@ -719,6 +910,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolNames = tools ? Array.from(tools.keys()) : [...DEFAULT_SYSTEM_PROMPT_TOOL_NAMES];
 	}
 
+	// List mode shows a compact tool-name list; it only applies when descriptors
+	// stay in provider-native tool schemas AND native tool calling is active.
+	// Otherwise render the full functions-namespace catalog in the system prompt.
+	const toolListMode = !inlineToolDescriptors && nativeTools;
 	// Build tool descriptions for system prompt rendering.
 	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
 	// xd://-mounted tools count as present for prompt gates ({{#has tools "lsp"}})
@@ -731,28 +926,32 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
 	// A direct custom tool can share a name with a retained built-in device.
 	// Presence in both toolNames and tools proves it still has a top-level definition.
+	// Bridge-only Code Mode tools stay out of the callable inventory: the eval
+	// description documents their `tool.*` access path instead.
+	const directSet = directToolNames === undefined ? undefined : new Set(directToolNames);
+	const directInventoryNames = directSet === undefined ? toolNames : toolNames.filter(name => directSet.has(name));
 	const inventoryToolNames =
-		xdevToolNames.size === 0 ? toolNames : toolNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
+		xdevToolNames.size === 0
+			? directInventoryNames
+			: directInventoryNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
 	const toolInfo = inventoryToolNames.map(name => ({
 		name: toolPromptNames.get(name) ?? name,
 		internalName: name,
 		label: tools?.get(name)?.label ?? "",
-		description: tools?.get(name)?.description ?? "",
 	}));
-	const inventoryTools = inventoryToolNames.map(name => {
-		const meta = tools?.get(name);
-		return {
-			name: toolPromptNames.get(name) ?? name,
-			description: meta?.description ?? "",
-			parameters: meta?.parameters ?? ({ type: "object" } as TSchema),
-			examples: meta?.examples,
-		};
-	});
-	// List mode shows a compact tool-name list; it only applies when descriptors
-	// stay in provider-native tool schemas AND native tool calling is active.
-	// Otherwise render full `# Tool:` sections inline in the system prompt.
-	const toolListMode = !inlineToolDescriptors && nativeTools;
-	const toolInventory = toolListMode ? "" : renderToolInventory(inventoryTools, model ?? "");
+	const toolInventory = toolListMode
+		? ""
+		: renderToolInventory(
+				inventoryToolNames.map(name => {
+					const meta = tools?.get(name);
+					return {
+						name: toolPromptNames.get(name) ?? name,
+						description: meta?.description ?? "",
+						parameters: meta?.parameters ?? ({ type: "object" } as TSchema),
+						examples: meta?.examples,
+					};
+				}),
+			);
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
@@ -791,30 +990,36 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
-		date,
-		dateTime,
 		cwd: promptCwd,
+		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
 		useCodexTaskPrompt: usesCodexTaskPrompt(model),
-		personality: personality === "none" ? "" : PERSONALITY_SPECS[personality].trim(),
+		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
+		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
+		securityEnabled,
 		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,
 		renderMermaid,
 		xdevTools,
+		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
+		writeTransportOnly,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];
+	if (toolNames.includes("computer")) {
+		systemPrompt.push(computerSafetyPrompt.trim());
+	}
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.
 	const projectPrompt = prompt
@@ -827,5 +1032,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(activeRepoContextPrompt);
 	}
 
-	return { systemPrompt };
+	// The xd:// protocol section (with its device catalog) is only rendered by the
+	// default template; a resolved custom prompt uses a template that omits it.
+	const xdevCatalogNames =
+		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
+	return { systemPrompt, xdevCatalogNames };
 }

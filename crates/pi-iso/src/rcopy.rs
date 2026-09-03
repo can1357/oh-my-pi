@@ -413,11 +413,10 @@ fn filetime_set(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()
 	let dur = mtime
 		.duration_since(std::time::UNIX_EPOCH)
 		.map_err(std::io::Error::other)?;
-	let times =
-		[libc::timespec { tv_sec: dur.as_secs() as libc::time_t, tv_nsec: 0 }, libc::timespec {
-			tv_sec:  dur.as_secs() as libc::time_t,
-			tv_nsec: dur.subsec_nanos() as libc::c_long,
-		}];
+	let times = [libc::timespec { tv_sec: dur.as_secs() as _, tv_nsec: 0 }, libc::timespec {
+		tv_sec:  dur.as_secs() as _,
+		tv_nsec: dur.subsec_nanos() as libc::c_long,
+	}];
 	let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
 	// SAFETY: `c_path` and `times` outlive the syscall; the kernel does
 	// not retain the pointers.

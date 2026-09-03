@@ -87,7 +87,7 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		if (!sessionManager.getBranch()[0]?.id) throw new Error("Expected seeded branch entry");
 
 		const settings = Settings.isolated({
-			"compaction.strategy": "snapcompact",
+			"compaction.methodOrder": ["snapcompact", "soft"],
 			"compaction.keepRecentTokens": 1,
 		});
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
@@ -113,14 +113,11 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		const result = await harness.session.compact();
 
 		expect(result.summary).toBe("llm summary");
-		// LLM fallback ran; the active text-only model is tried first.
+		// The preference resolver skips snapcompact and tries the active model for soft compaction.
 		expect(compactSpy).toHaveBeenCalled();
 		const [, firstCandidate] = compactSpy.mock.calls[0]!;
 		expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(
 			`${harness.activeModel.provider}/${harness.activeModel.id}`,
-		);
-		expect(harness.notices).toContain(
-			`snapcompact needs a vision-capable model (${harness.activeModel.id} is text-only); falling back to LLM compaction`,
 		);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toMatchObject({
 			type: "compaction",

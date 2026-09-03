@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+
+async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
+	const deadline = Date.now() + 2_000;
+	while (manager.getJob(jobId)) {
+		if (Date.now() >= deadline) throw new Error(`Timed out waiting for job eviction: ${jobId}`);
+		await scheduler.yield();
+	}
+}
 
 describe("AsyncJobManager", () => {
 	test("forwards progress updates and delivers completion", async () => {
@@ -113,6 +122,30 @@ describe("AsyncJobManager", () => {
 		expect(completions).toHaveLength(0);
 	});
 
+	test("bounds owner-job reap while preserving late settlement", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		const jobId = manager.register(
+			"task",
+			"ignores abort",
+			async () => {
+				await release.promise;
+				return "late result";
+			},
+			{ ownerId: "owner" },
+		);
+
+		const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
+
+		expect(reap.settled).toBe(false);
+		expect(reap.pendingJobIds).toEqual([jobId]);
+		expect(manager.getJob(jobId)?.status).toBe("cancelled");
+
+		release.resolve();
+		await reap.completion;
+		expect(manager.getJob(jobId)?.resultText).toBe("late result");
+	});
+
 	test("enforces maxRunningJobs cap", () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
@@ -187,17 +220,21 @@ describe("AsyncJobManager", () => {
 		await manager.drainDeliveries({ timeoutMs: 2_000 });
 
 		expect(manager.getJob(jobId)?.status).toBe("completed");
-		await Bun.sleep(60);
+		await waitForJobEviction(manager, jobId);
 		expect(manager.getJob(jobId)).toBeUndefined();
 	});
 
 	test("cancelAll does not clear retention timers for already completed jobs", async () => {
+		let completedJobId = "";
+		const completedDelivered = Promise.withResolvers<void>();
 		const manager = new AsyncJobManager({
 			retentionMs: 30,
-			onJobComplete: async () => {},
+			onJobComplete: async jobId => {
+				if (jobId === completedJobId) completedDelivered.resolve();
+			},
 		});
 
-		const completedJobId = manager.register("task", "completed", async () => "done");
+		completedJobId = manager.register("task", "completed", async () => "done");
 		const runningJobId = manager.register("bash", "running", async ({ signal }) => {
 			await new Promise<void>(resolve => {
 				signal.addEventListener("abort", () => resolve(), { once: true });
@@ -205,11 +242,7 @@ describe("AsyncJobManager", () => {
 			throw new Error("aborted");
 		});
 
-		const completedDeadline = Date.now() + 2_000;
-		while (manager.getJob(completedJobId)?.status === "running") {
-			if (Date.now() >= completedDeadline) throw new Error("Timed out waiting for completed job");
-			await Bun.sleep(5);
-		}
+		await completedDelivered.promise;
 		manager.cancelAll();
 		await manager.waitForAll();
 		await manager.drainDeliveries({ timeoutMs: 2_000 });
@@ -217,31 +250,36 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(completedJobId)?.status).toBe("completed");
 		expect(manager.getJob(runningJobId)?.status).toBe("cancelled");
 
-		await Bun.sleep(80);
+		await Promise.all([waitForJobEviction(manager, completedJobId), waitForJobEviction(manager, runningJobId)]);
 		expect(manager.getJob(completedJobId)).toBeUndefined();
 		expect(manager.getJob(runningJobId)).toBeUndefined();
 	});
 
 	test("acknowledgeDeliveries suppresses pending retries for completed jobs", async () => {
+		let failedJobId = "";
 		let attempts = 0;
+		const sentinelDelivered = Promise.withResolvers<void>();
+		const firstAttempt = Promise.withResolvers<void>();
 		const manager = new AsyncJobManager({
-			onJobComplete: async () => {
+			onJobComplete: async jobId => {
+				if (jobId !== failedJobId) {
+					sentinelDelivered.resolve();
+					return;
+				}
 				attempts += 1;
+				firstAttempt.resolve();
 				throw new Error("delivery failed");
 			},
 		});
 
-		const jobId = manager.register("task", "awaited-job", async () => "done");
+		failedJobId = manager.register("task", "awaited-job", async () => "done");
 		await manager.waitForAll();
 
-		const firstAttemptDeadline = Date.now() + 2_000;
-		while (attempts === 0) {
-			if (Date.now() >= firstAttemptDeadline) throw new Error("Timed out waiting for first delivery attempt");
-			await Bun.sleep(5);
-		}
+		await firstAttempt.promise;
+		while (!manager.hasPendingDeliveries()) await scheduler.yield();
 
 		expect(manager.hasPendingDeliveries()).toBe(true);
-		const removed = manager.acknowledgeDeliveries([jobId]);
+		const removed = manager.acknowledgeDeliveries([failedJobId]);
 		expect(removed).toBeGreaterThanOrEqual(1);
 
 		const drained = await manager.drainDeliveries({ timeoutMs: 200 });
@@ -249,7 +287,9 @@ describe("AsyncJobManager", () => {
 		expect(manager.hasPendingDeliveries()).toBe(false);
 
 		const attemptsAfterAck = attempts;
-		await Bun.sleep(700);
+		manager.register("task", "sentinel-job", async () => "sentinel");
+		await manager.waitForAll();
+		await sentinelDelivered.promise;
 		expect(attempts).toBe(attemptsAfterAck);
 	});
 
@@ -280,16 +320,32 @@ describe("AsyncJobManager", () => {
 			return "unreachable";
 		});
 
-		const startedAt = Date.now();
-		const result = await Promise.race([
-			manager.dispose({ timeoutMs: 25 }).then(drained => ({ drained, settled: true })),
-			Bun.sleep(150).then(() => ({ drained: true, settled: false })),
-		]);
+		const drained = await manager.dispose({ timeoutMs: 25 });
 
-		expect(result.settled).toBe(true);
-		expect(result.drained).toBe(false);
-		expect(Date.now() - startedAt).toBeLessThan(150);
+		expect(drained).toBe(false);
 		expect(manager.getAllJobs()).toHaveLength(0);
+	});
+
+	test("starts queued deliveries while an earlier sink receipt is pending", async () => {
+		const releaseDeliveries = Promise.withResolvers<void>();
+		const bothStarted = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("Main", async jobId => {
+			started.push(jobId);
+			if (started.length === 2) bothStarted.resolve();
+			await releaseDeliveries.promise;
+		});
+
+		const firstId = manager.register("task", "first", async () => "first result", { ownerId: "Main" });
+		const secondId = manager.register("task", "second", async () => "second result", { ownerId: "Main" });
+		await manager.waitForAll();
+
+		await bothStarted.promise;
+		expect(started).toEqual([firstId, secondId]);
+
+		releaseDeliveries.resolve();
+		expect(await manager.drainDeliveries({ timeoutMs: 200 })).toBe(true);
 	});
 
 	test("scoped delivery drain returns once matching owner deliveries finish", async () => {
@@ -302,17 +358,16 @@ describe("AsyncJobManager", () => {
 		const mainDeliveryReleased = new Promise<void>(resolve => {
 			releaseMainDelivery = resolve;
 		});
+		const mainDeliveryFinished = Promise.withResolvers<void>();
 		const subagentCompletions: Array<{ jobId: string; text: string }> = [];
-		const manager = new AsyncJobManager({
-			retentionMs: 0,
-			onJobComplete: async (jobId, text) => {
-				if (jobId === mainJobId) {
-					notifyMainDeliveryStarted();
-					await mainDeliveryReleased;
-					return;
-				}
-				subagentCompletions.push({ jobId, text });
-			},
+		const manager = new AsyncJobManager({ retentionMs: 0 });
+		manager.registerDeliverySink("0-Main", async () => {
+			notifyMainDeliveryStarted();
+			await mainDeliveryReleased;
+			mainDeliveryFinished.resolve();
+		});
+		manager.registerDeliverySink("3-AuthLoader", (jobId, text) => {
+			subagentCompletions.push({ jobId, text });
 		});
 
 		mainJobId = manager.register("task", "main job", async () => "main result", { ownerId: "0-Main" });
@@ -332,11 +387,11 @@ describe("AsyncJobManager", () => {
 		expect(manager.acknowledgeDeliveries([mainJobId])).toBe(0);
 		expect(manager.hasPendingDeliveries({ ownerId: "0-Main" })).toBe(false);
 		releaseMainDelivery();
-		await Bun.sleep(0);
+		await mainDeliveryFinished.promise;
+		await manager.dispose();
 	});
 
 	test("scoped delivery drain times out while a matching delivery callback is in flight", async () => {
-		let mainJobId = "";
 		let targetJobId = "";
 		let releaseMainDelivery = (): void => {};
 		let notifyMainDeliveryStarted = (): void => {};
@@ -355,22 +410,18 @@ describe("AsyncJobManager", () => {
 			releaseTargetDelivery = resolve;
 		});
 		const completions: string[] = [];
-		const manager = new AsyncJobManager({
-			onJobComplete: async jobId => {
-				if (jobId === mainJobId) {
-					notifyMainDeliveryStarted();
-					await mainDeliveryReleased;
-					return;
-				}
-				if (jobId === targetJobId) {
-					notifyTargetDeliveryStarted();
-					await targetDeliveryReleased;
-					completions.push(jobId);
-				}
-			},
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("0-Main", async () => {
+			notifyMainDeliveryStarted();
+			await mainDeliveryReleased;
+		});
+		manager.registerDeliverySink("3-AuthLoader", async jobId => {
+			notifyTargetDeliveryStarted();
+			await targetDeliveryReleased;
+			completions.push(jobId);
 		});
 
-		mainJobId = manager.register("task", "main job", async () => "main result", { ownerId: "0-Main" });
+		manager.register("task", "main job", async () => "main result", { ownerId: "0-Main" });
 		targetJobId = manager.register("task", "subagent job", async () => "subagent result", {
 			ownerId: "3-AuthLoader",
 		});
@@ -436,6 +487,76 @@ describe("AsyncJobManager", () => {
 		manager.cancelAll();
 		await manager.waitForAll();
 		expect(manager.getJob(parentJobId)?.status).toBe("cancelled");
+	});
+
+	test("routes owned deliveries to the owner's registered sink only", async () => {
+		const mainDeliveries: string[] = [];
+		const defaultDeliveries: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async jobId => {
+				defaultDeliveries.push(jobId);
+			},
+		});
+		manager.registerDeliverySink("Main", jobId => {
+			mainDeliveries.push(jobId);
+		});
+
+		manager.register("bash", "owned", async () => "ok", { id: "owned-1", ownerId: "Main" });
+		manager.register("bash", "unowned", async () => "ok", { id: "unowned-1" });
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 500 });
+
+		expect(mainDeliveries).toEqual(["owned-1"]);
+		expect(defaultDeliveries).toEqual(["unowned-1"]);
+	});
+
+	test("dead-letters an owned delivery when its owner has no live sink", async () => {
+		const defaultDeliveries: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async jobId => {
+				defaultDeliveries.push(jobId);
+			},
+		});
+		const unregister = manager.registerDeliverySink("Sub", () => {});
+		unregister();
+
+		manager.register("bash", "orphan", async () => "orphan result", { id: "orphan-1", ownerId: "Sub" });
+		await manager.waitForAll();
+		const drained = await manager.drainDeliveries({ timeoutMs: 500 });
+
+		// Dead-letter drops the delivery (drain settles) without misrouting it
+		// into the default sink; the outcome stays readable on the job row.
+		expect(drained).toBe(true);
+		expect(defaultDeliveries).toEqual([]);
+		expect(manager.getJob("orphan-1")?.resultText).toBe("orphan result");
+	});
+
+	test("waitForOwnerJobs settles cancelled jobs and skips suppressed ones on request", async () => {
+		const manager = new AsyncJobManager({});
+		manager.register(
+			"bash",
+			"hung",
+			async ({ signal }) => {
+				await new Promise<void>(resolve => {
+					if (signal.aborted) return resolve();
+					signal.addEventListener("abort", () => resolve(), { once: true });
+				});
+				return "stopped";
+			},
+			{ id: "hung-1", ownerId: "Sub" },
+		);
+
+		// Quiescence-barrier contract: a watched (suppressed) job can never
+		// re-wake a run, so the filtered wait treats it as settled.
+		manager.watchJobs(["hung-1"]);
+		await expect(manager.waitForOwnerJobs("Sub", { excludeSuppressed: true })).resolves.toBe(true);
+
+		// Teardown-reap contract: the unfiltered wait blocks until the
+		// cancelled job's body actually finishes.
+		const reap = manager.waitForOwnerJobs("Sub", { timeoutMs: 1_000 });
+		manager.cancelAll({ ownerId: "Sub" });
+		await expect(reap).resolves.toBe(true);
+		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
 	});
 });
 

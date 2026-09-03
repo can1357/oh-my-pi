@@ -66,15 +66,17 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
 | `name` | yes | Plugin name (same naming rules as marketplace name) |
 | `source` | yes | Where to find the plugin — string or object (see source types below) |
 | `description` | no | Short plugin description |
-| `version` | no | Version string |
+| `version` | no | Version string; falls back to `.claude-plugin/plugin.json`, `package.json`, source SHA, then `0.0.0` |
 | `author` | no | `{ name, email? }` |
 | `homepage` | no | URL |
 | `category` | no | e.g. `development`, `productivity`, `security` |
 | `tags` / `keywords` | no | Arrays of string tags/keywords |
 | `repository` | no | Repository URL |
 | `license` | no | License string |
-| `strict` | no | Boolean plugin metadata flag |
-| `commands`, `agents`, `hooks`, `mcpServers`, `lspServers` | no | Capability metadata used by plugin tooling and selectors |
+| `strict` | no | Boolean metadata flag; preserved but not used by install/runtime logic |
+| `commands`, `agents`, `hooks`, `mcpServers` | no | Catalog metadata preserved by the parser; runtime discovery comes from the installed plugin tree and manifests |
+| `lspServers` | no | Inline server map or path inside the plugin; installation writes `.lsp.json` |
+| `dapAdapters` | no | Inline adapter map or JSON/YAML path inside the plugin; installation writes `.dap.json`, `.dap.yaml`, or `.dap.yml` |
 
 ### Full catalog example
 
@@ -188,7 +190,7 @@ Declares the plugin as an npm package. `version` is optional:
 }
 ```
 
-> Note: npm plugin sources are declared in the schema but installation support is not yet fully implemented. Use Git-based sources for plugins that need to work today.
+> Note: npm plugin sources are accepted by catalog parsing but installation rejects them with `npm plugin sources are not yet supported`. Use relative or Git-based sources today.
 
 ## Plugin structure
 
@@ -196,17 +198,20 @@ A plugin directory (regardless of source type) ships its content in conventional
 
 ```
 my-plugin/
-  skills/<name>/SKILL.md   ← skills
-  commands/*.md            ← slash commands
-  agents/*.md              ← subagent definitions
-  hooks/pre/, hooks/post/  ← hooks
-  tools/                   ← custom tools
-  .mcp.json                ← MCP server definitions
-  package.json             ← optional; its version is a fallback when the catalog entry has no version
-  README.md                ← recommended: description + usage
+  skills/<name>/SKILL.md         ← skills
+  commands/*.md                  ← slash commands
+  agents/*.md                    ← subagent definitions
+  hooks/pre/, hooks/post/        ← hooks
+  tools/                         ← custom tools
+  .mcp.json                      ← MCP server definitions (default location)
+  .claude-plugin/plugin.json     ← optional paths for skills/commands and other manifest metadata
+  package.json                   ← optional version and `omp.extensions`
+  README.md                      ← recommended: description + usage
 ```
 
-> Note: extension modules declared via `package.json` `omp.extensions` are **not** loaded from marketplace installs — that mechanism only applies to npm-installed or `omp plugin link`ed plugins. Ship marketplace plugin behavior through the conventional directories above.
+> Note: MCP servers may instead be declared by the manifest's `mcpServers` field — either an inline server map or a path to a config file inside the plugin root (`{ "mcpServers": "./mcp-omp.json" }`). omp reads `.omp-plugin/plugin.json` first, then `.claude-plugin/plugin.json`; a manifest declaration replaces the default `.mcp.json` rather than merging with it, so one published tree can carry a per-harness MCP config.
+
+> Note: extension modules declared via `package.json` `omp.extensions` **are** loaded from marketplace installs — installation symlinks the cached plugin into the scope's `node_modules` and records it in `omp-plugins.lock.json`, the same runtime surfaces used by npm-installed and `omp plugin link`ed plugins.
 
 ## Install command
 
@@ -225,10 +230,16 @@ omp plugin install name@marketplace-name
 
 Scope behavior:
 
-- **user** (default) — installed in `~/.omp/plugins/installed_plugins.json`, available in all projects
+- **user** (default) — installed in the user plugins data root's `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default), available in all projects. On Linux and macOS, `omp config init-xdg` creates (but does not migrate data into) the XDG roots; once the relevant roots exist and the XDG variables are set, new user state uses `$XDG_DATA_HOME/omp/plugins/installed_plugins.json`.
 - **project** — installed in `<project>/.omp/plugins/installed_plugins.json`, available only in that project
 
-Project-scoped installs shadow user-scoped installs of the same plugin name.
+An enabled project-scoped install shadows an enabled user-scoped install of the same `name@marketplace` ID. A disabled project copy leaves the user copy active.
+
+Install and discovery details:
+
+- Invalid plugin entries are logged and skipped; invalid JSON or required top-level fields reject the catalog.
+- `skills/` and `commands/` may be remapped with `.claude-plugin/plugin.json`. Declared skill paths normally add to the default; for a plugin whose catalog source is exactly `"./"`, they replace it. Declared `commands` (preferred) or `slash-commands` replace the default unless `./commands` is included explicitly. Paths outside the plugin root are ignored with a warning.
+- Catalog `lspServers` and `dapAdapters` values are materialized during install. Catalog `commands`, `agents`, `hooks`, and `mcpServers` are otherwise metadata; they do not remap runtime discovery.
 
 ## Naming rules
 

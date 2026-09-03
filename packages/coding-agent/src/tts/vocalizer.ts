@@ -100,6 +100,8 @@ export class Vocalizer {
 	#chain: Promise<void> = Promise.resolve();
 	/** Whether the user is currently speaking; new sessions open ducked. */
 	#ducked = false;
+	/** Active scopes that suppress local TTS while another speech surface owns audio. */
+	#suspensions = 0;
 	/** Available rewrite slots; blocks queue when exhausted. */
 	#rewriteSlots = MAX_REWRITES_IN_FLIGHT;
 	#slotWaiters: Array<() => void> = [];
@@ -115,6 +117,21 @@ export class Vocalizer {
 	}
 
 	/**
+	 * Suppress new vocalization until the returned idempotent release function runs.
+	 * Existing synthesis and playback stop immediately; nested scopes release independently.
+	 */
+	suspend(): () => void {
+		this.#suspensions += 1;
+		this.clear();
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#suspensions = Math.max(0, this.#suspensions - 1);
+		};
+	}
+
+	/**
 	 * Stream a delta of assistant text into the pipeline. No-op when
 	 * vocalization is disabled. The synthesis session (worker, player) is only
 	 * opened once the first speakable segment exists, so a reply that
@@ -123,7 +140,7 @@ export class Vocalizer {
 	 * pipeline (enhanced vs mechanical) is latched per utterance.
 	 */
 	pushDelta(text: string): void {
-		if (!settings.get("speech.enabled")) return;
+		if (this.#suspensions > 0 || !settings.get("speech.enabled")) return;
 		if (!text) return;
 		if (this.#enhanced || (!this.#speakable && this.#enhancer && settings.get("speech.enhanced"))) {
 			this.#pushEnhanced(text);

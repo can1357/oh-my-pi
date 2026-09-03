@@ -29,11 +29,12 @@ export interface Component {
   handleInput?(data: string): void;
   wantsKeyRelease?: boolean;
   invalidate?(): void;
+  setIgnoreTight?(ignore: boolean): any;
   dispose?(): void;
 }
 ```
 
-Render results are component-owned and immutable to callers; a component that did not change should return the **same array reference** it returned last time (reference equality is what enables the renderer's memoization and row virtualization), and must return a new array whenever its content changed.
+Render results are component-owned and immutable to callers. An unchanged component may (and should) return the **same array reference** it returned last time; it must return a new array whenever content changes. Reference equality enables container memoization and stable-prefix work avoidance. A component that mutates a previously returned array in place must also implement `RenderStablePrefix` and report how many leading rows survived unchanged.
 
 `Focusable` is separate:
 
@@ -98,6 +99,10 @@ Then use `isKeyRelease()` / `isKeyRepeat()` if needed.
 - Overlay APIs exist in `TUI` (`showOverlay`, `OverlayHandle`). In interactive extension/custom UI, `custom(..., { overlay: true })` mounts your component through `TUI.showOverlay(...)`; without `overlay`, it replaces the editor component area directly.
 - Overlay custom UI is anchored at `bottom-center` with full terminal width/max height and is removed through the returned overlay handle when `done(...)` closes the flow.
 
+### Built-in full-screen surfaces
+
+The coding-agent integration also mounts built-in full-screen surfaces outside `ctx.ui.custom(...)`. [Agent Hub](./agent-hub.md) is the live roster and control surface for subagents. Its file-backed transcript viewer borrows the alternate screen while it is open, then restores the Hub beneath it on close.
+
 ## Mount points and return contracts
 
 ## 1) Extension UI (`ExtensionUIContext`)
@@ -125,27 +130,25 @@ Behavior in interactive mode (`extension-ui-controller.ts`):
 - On `done(result)`: calls `component.dispose?.()`, hides the overlay if present, restores editor + text for non-overlay flows, focuses editor, resolves promise.
   So `done(...)` is mandatory for completion.
 
-## 2) Hook/custom-tool UI context (legacy typing)
+## 2) Hook/custom-tool UI context (`HookUIContext`)
 
-`HookUIContext.custom` is typed as `(tui, theme, done)` in hook/custom-tool types.
-Underlying interactive implementation calls factories with `(tui, theme, keybindings, done)`. JS consumers can use the extra arg; type-level compatibility still reflects the 3-arg legacy signature.
-
-Custom tools typically use the same UI entrypoint via the factory-scoped `pi.ui` object, then return the selected value in normal tool content:
+Current signature (`extensibility/hooks/types.ts`) matches the interactive
+controller and `ExtensionUIContext.custom`:
 
 ```ts
-async execute(toolCallId, params, onUpdate, ctx, signal) {
-  if (!pi.hasUI) {
-    return { content: [{ type: "text", text: "UI unavailable" }] };
-  }
-
-  const picked = await pi.ui.custom<string | undefined>((tui, theme, done) => {
-    const component = new MyPickerComponent(done, signal);
-    return component;
-  });
-
-  return { content: [{ type: "text", text: picked ? `Picked: ${picked}` : "Cancelled" }] };
-}
+custom<T>(
+  factory: (
+    tui: TUI,
+    theme: Theme,
+    keybindings: KeybindingsManager,
+    done: (result: T) => void,
+  ) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+): Promise<T>
 ```
+
+Use the fourth argument as `done`. The third argument is a `KeybindingsManager`
+(interactive mode uses an in-memory instance with the default bindings). Guard
+terminal-only UI with `pi.hasUI` when the hook may also run headless.
 
 ## 3) Custom tool call/result renderers
 
@@ -164,7 +167,7 @@ These renderers are mounted by `ToolExecutionComponent`.
 
 ## Lifecycle and cancellation
 
-- `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays.
+- `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays. It must be idempotent: containers propagate disposal, and reset/removal paths may converge.
 - `done(...)` should be called exactly once from your component flow.
 - For cancellable long-running UI, pair `CancellableLoader` with `AbortSignal` and call `done(...)` from `onAbort`.
 

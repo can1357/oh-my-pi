@@ -111,17 +111,42 @@ describe("task async preflight", () => {
 		},
 	);
 
-	it("reports an invalid batch item synchronously while launching its valid sibling", async () => {
+	it("rejects an invalid async batch atomically before dispatching any item", async () => {
 		mockDiscovery();
-		const seen: string[] = [];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			seen.push(options.id ?? "");
-			return resultFor(options.id ?? "");
-		});
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
 		const jobs = manager();
+		const register = vi.spyOn(jobs, "register");
 		const tool = await TaskTool.create(createSession({ manager: jobs, settings: { "task.batch": true } }));
 
 		const result = await tool.execute("mixed-preflight", {
+			context: "Shared context.",
+			tasks: [
+				{ name: "Invalid", agent: "missing", task: "Do invalid work." },
+				{ name: "AlsoInvalid", agent: "also-missing", task: "Do more invalid work." },
+				{ name: "Valid", agent: "task", task: "Do valid work." },
+			],
+		} as TaskParams);
+
+		const text = textOf(result);
+		expect(text).toContain('Task Invalid failed preflight: Unknown agent "missing"');
+		expect(text).toContain('Task AlsoInvalid failed preflight: Unknown agent "also-missing"');
+		expect(register).not.toHaveBeenCalled();
+		expect(runSubprocess).not.toHaveBeenCalled();
+		expect(jobs.getJob("Invalid")).toBeUndefined();
+		expect(jobs.getJob("AlsoInvalid")).toBeUndefined();
+		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+
+	it("rejects an invalid synchronous batch before running any item", async () => {
+		mockDiscovery();
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
+		const jobs = manager();
+		const register = vi.spyOn(jobs, "register");
+		const tool = await TaskTool.create(
+			createSession({ manager: jobs, settings: { "async.enabled": false, "task.batch": true } }),
+		);
+
+		const result = await tool.execute("sync-preflight", {
 			context: "Shared context.",
 			tasks: [
 				{ name: "Invalid", agent: "missing", task: "Do invalid work." },
@@ -129,15 +154,10 @@ describe("task async preflight", () => {
 			],
 		} as TaskParams);
 
-		const text = textOf(result);
-		expect(text).toContain('Task Invalid failed preflight: Unknown agent "missing"');
-		expect(text).toContain("Spawned agent `Valid`");
-		expect(text.indexOf("Task Invalid failed preflight")).toBeLessThan(text.indexOf("Spawned agent `Valid`"));
+		expect(textOf(result)).toContain('Task Invalid failed preflight: Unknown agent "missing"');
+		expect(register).not.toHaveBeenCalled();
+		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
-		const valid = jobs.getJob("Valid");
-		expect(valid).toBeDefined();
-		await valid!.promise;
-		expect(valid!.status).toBe("completed");
-		expect(seen).toEqual(["Valid"]);
+		expect(jobs.getJob("Valid")).toBeUndefined();
 	});
 });

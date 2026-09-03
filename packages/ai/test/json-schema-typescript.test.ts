@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { z } from "zod/v4";
 
 describe("jsonSchemaToTypeScript", () => {
 	it("renders objects with optional markers and JSDoc descriptions", () => {
@@ -16,6 +16,23 @@ describe("jsonSchemaToTypeScript", () => {
 		expect(ts).toContain("query: string;");
 		expect(ts).toContain("/** max results */");
 		expect(ts).toContain("limit?: number;");
+	});
+
+	it("renders the harmony style with line comments, comma delimiters, and no indentation", () => {
+		const ts = jsonSchemaToTypeScript(
+			{
+				type: "object",
+				properties: {
+					position: { type: "number", description: "keypad position, 1 through 5" },
+					digit: { type: "number", description: "digit guess, 0 through 9" },
+				},
+				required: ["position", "digit"],
+			},
+			{ style: "harmony" },
+		);
+		expect(ts).toBe(
+			"{\n// keypad position, 1 through 5\nposition: number,\n// digit guess, 0 through 9\ndigit: number,\n}",
+		);
 	});
 
 	it("renders enums and consts as literal unions", () => {
@@ -82,9 +99,9 @@ describe("jsonSchemaToTypeScript", () => {
 	});
 
 	it("converts a Zod schema through the wire pipeline", () => {
-		const parameters = z.object({
-			name: z.string().describe("the name"),
-			count: z.number().int().optional(),
+		const parameters = type({
+			name: type("string").describe("the name"),
+			count: type("number.integer").optional(),
 		});
 		const ts = jsonSchemaToTypeScript(toolWireSchema({ name: "t", description: "", parameters }));
 		expect(ts).toContain("/** the name */");

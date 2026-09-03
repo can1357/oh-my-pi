@@ -19,6 +19,7 @@ import { formatContextUsage } from "../modes/components/status-line/context-thre
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../tui";
+import { formatEvalCodeForDisplay } from "./eval-format";
 import {
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -89,10 +90,11 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 	const out: EvalRenderCell[] = [];
 	for (const cell of raw) {
 		if (!cell || typeof cell !== "object") continue;
+		const language = normalizeRenderLanguage(typeof cell.language === "string" ? cell.language : undefined);
 		const code = typeof cell.code === "string" ? cell.code : "";
 		out.push({
-			language: normalizeRenderLanguage(typeof cell.language === "string" ? cell.language : undefined),
-			code,
+			language,
+			code: formatEvalCodeForDisplay(code, language),
 			title: typeof cell.title === "string" ? cell.title : undefined,
 		});
 	}
@@ -584,9 +586,17 @@ export const evalToolRenderer = {
 			warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
 		}
 		const noticeLine = details?.notice ? uiTheme.fg("dim", wrapBrackets(details.notice, uiTheme)) : undefined;
+		const asyncLine =
+			details?.async?.state === "running"
+				? uiTheme.fg("dim", wrapBrackets(`Backgrounded: ${details.async.jobId}`, uiTheme))
+				: undefined;
 
 		const cellResults = details?.cells;
 		if (cellResults && cellResults.length > 0) {
+			const displayCells = cellResults.map(cell => {
+				const language = cell.language ?? details?.language ?? "python";
+				return { cell, code: formatEvalCodeForDisplay(cell.code, language), language };
+			});
 			let cached: { key: string; width: number; result: string[] } | undefined;
 
 			return markFramedBlockComponent({
@@ -602,8 +612,8 @@ export const evalToolRenderer = {
 					}
 
 					const lines: string[] = [];
-					for (let i = 0; i < cellResults.length; i++) {
-						const cell = cellResults[i];
+					for (let i = 0; i < displayCells.length; i++) {
+						const { cell, code, language } = displayCells[i];
 						const allEvents = cell.statusEvents ?? [];
 						const agentEvents = allEvents.filter(e => e.op === "agent");
 						const otherEvents = agentEvents.length > 0 ? allEvents.filter(e => e.op !== "agent") : allEvents;
@@ -623,8 +633,8 @@ export const evalToolRenderer = {
 						}
 						const cellLines = renderCodeCell(
 							{
-								code: cell.code,
-								language: languageForHighlighter(cell.language ?? details?.language),
+								code,
+								language: languageForHighlighter(language),
 								showLanguage: true,
 								index: i,
 								total: cellResults.length,
@@ -664,6 +674,9 @@ export const evalToolRenderer = {
 					if (noticeLine) {
 						lines.push(noticeLine);
 					}
+					if (asyncLine) {
+						lines.push(asyncLine);
+					}
 					if (warningLine) {
 						lines.push(warningLine);
 					}
@@ -687,14 +700,19 @@ export const evalToolRenderer = {
 		);
 
 		if (!combinedOutput && statusLines.length === 0) {
-			const lines = [timeoutLine, noticeLine, warningLine].filter(Boolean) as string[];
+			const lines = [timeoutLine, noticeLine, asyncLine, warningLine].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
 		if (!combinedOutput && statusLines.length > 0) {
-			const lines = [uiTheme.fg("dim", "Status"), ...statusLines, timeoutLine, noticeLine, warningLine].filter(
-				Boolean,
-			) as string[];
+			const lines = [
+				uiTheme.fg("dim", "Status"),
+				...statusLines,
+				timeoutLine,
+				noticeLine,
+				asyncLine,
+				warningLine,
+			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
@@ -708,6 +726,7 @@ export const evalToolRenderer = {
 				...(statusLines.length > 0 ? [uiTheme.fg("dim", "Status"), ...statusLines] : []),
 				timeoutLine,
 				noticeLine,
+				asyncLine,
 				warningLine,
 			].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
@@ -758,6 +777,9 @@ export const evalToolRenderer = {
 				}
 				if (noticeLine) {
 					outputLines.push(truncateToWidth(noticeLine, width));
+				}
+				if (asyncLine) {
+					outputLines.push(truncateToWidth(asyncLine, width));
 				}
 				if (warningLine) {
 					outputLines.push(truncateToWidth(warningLine, width));

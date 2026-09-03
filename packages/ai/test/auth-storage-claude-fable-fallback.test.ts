@@ -45,7 +45,7 @@ function makeStore(rows: StoredAuthCredential[]): ObservableStore {
 	};
 }
 
-function oauthRow(id: number, email: string): StoredAuthCredential {
+function oauthRow(id: number, email: string, provider = "anthropic"): StoredAuthCredential {
 	const credential: AuthCredential = {
 		type: "oauth",
 		access: `oat-${id}`,
@@ -54,7 +54,7 @@ function oauthRow(id: number, email: string): StoredAuthCredential {
 		accountId: `account-${id}`,
 		email,
 	};
-	return { id, provider: "anthropic", credential, disabledCause: null };
+	return { id, provider, credential, disabledCause: null };
 }
 
 function baseReport(email: string): UsageReport {
@@ -298,6 +298,63 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 		const retryKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
 		expect(retryKey).not.toBe(firstKey);
 		expect(["oat-2", "oat-3"]).toContain(retryKey as string);
+	});
+
+	it("aborts a local usage lookup before marking the credential blocked", async () => {
+		let blockUsage = false;
+		const usageStarted = Promise.withResolvers<void>();
+		const releaseUsage = Promise.withResolvers<UsageReport>();
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			if (!blockUsage) return baseReport("a@example.com");
+			usageStarted.resolve();
+			return releaseUsage.promise;
+		});
+
+		const firstKey = await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" });
+		store.cache.clear();
+		blockUsage = true;
+		const controller = new AbortController();
+		const marking = storage.markUsageLimitReached("anthropic", "session-3", {
+			modelId: "claude-fable-5",
+			signal: controller.signal,
+		});
+		await usageStarted.promise;
+		controller.abort();
+		let rejection: unknown;
+		const rejectedQuickly = await Promise.race([
+			marking.then(
+				() => false,
+				error => {
+					rejection = error;
+					return true;
+				},
+			),
+			Bun.sleep(50).then(() => false),
+		]);
+		releaseUsage.resolve(baseReport("a@example.com"));
+		await marking.catch(() => {});
+
+		expect(rejectedQuickly).toBe(true);
+		expect(String(rejection)).toContain("usage fetch aborted");
+		expect(await storage.getApiKey("anthropic", "session-3", { modelId: "claude-fable-5" })).toBe(firstKey);
+	});
+
+	it("does not mark a credential when aborted during target resolution", async () => {
+		storage.close();
+		const provider = "no-usage-provider";
+		store = makeStore([oauthRow(1, "a@example.com", provider)]);
+		storage = new AuthStorage(store);
+		await storage.reload();
+		const firstKey = await storage.getApiKey(provider, "session-3");
+		const controller = new AbortController();
+
+		const marking = storage.markUsageLimitReached(provider, "session-3", {
+			signal: controller.signal,
+		});
+		controller.abort();
+
+		await expect(marking).rejects.toThrow();
+		expect(await storage.getApiKey(provider, "session-3")).toBe(firstKey);
 	});
 
 	it("extends a live Fable rate-limit block to the confirmed Fable reset", async () => {

@@ -13,6 +13,13 @@
   - `packages/coding-agent/src/mnemopi/state.ts` — scoped local recall and context formatting.
   - `docs/tools/retain.md` — shared backend, storage, scoping, and mental-model behavior.
 
+## Registration / Visibility
+- Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
+- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
+- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set. Restricted lists are not widened.
+- In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://reflect`; an explicitly requested tool remains top-level.
+- Execution is single-shot and emits no progress updates.
+
 ## Inputs
 
 | Field | Type | Required | Description |
@@ -33,7 +40,7 @@ Mnemopi:
 - if no scoped recall results exist: `content[0].text = "No relevant information found to reflect on."`
 - otherwise: `content[0].text = "Based on recalled memories:\n\n<formatted context>"`
 - `details = {}`
-- The local path performs recall plus formatting; it does not call a separate synthesis endpoint.
+- The local path performs recall plus formatting; it does not call a synthesis model or separate synthesis endpoint. Its result can therefore be raw recalled context rather than a blended answer.
 
 ## Flow
 1. `MemoryReflectTool.createIf(...)` exposes the tool when `memory.backend` is either `"hindsight"` or `"mnemopi"`.
@@ -61,9 +68,10 @@ Mnemopi:
   - `per-project-tagged` — shared bank id plus `project:<project label>` filter with `tagsMatch = "any"`.
 - Mnemopi bank scoping:
   - `global` — reads the shared bank.
-  - `per-project` — reads the project bank.
-  - `per-project-tagged` — reads the project bank and shared bank, then merges results.
-- Session scope: reads cross-session memory data, but does not persist local output.
+  - `per-project` — reads the bank derived from the absolute cwd basename plus a hash of that cwd.
+  - `per-project-tagged` — reads the cwd-derived project bank and shared bank, then merges results.
+  - Per-project modes may also include safe cwd-matching legacy banks discovered at startup.
+- Session scope: reads cross-session memory data, but does not persist local output. Subagent aliases use the parent's backend scope.
 
 ## Side Effects
 - Network
@@ -76,22 +84,22 @@ Mnemopi:
 
 ## Limits & Caps
 - Tool availability requires `memory.backend` to be `"hindsight"` or `"mnemopi"`; default `memory.backend` is `"off"`.
-- Tool-level params: only `query` is required; `context` is optional.
-- Hindsight budget setting comes from `hindsight.recallBudget`, default `"mid"`.
-- Hindsight `reflect` has no client-side token cap parameter here; unlike `recall`, the tool does not pass `maxTokens`.
+- Tool-level params: only `query` is required; `context` is optional. Both are plain strings with no schema-level minimum length.
+- Hindsight budget comes from `hindsight.recallBudget`, default `"mid"`.
+- Hindsight `reflect` has no client-side token cap parameter here; its request deadline defaults to `hindsight.reflectTimeoutMs = 120_000`.
 - Hindsight bank initialization tracks up to `MISSION_SET_CAP = 10_000` bank ids per session state, then drops half of the sorted set.
-- Mnemopi result count is capped by `mnemopi.recallLimit`, default `8`.
+- Mnemopi result count is capped by `mnemopi.recallLimit`, default `8` and runtime-clamped to at least 1; each recalled content preview is capped at 500 characters by default.
 
 ## Errors
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.
 - Throws `Hindsight backend is not initialised for this session.` when `memory.backend == "hindsight"` but no state exists.
-- Hindsight HTTP and fetch failures become `HindsightError` with `statusCode` and parsed `details` when available.
-- Hindsight `ensureBankExists(...)` failures are silent to the tool caller; only the later reflect request can fail visibly.
-- Mnemopi recall target failures inside `collectScopedRecallResults(...)` are caught per bank and logged only when `mnemopi.debug` is enabled; if all targets fail, the tool can return the no-information text.
+- Hindsight HTTP, fetch, and timeout failures become `HindsightError`; HTTP errors include `statusCode` and parsed `details` when available.
+- Hindsight `ensureBankExists(...)` failures are logged at debug level and hidden from the caller; only the later reflect request can fail visibly.
+- Mnemopi recall catches failures per target and logs them. Healthy targets still contribute; if every attempted target fails, the original error or a multi-bank `AggregateError` is thrown rather than converted to the no-information text.
 - Non-`Error` failures caught by the tool are normalized to `new Error(String(err))` before rethrow.
 
 ## Notes
 - Shared backend details are in `docs/tools/retain.md`: storage, subagent aliasing, bank scoping, seed mental models, and prompt injection.
-- Hindsight `reflect` does not read the cached `<mental_models>` block directly. It queries the Hindsight server over the bank contents. The same session may also have separate mental-model context injected into its developer instructions.
-- Hindsight reflect mission and retain mission are bank-level server settings, not per-request payload. The tool just ensures they are present best-effort before reflecting.
-- Mnemopi `reflect` is local recall plus formatting, so its output shape differs from Hindsight's remote synthesized answer.
+- Hindsight `reflect` does not read the cached `<mental_models>` block directly. It queries the Hindsight server over bank contents. The same session may separately have mental-model context in developer instructions.
+- Hindsight reflect and retain missions are bank-level server settings, not per-request payload. The tool only ensures them best-effort before reflecting.
+- Mnemopi `reflect` is local recall plus formatting. It does not implement the synthesis promised by the generic model-facing `reflect` prompt.

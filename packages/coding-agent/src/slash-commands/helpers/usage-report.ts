@@ -3,13 +3,14 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
-import { formatDuration, renderAsciiBar } from "./format";
+import { formatDuration, formatProviderName, renderAsciiBar } from "./format";
 
-function formatProviderName(provider: string): string {
-	return provider
-		.split(/[-_]/g)
-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
-		.join(" ");
+function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
+	if (!windowLabel) return "";
+	const normalizedLabel = label.toLowerCase();
+	const normalizedWindow = windowLabel.toLowerCase();
+	if (normalizedWindow === "quota window" || normalizedLabel.includes(normalizedWindow)) return "";
+	return ` — ${windowLabel}`;
 }
 
 function formatUsageAmount(limit: UsageLimit): string {
@@ -55,6 +56,7 @@ function renderUsageReports(
 	reports: UsageReport[],
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
+	usageModelSelectors: readonly string[] = [],
 ): string {
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
@@ -69,6 +71,11 @@ function renderUsageReports(
 		left.localeCompare(right),
 	)) {
 		lines.push("", formatProviderName(provider));
+		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
+		if (reportingModels.length > 0) {
+			lines.push("  Models with usage data");
+			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
+		}
 		const activeAccount = resolveActiveAccount?.(provider);
 		// Provider-wide disclaimers render once per provider, not per limit.
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
@@ -118,13 +125,15 @@ function renderUsageReports(
 					limit.scope.tier && !limit.label.toLowerCase().includes(limit.scope.tier.toLowerCase())
 						? ` (${limit.scope.tier})`
 						: "";
-				lines.push(`- ${limit.label}${tier}${window ? ` — ${window}` : ""}`);
+				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
 					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
-					lines.push(`  resets in ${formatDuration(limit.window.resetsAt - nowMs)}`);
+					lines.push(
+						`  ${limit.window.resetLabel ?? "resets"} in ${formatDuration(limit.window.resetsAt - nowMs)}`,
+					);
 				}
 				if (limit.notes && limit.notes.length > 0)
 					lines.push(
@@ -144,6 +153,7 @@ function renderUsageReports(
 export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
 	const provider = runtime.session as SlashCommandRuntime["session"] & {
 		fetchUsageReports?: () => Promise<UsageReport[] | null>;
+		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
 	};
 	if (provider.fetchUsageReports) {
 		const reports = await provider.fetchUsageReports();
@@ -155,8 +165,12 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 						runtime.session.sessionId,
 					)
 				: undefined;
-			return renderUsageReports(reports, Date.now(), providerId =>
-				providerId === currentProvider ? activeAccount : undefined,
+			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
+			return renderUsageReports(
+				reports,
+				Date.now(),
+				providerId => (providerId === currentProvider ? activeAccount : undefined),
+				usageModelSelectors,
 			);
 		}
 	}

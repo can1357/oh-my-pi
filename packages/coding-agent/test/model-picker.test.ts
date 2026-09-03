@@ -44,7 +44,7 @@ interface RegistryOverrides {
 
 interface PickerHarness {
 	picker: ModelPickerComponent;
-	onPick: Mock<(model: Model, selector: string) => void>;
+	onPick: Mock<(model: Model, selector: string, meta: { overContext: boolean }) => void>;
 	onPickRole: Mock<(entry: ResolvedRoleModel) => void>;
 	onCancel: Mock<() => void>;
 }
@@ -91,7 +91,7 @@ describe("ModelPicker", () => {
 		}
 	});
 
-	test("disables models below the current context size and picks the first enabled one", () => {
+	test("flags over-context models but keeps them selectable, reporting overContext on pick", () => {
 		const small = makeModel("test", "a-small", 4096);
 		const large = makeModel("test", "b-large", 128_000);
 		const { picker, onPick } = createPicker({
@@ -100,14 +100,33 @@ describe("ModelPicker", () => {
 			picker: { currentContextTokens: 6000 },
 		});
 
+		expect(normalize(picker.render(220))).toContain("Session-only switch");
+
+		picker.handleInput("small");
 		const rendered = normalize(picker.render(220));
-		expect(rendered).toContain("a-small");
 		expect(rendered).toContain("context>4.1k");
-		expect(rendered).toContain("Session-only switch");
+		expect(rendered).toContain("compacts with current model");
 
 		picker.handleInput("\n");
 		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPick.mock.calls[0]?.[0]).toBe(small);
+		expect(onPick.mock.calls[0]?.[2]).toEqual({ overContext: true });
+	});
+
+	test("picking a model that fits reports overContext false", () => {
+		const small = makeModel("test", "a-small", 4096);
+		const large = makeModel("test", "b-large", 128_000);
+		const { picker, onPick } = createPicker({
+			models: [small, large],
+			scoped: true,
+			picker: { currentContextTokens: 6000 },
+		});
+
+		picker.handleInput("large");
+		picker.handleInput("\n");
+		expect(onPick).toHaveBeenCalledTimes(1);
 		expect(onPick.mock.calls[0]?.[0]).toBe(large);
+		expect(onPick.mock.calls[0]?.[2]).toEqual({ overContext: false });
 	});
 
 	test("uses cached models for Enter while the offline refresh is still pending", () => {

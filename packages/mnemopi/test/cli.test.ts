@@ -56,9 +56,12 @@ describe("CLI command handlers", () => {
 			try {
 				const id = memory.remember("Working memory item", { source: "test", importance: 0.5 });
 				memory.consolidateToEpisodic("Episodic summary", [id], "test", 0.6);
-				memory.db
-					.prepare("INSERT INTO triples (subject, predicate, object, source) VALUES (?, ?, ?, ?)")
-					.run("alice", "likes", "typescript", "test");
+				memory.db.run("INSERT INTO triples (subject, predicate, object, source) VALUES (?, ?, ?, ?)", [
+					"alice",
+					"likes",
+					"typescript",
+					"test",
+				]);
 			} finally {
 				memory.close();
 			}

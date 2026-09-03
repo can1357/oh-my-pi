@@ -1,10 +1,10 @@
 /**
  * Subprocess spawn-option helpers for the Python kernel.
  *
- * Pure helpers (`shouldHideKernelWindow`, `consoleAttachedViaTTY`) live here
- * so they can be unit-tested without dragging in the kernel's runtime
- * dependencies. The effectful `hostHasInheritableConsole` wraps a Win32 FFI
- * probe with a TTY fallback and is the function `kernel.ts` actually calls.
+ * Pure helpers (`shouldHideKernelWindow`, `consoleAttached`) live here so they
+ * can be unit-tested without dragging in the kernel's runtime dependencies.
+ * The effectful `hostHasInheritableConsole` combines a Win32 FFI probe with
+ * TTY evidence and is the function `kernel.ts` actually calls.
  */
 import { dlopen, FFIType } from "bun:ffi";
 
@@ -54,20 +54,21 @@ export function shouldDetachKernel(platform: NodeJS.Platform): boolean {
 }
 
 /**
- * TTY-based fallback used when the Win32 console probe is unavailable.
+ * Combine native Win32 and stdio TTY evidence of an inheritable console.
  *
- * Returns `true` if any of stdin/stdout/stderr is currently a TTY. This
- * correctly detects the common interactive launches and the partial-
- * redirection cases (`omp -p > out.txt`, `< in.txt`, `2> err.log`) where at
- * least one stream stays bound to the terminal. The all-stdio-redirected
- * case (`< in > out 2> err` from a console) is the reason we prefer the
- * Win32 probe over this fallback whenever possible.
+ * `GetConsoleWindow()` detects classic consoles even when every stdio stream
+ * is redirected. TTY detection covers ConPTY-backed terminals, where compiled
+ * hosts can receive a null HWND despite being attached to Windows Terminal.
+ * Either signal must preserve console inheritance: `CREATE_NO_WINDOW` can
+ * deadlock NumPy native-extension loading in the Python child.
  */
-export function consoleAttachedViaTTY(opts: {
+export function consoleAttached(opts: {
+	nativeConsole?: boolean | null;
 	stdinIsTTY: boolean;
 	stdoutIsTTY: boolean;
 	stderrIsTTY: boolean;
 }): boolean {
+	if (opts.nativeConsole === true) return true;
 	return opts.stdinIsTTY || opts.stdoutIsTTY || opts.stderrIsTTY;
 }
 
@@ -75,10 +76,10 @@ export function consoleAttachedViaTTY(opts: {
  * Probe `kernel32.dll!GetConsoleWindow()` to detect whether the current
  * Windows process owns a console window.
  *
- * Returns `true` for a non-NULL HWND, `false` when NULL (no console — true
- * service / `DETACHED_PROCESS` / GUI parent), and `null` when the probe
- * itself fails (off-Windows, FFI disabled, or unexpected kernel32 layout).
- * A `null` return means "don't trust me, use the TTY fallback".
+ * Returns `true` for a non-NULL HWND, `false` when NULL, and `null` when the
+ * probe itself fails (off-Windows, FFI disabled, or unexpected kernel32
+ * layout). A false result is not conclusive for ConPTY-backed terminals, so
+ * callers must also inspect the stdio TTY signals.
  *
  * Cached on first call because in practice the console attachment of a
  * long-lived OMP host never changes for the lifetime of the process, and
@@ -117,21 +118,15 @@ export function __resetWindowsConsoleProbeCache(): void {
 /**
  * Whether the host process owns a console its children can inherit.
  *
- * - On Windows, the authoritative signal is `GetConsoleWindow()`. It returns
- *   a non-NULL HWND whenever the process has a console attached, regardless
- *   of how the standard streams are redirected — so an `omp -p ... < in.txt
- *   > out.txt 2> err.log` launched from a real Windows Terminal session is
- *   correctly classified as console-attached and the kernel keeps its
- *   inheritable console.
- * - On any other platform, or if the FFI probe fails, fall back to the
- *   TTY-OR heuristic. That still catches the common interactive cases.
+ * On Windows, `GetConsoleWindow()` detects classic consoles and all-stdio-
+ * redirected launches while stdio TTYs detect ConPTY-backed terminals. Either
+ * signal is sufficient. Other platforms use the same TTY evidence, although
+ * `windowsHide` is a no-op there.
  */
 export function hostHasInheritableConsole(): boolean {
-	if (process.platform === "win32") {
-		const native = probeWindowsConsoleWindow();
-		if (native !== null) return native;
-	}
-	return consoleAttachedViaTTY({
+	const nativeConsole = process.platform === "win32" ? probeWindowsConsoleWindow() : null;
+	return consoleAttached({
+		nativeConsole,
 		stdinIsTTY: !!process.stdin.isTTY,
 		stdoutIsTTY: !!process.stdout.isTTY,
 		stderrIsTTY: !!process.stderr.isTTY,

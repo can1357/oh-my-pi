@@ -18,13 +18,15 @@ interface ToolSchemaEntry {
 	schema: Record<string, unknown>;
 }
 
+const testSettings = Settings.isolated({ "tools.xdev": false });
+
 function createTestSession(): ToolSession {
 	return {
 		cwd: "/tmp/test",
 		hasUI: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated({ "tools.xdev": false }),
+		settings: testSettings,
 	};
 }
 
@@ -34,43 +36,40 @@ function asSchemaObject(value: unknown): Record<string, unknown> | null {
 	}
 	return value as Record<string, unknown>;
 }
-
-async function collectToolSchemas(): Promise<ToolSchemaEntry[]> {
+const builtinToolsPromise = createTools(createTestSession());
+const toolSchemasPromise: Promise<ToolSchemaEntry[]> = (async () => {
 	const session = createTestSession();
 	const byToolName = new Map<string, Record<string, unknown>>();
 
-	for (const tool of await createTools(session)) {
+	for (const tool of await builtinToolsPromise) {
 		const schema = toolWireSchema(tool);
-		if (!asSchemaObject(schema)) {
-			continue;
+		if (asSchemaObject(schema)) {
+			byToolName.set(tool.name, schema);
 		}
-		byToolName.set(tool.name, schema);
 	}
 
-	for (const [name, factory] of Object.entries(HIDDEN_TOOLS)) {
-		const tool = await factory(session);
+	for (const name in HIDDEN_TOOLS) {
+		const tool = await HIDDEN_TOOLS[name as keyof typeof HIDDEN_TOOLS](session);
 		if (!tool) {
 			continue;
 		}
 		const schema = toolWireSchema(tool);
-		if (!asSchemaObject(schema)) {
-			continue;
+		if (asSchemaObject(schema)) {
+			byToolName.set(name, schema);
 		}
-		byToolName.set(name, schema);
 	}
 
 	for (const tool of createVibeTools(session)) {
 		const schema = toolWireSchema(tool);
-		if (!asSchemaObject(schema)) {
-			continue;
+		if (asSchemaObject(schema)) {
+			byToolName.set(tool.name, schema);
 		}
-		byToolName.set(tool.name, schema);
 	}
 
 	return [...byToolName.entries()]
 		.sort(([left], [right]) => left.localeCompare(right))
 		.map(([name, schema]) => ({ name, schema }));
-}
+})();
 
 function formatCompatibilityIssues(
 	toolName: string,
@@ -88,7 +87,7 @@ function formatCompatibilityIssues(
 
 describe("builtin tool schemas provider compatibility", () => {
 	it("keeps todo strict and marks task non-strict for free-form output schemas", async () => {
-		const tools = await createTools(createTestSession());
+		const tools = await builtinToolsPromise;
 		const task = tools.find(tool => tool.name === "task");
 		const todo = tools.find(tool => tool.name === "todo");
 		expect(task).toBeDefined();
@@ -103,7 +102,7 @@ describe("builtin tool schemas provider compatibility", () => {
 	});
 
 	it("keeps all builtin and hidden tool schemas valid after provider enforcement", async () => {
-		const toolSchemas = await collectToolSchemas();
+		const toolSchemas = await toolSchemasPromise;
 		const failures: string[] = [];
 
 		for (const { name, schema } of toolSchemas) {
@@ -141,7 +140,7 @@ describe("builtin tool schemas provider compatibility", () => {
 	});
 
 	it("preserves the yield result schema for Cloud Code Assist", async () => {
-		const toolSchemas = await collectToolSchemas();
+		const toolSchemas = await toolSchemasPromise;
 		const yieldEntry = toolSchemas.find(tool => tool.name === "yield");
 		expect(yieldEntry).toBeDefined();
 		if (!yieldEntry) return;
@@ -157,7 +156,7 @@ describe("builtin tool schemas provider compatibility", () => {
 	});
 
 	it('asserts that browser tool schema root stays `type: "object"` when discoverable tools are mounted', async () => {
-		const toolSchemas = await collectToolSchemas();
+		const toolSchemas = await toolSchemasPromise;
 		const browserEntry = toolSchemas.find(tool => tool.name === "browser");
 		expect(browserEntry).toBeDefined();
 		expect(asSchemaObject(browserEntry?.schema)?.type).toBe("object");

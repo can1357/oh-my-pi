@@ -1,7 +1,7 @@
 import { type Component, padding, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
-import { framedBlock, renderStatusLine } from "../tui";
+import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import type {
 	GhRunWatchFailedLogDetails,
 	GhRunWatchJobDetails,
@@ -364,7 +364,7 @@ function renderFallbackComponent(
 	}
 
 	return framedBlock(theme, width => {
-		const lineWidth = Math.max(1, (width || FALLBACK_WIDTH) - 3);
+		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
 		const expanded = options.expanded;
 		const limit = expanded ? allLines.length : Math.min(allLines.length, PREVIEW_LIMITS.OUTPUT_EXPANDED);
 		const visible = allLines.slice(0, limit);
@@ -464,7 +464,7 @@ export const githubToolRenderer = {
 				uiTheme,
 			);
 			return framedBlock(uiTheme, width => {
-				const innerWidth = Math.max(1, (width || FALLBACK_WIDTH) - 3);
+				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
 				const sections = buildWatchSections(watch, uiTheme, options, innerWidth);
 				return {
 					header,

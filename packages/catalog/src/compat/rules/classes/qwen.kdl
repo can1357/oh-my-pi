@@ -1,0 +1,72 @@
+// Model-lineage compat for "qwen"; regenerated from the frozen census using class taxonomy selectors.
+
+class "qwen" {
+	on "aiand" "aimlapi" "alibaba-coding-plan" "amazon-bedrock" "coreweave" "groq" "huggingface" \
+		"kilo" "nanogpt" "novita" "nvidia" "ollama-cloud" "openrouter" "synthetic" \
+		"together" "venice" "wafer-serverless" "zenmux" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	on "aimlapi" "coreweave" "venice" "zenmux" {
+		// residue: the dated 235B thinking SKU cannot disable reasoning; the
+		// old range selector leaned on size-token misparses (3.235) and is
+		// pinned to the exact lineage instead.
+		models "*qwen3-235b-a22b-thinking-2507" {
+			thinking-requires-effort #true
+		}
+	}
+	on "alibaba-coding-plan" "alibaba-token-plan" "wafer-serverless" {
+		supports-developer-role #false
+	}
+	on "amazon-bedrock" "umans" "vercel-ai-gateway" {
+		thinking-mode "budget"
+	}
+	on "fireworks" "umans" "vercel-ai-gateway" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	on "kilo" "nanogpt" "novita" "nvidia" "openrouter" {
+		// residue: hyphen-3-generation thinking SKUs (base/vl/next/omni) are
+		// reasoning-locked; `:thinking` route variants of the dotted 3.x
+		// generations stay out (they accept thinking-off).
+		models "*qwen3-*thinking*" {
+			thinking-requires-effort #true
+		}
+	}
+	// Qwen 3.8+ open-weight chat templates steer thinking depth through the
+	// `reasoning_effort` template kwarg (wire-exact low/medium/xhigh, template
+	// default xhigh) and raise on `enable_thinking: false`, so local
+	// llama.cpp-style hosts route the selected effort onto the template instead
+	// of always reasoning at xhigh. vLLM ignores top-level
+	// `enable_thinking`, so it rides the chat-template-kwargs dialect.
+	on "llama.cpp" "lm-studio" {
+		revision ">=3.8" {
+			supports-reasoning-effort #true
+			template-reasoning-effort #true
+			thinking-efforts "low" "medium" "xhigh"
+			thinking-format "qwen"
+			thinking-requires-effort #true
+		}
+	}
+	on "vllm" {
+		revision ">=3.8" {
+			supports-reasoning-effort #true
+			template-reasoning-effort #true
+			thinking-efforts "low" "medium" "xhigh"
+			thinking-format "qwen-chat-template"
+			thinking-requires-effort #true
+		}
+	}
+	// DashScope compatible-mode text-only families reject image_url content.
+	on "alibaba-token-plan" {
+		family "coder" {
+			strip-image-input #true
+		}
+		revision "<3.8" {
+			models token="max" {
+				strip-image-input #true
+			}
+		}
+		models "qwen-max" {
+			strip-image-input #true
+		}
+	}
+}

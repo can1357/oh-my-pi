@@ -3,7 +3,6 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
 	ALL_SCENES,
 	CURRENT_SETUP_VERSION,
@@ -19,7 +18,7 @@ import { WebSearchTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scene
 import { SetupWizardComponent } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/wizard-overlay";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
@@ -391,7 +390,7 @@ describe("setup wizard short terminals", () => {
 				component.handleInput(key);
 				const frame = component.render(80).map(line => Bun.stripANSI(line));
 				expect(frame.length).toBe(24);
-				expect(frame.some(line => line.trimStart().startsWith(theme.nav.cursor))).toBe(true);
+				expect(frame.some(line => line.includes(`${theme.nav.cursor} `))).toBe(true);
 			}
 		} finally {
 			nowSpy.mockRestore();
@@ -487,13 +486,12 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
-	it("exposes every web-search provider preference in the schema-backed TUI list", () => {
-		const schema = SETTINGS_SCHEMA["providers.webSearch"];
-		expect(schema.values).toEqual(SEARCH_PROVIDER_PREFERENCES);
-		expect(schema.ui.options).toEqual(SEARCH_PROVIDER_OPTIONS);
+	it("exposes every web-search provider preference in the shared TUI list", () => {
+		expect(SEARCH_PROVIDER_OPTIONS[0]?.value).toBe("auto");
+		expect(SEARCH_PROVIDER_OPTIONS.slice(1).map(option => option.value)).toEqual([...SEARCH_PROVIDER_ORDER]);
 	});
 
-	it("persists the highlighted provider as the web search preference", async () => {
+	it("persists the highlighted provider as the head of the web search order", async () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -511,9 +509,12 @@ describe("setup wizard web search tab", () => {
 		tab.handleInput("\n"); // confirm the highlighted provider
 		await Bun.sleep(20);
 
-		const expected = SETTINGS_SCHEMA["providers.webSearch"].ui.options[1].value;
+		const expected = SEARCH_PROVIDER_OPTIONS[1]!.value;
 		expect(expected).not.toBe("auto");
-		expect(settings.get("providers.webSearch")).toBe(expected);
+		expect(settings.get("providers.webSearchOrder")).toEqual([
+			expected,
+			...SEARCH_PROVIDER_ORDER.filter(id => id !== expected),
+		]);
 	});
 
 	it("can select the last provider in the setup TUI list", async () => {
@@ -537,7 +538,12 @@ describe("setup wizard web search tab", () => {
 		await Bun.sleep(20);
 
 		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
-		expect(settings.get("providers.webSearch")).toBe(lastOption.value);
+		const lastValue = lastOption.value;
+		if (lastValue === "auto") throw new Error("last option must be a concrete provider");
+		expect(settings.get("providers.webSearchOrder")).toEqual([
+			lastValue,
+			...SEARCH_PROVIDER_ORDER.filter(id => id !== lastValue),
+		]);
 	});
 });
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { extractPrintableText, matchesKey, parseKey, setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
+import {
+	extractPrintableText,
+	isWindowsTerminalSession,
+	matchesKey,
+	matchesRawBackspace,
+	parseKey,
+	setKittyProtocolActive,
+} from "@oh-my-pi/pi-tui/keys";
 
 describe("matchesKey", () => {
 	it("matches ctrl+letter sequences", () => {
@@ -48,6 +55,17 @@ describe("matchesKey", () => {
 		expect(matchesKey(dvorakCtrlSlash, "ctrl+/")).toBe(true);
 		expect(matchesKey(dvorakCtrlSlash, "ctrl+[")).toBe(false);
 		setKittyProtocolActive(false);
+	});
+
+	it("matches non-Latin shortcuts by their base-layout key", () => {
+		setKittyProtocolActive(true);
+		try {
+			expect(matchesKey("\x1b[1089::99;5u", "ctrl+c")).toBe(true);
+			expect(matchesKey("\x1b[1079::112;5u", "ctrl+p")).toBe(true);
+			expect(matchesKey("\x1b[1057::99;6u", "ctrl+shift+c")).toBe(true);
+		} finally {
+			setKittyProtocolActive(false);
+		}
 	});
 	it("ignores Kitty release events while still matching repeats", () => {
 		setKittyProtocolActive(true);
@@ -174,6 +192,125 @@ describe("parseKey", () => {
 		expect(parseKey("\x1b[99;17u")).toBeUndefined(); // hyper-only
 		expect(parseKey("\x1b[99;33u")).toBeUndefined(); // meta-only
 		setKittyProtocolActive(false);
+	});
+});
+
+describe("Raw 0x08 backspace disambiguation", () => {
+	const envKeys = [
+		"WT_SESSION",
+		"SSH_CONNECTION",
+		"SSH_CLIENT",
+		"SSH_TTY",
+		"PI_TUI_RAW_BACKSPACE_IS_CTRL",
+		"TMUX",
+		"STY",
+		"ZELLIJ",
+		"HERDR_ENV",
+		"HERDR_PANE_ID",
+		"HERDR_TAB_ID",
+		"HERDR_WORKSPACE_ID",
+		"TERM",
+		"CMUX_WORKSPACE_ID",
+		"CMUX_SURFACE_ID",
+		"CMUX_REMOTE_TRANSPORT",
+	] as const;
+	function withEnv(overrides: Partial<Record<(typeof envKeys)[number], string>>, run: () => void): void {
+		const saved: Record<string, string | undefined> = {};
+		for (const key of envKeys) {
+			saved[key] = process.env[key];
+			delete process.env[key];
+		}
+		for (const key in overrides) process.env[key] = overrides[key as (typeof envKeys)[number]];
+		try {
+			run();
+		} finally {
+			for (const key of envKeys) {
+				const value = saved[key];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	}
+
+	it("maps raw 0x08 to ctrl+backspace only in a genuine Windows Terminal session", () => {
+		// Windows Terminal sends 0x08 for Ctrl+Backspace; the native parser reports
+		// plain `backspace` because it cannot see the environment.
+		withEnv({ WT_SESSION: "1" }, () => {
+			expect(isWindowsTerminalSession()).toBe(true);
+			expect(matchesRawBackspace("\x08", 4)).toBe(true);
+			expect(matchesRawBackspace("\x08", 0)).toBe(false);
+			expect(parseKey("\x08")).toBe("ctrl+backspace");
+			expect(matchesKey("\x08", "ctrl+backspace")).toBe(true);
+			expect(matchesKey("\x08", "backspace")).toBe(false);
+		});
+		// Outside Windows Terminal 0x08 stays plain backspace.
+		withEnv({}, () => {
+			expect(isWindowsTerminalSession()).toBe(false);
+			expect(matchesRawBackspace("\x08", 0)).toBe(true);
+			expect(matchesRawBackspace("\x08", 4)).toBe(false);
+			expect(parseKey("\x08")).toBe("backspace");
+			expect(matchesKey("\x08", "backspace")).toBe(true);
+			expect(matchesKey("\x08", "ctrl+backspace")).toBe(false);
+		});
+	});
+
+	it("does not apply the heuristic when WT_SESSION is forwarded over SSH", () => {
+		withEnv({ WT_SESSION: "1", SSH_CONNECTION: "1.2.3.4 5 6.7.8.9 22" }, () => {
+			expect(isWindowsTerminalSession()).toBe(false);
+			expect(parseKey("\x08")).toBe("backspace");
+		});
+	});
+
+	it("does not apply the heuristic inside a multiplexer that inherited WT_SESSION", () => {
+		// tmux/screen/Zellij inherit WT_SESSION from the launching shell but emit
+		// raw 0x08 for plain Backspace themselves, so the automatic heuristic
+		// must stay off there (#6784 review).
+		const multiplexers: Array<Partial<Record<(typeof envKeys)[number], string>>> = [
+			{ WT_SESSION: "1", TMUX: "/tmp/tmux-1000/default,1,0" },
+			{ WT_SESSION: "1", STY: "1234.pts-0" },
+			{ WT_SESSION: "1", ZELLIJ: "0" },
+			{ WT_SESSION: "1", TERM: "tmux-256color" },
+			{ WT_SESSION: "1", TERM: "screen-256color" },
+		];
+		for (const env of multiplexers) {
+			withEnv(env, () => {
+				expect(matchesRawBackspace("\x08", 0)).toBe(true);
+				expect(matchesRawBackspace("\x08", 4)).toBe(false);
+				expect(parseKey("\x08")).toBe("backspace");
+			});
+		}
+		// The explicit opt-in still wins inside a multiplexer.
+		withEnv({ WT_SESSION: "1", TMUX: "/tmp/tmux-1000/default,1,0", PI_TUI_RAW_BACKSPACE_IS_CTRL: "1" }, () => {
+			expect(matchesRawBackspace("\x08", 4)).toBe(true);
+			expect(matchesRawBackspace("\x08", 0)).toBe(false);
+			expect(parseKey("\x08")).toBe("ctrl+backspace");
+		});
+	});
+
+	it("supports an explicit opt-in when remote/container sessions lose terminal identity", () => {
+		withEnv(
+			{
+				PI_TUI_RAW_BACKSPACE_IS_CTRL: "1",
+				SSH_CONNECTION: "1.2.3.4 5 6.7.8.9 22",
+			},
+			() => {
+				expect(isWindowsTerminalSession()).toBe(false);
+				expect(matchesRawBackspace("\x08", 4)).toBe(true);
+				expect(matchesRawBackspace("\x08", 0)).toBe(false);
+				expect(parseKey("\x08")).toBe("ctrl+backspace");
+				expect(matchesKey("\x08", "ctrl+backspace")).toBe(true);
+			},
+		);
+	});
+
+	it("leaves 0x7f as plain backspace regardless of Windows Terminal or opt-in", () => {
+		withEnv({ WT_SESSION: "1", PI_TUI_RAW_BACKSPACE_IS_CTRL: "1" }, () => {
+			expect(matchesRawBackspace("\x7f", 0)).toBe(true);
+			expect(matchesRawBackspace("\x7f", 4)).toBe(false);
+			expect(parseKey("\x7f")).toBe("backspace");
+			expect(matchesKey("\x7f", "backspace")).toBe(true);
+			expect(matchesKey("\x7f", "ctrl+backspace")).toBe(false);
+		});
 	});
 });
 

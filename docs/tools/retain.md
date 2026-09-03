@@ -20,6 +20,13 @@
   - `packages/coding-agent/src/mnemopi/config.ts` — local SQLite path, bank, scoping, provider settings.
   - `packages/mnemopi/src/core/memory.ts` — local memory runtime used by `remember(...)`.
 
+## Registration / Visibility
+- Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls enqueue or perform memory writes.
+- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
+- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
+- In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
+- Execution returns one final result and has no progress callback or cancellation parameter.
+
 ## Inputs
 
 | Field | Type | Required | Description |
@@ -39,7 +46,7 @@ Mnemopi:
 - `content[0].type = "text"`
 - `content[0].text = "<count> memory stored."` or `"<count> memories stored."`
 - `details = { count: number }`
-- The tool calls the local backend synchronously, but `rememberScoped(...)` catches per-item write failures and returns `undefined`; the tool still reports the requested count.
+- The tool invokes local writes synchronously, but `rememberScoped(...)` catches each write failure and returns `undefined`; `retain` ignores that return and still reports the requested count. The response is therefore not a per-item durability receipt.
 
 ## Flow
 1. `MemoryRetainTool.createIf(...)` exposes the tool when `memory.backend` is either `"hindsight"` or `"mnemopi"`.
@@ -47,7 +54,7 @@ Mnemopi:
 3. If the backend is `mnemopi`:
    - it fetches `session.getMnemopiSessionState()` and throws if the backend was not started;
    - for each item, it calls `state.rememberScoped(item.content, ...)` with `source: "coding-agent-retain"`, `importance: 0.75`, `scope: "bank"`, `extract: true`, `extractEntities: true`, `veracity: "tool"`, `memoryType: "fact"`, and metadata `{ session_id, cwd, context, tool: "retain" }`;
-   - writes go to the scoped retain bank selected by `packages/coding-agent/src/mnemopi/config.ts`.
+   - writes go to the scoped retain bank; exact duplicate content in the same session updates the existing working-memory row in the Mnemopi core.
 4. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
    - each input item is handed to `HindsightSessionState.enqueueRetain(...)`;
@@ -63,8 +70,9 @@ Mnemopi:
   - `per-project-tagged` — shared bank plus `project:<project label>` tags on retained memories.
 - Mnemopi bank scoping from `computeMnemopiBankScope(...)`:
   - `global` — retain and recall use the shared bank.
-  - `per-project` — retain and recall use the project bank.
-  - `per-project-tagged` — retain writes project-local memories; recall also reads the shared bank.
+  - `per-project` — retain and recall use a project bank derived from the absolute cwd basename plus a hash of that absolute cwd.
+  - `per-project-tagged` — retain writes to the cwd-derived project bank; recall also reads the shared bank.
+  - Per-project recall may add safe legacy banks whose stored working-memory rows all match the active cwd; scanning is capped at 64 candidate bank directories.
 - Session scope:
   - tool-called retains are per-session work for the active backend;
   - persisted Hindsight memories are cross-session server-side bank data;
@@ -85,36 +93,38 @@ Mnemopi:
   - Hindsight async flush failures emit `session.emitNotice("warning", ...)`; the model is not told.
   - Mnemopi write failures are logged by `rememberInScope(...)`; the tool response does not expose per-item failures.
 - Background work / cancellation
-  - Hindsight flush runs later on timer, queue-size threshold, `agent_end`, backend `enqueue(...)`, or backend `clear(...)`.
-  - Mnemopi fact/entity extraction may continue in the Mnemopi runtime; backend `enqueue(...)` calls `flushExtractions()` before sleeping sessions.
+  - Hindsight flush runs later on the debounce timer or queue-size threshold; backend `enqueue(...)` and `clear(...)` explicitly drain it. A session-ownership mismatch at flush time logs and drops the batch.
+  - Mnemopi fact/entity extraction and embedding may continue after the synchronous row write. Backend `enqueue(...)` requests full consolidation; backend clear disposes scoped instances before deleting their database files.
+  - `retain.execute()` itself has no abort-signal handling.
 
 ## Limits & Caps
-- Input schema requires `items.length >= 1`.
+- Input schema requires `items.length >= 1`; item strings have no schema-level minimum length.
 - Tool availability requires `memory.backend` to be `"hindsight"` or `"mnemopi"`; default `memory.backend` is `"off"`.
 - Hindsight queue flush threshold: `RETAIN_FLUSH_BATCH_SIZE = 16`.
 - Hindsight queue debounce: `RETAIN_FLUSH_INTERVAL_MS = 5_000`.
-- Hindsight queue writes use `retainBatch(..., { async: true })`; the client does not wait for server-side consolidation.
+- Hindsight queue writes use `retainBatch(..., { async: true })`; the client request timeout defaults to `hindsight.retainTimeoutMs = 60_000`, but it does not wait for server-side consolidation.
 - Hindsight auto-retain settings:
-  - `hindsight.retainEveryNTurns` default `3`
-  - `hindsight.retainOverlapTurns` default `2`
-  - `hindsight.retainContext` default `"omp"`
-  - `hindsight.retainMode` default `"full-session"`
+  - `hindsight.autoRetain = true`
+  - `hindsight.retainEveryNTurns = 3`
+  - `hindsight.retainOverlapTurns = 2`
+  - `hindsight.retainContext = "omp"`
+  - `hindsight.retainMode = "full-session"`
 - Mnemopi retain settings:
-  - `mnemopi.retainEveryNTurns` default `4`
-  - `mnemopi.autoRetain` controls automatic retention of completed conversation turns
-  - `mnemopi.scoping` selects `global`, `per-project`, or `per-project-tagged`
+  - `mnemopi.autoRetain = true`
+  - `mnemopi.retainEveryNTurns = 4`
+  - `mnemopi.scoping = "per-project"`
 
 ## Errors
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.
 - Throws `Hindsight backend is not initialised for this session.` when `memory.backend == "hindsight"` but no state exists.
 - Hindsight queue enqueue on disposed state throws `Hindsight retain queue is closed.`
-- Hindsight flush-time API failures are caught in `HindsightRetainQueue.#doFlush(...)`, logged, and converted into a warning notice instead of a tool error.
-- Hindsight bank/mission creation failures are swallowed in `ensureBankExists(...)`; writes continue.
+- Hindsight flush-time API failures are caught, logged, and converted into a warning notice instead of a tool error.
+- Hindsight bank/mission creation failures are logged at debug level and swallowed in `ensureBankExists(...)`; the later write still runs.
 - Mnemopi `remember(...)` failures are caught in `MnemopiSessionState.rememberInScope(...)`, logged, and not rethrown to the tool caller.
 
 ## Notes
-- Hindsight storage is server-side. `hindsightBackend.clear(...)` only clears local cache/state and warns that upstream deletion must happen in Hindsight UI or `deleteBank`.
-- Mnemopi storage is local SQLite. `mnemopiBackend.clear(...)` removes the scoped database files for the active configuration.
+- Hindsight storage is server-side. `hindsightBackend.clear(...)` drains the local queue, clears local cache/state, and warns that upstream deletion must happen in Hindsight UI or `deleteBank`.
+- Mnemopi storage is local SQLite. `mnemopiBackend.clear(...)` removes the database files for every active scoped bank and then rehydrates the backend when the session remains active.
 - Hindsight auto-retain uses the same bank but a different path than this tool: `retainSession(...)` extracts plain user/assistant transcript, strips `<memories>` / `<mental_models>` blocks, and calls single-item `retain(...)`.
 - Mnemopi auto-retain stores prepared transcripts with `source: "coding-agent-transcript"`, `importance: 0.65`, `veracity: "unknown"`, and `memoryType: "episode"`.
 - Hindsight mental-model bootstrap lives in the shared backend: `HindsightSessionState.runMentalModelLoad(...)` optionally resolves seeds, creates missing models, then caches a rendered `<mental_models>` block for prompt injection.

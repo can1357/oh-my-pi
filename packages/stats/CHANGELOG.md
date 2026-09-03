@@ -2,6 +2,98 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
+### Changed
+
+- Provider, tool, and project `<select>` dropdowns are now styled to match the dashboard design, with dark and light theme support.
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added API for daily activity tracking, including cost, requests, and token usage aggregates
+- Added a Traces dashboard for detailed session analysis, including an interactive timeline, searchable and filterable transcripts, token and cost summaries, and aggregate tool-usage and timing insights.
+
+### Fixed
+
+- Fixed `omp stats` omitting usage from online auto-thinking classifier calls.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed inconsistent model colors between the Model Preference chart and Model Statistics table.
+
+## [18.0.4] - 2026-08-24
+
+### Fixed
+
+- Fixed SuperGrok usage appearing as free by applying matching public xAI API pricing (including 200K-token rates), labeling costs as API-equivalent estimates, backfilling existing usage records, and displaying subscription-only models as N/A ([#9512](https://github.com/can1357/oh-my-pi/issues/9512)).
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Projects dashboard folder endpoint running unrelated dashboard aggregations when loading folder statistics.
+- Fixed stats sync crashing with a NOT NULL constraint error when legacy session files carry a partially-populated usage cost.
+
+## [17.4.0] - 2026-08-20
+
+### Changed
+
+- Window token estimates now incorporate broker-reported fleet token burn when an auth broker is configured, accurately tracking fleet-wide usage instead of undercounting with local-only statistics.
+
+### Fixed
+
+- Fixed an issue in subscription-window insights where distinct limits sharing a duration label (such as Anthropic overall vs. model-scoped 7-day windows) were incorrectly merged, which inflated window-equivalents and skewed tokens-per-window estimates. Windows are now grouped by provider limit ID.
+
+## [17.3.6] - 2026-08-17
+
+### Fixed
+
+- Fixed the stats dashboard being unreachable from container hosts by accepting an explicit `--host` bind address while preserving loopback-only binding and same-origin API access by default.
+
+## [17.3.0] - 2026-08-13
+
+### Added
+
+- Added cost-weighted `cacheSavings` metric alongside `cacheRate`, accounting for cache-read discounts and write premiums against equivalent uncached prompt costs.
+
+### Fixed
+
+- Ensured the embedded dashboard archive is byte-reproducible by sorting entries and zeroing tar and gzip timestamps during compilation.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Optimized package dependencies by replacing `date-fns` with `@oh-my-pi/pi-utils/dates` and removing unused test dependencies.
+
+## [17.2.9] - 2026-08-05
+
+### Fixed
+
+- Restricted the stats dashboard to IPv4 loopback and removed wildcard CORS access to its API ([#7633](https://github.com/can1357/oh-my-pi/issues/7633)).
+
+## [17.2.4] - 2026-08-01
+
+### Fixed
+
+- Fixed provider usage window stats silently showing no data during SQLite contention by installing a five-second busy timeout on read-only agent database connections ([#7300](https://github.com/can1357/oh-my-pi/issues/7300)).
+
+## [17.1.2] - 2026-07-24
+
+### Added
+
+- Added a Providers dashboard section: per-provider totals, stacked token/cost burn over time, peak-burn-hours histogram, subscription-window insights (windows burned, estimated tokens per window, peak concurrent utilization, ideal account count, exhaustion events), and latest window utilization per account — window analytics read the auth broker's `/v1/usage/history` when a broker is configured (falling back to the local agent DB), since broker deployments record usage history on the broker host
+
+## [17.1.0] - 2026-07-24
+
+### Fixed
+
+- Fixed an issue where malformed persisted content blocks could abort stats ingestion for subsequent projects, and ensured pending full-session migrations are properly settled after successful backfills.
+
 ## [17.0.6] - 2026-07-20
 
 ### Changed

@@ -18,6 +18,7 @@ import {
 	getPathsForTab,
 	getType,
 	getUi,
+	isCredential,
 	SETTING_TABS,
 	type SettingPath,
 	type SettingTab,
@@ -35,6 +36,8 @@ interface BaseSettingDef {
 	path: SettingPath;
 	label: string;
 	description: string;
+	/** Risk note shown in warning styling; set for settings that can get the user flagged or banned. */
+	warning?: string;
 	tab: SettingTab;
 	/** Section within the tab; items are ordered by TAB_GROUPS[tab] and rendered under a heading row. */
 	group?: string;
@@ -66,10 +69,18 @@ export interface SubmenuSettingDef extends BaseSettingDef {
 
 export interface TextInputSettingDef extends BaseSettingDef {
 	type: "text";
+	secret: boolean;
 }
 
 export interface ProviderLimitsSettingDef extends BaseSettingDef {
 	type: "providerLimits";
+}
+
+/** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
+export interface MultiSelectSettingDef extends BaseSettingDef {
+	type: "multiselect";
+	options: OptionList;
+	ordered: boolean;
 }
 
 export type SettingDef =
@@ -77,13 +88,15 @@ export type SettingDef =
 	| EnumSettingDef
 	| SubmenuSettingDef
 	| TextInputSettingDef
-	| ProviderLimitsSettingDef;
+	| ProviderLimitsSettingDef
+	| MultiSelectSettingDef;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Condition Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
 const CONDITIONS: Record<string, () => boolean> = {
+	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	advisorEnabled: () => {
 		try {
@@ -120,9 +133,23 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	usageAwareFallbackEnabled: () => {
+		try {
+			return Settings.instance.get("retry.usageAwareFallback") === true;
+		} catch {
+			return false;
+		}
+	},
 	planModeEnabled: () => {
 		try {
 			return Settings.instance.get("plan.enabled");
+		} catch {
+			return false;
+		}
+	},
+	unexpectedStopSmart: () => {
+		try {
+			return Settings.instance.get("features.unexpectedStopDetection") === "smart";
 		} catch {
 			return false;
 		}
@@ -145,7 +172,15 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, group: ui.group, condition };
+	const base = {
+		path,
+		label: ui.label,
+		description: ui.description,
+		warning: ui.warning,
+		tab: ui.tab,
+		group: ui.group,
+		condition,
+	};
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };
@@ -176,11 +211,23 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		if (options) {
 			return { ...base, type: "submenu", options };
 		}
-		return { ...base, type: "text" };
+		// One classification drives both surfaces: a setting marked `credential`
+		// masks here too, so the panel cannot display one that only the CLI knows
+		// to redact.
+		return { ...base, type: "text", secret: isCredential(path) };
+	}
+
+	if (schemaType === "array") {
+		// Arrays without declared options stay config-file only (free-form lists
+		// like extension paths have no finite choice set to toggle).
+		if (!options || options === "runtime") return null;
+		return { ...base, type: "multiselect", options, ordered: ui.ordered === true };
 	}
 
 	if (schemaType === "record") {
-		return path === "providers.maxInFlightRequests" ? { ...base, type: "providerLimits" } : { ...base, type: "text" };
+		return path === "providers.maxInFlightRequests"
+			? { ...base, type: "providerLimits" }
+			: { ...base, type: "text", secret: false };
 	}
 
 	return null;

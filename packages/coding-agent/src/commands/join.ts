@@ -2,14 +2,15 @@
  * Join a shared collab session from the CLI: launches the interactive TUI and
  * immediately runs `/join <link>`.
  */
+
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
+import { joinHelp as commandHelp } from "../cli/command-help";
 import { runRootCommand } from "../main";
 
 export default class Join extends Command {
-	static description = "Join a shared collab session (same as /join)";
-
+	static description = commandHelp.description;
 	static args = {
 		link: Args.string({
 			description: "Collab link shared by the host (/collab)",

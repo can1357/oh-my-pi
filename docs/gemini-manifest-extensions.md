@@ -2,7 +2,7 @@
 
 This document covers how the coding-agent discovers and parses Gemini-style manifest extensions (`gemini-extension.json`) into the `extensions` capability.
 
-It does **not** cover TypeScript/JavaScript extension module loading (`extensions/*.ts`, `index.ts`, `package.json omp.extensions`), which is documented in `extension-loading.md`.
+It does **not** cover TypeScript/JavaScript extension module loading (`extensions/*.ts`, `index.ts`, `package.json omp.extensions`), which is documented in [Extension Loading](./extension-loading.md).
 
 ## Implementation files
 
@@ -10,6 +10,7 @@ It does **not** cover TypeScript/JavaScript extension module loading (`extension
 - [`packages/coding-agent/src/discovery/builtin.ts`](../packages/coding-agent/src/discovery/builtin.ts)
 - [`packages/coding-agent/src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`packages/coding-agent/src/capability/extension.ts`](../packages/coding-agent/src/capability/extension.ts)
+- [`packages/coding-agent/src/capability/extension-module.ts`](../packages/coding-agent/src/capability/extension-module.ts)
 - [`packages/coding-agent/src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`packages/coding-agent/src/extensibility/extensions/loader.ts`](../packages/coding-agent/src/extensibility/extensions/loader.ts)
 
@@ -65,9 +66,11 @@ interface ExtensionManifest {
 
 Discovery-time behavior is intentionally loose:
 
-- JSON parse success is required.
-- There is no runtime schema validation for field types/content beyond JSON syntax.
-- The parsed object is stored as `manifest` on the capability item.
+- The file must be non-empty and `tryParseJson()` must return a truthy value.
+  Invalid JSON and valid JSON literals `null`, `false`, `0`, or `""` therefore
+  take the same warning path.
+- There is no runtime schema validation for field types/content after that gate.
+- The parsed value is stored as `manifest` on the capability item.
 
 ### Name normalization
 
@@ -111,17 +114,19 @@ Notes:
 
 ### Warned
 
-- Invalid JSON in a manifest file:
+- Invalid JSON, or a syntactically valid falsy JSON literal, in a non-empty
+  manifest file:
   - warning format: `Invalid JSON in <manifestPath>`
 
 ### Not warned (silent skip)
 
 - `extensions` directory missing
 - child directory has no `gemini-extension.json`
-- unreadable manifest file
-- manifest JSON is syntactically valid but semantically odd/incomplete
+- unreadable or empty manifest file
+- manifest JSON is truthy but semantically odd/incomplete
 
-This means partial validity is accepted: only syntactic JSON failure emits a warning.
+This means semantic validity is not enforced; the warning gate is the truthiness
+of `tryParseJson()` rather than an `ExtensionManifest` runtime validator.
 
 ---
 
@@ -165,15 +170,20 @@ For Gemini manifests specifically:
 
 ---
 
-## Boundary: discovery metadata vs runtime extension loading
+## Boundary: manifest metadata vs runtime extension modules
 
-`gemini-extension.json` discovery currently feeds capability metadata (`Extension` items). It does **not** directly load runnable TS/JS extension modules.
+`gemini-extension.json` discovery feeds the `extensions` metadata capability. It
+does **not** identify a runnable TS/JS entry point.
 
-Runtime module loading (`discoverAndLoadExtensions()` / `loadExtensions()`) uses the `extension-module` capability and explicit paths, and currently filters auto-discovered modules to provider `native` only.
+The Gemini provider separately populates the `extension-module` capability by
+scanning the same two extension roots for direct `.ts`/`.js` files,
+`<name>/index.ts` / `index.js`, and `package.json` `omp`/`pi` extension entries.
+Those module records are independent of `gemini-extension.json`.
 
-Practical implication:
+The ambient startup path in `discoverExtensionPaths()` currently requests only
+the `native` provider, so Gemini-discovered module records are not automatically
+executed there. Explicitly configured extension paths can still be loaded.
 
-- Gemini manifest extensions are discoverable as capability records.
-- They are not, by themselves, executed as runtime extension modules by the extension loader pipeline.
-
-This boundary is intentional in current implementation and explains why manifest discovery and executable module loading can diverge.
+Practical implication: a Gemini manifest is discoverable metadata, but neither
+the manifest itself nor a neighboring module is automatically executed merely
+because it appears under `.gemini/extensions`.

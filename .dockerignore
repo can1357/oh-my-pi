@@ -1,0 +1,82 @@
+# Default build context filter, used by every build whose Dockerfile has no
+# `<dockerfile>.dockerignore` shadow next to it — today the install smokes in
+# scripts/install-tests (`podman build -f scripts/install-tests/*.dockerfile .`).
+# The pi and robomp images shadow this file with Dockerfile.dockerignore and
+# Dockerfile.robomp.dockerignore; keep the three roughly in sync.
+#
+# Patterns are depth-agnostic (`**/`) to match .gitignore semantics: dockerignore
+# anchors a bare `target/` at the context root only, so nested build dirs
+# (go-port/*/target, packages/*/dist) otherwise ride along — gigabytes per build.
+
+# Heavy build outputs.
+**/target/
+bazel-*
+**/node_modules
+**/dist/
+runs/
+.xwin-cache/
+packages/coding-agent/binaries/
+packages/natives/npm/
+packages/natives/native/.build/
+**/.cache/
+packages/snapcompact/research/results/
+# Host-built addons: every image that needs one compiles it from source.
+**/*.node
+
+# Per-host scratch the pi codebase uses for parallel agents / worktrees.
+.fallow/
+.worktrees/
+.wt/
+.opencode/
+.pi_config/
+.omp/plugins/
+
+# VCS, editors, IDEs.
+.git/
+.npm/
+.vscode/
+.zed/
+.idea/
+
+# OS + transient noise.
+.DS_Store
+*.swp
+*.swo
+*~
+*.tmp
+
+# Logs + profiling artifacts.
+*.log
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+CPU.*
+
+# Build / test side outputs.
+**/*.tsbuildinfo
+**/coverage/
+.nyc_output/
+**/__pycache__/
+compaction-results/
+changes/
+
+# Generated, regenerated in-image.
+packages/ai/test/.temp-images/
+python/omp-rpc/src/omp_rpc.egg-info/
+python/robomp/data/
+python/robomp/.cache/
+python/robomp/src/robomp/static/
+python/robomp/web/dist/
+
+# Scratch files the repo creates ad-hoc.
+syntax.jsonl
+out.jsonl
+out.html
+pi-*.html
+
+# Host virtualenvs — the image installs its own interpreter deps.
+**/.venv/
+
+# Secrets. Should never be in an image regardless. Depth-agnostic: a bare
+# `.env` misses nested ones such as `python/robomp/.env`.
+**/.env

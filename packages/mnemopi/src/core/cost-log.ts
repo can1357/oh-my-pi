@@ -1,10 +1,9 @@
-import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-
-export const DEFAULT_LOG_DIR = join(homedir(), ".mnemopi", "data");
-export const DEFAULT_LOG_DB = join(DEFAULT_LOG_DIR, "cost_log.db");
+import type { Database } from "bun:sqlite";
+import * as os from "node:os";
+import * as path from "node:path";
+import { openDatabase } from "../db";
+export const DEFAULT_LOG_DIR = path.join(os.homedir(), ".mnemopi", "data");
+export const DEFAULT_LOG_DB = path.join(DEFAULT_LOG_DIR, "cost_log.db");
 
 export interface CostStats {
 	total_calls: number;
@@ -22,8 +21,7 @@ type AggregateRow = {
 
 export function getConn(dbPath?: string): Database {
 	const path = dbPath ?? DEFAULT_LOG_DB;
-	mkdirSync(dirname(path), { recursive: true });
-	return new Database(path, { create: true, readwrite: true, strict: true });
+	return openDatabase(path, { pragmas: false });
 }
 
 export function initCostLog(dbPath?: string): void {

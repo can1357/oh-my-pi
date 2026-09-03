@@ -1,0 +1,158 @@
+name: "Compose bazel cache config"
+description: >
+   Selects the CI cache backend and emits a bazelrc fragment. A shell probe
+   exposes the backend through step outputs before any action condition
+   uses it.
+
+   omp-kata jobs use the cluster remote cache. GitHub-hosted jobs use an
+   actions/cache-backed disk cache seeded by the bazel-cache-warm workflow
+   on the same runner image — cross-host action keys never hit, so the disk
+   cache is hosted-only and its key carries a schema version (v1 was
+   poisoned by a kata-produced export that silently missed every action).
+
+   The v3 key is <config hash>-<source hash>: config covers toolchain and
+   build settings, source covers crates/** + BUILD.bazel. Restores fall
+   back to the config-scoped prefix, then to a bare scope+os+arch prefix:
+   the config hash covers Cargo.toml/Cargo.lock, which every release
+   version bump rewrites, so without the bare fallback each release built
+   the darwin addons fully cold (~40-50 min on macos-15-intel; CI run
+   30357804722). A stale-config archive is safe — bazel keys every
+   action by content digest, so mismatched entries just miss — and the
+   refreshed archive is saved after the build (an exact hit suppresses
+   the save — without the source component the first archive for a config
+   generation would permanently shadow newer source states). Restored
+   entries untouched for 14 days are pruned before the build so
+   ever-seeding archives don't grow without bound.
+
+inputs:
+   scope:
+      description: Disk-cache key discriminator shared by compatible consumers
+      required: true
+
+outputs:
+   rc:
+      description: Path to the generated bazelrc fragment
+      value: ${{ steps.compose.outputs.rc }}
+   cache-key:
+      description: Exact GitHub cache key for a later explicit save
+      value: ${{ steps.backend.outputs.cache-key }}
+   save-needed:
+      description: Whether a disk-cache build can save a new exact-key archive
+      value: ${{ steps.compose.outputs.save-needed }}
+   remote:
+      description: Whether the shell probe selected the cluster remote cache
+      value: ${{ steps.backend.outputs.remote }}
+
+runs:
+   using: composite
+   steps:
+      - name: Detect bazel cache backend
+        id: backend
+        shell: bash
+        env:
+           CONFIG_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**') }}
+           SOURCE_HASH: ${{ hashFiles('crates/**', 'BUILD.bazel') }}
+        run: |
+           set -euo pipefail
+           remote=false
+           if [ -n "${BAZEL_REMOTE_USER:-}" ] || [ -n "${BAZEL_REMOTE_PASSWORD:-}" ]; then
+             if [ -z "${BAZEL_REMOTE_USER:-}" ] || [ -z "${BAZEL_REMOTE_PASSWORD:-}" ]; then
+               echo "::error::BAZEL_REMOTE_USER and BAZEL_REMOTE_PASSWORD must both be set"
+               exit 1
+             fi
+             remote=true
+           fi
+           key="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-$SOURCE_HASH"
+           prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-"
+           bare_prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-"
+           {
+             echo "remote=$remote"
+             echo "cache-key=$key"
+             echo "cache-prefix=$prefix"
+             echo "cache-bare-prefix=$bare_prefix"
+           } >> "$GITHUB_OUTPUT"
+
+      - name: Restore bazel disk cache
+        id: restore
+        if: steps.backend.outputs.remote != 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+           # Both caches ride one archive: the action cache AND the repository
+           # cache (downloads + extracted repo contents at repo/contents, which
+           # reproducible repo rules reuse across output bases). Without the
+           # repo half, every hosted job re-downloaded and re-extracted the
+           # rust/LLVM/zig toolchains. Save sites must list the same paths.
+           path: |
+              ~/.cache/omp-bazel-disk
+              ~/.cache/omp-bazel-repo
+           key: ${{ steps.backend.outputs.cache-key }}
+           # Order matters: exact key, same-config prefix, then any archive for
+           # this scope+os+arch. The bare fallback is what keeps release version
+           # bumps (Cargo.toml/Cargo.lock churn -> new CONFIG_HASH) from going
+           # fully cold; bazel's content-addressed action keys make a
+           # stale-config archive a partial hit, never a wrong output.
+           restore-keys: |
+              ${{ steps.backend.outputs.cache-prefix }}
+              ${{ steps.backend.outputs.cache-bare-prefix }}
+
+      - name: Compose cache config
+        id: compose
+        shell: bash
+        env:
+           REMOTE: ${{ steps.backend.outputs.remote }}
+           RESTORE_HIT: ${{ steps.restore.outputs.cache-hit }}
+        run: |
+           set -euo pipefail
+           save_needed=false
+           if [ "$REMOTE" != "true" ] && [ "$RESTORE_HIT" != "true" ]; then
+             save_needed=true
+           fi
+
+           rc="$RUNNER_TEMP/bazel-cache.rc"
+           if [ "$REMOTE" = "true" ]; then
+             # Mask the derived credential BEFORE writing the rc: config=ci
+             # enables --announce_rc, which prints --remote_header verbatim.
+             # Mask lines inside the redirected block below would land in the
+             # rc file itself and mask nothing.
+             raw_auth="${BAZEL_REMOTE_USER}:${BAZEL_REMOTE_PASSWORD}"
+             auth="$(printf %s "$raw_auth" | base64 | tr -d '\n')"
+             echo "::add-mask::$raw_auth"
+             echo "::add-mask::$auth"
+             {
+               # The PVC mount lives outside $HOME. Pods are single-job and
+               # use RUNNER_TEMP for Bazel's output root.
+               echo "startup --output_user_root=$RUNNER_TEMP/bazel-root"
+               echo "common --config=ci"
+               echo "common --repository_cache=/opt/bazel-repo-cache"
+               echo "common --repo_env=OMP_XWIN_CACHE_DIR=/opt/bazel-repo-cache/xwin"
+               echo "common --config=cache-rw"
+               echo "common --remote_cache=grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092"
+               echo "common --tls_certificate=infra/bazel-remote/ca.crt"
+               echo "common --remote_header='authorization=Basic ${auth}'"
+               echo "common --remote_download_toplevel"
+             } > "$rc"
+           else
+             mkdir -p "$HOME/.cache/omp-bazel-disk" "$HOME/.cache/omp-bazel-repo"
+             # Seeding from stale archives means entries dead source
+             # generations wrote would otherwise ride along forever; drop
+             # anything untouched for 14 days (tar preserves mtimes across
+             # the actions/cache round trip, so age survives restores).
+             # DISK CACHE ONLY: never prune omp-bazel-repo file-by-file —
+             # extracted repo contents keep upstream-archive mtimes (often
+             # months old), so an mtime sweep guts contents-cache entries
+             # while bazel still trusts their recorded_inputs, materializing
+             # hollow external repos ("BUILD file not found" — v17.2.0
+             # release run 30519253683). The repo cache is bounded by the
+             # GitHub cache TTL/LRU at the archive level instead.
+             find "$HOME/.cache/omp-bazel-disk" -type f -mtime +14 -delete 2>/dev/null || true
+             {
+               echo "common --config=ci"
+               echo "common --disk_cache=$HOME/.cache/omp-bazel-disk"
+               echo "common --repository_cache=$HOME/.cache/omp-bazel-repo"
+             } > "$rc"
+           fi
+
+           {
+             echo "rc=$rc"
+             echo "save-needed=$save_needed"
+           } >> "$GITHUB_OUTPUT"

@@ -16,8 +16,10 @@
 import {
 	ABORT_MARKER,
 	BEGIN_PATCH_MARKER,
+	type Clipboard,
 	containsRecognizableHashlineOperations,
 	END_PATCH_MARKER,
+	forkClipboard,
 	type PatchSection as HashlineInputSection,
 	Patch as HashlinePatch,
 	type SnapshotStore,
@@ -28,7 +30,7 @@ import { computeEditDiff, type DiffError, type DiffResult } from "./diff";
 import { computeHashlineDiff, computeHashlineSectionDiff } from "./hashline/diff";
 import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
 import { computePatchDiff, type PatchEditEntry } from "./modes/patch";
-import type { ReplaceEditEntry } from "./modes/replace";
+import { computeSloppySectionDiff, splitSloppySections } from "./sloppy";
 
 export interface PerFileDiffPreview {
 	path: string;
@@ -50,6 +52,13 @@ export interface StreamingDiffContext {
 	 * not flicker in the preview.
 	 */
 	isStreaming?: boolean;
+	/**
+	 * Session-persistent clipboard register (`CUT`/`PASTE`). Previews
+	 * fork it per frame — never mutating it — so a `PASTE` of content cut in
+	 * an earlier edit call (or an earlier section of this patch) renders the
+	 * real rows.
+	 */
+	clipboard?: Clipboard;
 }
 
 /**
@@ -69,7 +78,7 @@ export interface EditStreamingStrategy<Args = unknown> {
 	 * compute a diff against. Strategies drop the trailing incomplete entry
 	 * when `partialJson` indicates its closing `}` hasn't arrived yet.
 	 */
-	extractCompleteEdits(args: Args, partialJson: string | undefined): Args;
+	extractCompleteEdits(args: Args, partialJson: string | undefined, isStreaming: boolean): Args;
 	/**
 	 * Compute diff(s) for the given partial args. Returns `null` when args
 	 * do not yet carry enough structure to compute anything.
@@ -324,27 +333,32 @@ function splitApplyPatchPerFile(input: string): EditMatcherEntry[] {
 
 interface ReplaceArgs {
 	path?: string;
-	edits?: ReplaceEditEntry[];
+	old_string?: string;
+	new_string?: string;
+	replace_all?: boolean;
 	__partialJson?: string;
 }
 
 const replaceStrategy: EditStreamingStrategy<ReplaceArgs> = {
 	extractCompleteEdits(args, partialJson) {
-		if (!args?.edits) return args;
-		return { ...args, edits: dropIncompleteLastEdit(args.edits, partialJson, "edits") };
+		// While args are still streaming, `old_string` is only trustworthy once
+		// the parser has moved past it — i.e. the `new_string` key has appeared.
+		// Previewing a half-streamed `old_string` would flash a bogus
+		// "no match" diff error until the rest of the value arrives.
+		if (!partialJson || partialJson.includes('"new_string"')) return args;
+		return { ...args, old_string: undefined, new_string: undefined };
 	},
 	async computeDiffPreview(args, ctx) {
 		if (!args.path) return null;
-		const first = args.edits?.[0];
-		if (!first || first.old_text === undefined || first.new_text === undefined) return null;
+		if (args.old_string === undefined || args.new_string === undefined) return null;
 		ctx.signal.throwIfAborted();
 		const result = await computeEditDiff(
 			args.path,
-			first.old_text,
-			first.new_text,
+			args.old_string,
+			args.new_string,
 			ctx.cwd,
 			ctx.allowFuzzy ?? true,
-			first.all,
+			args.replace_all,
 			ctx.fuzzyThreshold,
 		);
 		ctx.signal.throwIfAborted();
@@ -354,14 +368,7 @@ const replaceStrategy: EditStreamingStrategy<ReplaceArgs> = {
 		return "";
 	},
 	matcherDigest(args) {
-		const edits = args?.edits;
-		if (!Array.isArray(edits)) return undefined;
-		let digest: string | undefined;
-		for (const edit of edits) {
-			if (typeof edit?.new_text !== "string") continue;
-			digest = digest === undefined ? edit.new_text : `${digest}\n${edit.new_text}`;
-		}
-		return digest;
+		return typeof args?.new_string === "string" ? args.new_string : undefined;
 	},
 	matcherPaths(args) {
 		return typeof args?.path === "string" && args.path.length > 0 ? [args.path] : undefined;
@@ -411,7 +418,7 @@ const patchStrategy: EditStreamingStrategy<PatchArgs> = {
 			if (typeof edit?.diff !== "string") continue;
 			// `create` ops carry full file content in `diff` with no +/- markers;
 			// pass that content through whole.
-			const added = extractAddedLines(edit.diff, true);
+			const added = extractAddedLines(edit.diff, edit.op === "create");
 			digest = digest === undefined ? added : `${digest}\n${added}`;
 		}
 		return digest;
@@ -542,7 +549,9 @@ const hashlineStrategy: EditStreamingStrategy<HashlineArgs> = {
 			// to parse; suppress until the next chunk arrives. Once args are
 			// complete, surface the error so the model sees what went wrong.
 			if (ctx.isStreaming) return null;
-			const result = await computeHashlineDiff({ input }, ctx.cwd, ctx.snapshots);
+			const result = await computeHashlineDiff({ input }, ctx.cwd, ctx.snapshots, {
+				clipboard: forkClipboard(ctx.clipboard),
+			});
 			ctx.signal.throwIfAborted();
 			return [toPerFilePreview("", result)];
 		}
@@ -558,12 +567,16 @@ const hashlineStrategy: EditStreamingStrategy<HashlineArgs> = {
 		const trailingProcessedIndex = sectionsToProcess.length - 1;
 
 		const previews: PerFileDiffPreview[] = [];
+		// Fork the session register per preview frame: sections feed each other
+		// in patch order, but a preview must never mutate the live register.
+		const clipboard = forkClipboard(ctx.clipboard);
 		for (let i = 0; i < sectionsToProcess.length; i++) {
 			ctx.signal.throwIfAborted();
 			const section = sectionsToProcess[i];
 			const result = await computeHashlineSectionDiff(section, ctx.cwd, ctx.snapshots, {
 				streaming: ctx.isStreaming,
 				skipHashValidation: ctx.isStreaming === true,
+				clipboard,
 			});
 			ctx.signal.throwIfAborted();
 			// Ignore parse/apply errors from the trailing (actively-typed)
@@ -677,11 +690,65 @@ const applyPatchStrategy: EditStreamingStrategy<ApplyPatchArgs> = {
 		return entries.length > 0 ? entries : undefined;
 	},
 };
+interface SloppyArgs {
+	input?: string;
+}
+
+/**
+ * Sloppy previews apply each complete `[path]` section in memory and diff the
+ * result — the same pure engine the executor runs, never writing.
+ */
+const sloppyStrategy: EditStreamingStrategy<SloppyArgs> = {
+	extractCompleteEdits(args, _partialJson, isStreaming) {
+		const input = args.input;
+		return isStreaming && typeof input === "string" ? { input: trimTrailingPartialLine(input, true) } : args;
+	},
+	async computeDiffPreview(args, ctx) {
+		if (typeof args.input !== "string" || args.input.length === 0) return null;
+		const input = trimTrailingPartialLine(args.input, ctx.isStreaming);
+		const sections = splitSloppySections(input);
+		if (sections.length === 0) return null;
+		const previews: PerFileDiffPreview[] = [];
+		const lastIndex = sections.length - 1;
+		for (let i = 0; i < sections.length; i++) {
+			ctx.signal.throwIfAborted();
+			const result = await computeSloppySectionDiff(sections[i], ctx.cwd);
+			ctx.signal.throwIfAborted();
+			// The trailing section is still being typed while streaming; a
+			// transient parse/match error there would wipe stable previews of
+			// earlier sections. Suppress it until args are complete.
+			if (ctx.isStreaming && i === lastIndex && "error" in result) continue;
+			previews.push(toPerFilePreview(sections[i].path, result));
+		}
+		return previews.length > 0 ? previews : null;
+	},
+	renderStreamingFallback() {
+		// Never leak the raw payload (§/¤ grammar, unsanitized tabs) into the TUI.
+		return "";
+	},
+	matcherDigest(args) {
+		return typeof args?.input === "string" ? args.input : undefined;
+	},
+	matcherPaths(args) {
+		// Paths live in the payload's `[path]` section headers.
+		if (typeof args?.input !== "string") return undefined;
+		const sections = splitSloppySections(args.input);
+		return sections.length > 0 ? sections.map(section => section.path) : undefined;
+	},
+	matcherEntries(args) {
+		if (typeof args?.input !== "string") return undefined;
+		const sections = splitSloppySections(args.input);
+		if (sections.length === 0) return undefined;
+		return sections.map(section => ({ path: section.path, digest: section.body }));
+	},
+};
+
 export const EDIT_MODE_STRATEGIES: Record<EditMode, EditStreamingStrategy<unknown>> = {
 	replace: replaceStrategy as EditStreamingStrategy<unknown>,
 	patch: patchStrategy as EditStreamingStrategy<unknown>,
 	hashline: hashlineStrategy as EditStreamingStrategy<unknown>,
 	apply_patch: applyPatchStrategy as EditStreamingStrategy<unknown>,
+	sloppy: sloppyStrategy as EditStreamingStrategy<unknown>,
 };
 
 export { resolveEditMode };

@@ -12,6 +12,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -25,11 +26,23 @@ const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 20;
 const DEFAULT_TIMEOUT_SECONDS = 30;
 
+/** Kimi Code search is Bing-flavored: re-emit the operators Bing parses; dates/lang stay with the central filter. */
+const KIMI_QUERY_SYNTAX: QuerySyntax = {
+	phrases: true,
+	negation: true,
+	site: true,
+	inTitle: true,
+	inUrl: true,
+	filetype: true,
+};
+
 export interface KimiSearchParams {
 	query: string;
+	parsedQuery?: StructuredQuery;
 	num_results?: number;
 	include_content?: boolean;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	authStorage: AuthStorage;
 	sessionId?: string;
 	fetch?: FetchImpl;
@@ -93,6 +106,7 @@ async function callKimiSearch(
 		limit: number;
 		includeContent: boolean;
 		signal?: AbortSignal;
+		timeoutMs?: number;
 		fetch?: FetchImpl;
 	},
 ): Promise<{ response: KimiSearchResponse; requestId?: string }> {
@@ -110,7 +124,7 @@ async function callKimiSearch(
 			enable_page_crawling: params.includeContent,
 			timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
 		}),
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -138,15 +152,18 @@ export async function searchKimi(params: KimiSearchParams): Promise<SearchRespon
 		);
 	}
 
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const query = parsed.hasDirectives ? formatQuery(parsed, KIMI_QUERY_SYNTAX) : params.query;
 	const limit = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 	const { response, requestId } = await withAuth(
 		keyOrResolver,
 		key =>
 			callKimiSearch(key, {
-				query: params.query,
+				query,
 				limit,
 				includeContent: params.include_content ?? false,
 				signal: params.signal,
+				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 			}),
 		{ signal: params.signal },
@@ -192,8 +209,10 @@ export class KimiProvider extends SearchProvider {
 
 		return searchKimi({
 			query: params.query,
+			parsedQuery: params.parsedQuery,
 			num_results: params.numSearchResults ?? params.limit,
 			signal: params.signal,
+			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
 			sessionId: params.sessionId,
 			fetch: fetchImpl,

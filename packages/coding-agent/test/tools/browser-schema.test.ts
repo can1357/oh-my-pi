@@ -61,7 +61,7 @@ describe("browser tool schema", () => {
 	// which collided with each branch's `additionalProperties: false` and made
 	// every input fail validation.
 	it("keeps intent tracing satisfiable across action variants", () => {
-		const normalized = normalizeTools([new BrowserTool(makeSession())], true)?.[0];
+		const normalized = normalizeTools([new BrowserTool(makeSession())], { injectIntent: true })?.[0];
 		const schema = normalized?.parameters as TSchema;
 
 		expect(validateJsonSchemaValue(schema, { action: "run", name: "x" }).success).toBe(false);
@@ -90,7 +90,7 @@ describe("browser tool schema", () => {
 	// post-injection schema would either lose strict (no satisfiable input) or
 	// trip the additionalProperties / properties-coverage strict rules.
 	it("survives OpenAI strict-mode enforcement after intent injection", () => {
-		const normalized = normalizeTools([new BrowserTool(makeSession())], true)?.[0];
+		const normalized = normalizeTools([new BrowserTool(makeSession())], { injectIntent: true })?.[0];
 		const schema = normalized?.parameters as Record<string, unknown>;
 		const strict = adaptSchemaForStrict(schema, true);
 

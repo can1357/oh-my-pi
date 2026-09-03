@@ -19,6 +19,8 @@ Related references:
 - [Providers](./providers.md) — provider availability, credentials, custom providers
 - [Model and Provider Configuration](./models.md) — `models.yml`, routing, and compat fields
 - [Provider streaming internals](./provider-streaming-internals.md) — stream event normalization
+- [Provider compat reference](./provider-compat-reference.md) — every compat flag, reasoning levels, tool handling per provider
+- [Provider quirks](./provider-quirks.md) — per-provider special casings, stream behavior, auth/usage, catalog handling
 - [Adding a provider](./adding-a-provider.md) — catalog/auth wiring for a new provider
 
 ## Baseline rules
@@ -105,10 +107,14 @@ routing, model ids, or usage accounting.
 
 ### Azure OpenAI
 
-- Chat Completions base URL reshapes to
+- Chat Completions reshapes the base URL to
   `/deployments/{deployment}/chat/completions?api-version=...`.
-- Deployment names may differ from model ids through
+- Responses uses `/responses?api-version=...` without a deployment-scoped URL;
+  the deployment name is instead sent as the request's `model`.
+- Both surfaces can map model ids to deployment names through
   `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`.
+- Responses authenticates with the `api-key` header, defaults its API version to
+  `v1`, uses stateless `store: false`, and rejects explicit prompt caching.
 
 ### GitHub Copilot
 
@@ -146,6 +152,19 @@ routing, model ids, or usage accounting.
 - The OpenAI-compatible path needs common Kimi headers.
 - It also participates in the OpenAI/Anthropic dual-surface shim.
 
+### ClinePass
+
+- Requests carry the official Cline CLI client identity (`X-CLIENT-TYPE`, `X-CLIENT-VERSION`, `X-PLATFORM`, `X-CORE-VERSION`, `User-Agent`, and related headers). Inference also carries OMP's stable session key as `X-Task-ID`; account and discovery calls omit it. This is the supported identification contract for Cline-gated roster entries.
+- Public catalog ids omit the gateway's `cline-pass/` namespace; Chat Completions adds it on the wire. Free-tier ids retain their full OpenRouter-style namespace because the gateway already receives them in wire form.
+- The public `recommended-models` endpoint is authoritative for membership. The required `clinePass` bucket and optional `free` bucket currently resolve to a sixteen-model roster; malformed subscription data is rejected so the generated fallback survives.
+- Known ids use a Cline-authored metadata snapshot for exact limits, subscription pricing, input modalities, and per-model reasoning controls. Unknown ids remain usable with conservative limits and no invented reasoning controls until live OpenRouter enrichment or regeneration supplies metadata.
+- Subscription models display Cline's API-equivalent list price, but streamed `usage.cost` is the authoritative billed/discounted charge. Free-tier models remain genuinely $0.
+- Reasoning is model-specific: effort models send only their advertised wire tiers, Qwen3.7 Plus maps OMP efforts to Cline's nested `reasoning.max_tokens` budget, and thinking-off sends `reasoning: { enabled: false }` where Cline advertises a toggle.
+- Cline-hosted Qwen routes receive Anthropic-style ephemeral cache breakpoints. Reasoning continuations replay through `delta.reasoning` only for families that require it.
+- Login validates the key against `/users/me`; inference validation then proves model access without consuming quota.
+- Subscription-window exhaustion (`clinepass limit`) and free-tier caps (`free limit reached on model ...`) classify as usage limits. Roster rotation and account-policy errors receive provider-specific recovery guidance.
+- The dashboard's `/users/me/plan/usage-limits` route accepts the inference API key and reports five-hour, weekly, and monthly utilization; `/users/me` supplies the account label. Usage reporting does not require account OAuth.
+
 ### Fireworks and Firepass
 
 - Wire model ids need provider-specific mapping.
@@ -157,8 +176,8 @@ routing, model ids, or usage accounting.
 Check these before adding or forwarding a field:
 
 - **Model id.** Some models resolve a wire id from reasoning effort.
-  Firepass/Fireworks transform ids. OpenRouter suffix handling is path-segment
-  aware.
+  ClinePass, Firepass, and Fireworks transform ids. OpenRouter suffix handling
+  is path-segment aware.
 - **Max output tokens.** Kimi-family models may require a max-token field even
   when the caller did not set one. OpenRouter should omit catalog defaults unless
   explicit. Codex drops caller caps. Responses uses `max_output_tokens`; Chat
@@ -189,7 +208,12 @@ Reasoning fields are not interchangeable.
 - Uses `reasoning: { effort, summary }`.
 - Can include `reasoning.encrypted_content` for replay.
 - xAI Grok models may require omitting `reasoning.effort`.
-- Some compat paths inject the GPT-5 `# Juice: 0 !important` developer scaffold.
+- When reasoning is forced off for GPT-5.6+ Responses models, a trailing
+  developer item `# Juice: <N> !important` is appended, with `N` mapped from
+  the requested effort (`none`→0, `minimal`→2, `low`→4, `medium`→8, `high`→48,
+  `xhigh`→112, `max`→960; default 8) — see `getJuiceValue` in
+  `packages/ai/src/providers/openai-shared.ts` and the `forceReasoningOff`
+  path in `packages/ai/src/providers/openai-responses.ts`.
 
 ### OpenRouter `reasoning`
 
@@ -229,13 +253,16 @@ Reasoning fields are not interchangeable.
 - Compat needs both policies: disable reasoning for any tool choice, and disable
   reasoning only for forced tool choice.
 
-### xAI Grok through Responses/SuperGrok
+### xAI Grok through Responses (`xai` and `xai-oauth`)
 
-Keep these independent:
+Both the paid API-key provider (`xai` / `XAI_API_KEY`) and SuperGrok OAuth
+(`xai-oauth`) chat over `https://api.x.ai/v1/responses`. Keep these independent:
 
-- omit `reasoning.effort`
-- include or drop encrypted reasoning replay
-- filter reasoning-history wrappers
+- omit `reasoning.effort` unless the model is on the Grok effort-capable allowlist
+- omit `reasoning.summary` (the host rejects it; do not fall back to `"auto"`)
+- omit presence/frequency penalties (`/v1/responses` rejects them for every Grok model)
+- include `reasoning.encrypted_content` on the request
+- replay encrypted reasoning items on later turns
 
 Some models reject only one of those fields; do not collapse them into one
 "Grok mode" branch.

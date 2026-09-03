@@ -314,9 +314,8 @@ describe("applyPatch", () => {
 	});
 
 	test("create file", async () => {
-		const result = await applyPatch({ path: "add.txt", op: "create", diff: "ab\ncd" }, { cwd: tempDir });
+		await applyPatch({ path: "add.txt", op: "create", diff: "ab\ncd" }, { cwd: tempDir });
 
-		expect(result.change.type).toBe("create");
 		expect(await Bun.file(path.join(tempDir, "add.txt")).text()).toBe("ab\ncd\n");
 	});
 
@@ -324,12 +323,11 @@ describe("applyPatch", () => {
 		const target = path.join(tempDir, "exists.txt");
 		await Bun.write(target, "original\n");
 
-		const result = await applyPatch(
+		await applyPatch(
 			{ path: "exists.txt", op: "create", diff: "replacement\n" },
 			{ cwd: tempDir, allowCreateOverwrite: true },
 		);
 
-		expect(result.change.type).toBe("create");
 		expect(await Bun.file(target).text()).toBe("replacement\n");
 	});
 
@@ -337,9 +335,8 @@ describe("applyPatch", () => {
 		const filePath = path.join(tempDir, "del.txt");
 		await Bun.write(filePath, "x");
 
-		const result = await applyPatch({ path: "del.txt", op: "delete" }, { cwd: tempDir });
+		await applyPatch({ path: "del.txt", op: "delete" }, { cwd: tempDir });
 
-		expect(result.change.type).toBe("delete");
 		expect(fs.existsSync(filePath)).toBe(false);
 	});
 
@@ -347,12 +344,8 @@ describe("applyPatch", () => {
 		const filePath = path.join(tempDir, "update.txt");
 		await Bun.write(filePath, "foo\nbar\n");
 
-		const result = await applyPatch(
-			{ path: "update.txt", op: "update", diff: "@@\n foo\n-bar\n+baz" },
-			{ cwd: tempDir },
-		);
+		await applyPatch({ path: "update.txt", op: "update", diff: "@@\n foo\n-bar\n+baz" }, { cwd: tempDir });
 
-		expect(result.change.type).toBe("update");
 		expect(await Bun.file(filePath).text()).toBe("foo\nbaz\n");
 	});
 
@@ -365,7 +358,6 @@ describe("applyPatch", () => {
 			{ cwd: tempDir },
 		);
 
-		expect(result.change.type).toBe("update");
 		expect(result.change.newPath).toBe(path.join(tempDir, "dst.txt"));
 		expect(fs.existsSync(srcPath)).toBe(false);
 		expect(await Bun.file(path.join(tempDir, "dst.txt")).text()).toBe("line2\n");

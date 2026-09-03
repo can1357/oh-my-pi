@@ -2,7 +2,7 @@
 name = "pi-walker"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 repository.workspace = true
 
@@ -20,4 +20,10 @@ rayon.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = [
+	"Wdk_Storage_FileSystem",
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_Storage_FileSystem",
+	"Win32_System_IO",
+] }

@@ -127,3 +127,28 @@ describe("buildProviderTabs", () => {
 		expect(off?.label).toContain("Off (2)");
 	});
 });
+
+describe("ExtensionList list hints", () => {
+	test("collapses newlines in rule triggers to one physical row", () => {
+		const list = new ExtensionList(
+			[
+				{
+					id: "rule:dirty",
+					kind: "rule",
+					name: "dirty",
+					displayName: "dirty",
+					path: "/tmp/dirty.md",
+					trigger: "src/**/*.ts\nextra",
+					source: { provider: "native", providerName: "Native", level: "native" },
+					state: "active",
+					raw: {},
+				},
+			],
+			{ masterSwitchProvider: null },
+		);
+		list.setFocused(true);
+		const lines = list.render(80);
+		expect(lines.some(line => line.includes("\n"))).toBe(false);
+		expect(lines.join("\n").split("\n")).toHaveLength(lines.length);
+	});
+});

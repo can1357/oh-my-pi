@@ -14,7 +14,10 @@ use std::{
 	fs::File,
 	io::{self, Read},
 	path::{Path, PathBuf},
-	sync::atomic::{AtomicU64, Ordering},
+	sync::{
+		LazyLock,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
 use grep_matcher::Matcher;
@@ -35,6 +38,13 @@ use smallvec::SmallVec;
 use crate::{glob_util, iofs, task};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// PCRE2 JIT toggle: `OMP_PCRE2_JIT=1` forces JIT on, `0`/`false` forces it
+/// off. Unset, JIT stays on everywhere except macOS, where PCRE2's SLJIT
+/// executable allocator can fault while compiling patterns (issue #7399).
+static PCRE2_JIT_ENABLED: LazyLock<bool> = LazyLock::new(|| match std::env::var("OMP_PCRE2_JIT") {
+	Ok(v) if !v.is_empty() => v != "0" && !v.eq_ignore_ascii_case("false"),
+	_ => !cfg!(target_os = "macos"),
+});
 
 /// Output mode for [`search`] and [`grep`] (string values match JS callers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -814,7 +824,7 @@ pub(crate) struct GrepConfig {
 /// Check if `bytes[start]` (which must be `b'{'`) begins a valid repetition
 /// quantifier: `{N}`, `{N,}`, or `{N,M}` where N and M are decimal digits.
 /// Returns the byte index of the closing `}` if valid.
-fn find_valid_repetition(bytes: &[u8], start: usize) -> Option<usize> {
+const fn find_valid_repetition(bytes: &[u8], start: usize) -> Option<usize> {
 	let len = bytes.len();
 	let mut i = start + 1;
 	// Must start with at least one digit.
@@ -847,7 +857,7 @@ fn find_valid_repetition(bytes: &[u8], start: usize) -> Option<usize> {
 	None
 }
 
-fn find_braced_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
+const fn find_braced_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
 	let mut i = start + 1;
 	while i < bytes.len() {
 		if bytes[i] == b'}' {
@@ -1015,7 +1025,7 @@ fn build_pcre_matcher(
 		.multi_line(multiline)
 		.utf(true)
 		.ucp(true)
-		.jit_if_available(true);
+		.jit_if_available(*PCRE2_JIT_ENABLED);
 	builder.build(pattern)
 }
 
@@ -2411,10 +2421,16 @@ mod tests {
 		let root = TempDirGuard::new();
 		write_file(&root.path().join("lookahead.txt"), "foobar\nfoobaz\n");
 		write_file(&root.path().join("backreference.txt"), "same same\nsame other\n");
+		write_file(&root.path().join("models.txt"), "dim_customers_status_accepted_values\n");
 
 		for (pattern, path, line) in [
 			(r"foo(?=bar)", "lookahead.txt", "foobar"),
 			(r"\b(\w+)\s+\1\b", "backreference.txt", "same same"),
+			(
+				r"(final_incremental_account_id_relationships|dim_customers_status_accepted_values|stg_orders_customer_id_relationships)(?!_[0-9a-f]{32})",
+				"models.txt",
+				"dim_customers_status_accepted_values",
+			),
 		] {
 			let mut config = base_grep_config(root.path());
 			config.pattern = pattern.to_string();
@@ -2427,6 +2443,25 @@ mod tests {
 			assert_eq!(result.matches[0].line_number, 1);
 			assert_eq!(result.matches[0].line, line);
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grep_supports_multiline_pcre2_backreferences_and_lookahead() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("schema.yml"), "  - not_null:\n      severity: warn\n");
+
+		let mut config = base_grep_config(root.path());
+		config.pattern = r"^(\s+)- (not_null|unique|accepted_values|relationships|expression_is_true|[a-z_]+):\s*$\n(?!\1    (arguments|config|description|name):)".to_string();
+		config.multiline = Some(true);
+
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("multiline PCRE2 pattern should search without terminating the process");
+
+		assert_eq!(result.total_matches, 1);
+		assert_eq!(result.matches.len(), 1);
+		assert_eq!(result.matches[0].path, "schema.yml");
+		assert_eq!(result.matches[0].line_number, 1);
 	}
 	#[cfg(unix)]
 	#[test]

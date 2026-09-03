@@ -15,12 +15,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
 import {
 	type ChangelogEntry,
+	formatStartupChangelogSummary,
+	getNewEntries,
 	parseChangelog,
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	readLastChangelogVersion,
 	renderChangelogEntries,
+	resolveStartupChangelogForDisplay,
 	STARTUP_CHANGELOG_FULL_HINT,
 	STARTUP_CHANGELOG_MAX_BYTES,
 	selectStartupChangelog,
@@ -42,6 +46,39 @@ function release(major: number, minor: number, patch: number, body: string): Cha
 	const content = `${heading}\n\n${body.trimEnd()}`;
 	return { major, minor, patch, content };
 }
+
+describe("startup changelog mode settings", () => {
+	test("defaults to a summary", () => {
+		expect(Settings.isolated().get("startup.changelogMode")).toBe("summary");
+	});
+
+	test("keeps the legacy key out of the public schema while migrating raw config", async () => {
+		expect(Object.hasOwn(SETTINGS_SCHEMA, "collapseChangelog")).toBe(false);
+
+		await withTempAgentDir(async agentDir => {
+			const configPath = path.join(agentDir, "config.yml");
+			for (const [legacyValue, expectedMode] of [
+				[true, "summary"],
+				[false, "expanded"],
+			] as const) {
+				await Bun.write(configPath, `collapseChangelog: ${legacyValue}\n`);
+				const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
+				expect(settings.get("startup.changelogMode")).toBe(expectedMode);
+			}
+		});
+	});
+
+	test("lets an explicit new mode win over the legacy raw config key", async () => {
+		await withTempAgentDir(async agentDir => {
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				"collapseChangelog: false\nstartup:\n  changelogMode: hidden\n",
+			);
+			const settings = await Settings.loadReadOnly({ cwd: agentDir, agentDir });
+			expect(settings.get("startup.changelogMode")).toBe("hidden");
+		});
+	});
+});
 
 async function withTempAgentDir<T>(callback: (agentDir: string) => Promise<T>): Promise<T> {
 	const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-marker-"));
@@ -105,6 +142,10 @@ describe("selectStartupChangelog", () => {
 		expect(selection.persistCurrentVersion).toBe(true);
 		expect(selection.truncated).toBe(false);
 		expect(selection.selectedEntries).toBe(RECENT_CHANGELOG_ENTRY_LIMIT);
+		expect(selection.totalUnseenEntries).toBe(5);
+		expect(selection.latestVersion).toBe("1.0.5");
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Added: 3 });
 		expect(selection.markdown?.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("1.0.5");
 		expect(selection.markdown).toContain("## [1.0.5]");
 		expect(selection.markdown).toContain("## [1.0.4]");
@@ -152,13 +193,58 @@ describe("selectStartupChangelog", () => {
 	});
 });
 
+describe("formatStartupChangelogSummary", () => {
+	test("summarizes selected releases and points to omitted history", () => {
+		const selection = selectStartupChangelog(
+			[
+				release(2, 0, 0, "### Added\n\n- First addition.\n- Second addition.\n\n### Fixed\n\n- A fix."),
+				release(1, 9, 0, "### Changed\n\n- A behavior change."),
+				release(1, 8, 0, "### Security\n\n- A security improvement."),
+				release(1, 7, 0, "### Fixed\n\n- An earlier fix."),
+				release(1, 6, 0, "### Added\n\n- Already seen."),
+			],
+			"1.6.0",
+			"2.0.0",
+		);
+
+		expect(formatStartupChangelogSummary(selection)).toBe(
+			[
+				"Updated to v2.0.0 · 5 changes across 3 releases",
+				"2 added · 1 changed · 1 fixed · 1 security · +1 earlier release · Use /changelog full for history.",
+			].join("\n"),
+		);
+	});
+
+	test("uses the recent-details hint when every unseen release is represented", () => {
+		const selection = selectStartupChangelog(
+			[release(2, 0, 0, "### Breaking Changes\n\n- Removed the old wire format.")],
+			"1.0.0",
+			"2.0.0",
+		);
+
+		expect(formatStartupChangelogSummary(selection)).toBe(
+			["Updated to v2.0.0 · 1 change in 1 release", "1 breaking change · Use /changelog for details."].join("\n"),
+		);
+	});
+});
+
 describe("parseChangelog", () => {
-	test("reads the embedded release history when no package path is available", async () => {
+	test("reads current source release data and filters versions newer than the previous release", async () => {
 		const entries = await parseChangelog(undefined);
 		const latest = entries[0];
+		const previous = entries[1];
 
-		expect(`${latest?.major}.${latest?.minor}.${latest?.patch}`).toBe(VERSION);
-		expect(latest?.content).toContain(`## [${VERSION}]`);
+		// A release with no user-facing coding-agent changes gets no changelog
+		// section (scripts/release.ts skips empty [Unreleased]), so the newest
+		// section may lag VERSION — but it must never be ahead of it.
+		expect(latest).toBeDefined();
+		const latestVersion = `${latest?.major}.${latest?.minor}.${latest?.patch}`;
+		expect(latest?.content).toContain(`## [${latestVersion}]`);
+		expect(getNewEntries(entries, VERSION)).toEqual([]);
+		expect(previous).toBeDefined();
+
+		const previousVersion = `${previous?.major}.${previous?.minor}.${previous?.patch}`;
+		expect(getNewEntries(entries, previousVersion)).toEqual([latest]);
 	});
 });
 
@@ -190,6 +276,31 @@ describe("last changelog marker", () => {
 
 			expect(await readLastChangelogVersion(agentDir)).toBe(CURRENT_VERSION);
 			expect(await Bun.file(path.join(agentDir, "last-changelog-version")).text()).toBe(CURRENT_VERSION);
+		});
+	});
+
+	test("hidden mode suppresses display and advances the marker only for upgrades", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("1.0.0", agentDir);
+
+			const upgradeDisplay = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: CURRENT_VERSION,
+				agentDir,
+			});
+
+			expect(upgradeDisplay).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe(CURRENT_VERSION);
+
+			await writeLastChangelogVersion("3.0.0", agentDir);
+			const downgradeDisplay = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: CURRENT_VERSION,
+				agentDir,
+			});
+
+			expect(downgradeDisplay).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe("3.0.0");
 		});
 	});
 });

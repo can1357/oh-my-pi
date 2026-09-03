@@ -8,6 +8,7 @@ import * as path from "node:path";
  * shows every TTSR-registered rule the current project/user config would load.
  */
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { ttsrHelp as commandHelp } from "../cli/command-help";
 import {
 	runTtsrCommand,
 	TTSR_ACTIONS,
@@ -19,8 +20,7 @@ import {
 import type { TtsrMatchSource } from "../export/ttsr";
 
 export default class Ttsr extends Command {
-	static description = "Inspect and test Time-Traveling Stream Rules (TTSR)";
-
+	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
 			description: "TTSR action",

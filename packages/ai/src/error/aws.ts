@@ -9,7 +9,15 @@ export type AwsCredentialsErrorKind =
 	/** SSO `GetRoleCredentials` call failed or returned no role. */
 	| "sso-role"
 	/** External `credential_process` failed, timed out, or emitted bad output. */
-	| "credential-process";
+	| "credential-process"
+	/** STS web-identity exchange failed or returned malformed credentials. */
+	| "web-identity"
+	/** ECS/container credential endpoint failed or returned malformed credentials. */
+	| "container"
+	/** Shared-config role chain is misconfigured (cycle, missing source_profile, unsupported credential_source). */
+	| "profile"
+	/** STS `AssumeRole` call failed or returned malformed credentials. */
+	| "assume-role";
 
 /** A failure resolving AWS credentials for the Bedrock provider. */
 export class AwsCredentialsError extends Error {

@@ -12,6 +12,8 @@ cp -r . ~/.omp/agent/extensions/hello-extension
 
 Restart `omp`. You will see the startup notification immediately.
 
+With `omp --profile <name>`, use `~/.omp/profiles/<name>/agent/extensions/hello-extension` instead. `PI_CODING_AGENT_DIR` likewise changes the agent directory.
+
 **Option B — point the settings `extensions` array at it:**
 
 ```yaml

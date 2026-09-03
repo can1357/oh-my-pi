@@ -10,9 +10,9 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { daemonClientForProject } from "../../launch/client";
+import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForProject } from "../../launch/client";
 import type { DaemonOperation, DaemonRpcResult, DaemonSnapshot, DaemonSpec, DaemonState } from "../../launch/protocol";
-import { renderTerminalOutput } from "../../launch/terminal-output";
+import { renderTerminalOutputIsolated } from "../../launch/terminal-output-worker-client";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../../tui";
 import type { ToolSession } from "..";
@@ -34,6 +34,83 @@ import {
 } from "../render-utils";
 import { styleTerminalRow } from "../terminal-output";
 import { ToolError } from "../tool-errors";
+
+interface CompletionRegistration {
+	inFlight: number;
+	retained: boolean;
+	active: boolean;
+	cleanup: (preservePending?: boolean) => void;
+}
+
+interface CompletionLease {
+	retain: () => void;
+	reject: (preservePending?: boolean) => void;
+	hasConcurrentRequest: () => boolean;
+}
+
+const completionRegistrations = new WeakMap<
+	ToolSession,
+	Map<DaemonBrokerClient, Map<string, CompletionRegistration>>
+>();
+
+function registerCompletionSink(
+	session: ToolSession,
+	client: DaemonBrokerClient,
+	owner: string,
+): CompletionLease | undefined {
+	if (!session.queueLaunchCompletion) return undefined;
+	let clients = completionRegistrations.get(session);
+	if (!clients) {
+		clients = new Map();
+		completionRegistrations.set(session, clients);
+	}
+	let owners = clients.get(client);
+	if (!owners) {
+		owners = new Map();
+		clients.set(client, owners);
+	}
+	let registration = owners.get(owner);
+	if (!registration) {
+		const unregister = client.onCompletion(owner, notification => {
+			if (session.isDisposed?.()) throw new Error("Session disposed before launch completion delivery");
+			const delivery = session.queueLaunchCompletion?.(notification);
+			if (!delivery) throw new Error("Session cannot accept launch completion delivery");
+			return delivery;
+		});
+		// oxlint-disable-next-line prefer-const -- read by the cleanup closure before assignment
+		let unregisterDispose: (() => void) | void;
+		// oxlint-disable-next-line prefer-const -- read by the cleanup closure before assignment
+		let unregisterSessionChange: (() => void) | void;
+		const cleanup = (preservePending = false): void => {
+			if (!registration?.active) return;
+			registration.active = false;
+			unregister({ preservePending });
+			unregisterDispose?.();
+			unregisterSessionChange?.();
+			owners.delete(owner);
+			if (owners.size === 0) clients.delete(client);
+			if (clients.size === 0) completionRegistrations.delete(session);
+		};
+		registration = { inFlight: 0, retained: false, active: true, cleanup };
+		owners.set(owner, registration);
+		unregisterDispose = session.registerDisposeCallback?.(() => cleanup(true));
+		unregisterSessionChange = session.registerSessionChangeCallback?.(() => cleanup(true));
+	}
+	registration.inFlight++;
+	let settled = false;
+	const settle = (retain: boolean, preservePending = false): void => {
+		if (settled || !registration.active) return;
+		settled = true;
+		registration.inFlight--;
+		if (retain) registration.retained = true;
+		if (!registration.retained && registration.inFlight === 0) registration.cleanup(preservePending);
+	};
+	return {
+		retain: () => settle(true),
+		hasConcurrentRequest: () => registration.active && registration.inFlight > 1,
+		reject: preservePending => settle(false, preservePending),
+	};
+}
 
 /** Broker-facing launch parameters; the hub adapts its `ps` op to `list` before calling in. */
 export interface LaunchParams {
@@ -161,6 +238,7 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 				grep: params.grep,
 				follow: params.follow ?? false,
 				cursor: params.cursor,
+				renderTerminalRows: true,
 				timeoutMs: timeoutMs(params.timeout, 30),
 			};
 		case "wait":
@@ -270,28 +348,33 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 	}
 }
 
+/** Resolve display rows while keeping legacy raw replay outside the client process. */
+export async function renderLaunchLogTerminalRows(
+	result: Extract<DaemonRpcResult, { op: "logs" }>,
+	params: Pick<LaunchParams, "head" | "lines">,
+): Promise<string[] | undefined> {
+	if (result.terminalRows !== undefined) return result.terminalRows;
+	if (result.terminalText === undefined) return undefined;
+	return renderTerminalOutputIsolated(result.terminalText, {
+		head: params.head ?? false,
+		maxRows: Math.min(1_000, Math.floor(params.lines ?? 100)),
+	});
+}
+
 async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promise<LaunchToolDetails> {
 	switch (result.op) {
 		case "start":
 			return { op: "start", daemon: result.daemon, timedOut: result.readyTimedOut };
 		case "list":
 			return { op: "list", daemons: result.daemons };
-		case "logs": {
-			const terminalRows =
-				result.terminalText === undefined
-					? undefined
-					: await renderTerminalOutput(result.terminalText, {
-							head: params.head ?? false,
-							maxRows: Math.min(1_000, Math.floor(params.lines ?? 100)),
-						});
+		case "logs":
 			return {
 				op: "logs",
 				cursor: result.cursor,
 				timedOut: result.timedOut,
 				state: result.state,
-				terminalRows,
+				terminalRows: await renderLaunchLogTerminalRows(result, params).catch(() => undefined),
 			};
-		}
 		case "wait":
 			return { op: "wait", daemon: result.daemon, timedOut: result.timedOut, matched: result.matched };
 		case "send":
@@ -315,11 +398,52 @@ export async function executeLaunch(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<LaunchToolDetails>> {
 	const client = await daemonClientForProject(session.cwd);
-	const result = await client.request(operationFor(params, session), signal);
-	return {
-		content: [{ type: "text", text: replaceTabs(toolContent(result, params)) }],
-		details: await toolDetails(result, params),
-	};
+	const operation = operationFor(params, session);
+	const owner = operation.op === "start" ? operation.owner : undefined;
+	const resumedOwner = params.op !== "start" ? (session.getSessionId?.() ?? undefined) : undefined;
+	const completionLease = owner
+		? registerCompletionSink(session, client, owner)
+		: resumedOwner
+			? registerCompletionSink(session, client, resumedOwner)
+			: undefined;
+	try {
+		const result = await client.request(operation, signal);
+		const sessionOwner = session.getSessionId?.();
+		let resumedDaemonFound = false;
+		const daemons =
+			result.op === "list" ? result.daemons : "daemon" in result && result.daemon ? [result.daemon] : [];
+		for (const daemon of daemons) {
+			if (!daemon.owner || daemon.owner !== sessionOwner || TERMINAL_STATES[daemon.state]) continue;
+			resumedDaemonFound = true;
+			if (daemon.owner !== resumedOwner) registerCompletionSink(session, client, daemon.owner)?.retain();
+		}
+		if (params.op === "list" && resumedOwner && !resumedDaemonFound) completionLease?.reject(true);
+		else completionLease?.retain();
+		return {
+			content: [{ type: "text", text: replaceTabs(toolContent(result, params)) }],
+			details: await toolDetails(result, params),
+		};
+	} catch (error) {
+		if (error instanceof DaemonBrokerRejectedError && owner) {
+			if (completionLease?.hasConcurrentRequest()) {
+				completionLease.reject();
+			} else {
+				try {
+					const listed = await client.request({ op: "list" }, signal);
+					const ownerStillRunning =
+						listed.op === "list" &&
+						listed.daemons.some(daemon => daemon.owner === owner && !TERMINAL_STATES[daemon.state]);
+					if (ownerStillRunning) completionLease?.retain();
+					else completionLease?.reject(true);
+				} catch {
+					completionLease?.retain();
+				}
+			}
+		} else {
+			completionLease?.retain();
+		}
+		throw error;
+	}
 }
 
 // =============================================================================

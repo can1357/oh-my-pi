@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- The guest transcript now returns to the latest message after an initial connection or reconnect.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Transcript Markdown now renders LaTeX: `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` in display mode, plus own-line `$$`/`\[` blocks. Currency ("$5 and $10"), escaped dollars, and code spans stay literal, and half-streamed delimiters stay visible until the equation closes.
+- Note: parity with the TUI covers these delimited forms only. Bare `\begin{…}…\end{…}` environments without `$$`/`\[` fences remain literal here (the TUI typesets them); web support is a follow-up.
+
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- The ask tool card now renders the note the user attached to their answer; previously it was dropped from HTML exports and the collab guest view.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Updated the Markdown parsing implementation to use @oh-my-pi/pi-utils.
+
+## [17.2.2] - 2026-07-31
+
+### Fixed
+
+- Fixed an issue where the guest UI could incorrectly appear idle (such as the loading spinner disappearing) while the host agent was still running after a reconnection, and ensured tool cards are properly cleared if a connection drop occurs.
+
+## [17.2.0] - 2026-07-30
+
+### Fixed
+
+- Fixed an issue where the agent would stop silently without a message by ensuring terminal auto-retry failures are properly surfaced as error notices.
+
+## [17.1.0] - 2026-07-24
+
+### Fixed
+
+- Fixed action metadata loss on xd://resolve, xd://reject, and xd://propose cards to ensure correct action badges are rendered.
+- Added proper rendering support for reject, propose, and hub-family aliases (irc, job, await, poll, cancel_job) to prevent them from falling back to generic JSON.
+
 ## [17.0.8] - 2026-07-22
 
 ### Fixed

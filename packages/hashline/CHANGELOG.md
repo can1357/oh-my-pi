@@ -2,6 +2,139 @@
 
 ## [Unreleased]
 
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Improved line-ending normalization performance by avoiding full scan-and-copy operations on files without carriage returns, eliminating stalls on large LF-only files.
+
+## [17.4.0] - 2026-08-20
+
+### Added
+
+- Added an opener-escape landing correction for insertions anchored on a construct's opening line to place shallower sibling constructs after the enclosing block rather than splitting the opener from its body.
+
+### Fixed
+
+- Fixed an issue where single-line replacements echoing attributes or decorators (such as `#[napi]` or `@Injectable()`) could lead to silently duplicated annotations.
+- Increased the default snapshot-store path capacity from 30 to 256 to prevent early tags in wide sessions from aging out and triggering misleading "hash is not from this session" errors.
+
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Recovered dangling range separators in hunk headers (`PUT 244.=:`, `CUT 5.=`) as single-line ranges (`N.=N`) instead of rejecting the header as an orphan payload line.
+
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Recovered dangling range separators in hunk headers (`PUT 244.=:`, `CUT 5.=`) as single-line ranges (`N.=N`) instead of rejecting the header as an orphan payload line.
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Repaired mis-set replacement ranges using exact outside-row matches, indentation, tree-sitter structure, and a narrow pure-closer shape: opening comment fences and other syntax-essential edges are retained only when a parse-valid candidate satisfies those constraints; ambiguous placements are rejected.
+
+## [17.2.15] - 2026-08-12
+
+### Added
+
+- Added a post-apply parse advisory warning that alerts users when an applied edit fails to parse (despite the pre-edit content parsing successfully), helping catch balance-neutral misplacements that previously failed silently.
+
+### Fixed
+
+- Fixed a bug where Rust lifetimes (e.g., `'static`) were incorrectly parsed as starting a string literal, which blinded the delimiter-balance scanner and could lead to silent signature deletions. Single-quote lexing on `.rs` files is now language-aware and correctly distinguishes lifetimes from character literals.
+- Fixed an issue where terminal newlines in files were incorrectly exposed as editable blank rows.
+
+## [17.2.12] - 2026-08-08
+
+### Breaking Changes
+
+- `PUT N.=M @name` over a *span* now throws when `@name` was never captured, instead of warning and deleting the range. Pasting a never-captured register over a span wrote nothing back, so a mistyped or hallucinated register name silently destroyed content. Gap pastes (`PUT >N @name`) keep the warned no-op behaviour from 17.2.11.
+
+### Added
+
+- `applyEdits` now takes a `path` and uses the native tree-sitter parser to decide every boundary repair that depends on delimiter *semantics*. The authored edits are materialized first: if that result parses, it is returned untouched, so a `}` inside a regex literal, a string, or Markdown prose is never mistaken for a block closer. A closer-spare repair lands only when the repaired result is *shown* to parse — never on delimiter arithmetic alone — so an unrecognized language or an unprovable candidate leaves the edit exactly as authored. Wired through the patcher, recovery, section apply, and the edit tool's preview.
+- Auto-repair for replacement ranges that start one line early on a structural closer (the `}` of the construct above): the closer is spared and the payload lands after it, gated on the same parse proof.
+- Warning for balanced payloads over ranges that end mid-block (deleting opener(s) whose closer(s) survive below), pointing at the block-op remedy (`PUT N*:`). Raised only when the baseline parsed and the authored result does not, so it cannot fire on prose or an unknown language.
+- Warning when a `+` body row is itself a valid hunk header (`+CUT 5.=9`). Such a row is literal content by definition and is inserted into the file as text; naming it at the moment it happens turns a silent source-file corruption into an actionable diagnostic.
+
+### Fixed
+
+- Rejected patches whose pasted `N:TEXT` read-output rows repeat a source line number. Each such row is recovered as a single-line `PUT N.=N:`, so a body written as consecutive lines under one number collapsed through the same-range coalescer, keeping only the last row and silently dropping the rest — in one incident replacing a block opener with `}` and deleting the following statement. The error now names the repeated line and teaches the explicit `PUT` form.
+
+## [17.2.11] - 2026-08-07
+
+### Changed
+
+- Pasting an empty named register (`PUT … @name` with no matching capture) now surfaces a warning listing available registers and removes the span target instead of throwing an error.
+
+### Fixed
+
+- Fixed an issue where pipe-numbered `read`/`search` rows copied into top-level and bare-body patch payloads were not properly recovered (#7905).
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Updated internal caching dependency to use `@oh-my-pi/pi-utils/lru`.
+
+## [17.2.2] - 2026-07-31
+
+### Breaking Changes
+
+- Replaced legacy SWAP, INS, and PASTE syntax with unified PUT and CUT hunks
+
+### Added
+
+- Added named register support (@reg) and span paste capabilities to clipboard operations
+- Added conservative recovery for uniformly omitted replacement indents near brace openers, preserving intentional indentation-only edits
+
+### Changed
+
+- Made .= the canonical inclusive range separator while retaining legacy separator variants as lenient input
+- Unified replacement, insertion, register paste, block, head/tail, move, and removal headers under a composable PUT, CUT, MV, and REM grammar
+
+### Fixed
+
+- Improved resilience against common model output formatting errors, including numbered read rows, summarized ranges, diff-style old/new rows, empty PUT deletes, harmless CUT colons, and single-line span shorthand
+
+## [17.2.0] - 2026-07-30
+
+### Breaking Changes
+
+- Removed `DEL`, `DEL.BLK`, `COPY`, and `COPY.BLK` from the patch language. Use `CUT` / `CUT.BLK` for deletion; a cut does not require a following `PASTE` and leaves the removed content available to later pastes.
+
+### Added
+
+- Added clipboard ops: `CUT N.=M` captures lines into a register (and deletes them), `CUT.BLK N` captures tree-sitter blocks, and `PASTE.PRE|POST N` / `PASTE.HEAD|TAIL` / `PASTE.BLK.POST N` insert the captured lines without retyping. The register flows top-to-bottom across sections, so content moves between files in one patch; `PASTE` does not consume it and the last capture wins.
+- Added `PatcherOptions.clipboard` for a host-owned register that persists across `Patcher.apply` batches. Batches work on a fork (`forkClipboard`) published per landed section (`commitClipboard`), so failed batches never poison the register and a mid-batch write failure still preserves content already cut from disk.
+- Added clipboard safety guards: a `PASTE` with an empty register, a capture overwriting un-pasted `CUT` content, and clipboard ops in same-path sections interleaved across another file's section are all rejected with targeted diagnostics. `CUT` ranges participate in overlap validation, the seen-lines guard, and drift recovery (every captured line must remap).
+
+### Changed
+
+- Simplified `grammar.lark` around shared target and position shapes, collapsing the concrete and block `CUT` forms plus the `INS` / `PASTE` position variants into their common grammar rules.
+
+### Fixed
+
+- Prevented CPU and memory exhaustion in streaming previews by rejecting line anchors above Number.MAX_SAFE_INTEGER and ranges spanning more than 100,000 lines.
+- Fixed an issue where recorded snapshot tags desynced from disk when the filesystem transformed content on write (e.g., auto-formatting on save), which previously caused subsequent edits to incorrectly reformat unrelated parts of the file. `Patcher.commit` now correctly keys the returned file hash and snapshot on the actual content written to disk and issues a warning when a drift is detected.
+
+## [17.1.5] - 2026-07-27
+
+### Changed
+
+- Improved reversed-range and invalid block-anchor diagnostics with absolute endpoint corrections plus nearby syntactic opener suggestions, without auto-applying the suggested edit ([#6671](https://github.com/can1357/oh-my-pi/issues/6671)).
+- Accepted a single dot between integer range endpoints, such as `DEL 235.258`, as an unambiguous range separator ([#6671](https://github.com/can1357/oh-my-pi/issues/6671)).
+
+## [17.1.2] - 2026-07-24
+
+### Changed
+
+- Bare `- ` bullet body rows are now auto-accepted as literal content with a warning when the hunk is unambiguously a Markdown bullet list (every `-` row bullet-shaped and no plain `+new` diff counterpart); ambiguous `-` rows still fail with the teaching error.
+
 ## [17.0.8] - 2026-07-22
 
 ### Changed
@@ -12,6 +145,7 @@
 ### Removed
 
 - Removed npm `diff` dependency.
+
 ## [17.0.4] - 2026-07-18
 
 ### Fixed

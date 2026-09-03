@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type } from "arktype";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
 

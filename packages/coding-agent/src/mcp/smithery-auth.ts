@@ -7,13 +7,14 @@ import { withTimeoutSignal } from "../utils/fetch-timeout";
 const SMITHERY_AUTH_FILENAME = "smithery.json";
 const SMITHERY_URL = process.env.SMITHERY_URL || "https://smithery.ai";
 const SMITHERY_AUTH_TIMEOUT_MS = 10_000;
+const SMITHERY_POLL_TIMEOUT_MS = 30_000;
 
 type SmitheryCliAuthSession = {
 	sessionId: string;
 	authUrl: string;
 };
 
-type SmitheryCliPollResponse = {
+export type SmitheryCliPollResponse = {
 	status: "pending" | "success" | "error";
 	apiKey?: string;
 	message?: string;
@@ -53,7 +54,7 @@ export async function pollSmitheryCliAuthSession(
 	signal?: AbortSignal,
 ): Promise<SmitheryCliPollResponse> {
 	const response = await fetch(`${SMITHERY_URL}/api/auth/cli/poll/${sessionId}`, {
-		signal,
+		signal: withTimeoutSignal(SMITHERY_POLL_TIMEOUT_MS, signal),
 	});
 	if (!response.ok) {
 		if (response.status === 404 || response.status === 410) {

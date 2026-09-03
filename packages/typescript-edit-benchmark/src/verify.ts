@@ -1,7 +1,10 @@
 /**
  * File verification for edit benchmark.
  *
- * Compares output files against expected fixtures with byte-for-byte equality.
+ * Compares output files against expected fixtures after Prettier formatting.
+ * For code files the comparison additionally ignores blank-line count, so a
+ * stray seam blank left by an otherwise perfect edit does not fail the task;
+ * blank-sensitive formats (markdown, yaml) keep exact formatted equality.
  */
 import * as path from "node:path";
 import { diffLines } from "diff";
@@ -137,7 +140,9 @@ export async function verifyExpectedFileSubset(
 				actualPath,
 				normalizeBlankLines(actualNormalizedWithPreservedWhitespace),
 			);
-			const formattedEquivalent = expectedFormatted.formatted === actualFormatted.formatted;
+			const formattedEquivalent = blankLineSensitive(file)
+				? expectedFormatted.formatted === actualFormatted.formatted
+				: stripBlankLines(expectedFormatted.formatted) === stripBlankLines(actualFormatted.formatted);
 
 			// Indent score: distance between agent's raw output and formatted output
 			// This measures how much the formatter had to fix the agent's indentation
@@ -241,6 +246,28 @@ function normalizeLineEndings(value: string): string {
 /** Collapse runs of 2+ blank lines into a single blank line. */
 function normalizeBlankLines(text: string): string {
 	return text.replace(/\n{3,}/g, "\n\n");
+}
+
+/** Formats where blank lines are semantic (paragraph/document structure). */
+const BLANK_SENSITIVE_EXTENSIONS: Record<string, true> = {
+	".md": true,
+	".mdx": true,
+	".yml": true,
+	".yaml": true,
+};
+
+function blankLineSensitive(file: string): boolean {
+	return BLANK_SENSITIVE_EXTENSIONS[path.extname(file).toLowerCase()] === true;
+}
+
+/** Drop empty/whitespace-only lines so blank-line count differences never fail code comparisons. */
+function stripBlankLines(text: string): string {
+	const lines = text.split("\n");
+	const kept: string[] = [];
+	for (const line of lines) {
+		if (line.trim() !== "") kept.push(line);
+	}
+	return kept.join("\n");
 }
 
 function restoreWhitespaceOnlyLineDiffs(expected: string, actual: string): string {

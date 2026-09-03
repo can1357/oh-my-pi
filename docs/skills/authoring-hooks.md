@@ -21,7 +21,7 @@ export default function myHook(omp: HookAPI): void {
 }
 ```
 
-The default export must be a plain function (not async, not a class). It receives a `HookAPI` instance and must register all handlers synchronously during execution.
+The default export must be a function (not a class). It receives a `HookAPI` instance and should register handlers during factory execution; the loader awaits a returned promise, so asynchronous initialization is accepted.
 
 Alternatively, using `ExtensionAPI` (preferred):
 
@@ -39,7 +39,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 
 | Event | Fires | Can return |
 |---|---|---|
-| `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string }` |
+| `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown> }` |
 | `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean }` |
 
 ### Session lifecycle
@@ -95,9 +95,10 @@ omp.on("tool_call", async (event, ctx) => {
 Contract:
 
 - If **any** handler returns `{ block: true }`, execution stops immediately.
-- `reason` is returned to the LLM as the tool error text.
+- `reason` becomes the tool error text the LLM sees.
 - If a handler **throws**, the tool is also blocked (fail-closed).
-- Last non-blocking return wins for non-blocking results; first `block: true` short-circuits.
+- Last non-blocking return wins; first `block: true` short-circuits.
+- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. Handlers do not see earlier input revisions, and input replacement is ignored for `computer` calls.
 
 ## Post-tool override contract
 

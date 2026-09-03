@@ -159,16 +159,57 @@ Moonshot's hosted API (`platform.moonshot.ai`) exposes both OpenAI- and Anthropi
 
 ## Parsing notes & gotchas
 
-- **ID → name parsing differs between references.** The official `tool_call_guidance.md` extracts the name with `function_id.split('.')[1].split(':')[0]`, which assumes the ID is exactly `functions.{name}` with no extra dots. vLLM uses the more robust `function_id.split(":")[0].split(".")[-1]` (takes the last dot-segment before `:{idx}`). Prefer the vLLM form so function names containing `.` are handled.
+- **ID → name parsing differs between references.** The official
+  `tool_call_guidance.md` uses `function_id.split('.')[1].split(':')[0]`,
+  while vLLM and omp take the last dot-separated segment before the colon.
+  The latter tolerates additional namespace segments, but neither convention
+  can preserve a literal dot as part of the function name; tool names SHOULD
+  follow the documented `functions.{name}:{idx}` shape without dots in
+  `{name}`.
 - **Extraction regexes differ too.** Guidance: `<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*?)\s*<\|tool_call_end\|>`. vLLM: ID class is `[^<]+:\d+` and the argument body uses a negative lookahead `(?:(?!<\|tool_call_begin\|>).)*?` so adjacent calls aren't merged. Both run with `DOTALL`.
 - **`skip_special_tokens` must be False.** The parser depends on the literal marker text surviving detokenization; vLLM forces `skip_special_tokens = False` when tools are enabled and `tool_choice != "none"`. If markers are stripped, no tool call is detected.
 - **Arguments are unvalidated raw text.** Whatever the model emits between the argument marker and `<|tool_call_end|>` is passed straight through as the `arguments` string; it must be valid JSON for downstream `json.loads`, and the model can emit malformed/truncated JSON. Validate before executing.
 - **Index semantics.** `{idx}` is the per-turn call counter starting at `0`; it is not a global counter and resets each assistant turn. Do not assume IDs are unique across turns — disambiguate by turn when persisting history.
-- **Streaming marker splits.** Section and call markers can be split across token boundaries. vLLM holds back any trailing suffix that partially matches a marker (`partial_tag_overlap`) to avoid leaking marker bytes into streamed content, and only streams a call's name once its header is fully received.
+- **Streaming marker splits.** Section and call markers can be split across token boundaries.
+  vLLM holds back any trailing suffix that partially matches a marker and streams
+  argument fragments. omp's owned scanner also holds partial markers, but buffers a
+  call's arguments until `<|tool_call_end|>` and emits no `toolArgDelta` events.
 - **`finish_reason` varies by engine.** The official guide explicitly warns the terminal `finish_reason` for tool calls "may vary across different engines"; loop on `finish_reason == "tool_calls"` but be defensive.
 - **Engine fallback.** Kimi K2 reuses the DeepSeek-V3 architecture; `config.json` sets `model_type: "kimi_k2"` so engines apply the right parser. If you force `model_type: "deepseek_v3"` as a compatibility workaround, no native Kimi tool parser is available and you must parse the `<|tool_calls_section_*|>` markers manually.
 - **Parser availability.** vLLM ships both a Python (`KimiK2ToolParser`) and a newer Rust tool parser; SGLang implements its own `kimi_k2` parser. All key off the same five markers and the `functions.{name}:{idx}` ID convention documented here.
 - **Whitespace artifact.** When no `system` message is supplied, the template injects the default system prompt and a small `\n  ` (newline + two spaces) can appear before the first `<|im_user|>` marker. It is harmless (tokenizes around the markers), but supplying an explicit system message yields the clean streams shown above.
+
+## omp / pi converter behavior
+
+The repository's `kimi` dialect is an **owned in-band converter**. Select it
+with `PI_DIALECT=kimi` (or the equivalent agent configuration). With tools
+present, the agent appends the Kimi guide and compact tool catalog to the
+system prompt, removes native provider tools, rewrites prior calls/results in
+Kimi text form, and converts streamed output back into canonical pi events.
+Kimi-family model affinity resolves to this dialect.
+
+The renderer emits one section per assistant call batch. It preserves a
+pre-existing id that already begins with `functions.`; otherwise it generates
+`functions.{name}:{batchIndex}`. Tool results are rendered as consecutive
+`<|im_system|>{name}<|im_middle|>## Return of …<|im_end|>` turns, and canonical
+tool-result messages are collapsed into one synthetic user message containing
+that text.
+
+The scanner recognizes only calls inside a section. Once the argument marker
+arrives it preserves the raw header as the call id, derives the name from the
+last dot-separated segment before the first colon, and emits `toolStart`. It
+buffers the argument body until `<|tool_call_end|>`, then applies the shared
+repairing JSON parser and emits `toolEnd`; it does **not** emit incremental
+argument deltas. Invalid/non-object completed arguments normalize to `{}`.
+If EOF arrives after `toolStart` but before the close marker, no `toolEnd` is
+emitted, yet the canonical `{}` call remains and may be dispatched on a normal
+stop. Only incomplete input that never reaches the argument marker is
+discarded without creating a call. Section markers are suppressed from visible
+text, while an isolated call marker outside a section remains ordinary text.
+
+Thinking parsing is enabled by default and maps `<think>…</think>` to thinking
+events. `parseThinking: false` leaves those tags and their contents in visible
+text.
 
 ## Sources
 

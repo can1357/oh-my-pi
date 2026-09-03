@@ -1,16 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
-import { $which, logger } from "@oh-my-pi/pi-utils";
+import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
 function getExistingWslLocalPath(urlOrPath: string): string | undefined {
-	if (
-		process.platform !== "linux" ||
-		!(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) ||
-		!$which("wslview")
-	) {
+	if (!isWsl() || !$which("wslview")) {
 		return undefined;
 	}
 
@@ -69,8 +65,6 @@ function windowsOpenerCommand(target: string): string[] {
 		powershell,
 		"-NoProfile",
 		"-NonInteractive",
-		"-WindowStyle",
-		"Hidden",
 		"-EncodedCommand",
 		Buffer.from(script, "utf16le").toString("base64"),
 	];
@@ -93,7 +87,12 @@ export function openPath(urlOrPath: string): void {
 	}
 	let child: Bun.Subprocess | undefined;
 	try {
-		child = Bun.spawn(cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+		child = Bun.spawn(cmd, {
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+			windowsHide: process.platform === "win32",
+		});
 	} catch (error) {
 		// Spawn threw synchronously (missing binary, denied exec, sandbox
 		// restriction, …). Best-effort: log so the failure isn't invisible while

@@ -21,6 +21,15 @@ function getUriTemplateMatchScore(
 }
 
 function extractResourceUri(url: InternalUrl): string {
+	const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+	if (scheme !== "mcp") {
+		// Server-advertised native URI (hierarchical or opaque). Preserve the
+		// input byte-for-byte: `resolveTargetServer` matches by exact string
+		// equality, so e.g. `catalog://root/` must keep its trailing slash.
+		return url.rawHref ?? url.href;
+	}
+	// Legacy `mcp://<resource-uri>` wrapper: reconstruct the wrapped URI and
+	// elide a bare trailing `/` that URL parsing adds to host-only forms.
 	const host = url.rawHost || url.hostname;
 	const rawPathname = url.rawPathname ?? url.pathname;
 	const hasPath = rawPathname && rawPathname !== "/";
@@ -88,17 +97,21 @@ function formatAvailableResources(mcpManager: MCPManager): string {
 		.getConnectedServers()
 		.flatMap(name => {
 			const serverResources = mcpManager.getServerResources(name);
-			return (serverResources?.resources ?? []).map(r => `  ${r.uri} (${name})`);
+			if (!serverResources) return [];
+			const concrete = serverResources.resources.map(r => `  ${r.uri} (${name})`);
+			const templates = serverResources.templates.map(t => `  ${t.uriTemplate} (${name}, template)`);
+			return [...concrete, ...templates];
 		})
 		.join("\n");
 	return available || "  (none)";
 }
 
 /**
- * Protocol handler for mcp:// URLs.
+ * Protocol handler for MCP resources.
  *
- * URL form:
+ * URL forms:
  * - mcp://<resource-uri> (e.g. mcp://test://notes, mcp://ibkr://portfolio/positions)
+ * - A resource's native URI when its scheme has no OMP handler (e.g. ags://capabilities/current-host)
  */
 export class McpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "mcp";
@@ -111,7 +124,11 @@ export class McpProtocolHandler implements ProtocolHandler {
 		}
 
 		const uri = extractResourceUri(url);
-		const targetServer = resolveTargetServer(mcpManager, uri);
+		let targetServer = resolveTargetServer(mcpManager, uri);
+		if (!targetServer) {
+			await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
+			targetServer = resolveTargetServer(mcpManager, uri);
+		}
 		if (!targetServer) {
 			throw new Error(
 				`No MCP server has resource "${uri}".\n\nAvailable resources:\n${formatAvailableResources(mcpManager)}`,

@@ -1,8 +1,9 @@
 import { fetchWithRetry } from "@oh-my-pi/pi-utils";
+import { compareRevision, parseRevision } from "../compat/revision";
+import { classifyModel } from "../compat/taxonomy";
 import { Effort } from "../effort";
-import { isGlm52ReasoningEffortModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ThinkingConfig } from "../types";
+import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
 import { createBundledReferenceMap, createReferenceResolver } from "./bundled-references";
 
@@ -23,6 +24,36 @@ type OllamaShowResponse = {
 };
 
 const OLLAMA_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+/**
+ * Output-token ceiling that Ollama Cloud enforces for the DeepSeek V4 Pro/Flash
+ * deployments: `/api/chat` rejects `num_predict` above it with HTTP 400
+ * (`max_tokens (...) exceeds model's maximum output tokens (65536)`) even though
+ * the model pages advertise a 1M context / 384K output. Ollama's `/api/show`
+ * never reports this cap, so the catalog pins it for the affected models
+ * (ollama/ollama#16890, #7266). The wire layer clamps `num_predict` to the same
+ * value (`OLLAMA_CLOUD_NUM_PREDICT_CAP` in `packages/ai/src/providers/ollama.ts`,
+ * #3392/#3394).
+ */
+export const OLLAMA_CLOUD_MAX_OUTPUT_TOKENS = 65_536;
+
+/**
+ * Untagged base ids whose Ollama Cloud deployment enforces
+ * {@link OLLAMA_CLOUD_MAX_OUTPUT_TOKENS}. Only DeepSeek V4 Pro/Flash are known
+ * to cap output below their advertised window (ollama/ollama#16890); other cloud
+ * models keep their discovered limits.
+ */
+const OLLAMA_CLOUD_OUTPUT_CAPPED_BASE_IDS: Record<string, true> = {
+	"deepseek-v4-flash": true,
+	"deepseek-v4-pro": true,
+};
+
+/** Whether an Ollama Cloud model id (tagged or not) enforces the 65536 output cap. */
+export function isOllamaCloudOutputCapped(id: string): boolean {
+	const separator = id.indexOf(":");
+	const baseId = separator > 0 ? id.slice(0, separator) : id;
+	return OLLAMA_CLOUD_OUTPUT_CAPPED_BASE_IDS[baseId] === true;
+}
+
 const OLLAMA_CLOUD_GLM_52_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.High, Effort.Max],
@@ -66,7 +97,19 @@ function getThinkingConfig(modelId: string, capabilities: string[] | undefined):
 	if (!capabilities?.includes("thinking")) {
 		return undefined;
 	}
-	if (isGlm52ReasoningEffortModelId(modelId)) {
+	const identity = classifyModel("ollama-cloud", modelId, { lenient: true });
+	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
+	const floor = parseRevision(identity.family === "flash" ? "5.3" : "5.2");
+	const isGlmEffortModel =
+		identity.class === "glm" &&
+		(identity.family === undefined ||
+			identity.family === "air" ||
+			identity.family === "turbo" ||
+			identity.family === "flash") &&
+		revision !== undefined &&
+		floor !== undefined &&
+		compareRevision(revision, floor) >= 0;
+	if (isGlmEffortModel) {
 		return OLLAMA_CLOUD_GLM_52_THINKING;
 	}
 	return { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] };
@@ -96,8 +139,10 @@ export function ollamaCloudModelManagerOptions(
 ): ModelManagerOptions<"ollama-chat"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = normalizeOllamaCloudBaseUrl(config?.baseUrl);
-	const providerReferences = createBundledReferenceMap<"ollama-chat">("ollama-cloud");
-	const resolveReference = createReferenceResolver(providerReferences);
+	let providerReferences: Map<string, ModelSpec<"ollama-chat">> | undefined;
+	const getProviderReferences = () =>
+		(providerReferences ??= createBundledReferenceMap<"ollama-chat">("ollama-cloud"));
+	const resolveReference = createReferenceResolver(getProviderReferences);
 	return {
 		providerId: "ollama-cloud",
 		fetchDynamicModels: async () => {
@@ -121,8 +166,8 @@ export function ollamaCloudModelManagerOptions(
 					if (!id) {
 						return undefined;
 					}
-					const providerReference = providerReferences.get(id);
 					const reference = resolveReference(id);
+					const providerReference = getProviderReferences().get(id);
 					let metadata: OllamaShowResponse | undefined;
 					try {
 						metadata = await fetchShowMetadata(baseUrl, apiKey, id, config?.fetch);
@@ -131,10 +176,10 @@ export function ollamaCloudModelManagerOptions(
 					}
 					const capabilities = metadata?.capabilities;
 					const discoveredContextWindow = getContextWindow(metadata?.model_info);
-					// `/api/show` is the only trustworthy Ollama-owned source for size caps.
-					// When it is unavailable (or returns only coarse capabilities), do NOT
-					// inherit giant budgets from bundled fallback metadata sourced from a
-					// different catalog; keep the historical safe fallback instead.
+					// `/api/show` reports the context length but never a per-model output
+					// cap. DeepSeek V4 Pro/Flash deployments enforce a 65536 output ceiling
+					// (ollama/ollama#16890, #7266); every other id keeps the trusted
+					// reference limit, falling back to the historical safe cap otherwise.
 					const contextWindow = discoveredContextWindow ?? 128000;
 					const reasoning = capabilities ? capabilities.includes("thinking") : (reference?.reasoning ?? false);
 					const thinking = capabilities ? getThinkingConfig(id, capabilities) : reference?.thinking;
@@ -155,8 +200,9 @@ export function ollamaCloudModelManagerOptions(
 						input,
 						cost: reference?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 						contextWindow,
-						maxTokens:
-							discoveredContextWindow !== null && discoveredContextWindow !== undefined
+						maxTokens: isOllamaCloudOutputCapped(id)
+							? Math.min(contextWindow, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS)
+							: discoveredContextWindow !== null && discoveredContextWindow !== undefined
 								? (providerReference?.maxTokens ?? Math.min(contextWindow, 8192))
 								: Math.min(contextWindow, 8192),
 						omitMaxOutputTokens: true,

@@ -21,6 +21,7 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { installHelp as commandHelp } from "../cli/command-help";
 import { type PluginAction, type PluginCommandArgs, runPluginCommand } from "../cli/plugin-cli";
 import { initTheme } from "../modes/theme/theme";
 
@@ -41,8 +42,7 @@ export function looksLikeLocalPath(target: string, cwd?: string): boolean {
 }
 
 export default class Install extends Command {
-	static description = "Install or link an extension package (alias of `plugin install`/`plugin link`)";
-
+	static description = commandHelp.description;
 	static args = {
 		targets: Args.string({
 			description: "Local path, npm spec, or marketplace ref (e.g. ./my-ext, my-pkg@1.2.3, name@marketplace)",

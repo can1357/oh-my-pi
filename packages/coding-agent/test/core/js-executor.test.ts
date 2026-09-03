@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, setDefaultTimeout, vi } from "bun:test";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
@@ -7,7 +8,6 @@ import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/exec
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { type } from "arktype";
 
 // JS eval cold-starts a Bun worker; under --isolate + high CI concurrency that startup
 // can exceed Bun's 5s default per-test timeout, flaking the suite. Give the worker-backed
@@ -368,12 +368,16 @@ describe("executeJs", () => {
 			expect.stringMatching(/^js-read-/),
 			{ path: "artifact://15:raw:1-1400", [INTENT_FIELD]: "js prelude" },
 			expect.any(AbortSignal),
+			undefined,
+			undefined,
 		);
 		expect(execute).toHaveBeenNthCalledWith(
 			2,
 			expect.stringMatching(/^js-read-/),
 			{ path: "artifact://15:raw:1-2", [INTENT_FIELD]: "js prelude" },
 			expect.any(AbortSignal),
+			undefined,
+			undefined,
 		);
 	});
 
@@ -428,12 +432,10 @@ describe("executeJs", () => {
 	});
 
 	it("auto-displays the final awaited expression result", async () => {
-		const execute = vi.fn(
-			async (): Promise<AgentToolResult> => ({
-				content: [{ type: "text", text: "tool output" }],
-				details: { kind: "tool-result" },
-			}),
-		);
+		const execute = vi.fn(async (): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: "tool output" }],
+			details: { kind: "tool-result" },
+		}));
 		const toolSession: ToolSession = {
 			...session,
 			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),

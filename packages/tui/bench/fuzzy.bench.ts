@@ -25,22 +25,71 @@ import { fuzzyFilter, fuzzyRank, resetFuzzyIndexCache } from "../src/fuzzy";
 // every run so the golden checksums stay valid.
 
 const BASES = [
-	"openai/gpt-4o", "openai/gpt-4o-mini", "openai/gpt-4.1", "openai/gpt-4.1-mini",
-	"openai/gpt-4-turbo", "openai/gpt-5", "openai/gpt-5-mini", "openai/o3", "openai/o3-mini", "openai/o4-mini",
-	"anthropic/claude-3.5-sonnet", "anthropic/claude-3.5-haiku", "anthropic/claude-3-7-sonnet",
-	"anthropic/claude-3-opus", "anthropic/claude-4-sonnet", "anthropic/claude-4-opus", "anthropic/claude-4.5-sonnet",
-	"google/gemini-2.0-flash", "google/gemini-2.5-pro", "google/gemini-2.5-flash", "google/gemini-1.5-pro",
-	"meta/llama-3.3-70b", "meta/llama-3.1-405b", "meta/llama-4-scout", "meta/llama-4-maverick",
-	"mistral/mistral-large", "mistral/codestral", "deepseek/deepseek-v3", "deepseek/deepseek-r1",
-	"xai/grok-3", "xai/grok-4", "qwen/qwen3-coder", "qwen/qwen3-235b", "qwen/qwen-max", "amazon/nova-pro",
+	"openai/gpt-4o",
+	"openai/gpt-4o-mini",
+	"openai/gpt-4.1",
+	"openai/gpt-4.1-mini",
+	"openai/gpt-4-turbo",
+	"openai/gpt-5",
+	"openai/gpt-5-mini",
+	"openai/o3",
+	"openai/o3-mini",
+	"openai/o4-mini",
+	"anthropic/claude-3.5-sonnet",
+	"anthropic/claude-3.5-haiku",
+	"anthropic/claude-3-7-sonnet",
+	"anthropic/claude-3-opus",
+	"anthropic/claude-4-sonnet",
+	"anthropic/claude-4-opus",
+	"anthropic/claude-4.5-sonnet",
+	"google/gemini-2.0-flash",
+	"google/gemini-2.5-pro",
+	"google/gemini-2.5-flash",
+	"google/gemini-1.5-pro",
+	"meta/llama-3.3-70b",
+	"meta/llama-3.1-405b",
+	"meta/llama-4-scout",
+	"meta/llama-4-maverick",
+	"mistral/mistral-large",
+	"mistral/codestral",
+	"deepseek/deepseek-v3",
+	"deepseek/deepseek-r1",
+	"xai/grok-3",
+	"xai/grok-4",
+	"qwen/qwen3-coder",
+	"qwen/qwen3-235b",
+	"qwen/qwen-max",
+	"amazon/nova-pro",
 ];
-const VARIANTS = ["", "-2024-06-01", "-2025-03-01", "-latest", "-preview", "-0513", "-0806", "-fp8", "-q4-k-m", "-32k", "-128k"];
+const VARIANTS = [
+	"",
+	"-2024-06-01",
+	"-2025-03-01",
+	"-latest",
+	"-preview",
+	"-0513",
+	"-0806",
+	"-fp8",
+	"-q4-k-m",
+	"-32k",
+	"-128k",
+];
 const FILES = [
-	"src/components/markdown.ts", "src/tools/read.ts", "src/tools/grep.ts", "src/utils/git.ts",
-	"src/modes/theme/theme.ts", "src/system-prompt.ts", "src/workspace-tree.ts",
-	"packages/tui/src/fuzzy.ts", "packages/tui/src/autocomplete.ts", "packages/tui/src/utils.ts",
-	"crates/pi-natives/src/grep.rs", "crates/pi-ast/src/summary.rs", "crates/pi-shell/src/shell.rs",
-	"packages/coding-agent/src/tools/write.ts", "packages/coding-agent/src/tools/bash.ts",
+	"src/components/markdown.ts",
+	"src/tools/read.ts",
+	"src/tools/grep.ts",
+	"src/utils/git.ts",
+	"src/modes/theme/theme.ts",
+	"src/system-prompt.ts",
+	"src/workspace-tree.ts",
+	"packages/tui/src/fuzzy.ts",
+	"packages/tui/src/autocomplete.ts",
+	"packages/tui/src/utils.ts",
+	"crates/pi-natives/src/grep.rs",
+	"crates/pi-ast/src/summary.rs",
+	"crates/pi-shell/src/shell.rs",
+	"packages/coding-agent/src/tools/write.ts",
+	"packages/coding-agent/src/tools/bash.ts",
 ];
 
 function buildCorpus(): string[] {
@@ -64,13 +113,13 @@ function fnv1a(str: string): string {
 }
 
 const GOLDENS: Record<string, string> = {
-	"gpt4": "907188d2",
-	"claude": "a424a682",
-	"rs": "d6922083",
-	"src": "f82e2f7e",
+	gpt4: "907188d2",
+	claude: "a424a682",
+	rs: "d6922083",
+	src: "f82e2f7e",
 	"deepseek r1": "6f6aad2d",
-	"son": "79c9d65f",
-	"o3": "edf71867",
+	son: "79c9d65f",
+	o3: "edf71867",
 	"4o": "84ede5df",
 	"0513": "563822f3",
 };
@@ -78,7 +127,9 @@ const GOLDENS: Record<string, string> = {
 function assertGolden(corpus: string[]): void {
 	let failed = false;
 	for (const [query, golden] of Object.entries(GOLDENS)) {
-		const out = fuzzyRank(corpus, query, t => t).map(r => r.item).join("\n");
+		const out = fuzzyRank(corpus, query, t => t)
+			.map(r => r.item)
+			.join("\n");
 		const hash = fnv1a(out);
 		if (hash !== golden) {
 			console.error(`GOLDEN MISMATCH for "${query}": expected ${golden}, got ${hash}`);

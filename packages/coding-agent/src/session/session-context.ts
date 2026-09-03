@@ -1,12 +1,21 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { coerceServiceTierByFamily, type ProviderPayload, type ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import {
+	coerceServiceTierByFamily,
+	type OpenAIResponsesHistoryPayload,
+	type ServiceTierByFamily,
+} from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
+	isEmptyErrorTurn,
 	normalizeCustomMessagePayload,
+	PREWALK_PLAN_MESSAGE_TYPE,
+	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
@@ -17,6 +26,8 @@ import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } 
 const LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD = 16;
 const LEGACY_SNAPCOMPACT_ARCHIVE_TEXT_GUARD = 250_000;
 const LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD = 1_000_000;
+const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
+const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
 
 function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
@@ -151,6 +162,21 @@ function snapcompactHistoryBlocksForContext(
 	return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
 }
 
+/** Reads validated OpenAI Responses replacement history from a compaction entry. */
+export function getOpenAiRemoteCompactionPayload(
+	compaction: CompactionEntry | null | undefined,
+): OpenAIResponsesHistoryPayload | undefined {
+	const candidate = compaction?.preserveData?.openaiRemoteCompaction;
+	if (!isRecord(candidate)) return undefined;
+	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
+	if (!Array.isArray(candidate.replacementHistory) || !candidate.replacementHistory.every(isRecord)) return undefined;
+	return {
+		type: "openaiResponsesHistory",
+		provider: candidate.provider,
+		items: candidate.replacementHistory,
+	};
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
@@ -197,10 +223,13 @@ export function buildSessionContext(
 		};
 	}
 
-	// Walk from leaf to root, collecting path
+	// Walk from leaf to root, collecting path. Corrupt/pre-fix files can contain
+	// parent cycles; stop at the first repeat so session load is bounded.
 	const path: SessionEntry[] = [];
+	const seenPathIds = new Set<string>();
 	let current: SessionEntry | undefined = leaf;
-	while (current) {
+	while (current && !seenPathIds.has(current.id)) {
+		seenPathIds.add(current.id);
 		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
@@ -263,6 +292,12 @@ export function buildSessionContext(
 
 	const injectedTtsrRules = Array.from(injectedTtsrRulesSet);
 
+	// Index on the path of the latest `/clear` boundary, or -1 when none. The
+	// collapsed live transcript and the model-context rebuild start emission
+	// after it (see the emission branch below); the full-history export path
+	// ignores it.
+	const resetBoundaryIdx = path.reduce((latest, entry, i) => (entry.type === "reset_boundary" ? i : latest), -1);
+
 	// Build messages and collect corresponding entries
 	// When there's a compaction, we need to:
 	// 1. Emit summary first (entry = compaction)
@@ -308,12 +343,18 @@ export function buildSessionContext(
 			if (
 				!options?.transcript &&
 				entry.message.role === "assistant" &&
-				entry.message.retryRecovery?.status === "recovered"
+				(entry.message.retryRecovery || isEmptyErrorTurn(entry.message))
 			) {
 				return;
 			}
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
+			if (
+				!options?.transcript &&
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+			) {
+				return;
+			}
 			if (!isCustomMessageContent(entry.content)) return;
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
@@ -340,36 +381,48 @@ export function buildSessionContext(
 		for (const entry of path) {
 			handleEntryResetTracking(entry);
 			if (entry.type === "compaction") {
-				const snapcompactArchive = snapcompact.getPreservedArchive(entry.preserveData);
+				const active = entry.id === compaction?.id;
+				const snapcompactArchive = active ? snapcompact.getPreservedArchive(entry.preserveData) : undefined;
 				pushMessage(
 					createCompactionSummaryMessage(
-						entry.summary,
+						active ? entry.summary : SUPERSEDED_COMPACTION_SUMMARY,
 						entry.tokensBefore,
 						entry.timestamp,
-						entry.shortSummary,
-						undefined,
-						undefined,
-						snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-						entry.warning,
+						{
+							shortSummary: active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
+							blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+							warning: entry.warning,
+							method: entry.method,
+							tokensAfter: entry.tokensAfter,
+						},
 					),
 				);
 			} else {
 				appendMessage(entry);
 			}
 		}
+	} else if (
+		resetBoundaryIdx >= 0 &&
+		resetBoundaryIdx > (compaction ? path.findIndex(e => e.type === "compaction" && e.id === compaction.id) : -1)
+	) {
+		// A `/clear` boundary durably starts emission after it — for BOTH the
+		// collapsed live transcript AND the model context (non-transcript) rebuild
+		// that feeds agent.replaceMessages (resume, /shake, reload, image drop).
+		// Without honoring it here, those model-context rebuilds walk the full
+		// persisted branch and put the pre-reset turns back into the LLM context
+		// even though `/clear` reported it empty. The full-history export path
+		// (`transcript && !collapseCompactedHistory`) is handled by the first
+		// branch above and left untouched, so on-disk history stays recoverable.
+		// When a compaction and a reset boundary interact, the later one on the
+		// path wins: a boundary after the latest compaction elides that compaction
+		// (and its kept tail) too, so only genuinely post-reset entries emit; a
+		// boundary before the latest compaction is superseded by it (the
+		// `else if (compaction)` branch below handles that case via this guard).
+		for (let i = resetBoundaryIdx + 1; i < path.length; i++) {
+			appendMessage(path[i]);
+		}
 	} else if (compaction) {
-		const providerPayload: ProviderPayload | undefined = (() => {
-			const candidate = compaction.preserveData?.openaiRemoteCompaction;
-			if (!candidate || typeof candidate !== "object") return undefined;
-			const remote = candidate as { provider?: unknown; replacementHistory?: unknown };
-			if (typeof remote.provider !== "string" || remote.provider.length === 0) return undefined;
-			if (!Array.isArray(remote.replacementHistory)) return undefined;
-			return {
-				type: "openaiResponsesHistory",
-				provider: remote.provider,
-				items: remote.replacementHistory as Array<Record<string, unknown>>,
-			};
-		})();
+		const providerPayload = getOpenAiRemoteCompactionPayload(compaction);
 		const remoteReplacementHistory = providerPayload?.items;
 
 		// Re-attach any archived snapcompact frames so the model can keep
@@ -379,11 +432,14 @@ export function buildSessionContext(
 			compaction.summary,
 			compaction.tokensBefore,
 			compaction.timestamp,
-			compaction.shortSummary,
-			providerPayload,
-			undefined,
-			snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-			compaction.warning,
+			{
+				shortSummary: compaction.shortSummary,
+				providerPayload,
+				blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+				warning: compaction.warning,
+				method: compaction.method,
+				tokensAfter: compaction.tokensAfter,
+			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
@@ -409,6 +465,13 @@ export function buildSessionContext(
 				}
 				if (foundFirstKept) {
 					appendMessage(entry);
+				}
+			}
+		} else if (compaction.providerReplayThroughEntryId) {
+			const replayThroughIdx = path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId);
+			if (replayThroughIdx >= 0 && replayThroughIdx < compactionIdx) {
+				for (let i = replayThroughIdx + 1; i < compactionIdx; i++) {
+					appendMessage(path[i]);
 				}
 			}
 		}
@@ -494,6 +557,41 @@ export function buildSessionContext(
 					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
 				}
 				messages[i] = rewritten;
+			}
+		}
+	}
+
+	// Error/abort assistant turns are transcript events, not safe assistant
+	// turns to replay into the next provider request. Drop them even when a
+	// later user message follows through non-context entries (`session_exit`,
+	// labels, etc.); otherwise a resumed session replays a dead partial turn
+	// and can spend minutes reprocessing old context before the new prompt.
+	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
+	// unsafe trailing thinking from that assistant and sends the hidden
+	// continuity note instead.
+	if (!options?.transcript) {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message?.role !== "assistant") continue;
+			if (message.stopReason !== "aborted" && message.stopReason !== "error") continue;
+			const next = messages[i + 1];
+			if (next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) continue;
+			// A failed turn that emitted tool calls persists paired synthetic
+			// tool_result placeholders after it. Dropping only the assistant would
+			// strand those results with no preceding tool_use — a shape providers
+			// reject — so remove the paired results alongside the turn.
+			const droppedToolCallIds = new Set<string>();
+			for (const block of message.content) {
+				if (block.type === "toolCall") droppedToolCallIds.add(block.id);
+			}
+			messages.splice(i, 1);
+			if (droppedToolCallIds.size > 0) {
+				for (let j = messages.length - 1; j >= i; j--) {
+					const candidate = messages[j];
+					if (candidate?.role === "toolResult" && droppedToolCallIds.has(candidate.toolCallId)) {
+						messages.splice(j, 1);
+					}
+				}
 			}
 		}
 	}

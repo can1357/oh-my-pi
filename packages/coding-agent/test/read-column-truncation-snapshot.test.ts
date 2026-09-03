@@ -176,10 +176,31 @@ describe("read tool column truncation vs hashline snapshot", () => {
 			tmpDir,
 			filePath,
 			header,
-			patchBody: "SWAP 3.=3:\n+epilogue\n",
+			patchBody: "PUT 3-3:\n+epilogue\n",
 		});
 
 		const after = await fs.readFile(filePath, "utf8");
 		expect(after).toBe(`intro\n${longLine}\nepilogue\n`);
+	});
+
+	it("keeps a genuine blank line editable without exposing the EOF sentinel", async () => {
+		const filePath = path.join(tmpDir, "eof-blank.txt");
+		await fs.writeFile(filePath, "first\n\nlast\n");
+
+		const session = createSession(tmpDir);
+		const readText = textOutput(await new ReadTool(session).execute("call-eof-blank", { path: filePath }));
+		expect(readText).toContain("1:first\n2:\n3:last");
+		expect(readText).not.toContain("\n4:");
+
+		const { header } = extractHeader(readText);
+		await applyEditWithTag({
+			session,
+			tmpDir,
+			filePath,
+			header,
+			patchBody: "CUT 2\n",
+		});
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("first\nlast\n");
 	});
 });

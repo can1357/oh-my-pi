@@ -52,6 +52,7 @@ describe("issue #980 provider-qualified model resolution", () => {
 			cliModel: "anthropic/claude-3-7-sonnet",
 			modelRegistry: {
 				getAll: () => availableModels,
+				getAvailable: () => availableModels,
 			},
 		});
 		expect(cliResolved.model).toBeUndefined();

@@ -19,6 +19,7 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
+import { truncateMiddle } from "./streaming-output";
 
 export interface HistoryFormatOptions {
 	/** Optional H1 prepended to the transcript. */
@@ -47,6 +48,14 @@ export interface HistoryFormatOptions {
 	 */
 	expandEditDiffs?: boolean;
 	/**
+	 * Append bounded tool-result text and, for `ask`, the structured questions.
+	 * Advisor transcripts enable this so reviewers see user decisions and the
+	 * evidence returned by primary tools without admitting unbounded output.
+	 */
+	expandToolIO?: boolean;
+	/** Transform expanded tool input/output before any byte or line truncation. */
+	transformExpandedToolIO?: (text: string) => string;
+	/**
 	 * Chunked rendering support: a caller formatting one logical transcript in
 	 * several calls (the advisor's chunked delta render) passes a result index
 	 * built over the WHOLE delta plus one shared consumed-id set, so a toolCall
@@ -55,10 +64,23 @@ export interface HistoryFormatOptions {
 	 */
 	toolResultIndex?: ReadonlyMap<string, ToolResultMessage>;
 	consumedToolCallIds?: Set<string>;
+	/**
+	 * Chunked rendering state: a mutable holder for the watched-role label
+	 * (`**user**:` / `**agent**:`) that ended the previous chunk. Lets a caller
+	 * formatting one logical transcript across several calls (advisor
+	 * multi-message split) keep consecutive same-role collapsing byte-identical
+	 * to the single-block render: pass one object across all chunk calls.
+	 */
+	watchedRoleState?: { lastLabel: string | undefined };
 }
 
 /** Max length of the primary-arg summary inside `→ tool(...)` lines. */
 const PRIMARY_ARG_MAX = 120;
+/** Per-tool budget for expanded advisor input/output. */
+const EXPANDED_TOOL_IO_MAX_BYTES = 8 * 1024;
+const EXPANDED_TOOL_IO_MAX_LINES = 80;
+const EXPANDED_ASK_FIELD_MAX_BYTES = 2 * 1024;
+const EXPANDED_ASK_FIELD_MAX_LINES = 20;
 
 /** Per-tool preference order for the most informative scalar argument. */
 const PRIMARY_ARG_KEYS = [
@@ -83,6 +105,10 @@ const PRIMARY_ARG_KEYS = [
 function oneLine(text: string, max = PRIMARY_ARG_MAX): string {
 	const flat = text.replace(/\s+/g, " ").trim();
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+export function formatExecutionSourcePreview(source: string): string {
+	return oneLine(source);
 }
 
 /** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
@@ -110,7 +136,7 @@ function primaryArgValue(value: unknown): string {
 }
 
 /** Pick the most informative scalar argument of a tool call. */
-function primaryArg(name: string, args: Record<string, unknown> | undefined): string {
+export function formatToolCallPrimaryArg(name: string, args: Record<string, unknown> | undefined): string {
 	if (!args || typeof args !== "object") return "";
 	// Advisor note is the most informative summary; preserve severity too.
 	if (name === "advise") {
@@ -158,35 +184,142 @@ function primaryArg(name: string, args: Record<string, unknown> | undefined): st
 	}
 }
 
+export function formatToolCallIntentPreview(args: Record<string, unknown> | undefined): string | undefined {
+	const intent = args?.[INTENT_FIELD];
+	return typeof intent === "string" && intent.trim() ? oneLine(intent, 80) : undefined;
+}
+
+export function formatToolResultErrorPreview(content: string | readonly (TextContent | ImageContent)[]): string {
+	return oneLine(contentToText(content).split("\n", 1)[0] ?? "");
+}
+
 /**
  * Wrap a diff body in a backtick fence sized to outlast the longest backtick
  * run inside it, so a diff that touches markdown (triple backticks) can't break
  * out of the fence. Info string `diff` for syntax highlighting.
  */
-function fenceDiff(diff: string): string {
-	const longest = diff.match(/`+/g)?.reduce((m, run) => Math.max(m, run.length), 0) ?? 0;
+function fencedText(text: string, language: string): string {
+	const longest = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
 	const fence = "`".repeat(Math.max(3, longest + 1));
-	return `${fence}diff\n${diff}\n${fence}`;
+	return `${fence}${language}\n${text}\n${fence}`;
+}
+
+/** Wrap a diff in the shared adaptive Markdown fence. */
+function fenceDiff(diff: string): string {
+	return fencedText(diff, "diff");
+}
+
+function boundedToolContext(text: string): string {
+	return truncateMiddle(text, {
+		maxBytes: EXPANDED_TOOL_IO_MAX_BYTES,
+		maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+	}).content;
+}
+
+function boundedAskJson(value: unknown, transform?: (text: string) => string): string {
+	return boundedToolContext(
+		JSON.stringify(
+			value,
+			(_key, nested) => {
+				if (typeof nested !== "string") return nested;
+				return truncateMiddle(transform?.(nested) ?? nested, {
+					maxBytes: EXPANDED_ASK_FIELD_MAX_BYTES,
+					maxLines: EXPANDED_ASK_FIELD_MAX_LINES,
+				}).content;
+			},
+			2,
+		),
+	);
+}
+
+function boundedFencedToolContext(text: string, language: string): string {
+	const longestFence = text.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
+	// A pathological run can make Markdown fences larger than the whole budget.
+	// Use indented code in that case: constant wrapper cost and no delimiter collision.
+	if (longestFence * 2 > EXPANDED_TOOL_IO_MAX_BYTES / 2) {
+		const marker = "[…content elided to fit advisor context…]";
+		const truncated = truncateMiddle(text, {
+			maxBytes: EXPANDED_TOOL_IO_MAX_BYTES - Buffer.byteLength(marker) - 2,
+			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+		});
+		const bounded = truncated.truncated ? `${marker}\n${truncated.content}` : truncated.content;
+		return bounded.replace(/^/gm, "    ");
+	}
+	const fenceBytes = Math.max(3, longestFence + 1) * 2 + language.length + 2;
+	return fencedText(
+		truncateMiddle(text, {
+			maxBytes: Math.max(1, EXPANDED_TOOL_IO_MAX_BYTES - fenceBytes),
+			maxLines: EXPANDED_TOOL_IO_MAX_LINES,
+		}).content,
+		language,
+	);
+}
+
+function expandedAskArguments(
+	args: Record<string, unknown> | undefined,
+	transform?: (text: string) => string,
+): string | undefined {
+	if (!args) return undefined;
+	const visibleArgs = Object.fromEntries(Object.entries(args).filter(([key]) => key !== INTENT_FIELD));
+	try {
+		return boundedAskJson(visibleArgs, transform);
+	} catch {
+		return undefined;
+	}
+}
+
+function expandedAskDetails(
+	result: ToolResultMessage | undefined,
+	transform?: (text: string) => string,
+): string | undefined {
+	if (!result?.details || typeof result.details !== "object") return undefined;
+	const details = result.details as {
+		question?: unknown;
+		questions?: unknown;
+		results?: unknown;
+	};
+	const questions = Array.isArray(details.results)
+		? details.results
+				.map(item =>
+					item && typeof item === "object" && typeof (item as { question?: unknown }).question === "string"
+						? (item as { question: string }).question
+						: undefined,
+				)
+				.filter((question): question is string => question !== undefined)
+		: Array.isArray(details.questions)
+			? details.questions.filter((question): question is string => typeof question === "string")
+			: typeof details.question === "string"
+				? [details.question]
+				: [];
+	return questions.length > 0 ? boundedAskJson({ questions }, transform) : undefined;
 }
 
 /** One line per tool call: `→ read(src/foo.ts:50-80) ⇒ ok · 31 lines`. */
+
+function expandedToolResultText(text: string | undefined): string | undefined {
+	return text?.trim() ? text : undefined;
+}
 function toolCallLine(
 	name: string,
 	args: Record<string, unknown> | undefined,
 	result: ToolResultMessage | undefined,
 	includeToolIntent?: boolean,
 	expandEditDiffs?: boolean,
+	expandToolIO?: boolean,
+	transformExpandedToolIO?: (text: string) => string,
 ): string {
-	const head = `→ ${name}(${primaryArg(name, args)})`;
+	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args)})`;
+	const rawResultText = result ? contentToText(result.content) : undefined;
+	const visibleResultText =
+		rawResultText === undefined ? undefined : (transformExpandedToolIO?.(rawResultText) ?? rawResultText);
 	let base: string;
 	if (!result) {
 		base = `${head} ⇒ pending`;
 	} else {
-		const text = contentToText(result.content);
-		const lines = lineCount(text);
+		const lines = lineCount(rawResultText ?? "");
 		const count = `${lines} ${lines === 1 ? "line" : "lines"}`;
 		if (result.isError) {
-			const firstLine = oneLine(text.split("\n", 1)[0] ?? "");
+			const firstLine = formatToolResultErrorPreview(visibleResultText ?? "");
 			base = firstLine ? `${head} ⇒ error · ${count} — ${firstLine}` : `${head} ⇒ error · ${count}`;
 		} else {
 			base = `${head} ⇒ ok · ${count}`;
@@ -200,15 +333,31 @@ function toolCallLine(
 		}
 	}
 
-	const intent = includeToolIntent ? args?.[INTENT_FIELD] : undefined;
-	if (typeof intent === "string" && intent.trim()) {
-		const formattedIntent = oneLine(intent, 80);
-		return `// ${formattedIntent}\n${base}`;
+	if (expandToolIO) {
+		const sections: string[] = [];
+		if (name === "ask") {
+			const askArguments =
+				expandedAskArguments(args, transformExpandedToolIO) ?? expandedAskDetails(result, transformExpandedToolIO);
+			if (askArguments) sections.push(`Ask input:\n${boundedFencedToolContext(askArguments, "json")}`);
+		}
+		if (result) {
+			const resultText = expandedToolResultText(visibleResultText);
+			if (resultText) {
+				sections.push(`Tool result:\n${boundedFencedToolContext(resultText, "text")}`);
+			}
+		}
+		if (sections.length > 0) base = `${base}\n${sections.join("\n")}`;
 	}
+
+	const formattedIntent = includeToolIntent ? formatToolCallIntentPreview(args) : undefined;
+	if (formattedIntent) return `// ${formattedIntent}\n${base}`;
 	return base;
 }
 
-/** One line for a user-initiated `!`/`$` execution. */
+/** One line for a user-initiated `!`/`$` execution. Always attributed to the
+ *  user: these roles never carry agent-run commands (the model's bash goes
+ *  through `toolCall`), so the `user-` prefix makes provenance explicit for the
+ *  advisor and history readers regardless of render mode. */
 function executionLine(
 	kind: "bash" | "python",
 	source: string,
@@ -220,7 +369,8 @@ function executionLine(
 			? `error · exit ${msg.exitCode}`
 			: "ok";
 	const lines = lineCount(msg.output);
-	return `→ ${kind}! ${oneLine(source)} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
+	const sourcePreview = formatExecutionSourcePreview(source);
+	return `→ user-${kind}! ${sourcePreview} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
 }
 
 /**
@@ -299,7 +449,21 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 	// (the watched agent emits one assistant message per tool call, so otherwise
 	// every call repeats `**agent**:`). Cleared whenever a
 	// non-role-labeled line is emitted so the next turn re-labels.
-	let lastWatchedLabel: string | undefined;
+	// Chunked callers seed the previous chunk's trailing label so collapsing
+	// stays byte-identical to the single-block render.
+	let lastWatchedLabel: string | undefined = opts?.watchedRoleState?.lastLabel;
+	// Emit a watched-mode role label, collapsing consecutive same-role turns
+	// under one label (matching the user/assistant paths). Used for the
+	// user-attributed `!`/`$` execution lines so the advisor never reads them
+	// as agent actions.
+	const pushWatchedRole = (label: string, body: string): void => {
+		if (lastWatchedLabel === label) {
+			lines.push(body, "");
+		} else {
+			lines.push(label, body, "");
+			lastWatchedLabel = label;
+		}
+	};
 
 	for (const msg of typed) {
 		switch (msg.role) {
@@ -330,7 +494,15 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 						const result = resultsByCallId.get(block.id);
 						if (result) consumed.add(block.id);
 						body.push(
-							toolCallLine(block.name, block.arguments, result, opts?.includeToolIntent, opts?.expandEditDiffs),
+							toolCallLine(
+								block.name,
+								block.arguments,
+								result,
+								opts?.includeToolIntent,
+								opts?.expandEditDiffs,
+								opts?.expandToolIO,
+								opts?.transformExpandedToolIO,
+							),
 						);
 					} else if (opts?.includeThinking && block.type === "thinking" && block.thinking.trim()) {
 						body.push(`_thinking:_ ${block.thinking}`);
@@ -354,22 +526,43 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "toolResult": {
 				// Normally consumed by its toolCall; orphans (e.g. truncated history) get their own line.
 				if (consumed.has(msg.toolCallId)) break;
-				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.includeToolIntent, opts?.expandEditDiffs), "");
+				lines.push(
+					toolCallLine(
+						msg.toolName,
+						undefined,
+						msg,
+						opts?.includeToolIntent,
+						opts?.expandEditDiffs,
+						opts?.expandToolIO,
+						opts?.transformExpandedToolIO,
+					),
+					"",
+				);
 				lastWatchedLabel = undefined;
 				break;
 			}
 			case "bashExecution": {
 				const bashMsg = msg as BashExecutionMessage;
 				if (bashMsg.excludeFromContext) break;
-				lines.push(executionLine("bash", bashMsg.command, bashMsg), "");
-				lastWatchedLabel = undefined;
+				const bashLine = executionLine("bash", bashMsg.command, bashMsg);
+				if (opts?.watchedRoles) {
+					pushWatchedRole("**user**:", bashLine);
+				} else {
+					lines.push(bashLine, "");
+					lastWatchedLabel = undefined;
+				}
 				break;
 			}
 			case "pythonExecution": {
 				const pythonMsg = msg as PythonExecutionMessage;
 				if (pythonMsg.excludeFromContext) break;
-				lines.push(executionLine("python", pythonMsg.code, pythonMsg), "");
-				lastWatchedLabel = undefined;
+				const pythonLine = executionLine("python", pythonMsg.code, pythonMsg);
+				if (opts?.watchedRoles) {
+					pushWatchedRole("**user**:", pythonLine);
+				} else {
+					lines.push(pythonLine, "");
+					lastWatchedLabel = undefined;
+				}
 				break;
 			}
 			case "custom":
@@ -417,6 +610,10 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 				break;
 			}
 		}
+	}
+
+	if (opts?.watchedRoleState) {
+		opts.watchedRoleState.lastLabel = lastWatchedLabel;
 	}
 
 	return `${lines.join("\n").trim()}\n`;

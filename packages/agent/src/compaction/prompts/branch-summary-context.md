@@ -1,4 +1,4 @@
-The following is a summary of a branch that this conversation came back from:
+Branch-return summary:
 
 <summary>
 {{summary}}

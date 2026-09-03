@@ -30,6 +30,8 @@ export class Input implements Component, Focusable {
 	#useTerminalCursor = false;
 	/** Rendered before the editable area; set to "" for chrome-less embedding. */
 	prompt = "> ";
+	/** Render the editable value as bullets while retaining the real value internally. */
+	mask = false;
 	onSubmit?: (value: string) => void;
 	onEscape?: () => void;
 
@@ -48,6 +50,19 @@ export class Input implements Component, Focusable {
 
 	getValue(): string {
 		return this.#value;
+	}
+	/** Return bounded input content and cursor state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#value.slice(0, 120),
+			textLength: this.#value.length,
+			previewTruncated: this.#value.length > 120,
+			cursor: this.#cursor,
+			cursorLine: 0,
+			selection: null,
+			placeholderActive: false,
+			masked: this.mask,
+		};
 	}
 
 	setValue(value: string): void {
@@ -415,9 +430,15 @@ export class Input implements Component, Focusable {
 			return [prompt];
 		}
 
-		const cursorIndex = this.#cursor;
+		let cursorIndex = this.#cursor;
 		// Ensure we always have a grapheme to invert at the cursor (space at end).
-		const displayValue = cursorIndex >= this.#value.length ? `${this.#value} ` : this.#value;
+		let visibleValue = this.#value;
+		if (this.mask) {
+			const graphemes = [...segmenter.segment(this.#value)];
+			visibleValue = "•".repeat(graphemes.length);
+			cursorIndex = graphemes.filter(grapheme => grapheme.index < this.#cursor).length;
+		}
+		const displayValue = this.#cursor >= this.#value.length ? `${visibleValue} ` : visibleValue;
 
 		const totalCols = visibleWidth(displayValue);
 		const cursorCols = visibleWidth(displayValue.slice(0, cursorIndex));

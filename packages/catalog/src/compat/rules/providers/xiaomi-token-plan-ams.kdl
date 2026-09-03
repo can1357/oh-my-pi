@@ -1,0 +1,9 @@
+// Provider-wire compat for "xiaomi-token-plan-ams"; regenerated from the frozen census using deployment contract selectors.
+
+provider "xiaomi-token-plan-ams" {
+	class "mimo" {
+		family "v2" {
+			thinking-mode "effort"
+		}
+	}
+}

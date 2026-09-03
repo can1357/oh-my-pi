@@ -12,15 +12,22 @@
 import { isJsonObject } from "./types";
 
 export interface JsonSchemaToTsOptions {
-	/** Indentation unit for nested object bodies. Default two spaces. */
+	/** Indentation unit for nested object bodies. Default two spaces (none in `harmony` style). */
 	readonly indent?: string;
-	/** Emit `description` keywords as JSDoc comments on object properties. Default true. */
+	/** Emit `description` keywords as comments on object properties. Default true. */
 	readonly comments?: boolean;
+	/**
+	 * Output flavor. `default` renders JSDoc comments, `;` delimiters, and
+	 * indented bodies; `harmony` renders the flat OpenAI-Harmony convention —
+	 * `//` line comments, `,` delimiters, no indentation.
+	 */
+	readonly style?: "default" | "harmony";
 }
 
 interface Ctx {
 	readonly indent: string;
 	readonly comments: boolean;
+	readonly harmony: boolean;
 	readonly defs: Record<string, unknown> | undefined;
 	readonly seen: Set<unknown>;
 }
@@ -48,7 +55,11 @@ function joinUnion(parts: readonly string[]): string {
 	return unique.length > 0 ? unique.join(" | ") : "never";
 }
 
-function emitJsDoc(lines: string[], description: string, pad: string): void {
+function emitDescription(lines: string[], description: string, ctx: Ctx, pad: string): void {
+	if (ctx.harmony) {
+		for (const line of description.split("\n")) lines.push(`${pad}// ${line}`.trimEnd());
+		return;
+	}
 	// `* /` keeps a stray closing token inside the description from ending the comment.
 	const safe = description.replace(/\*\//g, "* /");
 	if (!safe.includes("\n")) {
@@ -85,6 +96,7 @@ function convertObject(node: Record<string, unknown>, ctx: Ctx, pad: string): st
 		const required = new Set(
 			Array.isArray(node.required) ? node.required.filter((key): key is string => typeof key === "string") : [],
 		);
+		const delimiter = ctx.harmony ? "," : ";";
 		for (const key in properties) {
 			const value = properties[key];
 			if (
@@ -93,11 +105,11 @@ function convertObject(node: Record<string, unknown>, ctx: Ctx, pad: string): st
 				typeof value.description === "string" &&
 				value.description.length > 0
 			) {
-				emitJsDoc(body, value.description, childPad);
+				emitDescription(body, value.description, ctx, childPad);
 			}
 			const optional = required.has(key) ? "" : "?";
 			const name = SAFE_KEY.test(key) ? key : JSON.stringify(key);
-			body.push(`${childPad}${name}${optional}: ${convert(value, ctx, childPad)};`);
+			body.push(`${childPad}${name}${optional}: ${convert(value, ctx, childPad)}${delimiter}`);
 		}
 	}
 
@@ -110,7 +122,7 @@ function convertObject(node: Record<string, unknown>, ctx: Ctx, pad: string): st
 
 	// Named properties alongside a free-form value schema → index signature.
 	if (isJsonObject(additional)) {
-		body.push(`${childPad}[key: string]: ${convert(additional, ctx, childPad)};`);
+		body.push(`${childPad}[key: string]: ${convert(additional, ctx, childPad)}${ctx.harmony ? "," : ";"}`);
 	}
 	return `{\n${body.join("\n")}\n${pad}}`;
 }
@@ -188,9 +200,11 @@ export function jsonSchemaToTypeScript(schema: unknown, options?: JsonSchemaToTs
 			}
 		}
 	}
+	const harmony = options?.style === "harmony";
 	const ctx: Ctx = {
-		indent: options?.indent ?? "  ",
+		indent: options?.indent ?? (harmony ? "" : "  "),
 		comments: options?.comments ?? true,
+		harmony,
 		defs,
 		seen: new Set(),
 	};

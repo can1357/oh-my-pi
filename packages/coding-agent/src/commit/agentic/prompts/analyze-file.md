@@ -1,4 +1,4 @@
-Analyze file at {{file}}.
+Analyze {{file}}.
 
 Goal:
 {{#if goal}}
@@ -7,16 +7,16 @@ Goal:
 Summarize purpose and commit-relevant changes.
 {{/if}}
 
-Return concise JSON object with:
-- summary: one-sentence description of file's role
-- highlights: 2-5 bullet points about notable behaviors or changes
-- risks: edge cases or risks worth noting (empty array if none)
+Return concise JSON object:
+- summary: 1-sentence file-role description
+- highlights: 2-5 bullets, notable behaviors or changes
+- risks: edge cases or risks worth noting; [] if none
 
 {{#if related_files}}
 ## Other Files in This Change
 {{related_files}}
 
-Consider how file's changes relate to above files.
+Relate file changes to these files.
 {{/if}}
 
 Call yield tool with JSON payload.

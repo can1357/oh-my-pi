@@ -1,4 +1,4 @@
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
@@ -6,29 +6,39 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/theme/
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
 import { loadEntriesFromFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
-import templateCss from "./template.css" with { type: "text" };
-import templateHtml from "./template.html" with { type: "text" };
-import templateJs from "./template.js" with { type: "text" };
+import type { ExportThemeNames } from "./args";
+import templateCssPath from "./template.css" with { type: "file" };
+import templateHtmlPath from "./template.html" with { type: "file" };
+import templateJsPath from "./template.js" with { type: "file" };
 // Pre-built React tool renderers: built by `gen:tool-views` (`bun run gen:tool-views`),
 // run automatically by root `prepare` on install and by `prepack` at publish.
-import toolViewsJs from "./tool-views.generated.js" with { type: "text" };
+import toolViewsJsPath from "./tool-views.generated.js" with { type: "file" };
 import { webExportThemeVars } from "./web-palette";
 
+export { type ExportThemeNames, parseExportArgs } from "./args";
+
 let cachedTemplate: string | undefined;
+/** Resolve a Bun file-loader value without parsing Windows drive letters as URL schemes. */
+export function resolveBundledHtmlAssetPath(assetPath: string, moduleDir: string = import.meta.dir): string {
+	if (path.isAbsolute(assetPath) || path.win32.isAbsolute(assetPath)) return assetPath;
+	return path.resolve(moduleDir, assetPath);
+}
 
 /** Compose the standalone export template: minified CSS, tool renderers, and viewer JS inlined. */
 export function getTemplate(): string {
 	if (cachedTemplate) return cachedTemplate;
+	const templateCss = fs.readFileSync(resolveBundledHtmlAssetPath(templateCssPath), "utf8");
+	const templateHtml = fs.readFileSync(resolveBundledHtmlAssetPath(templateHtmlPath as unknown as string), "utf8");
+	const templateJs = fs.readFileSync(resolveBundledHtmlAssetPath(templateJsPath), "utf8");
+	const toolViewsJs = fs.readFileSync(resolveBundledHtmlAssetPath(toolViewsJsPath), "utf8");
 	const minifiedCss = templateCss
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\s+/g, " ")
 		.replace(/\s*([{}:;,])\s*/g, "$1")
 		.trim();
 	// Function replacements so `$'`, `$&`, `$$`, etc. inside the embedded
-	// CSS/JS are not interpreted as substitution patterns. The cast is safe:
-	// `with { type: "text" }` yields a string at runtime; bun-types just types
-	// every *.html import as HTMLBundle (TS can't vary types by import attribute).
-	cachedTemplate = (templateHtml as unknown as string)
+	// CSS/JS are not interpreted as substitution patterns.
+	cachedTemplate = templateHtml
 		.replace("<template-css/>", () => `<style>${minifiedCss}</style>`)
 		.replace("<template-tool-views/>", () => `<script>${toolViewsJs}</script>`)
 		.replace("<template-js/>", () => `<script>${templateJs}</script>`);
@@ -37,20 +47,12 @@ export function getTemplate(): string {
 
 export interface ExportOptions {
 	outputPath?: string;
-	/**
-	 * Which color palette the export ships with.
-	 * - `"web"` (default) — the omp brand identity (collab-web pink/purple),
-	 *   so public HTML exports and the `/s/<id>` share viewer match the live
-	 *   `my.omp.sh` client. See `web-palette.ts`.
-	 * - `"theme"` — derive from `themeName` (or the active TUI theme), preserving
-	 *   the pre-15.12 behavior where an export mirrored the user's terminal.
-	 */
+	/** `"web"` bundles the omp web themes; `"theme"` bundles TUI themes. */
 	palette?: "web" | "theme";
-	/**
-	 * TUI theme to derive colors from when `palette: "theme"`. Ignored for the
-	 * default `"web"` palette. Resolves to the active TUI theme when omitted.
-	 */
+	/** Legacy single TUI theme name. Prefer `themeNames` for dual-theme exports. */
 	themeName?: string;
+	/** Dark and light TUI themes to bundle when `palette` is `"theme"`. */
+	themeNames?: ExportThemeNames;
 	/** Embed subagent session transcripts found next to the session file (default true). */
 	includeSubSessions?: boolean;
 }
@@ -116,48 +118,47 @@ function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string
 }
 
 /**
- * Generate CSS custom properties for the export `:root`.
+ * Generate CSS custom properties for one export theme.
  *
- * Two call shapes:
- *   • `generateThemeVars("web" | "theme", themeName?)` — explicit palette.
- *     `"web"` (the default for public artifacts) returns the fixed omp brand
- *     palette from `web-palette.ts` — collab-web pink/purple identity, shared
- *     with the live `my.omp.sh` client, so exports and the share viewer render
- *     identically to it. `"theme"` derives from the TUI theme via
- *     `getResolvedThemeColors(themeName)` plus the three
- *     `export.{pageBg,cardBg,infoBg}` surface overrides.
- *   • `generateThemeVars(themeName)` — legacy single-arg form: derive from the
- *     named TUI theme. Kept so existing callers (and the theme-islight test)
- *     keep working; equivalent to `generateThemeVars("theme", themeName)`.
- *
- * Exported for the share-viewer build script.
+ * The single-argument theme-name form remains available to callers that need
+ * one TUI palette. Standalone HTML uses `generateThemeStyles()` below.
  */
 export async function generateThemeVars(
 	palette: "web" | "theme" | (string & {}) = "web",
 	themeName?: string,
 ): Promise<string> {
-	// Legacy single-arg form: `generateThemeVars("my-theme")` — the first arg
-	// is a theme name, not a palette. Route it to the themed path.
-	if (palette !== "web" && palette !== "theme") {
-		return generateThemeVars("theme", palette);
-	}
-	if (palette === "web") return webExportThemeVars();
+	if (palette !== "web" && palette !== "theme") return generateThemeVars("theme", palette);
+	if (palette === "web") return webExportThemeVars("dark");
 
 	const colors = await getResolvedThemeColors(themeName);
-	const lines: string[] = [];
-	for (const key in colors) {
-		lines.push(`--${key}: ${colors[key]};`);
-	}
-
+	const lines = Object.entries(colors).map(([key, value]) => `--${key}: ${value};`);
 	const themeExport = await getThemeExportColors(themeName);
-	const userMessageBg = colors.userMessageBg || "#343541";
-	const derived = deriveExportColors(userMessageBg);
+	const derived = deriveExportColors(colors.userMessageBg || "#343541");
 
 	lines.push(`--body-bg: ${themeExport.pageBg ?? derived.pageBg};`);
 	lines.push(`--container-bg: ${themeExport.cardBg ?? derived.cardBg};`);
 	lines.push(`--info-bg: ${themeExport.infoBg ?? derived.infoBg};`);
-
 	return lines.join(" ");
+}
+
+/** Generate dark, light, and auto-following CSS rules for a standalone viewer. */
+export async function generateThemeStyles(
+	palette: "web" | "theme",
+	themeNames?: ExportThemeNames,
+	legacyThemeName?: string,
+): Promise<string> {
+	const [dark, light] =
+		palette === "web"
+			? [webExportThemeVars("dark"), webExportThemeVars("light")]
+			: await Promise.all([
+					generateThemeVars("theme", themeNames?.dark ?? legacyThemeName ?? "dark"),
+					generateThemeVars("theme", themeNames?.light ?? legacyThemeName ?? "light"),
+				]);
+	return [
+		`:root, :root[data-theme="dark"] { color-scheme: dark; ${dark} }`,
+		`:root[data-theme="light"] { color-scheme: light; ${light} }`,
+		`@media (prefers-color-scheme: light) { :root:not([data-theme]) { color-scheme: light; ${light} } }`,
+	].join("\n");
 }
 
 /** Embedded subagent session transcript, keyed by slash-joined agent path in `SessionData.subSessions`. */
@@ -180,10 +181,17 @@ export interface SessionData {
 	subSessions?: Record<string, SubSession>;
 }
 
+function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | null {
+	if (!header) return null;
+	const exported = { ...header };
+	delete exported.previousSessionFiles;
+	return exported;
+}
+
 /** Snapshot the session (plus optional agent state) into the JSON shape the viewer renders. */
 export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
 	return {
-		header: sm.getHeader(),
+		header: sessionHeaderForExport(sm.getHeader()),
 		entries: sm.getEntries(),
 		leafId: sm.getLeafId(),
 		systemPrompt: state?.systemPrompt.join("\n\n"),
@@ -213,7 +221,7 @@ async function collectSubSessionsFromDir(
 ): Promise<void> {
 	let names: string[];
 	try {
-		names = await fs.readdir(dir);
+		names = await fs.promises.readdir(dir);
 	} catch (err) {
 		if (isEnoent(err)) return;
 		throw err;
@@ -230,7 +238,7 @@ async function collectSubSessionsFromDir(
 			out[key] = {
 				agentId,
 				parent: parentKey,
-				header,
+				header: sessionHeaderForExport(header),
 				entries,
 				leafId: entries.length > 0 ? entries[entries.length - 1].id : null,
 			};
@@ -240,15 +248,19 @@ async function collectSubSessionsFromDir(
 }
 
 /** Generate HTML from bundled template with runtime substitutions. */
-async function generateHtml(sessionData: SessionData, palette: "web" | "theme", themeName?: string): Promise<string> {
-	const themeVars = await generateThemeVars(palette, themeName);
+async function generateHtml(
+	sessionData: SessionData,
+	palette: "web" | "theme",
+	themeNames?: ExportThemeNames,
+	themeName?: string,
+): Promise<string> {
+	const themeStyles = await generateThemeStyles(palette, themeNames, themeName);
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toBase64();
 
 	// Use function replacements so `$'`, `$&`, `$$`, `$n`, etc. in the
-	// substituted CSS/base64 are not interpreted as substitution patterns
-	// (see https://mdn.io/String.replace).
+	// substituted CSS/base64 are not interpreted as substitution patterns.
 	return getTemplate()
-		.replace("<theme-vars/>", () => `<style>:root { ${themeVars} }</style>`)
+		.replace("<theme-vars/>", () => `<style>${themeStyles}</style>`)
 		.replace("{{SESSION_DATA}}", () => sessionDataBase64);
 }
 
@@ -270,7 +282,7 @@ export async function exportSessionToHtml(
 	}
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
-	const html = await generateHtml(sessionData, palette, opts.themeName);
+	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
 
 	await Bun.write(outputPath, html);
@@ -290,7 +302,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 	}
 
 	const sessionData: SessionData = {
-		header: sm.getHeader(),
+		header: sessionHeaderForExport(sm.getHeader()),
 		entries: sm.getEntries(),
 		leafId: sm.getLeafId(),
 	};
@@ -300,7 +312,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 	}
 
 	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
-	const html = await generateHtml(sessionData, palette, opts.themeName);
+	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(inputPath, ".jsonl")}.html`;
 
 	await Bun.write(outputPath, html);

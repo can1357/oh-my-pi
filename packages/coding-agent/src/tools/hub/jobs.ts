@@ -7,11 +7,12 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { AsyncJob, AsyncJobManager } from "../../async";
+import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
+import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import type { ToolSession } from "..";
 import {
@@ -86,6 +87,12 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
  * that activity instead of implying the system is quiet. Existence is
  * already public via the peer roster, so listing ids here leaks nothing new;
  * job *control* stays owner-scoped.
+ *
+ * Reporting deliberately uses the claimed `status`, not the session-corroborated
+ * `registry.isRunning` used by the wait-sustaining gates: a ref that claims
+ * `running` with no live turn is exactly the stale entry an operator must see
+ * here to cancel it (#8634). Hiding it would match the badge count to nothing
+ * and remove the only discovery path for the id.
  */
 export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySnapshot[] {
 	const registry = session.agentRegistry;
@@ -112,6 +119,7 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 			...(ref.parentId ? { parentId: ref.parentId } : {}),
 			...(ref.activity ? { activity: ref.activity } : {}),
 			ageMs: Math.max(0, now - ref.createdAt),
+			live: registry.isRunning(ref),
 		});
 	}
 	return out;
@@ -123,15 +131,21 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 	for (const agent of agents) {
 		const parent = agent.parentId ? ` (spawned by \`${agent.parentId}\`)` : "";
 		const activity = agent.activity ? ` — ${agent.activity}` : "";
-		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}`);
+		const stale = agent.live ? "" : " — no turn in flight (stale registration?)";
+		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
 	lines.push("", "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`.");
+	if (agents.some(agent => !agent.live)) {
+		lines.push(
+			"An agent with no turn in flight cannot answer a message and never satisfies a bare `wait`; clear it with `hub` cancel.",
+		);
+	}
 	return lines;
 }
 
 interface TrackedJobLike {
 	id: string;
-	type: "bash" | "task";
+	type: AsyncJobType;
 	status: string;
 	label: string;
 	startTime: number;
@@ -145,6 +159,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 	return jobs.map(j => {
 		const current = session.asyncJobManager?.getJob(j.id);
 		const latest = current ?? j;
+		const resultConsumed = session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
 		let resolvedModel: string | undefined;
 		if (latest.type === "task") {
 			const progressValue = latest.latestDetails?.progress;
@@ -173,8 +188,8 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
 			...(resolvedModel ? { resolvedModel } : {}),
-			...(latest.resultText ? { resultText: latest.resultText } : {}),
-			...(latest.errorText ? { errorText: latest.errorText } : {}),
+			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
+			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
 		};
 	});
 }
@@ -195,8 +210,9 @@ export function buildJobResult(
 		return true;
 	});
 	const jobResults = snapshotJobs(session, uniqueJobs);
+	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
 
-	manager.acknowledgeDeliveries(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");
@@ -214,6 +230,13 @@ export function buildJobResult(
 		for (const j of completed) {
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
 			lines.push(`Label: ${j.label}`);
+			if (j.status !== "cancelled") {
+				lines.push(
+					alreadyConsumed.has(j.id)
+						? "Delivery: already delivered or recovered."
+						: "Delivery: not auto-delivered; recovered by this snapshot.",
+				);
+			}
 			if (j.resultText) {
 				lines.push("```", j.resultText, "```");
 			}
@@ -304,26 +327,38 @@ export function nothingToWaitForResult(session: ToolSession): AgentToolResult<Co
 }
 
 /** `cancel`: kill the named jobs; returns immediately with outcomes + snapshots. */
-export function executeCancel(
+export async function executeCancel(
 	session: ToolSession,
 	manager: AsyncJobManager,
 	ownerId: string | undefined,
 	ids: string[],
-): AgentToolResult<CoordinationDetails> {
+): Promise<AgentToolResult<CoordinationDetails>> {
 	const ownerFilter = ownerId ? { ownerId } : undefined;
 	const cancelOutcomes: CancelOutcome[] = [];
 	for (const id of ids) {
 		const existing = manager.getJob(id);
 		if (!existing || (ownerId && existing.ownerId !== ownerId)) {
-			cancelOutcomes.push({ id, status: "not_found", message: `Background job not found: ${id}` });
+			// No job by this id (or it belongs to another agent): a budget-aborted
+			// keep-alive subagent lives on as a jobless registration long after its
+			// job row is reaped, so let cancel reach the agent registration too.
+			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id));
 			continue;
 		}
 		if (existing.status !== "running") {
-			cancelOutcomes.push({
-				id,
-				status: "already_completed",
-				message: `Background job ${id} is already ${existing.status}.`,
-			});
+			// The job row settled but may still be inside the retention window.
+			// The agent registration behind it (job id == agent id for task
+			// spawns) can outlive the row as an idle/parked zombie — try the
+			// registration kill before reporting the row as already done.
+			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
+			cancelOutcomes.push(
+				regOutcome.status === "cancelled"
+					? regOutcome
+					: {
+							id,
+							status: "already_completed",
+							message: `Background job ${id} is already ${existing.status}.`,
+						},
+			);
 			continue;
 		}
 		const cancelled = manager.cancel(id, ownerFilter);
@@ -334,6 +369,52 @@ export function executeCancel(
 		);
 	}
 	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
+}
+
+/**
+ * Kill a non-job-backed agent registration named by `id`: abort any in-flight
+ * turn, then release it from the lifecycle (dispose session + unregister). This
+ * is the only kill path for a keep-alive subagent that was budget-aborted, went
+ * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
+ * of a broker restart (issue #6315). Scoped to the caller's own descendants so
+ * cross-agent kills stay impossible; a bare test/SDK caller (no owner id) may
+ * target any sub. Never touches Main, the caller, or advisor transcripts.
+ */
+async function cancelAgentRegistration(
+	session: ToolSession,
+	ownerId: string | undefined,
+	id: string,
+): Promise<CancelOutcome> {
+	const registry = session.agentRegistry;
+	const ref = registry?.get(id);
+	if (ref?.kind !== "sub") {
+		return { id, status: "not_found", message: `Background job not found: ${id}` };
+	}
+	if (id === ownerId) {
+		return { id, status: "not_found", message: `Cannot cancel yourself (${id}).` };
+	}
+	if (ownerId && ref.parentId !== ownerId) {
+		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
+	}
+	const lifecycle = session.agentLifecycle?.();
+	try {
+		if (ref.status === "running" && ref.session) {
+			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
+		}
+		if (lifecycle) {
+			await lifecycle.release(id);
+		} else {
+			await ref.session?.dispose();
+			registry?.unregister(id);
+		}
+	} catch (error) {
+		return {
+			id,
+			status: "already_completed",
+			message: `Agent ${id} could not be fully cancelled: ${error instanceof Error ? error.message : String(error)}.`,
+		};
+	}
+	return { id, status: "cancelled", message: `Cancelled agent ${id} (killed session, dropped registration).` };
 }
 
 /** `jobs`: read-only snapshot of every job plus the jobless running-agent roster. */
@@ -631,8 +712,12 @@ export function jobsRenderResult(
 								maxCollapsed: COLLAPSED_LIST_LIMIT,
 								itemType: "agent",
 								renderItem: agent => {
-									const icon = formatStatusIcon("running", uiTheme, options.spinnerFrame);
-									const badge = formatBadge("agent", "accent", uiTheme);
+									const icon = agent.live
+										? formatStatusIcon("running", uiTheme, options.spinnerFrame)
+										: formatStatusIcon("warning", uiTheme);
+									const badge = agent.live
+										? formatBadge("agent", "accent", uiTheme)
+										: formatBadge("agent · no turn", "warning", uiTheme);
 									const gist = agent.activity
 										? ` ${uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(agent.activity), LABEL_MAX_WIDTH, Ellipsis.Unicode))}`
 										: "";

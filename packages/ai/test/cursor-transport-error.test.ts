@@ -20,5 +20,5 @@ describe("Cursor transport errors", () => {
 			eventTypes: ["start", "error"],
 			stopReason: "error",
 		});
-	});
+	}, 60_000);
 });

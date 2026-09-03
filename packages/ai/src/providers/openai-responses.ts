@@ -1,5 +1,4 @@
 import { scheduler } from "node:timers/promises";
-import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -24,7 +23,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -34,10 +33,10 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { callWithCopilotModelRetry } from "../utils/retry";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
+	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForOpenAIResponses,
@@ -64,6 +63,7 @@ import type {
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
 	ResponseInput,
+	ResponseInputContent,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import {
@@ -71,6 +71,7 @@ import {
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyResponsesCompatPolicy,
+	applyVercelResponsesCacheControls,
 	applyWireModelIdTransform,
 	buildResponsesDeltaInput,
 	buildResponsesInput,
@@ -78,20 +79,24 @@ import {
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
 	disableStrictToolsForScope,
+	getJuiceValue,
 	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
 	getOpenAIStrictToolsScope,
 	getOpenRouterResponsesSessionId,
 	isCompiledGrammarTooLargeStrictError,
 	isOpenAIResponsesProgressEvent,
-	isOpenRouterAnthropicModel,
 	isStrictToolsDisabledForScope,
+	type OpenAIPromptCacheOptions,
 	type OpenAIStrictToolsScope,
 	type OpenAIStrictToolsState,
 	processResponsesStream,
 	resolveOpenAICompatPolicy,
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
+	resolveOpenAIResponsesOutputClamp,
+	resolveReasoningSummaryOption,
+	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
 
@@ -149,6 +154,8 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	 * prompt_cache_key for prompt-cache routing).
 	 */
 	extraBody?: Record<string, unknown>;
+	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
+	promptCache?: OpenAIPromptCacheOptions;
 }
 
 const OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX = "openai-responses:";
@@ -180,14 +187,13 @@ function isOpenAIResponsesReplayUnsafeEvent(event: ResponseStreamEvent): boolean
 function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 	return (
 		AIError.isTransientStreamParseError(error) ||
-		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream")
+		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream") ||
+		AIError.isProviderRetryableError(error)
 	);
 }
 
 interface OpenAIResponsesProviderSessionState
-	extends ProviderSessionState,
-		OpenAIStrictToolsState,
-		OpenAIReasoningEffortFallbackState {
+	extends ProviderSessionState, OpenAIStrictToolsState, OpenAIReasoningEffortFallbackState {
 	nativeHistoryReplayWarmed: boolean;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
@@ -199,6 +205,7 @@ interface OpenAIResponsesChainState {
 	 * `previous_response_id`.
 	 */
 	lastParams?: OpenAIResponsesSamplingParams;
+	lastPromptCacheBreakpointPolicy?: "latest-stable-message" | "none";
 	lastResponseId?: string;
 	/** Output items of the last response, in replay-sanitized form (matches next-turn input). */
 	lastResponseItems?: ResponseInput;
@@ -242,15 +249,14 @@ function getOpenAIResponsesProviderSessionState(
 
 function isOpenAIResponsesStatefulEnabled(
 	options: OpenAIResponsesOptions | undefined,
-	baseUrl: string | undefined,
+	model: Model<"openai-responses">,
 ): boolean {
 	if (options?.statefulResponses === false) return false;
 	if (options?.statefulResponses === true) return true;
 	// Default ON only against the official OpenAI API: chaining forces
 	// `store: true`, and third-party /v1/responses proxies routinely ignore or
-	// reject `previous_response_id`. An unset baseUrl means the default
-	// endpoint (api.openai.com).
-	return $flag("PI_OPENAI_STATEFUL", !baseUrl || hostMatchesUrl(baseUrl, "openai"));
+	// reject `previous_response_id`.
+	return $flag("PI_OPENAI_STATEFUL", model.compat.officialEndpoint);
 }
 
 function getOpenAIResponsesChainState(
@@ -272,6 +278,7 @@ function resetOpenAIResponsesChainState(state: OpenAIResponsesChainState): void 
 	state.lastParams = undefined;
 	state.lastResponseId = undefined;
 	state.lastResponseItems = undefined;
+	state.lastPromptCacheBreakpointPolicy = undefined;
 }
 
 interface OpenAIResponsesChainedParams {
@@ -290,14 +297,23 @@ interface OpenAIResponsesChainedParams {
  */
 function buildOpenAIResponsesChainedParams(
 	params: OpenAIResponsesSamplingParams,
+	trailingScaffoldingItems: number,
 	chain: OpenAIResponsesChainState,
 ): OpenAIResponsesChainedParams {
+	const historyParams =
+		trailingScaffoldingItems > 0 && Array.isArray(params.input)
+			? { ...params, input: params.input.slice(0, params.input.length - trailingScaffoldingItems) }
+			: params;
 	const deltaInput = chain.canAppend
-		? buildResponsesDeltaInput(chain.lastParams, chain.lastResponseItems, params)
+		? buildResponsesDeltaInput(chain.lastParams, chain.lastResponseItems, historyParams)
 		: null;
 	if (deltaInput && deltaInput.length > 0 && chain.lastResponseId) {
+		const scaffolding =
+			historyParams !== params && Array.isArray(params.input)
+				? params.input.slice(params.input.length - trailingScaffoldingItems)
+				: [];
 		return {
-			params: { ...params, previous_response_id: chain.lastResponseId, input: deltaInput },
+			params: { ...params, previous_response_id: chain.lastResponseId, input: [...deltaInput, ...scaffolding] },
 			previousResponseId: chain.lastResponseId,
 		};
 	}
@@ -358,6 +374,9 @@ type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	provider?: OpenAICompat["openRouterRouting"];
 	reasoning?: { effort?: string } | { enabled: false };
 	cache_control?: OpenRouterAnthropicCacheControl;
+	caching?: "auto";
+	cache_anchor_items?: number;
+	cache_ttl?: "5m" | "1h";
 };
 
 function maybeAddOpenRouterAnthropicCacheControl(
@@ -365,7 +384,7 @@ function maybeAddOpenRouterAnthropicCacheControl(
 	model: Model<"openai-responses">,
 	cacheRetention: CacheRetention,
 ): void {
-	if (cacheRetention === "none" || !isOpenRouterAnthropicModel(model)) return;
+	if (cacheRetention === "none" || model.compat.cacheControlFormat !== "anthropic") return;
 	if (params.cache_control != null) return;
 	params.cache_control = cacheRetention === "long" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
 }
@@ -432,9 +451,28 @@ const streamOpenAIResponsesOnce = (
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
-			const builtParams = buildParams(model, context, options, providerSessionState, strictToolsScope);
-			const params = builtParams.params;
+			const promptCacheBreakpointPolicy =
+				resolveCacheRetention(options?.cacheRetention) !== "none" && options?.promptCache?.mode === "explicit"
+					? (options.promptCache.breakpoint ?? "latest-stable-message")
+					: undefined;
+			if (isOpenAIResponsesStatefulEnabled(options, model) && routingSessionId && providerSessionState) {
+				chainState = getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId);
+				if (chainState.canAppend && chainState.lastPromptCacheBreakpointPolicy !== promptCacheBreakpointPolicy) {
+					resetOpenAIResponsesChainState(chainState);
+				}
+			}
+			const builtParams = buildParams(
+				model,
+				context,
+				options,
+				providerSessionState,
+				strictToolsScope,
+				false,
+				chainState?.canAppend ? chainState.lastParams?.input : undefined,
+			);
+			const { params, trailingScaffoldingItems } = builtParams;
 			let activeParams = params;
+			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
 			const attemptedReasoningEffortFallbacks = new Set<string>();
@@ -455,21 +493,21 @@ const streamOpenAIResponsesOnce = (
 				}
 				return fallbackKey;
 			};
-			if (isOpenAIResponsesStatefulEnabled(options, baseUrl) && routingSessionId && providerSessionState) {
-				chainState = getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId);
-				if (!chainState.disabled) {
-					// Platform `previous_response_id` chaining only resolves stored responses.
-					params.store = true;
-				}
+			if (chainState && !chainState.disabled) {
+				// Platform `previous_response_id` chaining only resolves stored responses.
+				params.store = true;
 			}
 			applyReasoningEffortFallbackForRequest(params);
 			let chained: OpenAIResponsesChainedParams =
-				chainState && !chainState.disabled ? buildOpenAIResponsesChainedParams(params, chainState) : { params };
+				chainState && !chainState.disabled
+					? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
+					: { params };
 			sentPreviousResponseId = chained.previousResponseId;
 			const idleTimeoutMs =
 				options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
 			const firstEventTimeoutMs =
-				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
+				options?.streamFirstEventTimeoutMs ??
+				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const requestUrl = `${resolvedBaseUrl}/responses`;
@@ -490,52 +528,46 @@ const streamOpenAIResponsesOnce = (
 				body: chained.params,
 			};
 			rawRequestDump = activeRawRequestDump;
-			const openResponsesStream = (requestParams: OpenAIResponsesSamplingParams) => {
+			const openResponsesStream = async (
+				requestParams: OpenAIResponsesSamplingParams,
+			): Promise<AsyncIterable<ResponseStreamEvent>> => {
 				activeReasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"responses",
 					resolvedBaseUrl,
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
 				);
 				activeRequestParams = requestParams;
-				return callWithCopilotModelRetry(
-					async () => {
-						let requestTimeout: NodeJS.Timeout | undefined;
-						if (requestTimeoutMs !== undefined) {
-							requestTimeout = setTimeout(
-								() => abortTracker.abortLocally(firstEventTimeoutAbortError),
-								requestTimeoutMs,
-							);
-						}
-						try {
-							const headersWithTimeout = { ...headers };
-							if (requestTimeoutMs !== undefined) {
-								headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
-							}
-							const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
-								url: requestUrl,
-								headers: headersWithTimeout,
-								body: requestParams,
-								signal: requestSignal,
-								fetch: options?.fetch,
-								// Transient 408/429/5xx get Retry-After-aware transport
-								// retries; the first-event watchdog aborts `requestSignal`,
-								// so retries cannot extend the caller's deadline.
-								onSseEvent: rawSseObserver,
-							});
-							// Disarm the first-event watchdog as soon as headers arrive — a slow
-							// onResponse callback must not abort an already-connected stream.
-							if (requestTimeout !== undefined) {
-								clearTimeout(requestTimeout);
-								requestTimeout = undefined;
-							}
-							await notifyProviderResponse(options, response, model, requestId);
-							return events;
-						} finally {
-							if (requestTimeout !== undefined) clearTimeout(requestTimeout);
-						}
-					},
-					{ provider: model.provider, signal: requestSignal },
-				);
+				let requestTimeout: NodeJS.Timeout | undefined;
+				if (requestTimeoutMs !== undefined) {
+					requestTimeout = setTimeout(
+						() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+						requestTimeoutMs,
+					);
+				}
+				try {
+					const headersWithTimeout = { ...headers };
+					if (requestTimeoutMs !== undefined) {
+						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
+					}
+					const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
+						url: requestUrl,
+						headers: headersWithTimeout,
+						body: requestParams,
+						signal: requestSignal,
+						fetch: options?.fetch,
+						// Transient 408/429/5xx get Retry-After-aware transport
+						// retries; the first-event watchdog aborts `requestSignal`,
+						// so retries cannot extend the caller's deadline.
+						onSseEvent: rawSseObserver,
+					});
+					// Disarm the first-event watchdog as soon as headers arrive — a slow
+					// onResponse callback must not abort an already-connected stream.
+					clearTimeout(requestTimeout);
+					await notifyProviderResponse(options, response, model, requestId);
+					return events;
+				} finally {
+					clearTimeout(requestTimeout);
+				}
 			};
 			let strictRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
@@ -559,7 +591,9 @@ const streamOpenAIResponsesOnce = (
 						const reasoningEffortFallback =
 							activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
 								? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
-										explicitDisable: options?.disableReasoning === true && options.reasoning === undefined,
+										explicitDisable:
+											options?.forceReasoningOff === true ||
+											(options?.disableReasoning === true && options.reasoning === undefined),
 									})
 								: undefined;
 						if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
@@ -577,18 +611,17 @@ const streamOpenAIResponsesOnce = (
 							continue;
 						}
 						const compiledGrammarTooLarge =
-							isOpenRouterAnthropicModel(model) &&
+							model.compat.retryWithoutStrictOnGrammarError &&
 							isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse);
 						const canRetryWithoutStrictTools =
 							strictRetryAvailable &&
 							!requestSignal.aborted &&
 							(compiledGrammarTooLarge ||
-								shouldRetryWithoutStrictTools(
-									error,
-									capturedErrorResponse,
-									activeStrictToolsApplied,
-									context.tools,
-								));
+								shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
+									model,
+									strictToolsApplied: activeStrictToolsApplied,
+									tools: context.tools,
+								}));
 						if (canRetryWithoutStrictTools) {
 							strictRetryAvailable = false;
 							forceDisableStrictTools = true;
@@ -600,12 +633,17 @@ const streamOpenAIResponsesOnce = (
 								providerSessionState,
 								strictToolsScope,
 								true,
+								chainState?.canAppend ? chainState.lastParams?.input : undefined,
 							);
 							const fallbackParams = fallbackBuilt.params;
 							if (chainState && !chainState.disabled) fallbackParams.store = true;
 							let fallbackChained: OpenAIResponsesChainedParams =
 								chainState && !chainState.disabled
-									? buildOpenAIResponsesChainedParams(fallbackParams, chainState)
+									? buildOpenAIResponsesChainedParams(
+											fallbackParams,
+											fallbackBuilt.trailingScaffoldingItems,
+											chainState,
+										)
 									: { params: fallbackParams };
 							sentPreviousResponseId = fallbackChained.previousResponseId;
 							fallbackChained = {
@@ -615,7 +653,7 @@ const streamOpenAIResponsesOnce = (
 							chained = fallbackChained;
 							activeRawRequestDump.body = chained.params;
 							activeParams = fallbackParams;
-							activeStrictToolsApplied = fallbackBuilt.strictToolsApplied;
+							activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
 							continue;
 						}
 						if (!chainState || !sentPreviousResponseId || requestSignal.aborted) {
@@ -661,6 +699,7 @@ const streamOpenAIResponsesOnce = (
 						chained = { params: retryParams };
 						activeRawRequestDump.body = retryParams;
 						activeParams = currentParams;
+						activeTrailingScaffoldingItems = currentBuilt.trailingScaffoldingItems;
 						activeStrictToolsApplied = currentBuilt.strictToolsApplied;
 					}
 				}
@@ -797,7 +836,18 @@ const streamOpenAIResponsesOnce = (
 			if (replayableResponseItems) {
 				if (providerSessionState) providerSessionState.nativeHistoryReplayWarmed = true;
 				if (chainState) {
-					chainState.lastParams = structuredCloneJSON(activeParams);
+					chainState.lastParams = structuredCloneJSON(
+						activeTrailingScaffoldingItems > 0 && Array.isArray(activeParams.input)
+							? {
+									...activeParams,
+									input: activeParams.input.slice(
+										0,
+										activeParams.input.length - activeTrailingScaffoldingItems,
+									),
+								}
+							: activeParams,
+					);
+					chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
 					if (output.responseId) {
 						chainState.lastResponseId = output.responseId;
 						chainState.lastResponseItems = replayableResponseItems;
@@ -815,7 +865,15 @@ const streamOpenAIResponsesOnce = (
 				// baseline, but `lastParams` still records the successful wire controls
 				// without re-enabling `previous_response_id` chaining.
 				chainState.canAppend = false;
-				chainState.lastParams = structuredCloneJSON(activeParams);
+				chainState.lastParams = structuredCloneJSON(
+					activeTrailingScaffoldingItems > 0 && Array.isArray(activeParams.input)
+						? {
+								...activeParams,
+								input: activeParams.input.slice(0, activeParams.input.length - activeTrailingScaffoldingItems),
+							}
+						: activeParams,
+				);
+				chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
 				chainState.lastResponseId = undefined;
 				chainState.lastResponseItems = undefined;
 			}
@@ -852,22 +910,196 @@ const streamOpenAIResponsesOnce = (
 };
 
 /**
- * Public entry: wrap the single-attempt Responses streamer with bounded
- * empty-completion retries — a `response.completed` carrying no content/usage
- * would otherwise stall the agent loop. Shared with the OpenAI-completions and
- * Anthropic providers via `withEmptyCompletionRetry`.
+ * Public entry: retry benign empty completions before they reach the agent
+ * loop. Transient stream failures are retried inside the attempt so stateful
+ * Responses request metadata remains stable.
  */
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOpenAIResponsesOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
+		retryEmptyCompletion: true,
+	});
 
-function isOfficialOpenAIResponsesEndpoint(model: Model<"openai-responses">): boolean {
-	if (model.provider !== "openai") return false;
-	if (!model.baseUrl) return true;
-	try {
-		return new URL(model.baseUrl).hostname === "api.openai.com";
-	} catch {
+function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {
+	if (typeof block !== "object" || block === null || !("type" in block)) return false;
+	return block.type === "input_text" || block.type === "input_image" || block.type === "input_file";
+}
+
+type ResponsesPromptCacheableMessage = {
+	role: "assistant" | "developer" | "system" | "user";
+	content: ResponseInputContent[];
+};
+
+function isResponsesPromptCacheableMessage(item: unknown): item is ResponsesPromptCacheableMessage {
+	if (typeof item !== "object" || item === null || !("role" in item) || !("content" in item)) return false;
+	if (item.role !== "assistant" && item.role !== "developer" && item.role !== "system" && item.role !== "user")
 		return false;
+	return Array.isArray(item.content) && item.content.every(isResponsesPromptCacheableContentBlock);
+}
+
+type ResponsesStringInstruction = {
+	role: "developer" | "system";
+	content: string;
+};
+
+function isStableStringResponsesInstruction(item: unknown): item is ResponsesStringInstruction {
+	if (typeof item !== "object" || item === null || !("role" in item) || !("content" in item)) return false;
+	return (
+		(item.role === "developer" || item.role === "system") &&
+		typeof item.content === "string" &&
+		item.content.length > 0
+	);
+}
+
+function matchesResponsesCacheBaseline(
+	baseline: ResponsesPromptCacheableMessage,
+	current: ResponsesPromptCacheableMessage,
+): boolean {
+	if (baseline.role !== current.role || baseline.content.length !== current.content.length) return false;
+	for (let index = 0; index < baseline.content.length; index++) {
+		const baselineBlock = baseline.content[index];
+		const currentBlock = current.content[index];
+		if (!baselineBlock || !currentBlock) return false;
+		const breakpoint = baselineBlock.prompt_cache_breakpoint;
+		if (breakpoint) {
+			if (!Bun.deepEquals(baselineBlock, { ...currentBlock, prompt_cache_breakpoint: breakpoint })) return false;
+		} else if (!Bun.deepEquals(baselineBlock, currentBlock)) {
+			return false;
+		}
 	}
+	return true;
+}
+
+function restoreResponsesCacheBreakpointsFromBaseline(
+	input: ResponseInput | undefined,
+	baseline: ResponseInput | undefined,
+): boolean {
+	if (!input || !baseline) return false;
+	let restored = false;
+	for (let i = 0; i < baseline.length && i < input.length; i++) {
+		const baselineMessage = baseline[i];
+		const message = input[i];
+		if (!isResponsesPromptCacheableMessage(baselineMessage)) continue;
+
+		if (isStableStringResponsesInstruction(message)) {
+			const [baselineBlock] = baselineMessage.content;
+			if (
+				baselineMessage.role === message.role &&
+				baselineBlock?.type === "input_text" &&
+				baselineBlock.text === message.content &&
+				baselineBlock.prompt_cache_breakpoint
+			) {
+				Object.assign(message, {
+					content: [
+						{
+							type: "input_text",
+							text: message.content,
+							prompt_cache_breakpoint: baselineBlock.prompt_cache_breakpoint,
+						},
+					],
+				});
+				restored = true;
+			}
+			continue;
+		}
+
+		if (!isResponsesPromptCacheableMessage(message) || !matchesResponsesCacheBaseline(baselineMessage, message))
+			continue;
+		for (let j = 0; j < baselineMessage.content.length; j++) {
+			const baselineBlock = baselineMessage.content[j];
+			const block = message.content[j];
+			if (!baselineBlock?.prompt_cache_breakpoint || !block) continue;
+			Object.assign(block, { prompt_cache_breakpoint: baselineBlock.prompt_cache_breakpoint });
+			restored = true;
+		}
+	}
+	return restored;
+}
+
+function hasResponsesCacheBreakpoint(input: ResponseInput | undefined): boolean {
+	return (
+		input?.some(
+			message =>
+				isResponsesPromptCacheableMessage(message) &&
+				message.content.some(block => block.prompt_cache_breakpoint !== undefined),
+		) ?? false
+	);
+}
+
+function markLatestStableResponsesCacheBreakpoint(
+	input: ResponseInput | undefined,
+	statefulBaseline?: ResponseInput,
+): boolean {
+	if (!input) return false;
+	// Stateful appends use a strict wire-prefix comparison. Retain the exact
+	// marker from that prefix rather than recomputing a newer boundary.
+	if (statefulBaseline) {
+		if (restoreResponsesCacheBreakpointsFromBaseline(input, statefulBaseline)) return true;
+		// A prior marker whose content no longer matches means chaining will
+		// reset to a full replay. Recompute a fresh boundary for that replay.
+		// Markerless baselines stay markerless so appends do not mutate them.
+		if (!hasResponsesCacheBreakpoint(statefulBaseline)) return false;
+	}
+
+	let latestInputMessage = -1;
+	for (let i = input.length - 1; i >= 0; i--) {
+		const message = input[i];
+		if (!("role" in message)) continue;
+		if (message.role === "user" || message.role === "developer") {
+			latestInputMessage = i;
+			break;
+		}
+	}
+	if (latestInputMessage <= 0) return false;
+
+	for (let i = latestInputMessage - 1; i >= 0; i--) {
+		const message = input[i];
+		if (isStableStringResponsesInstruction(message)) {
+			const text = message.content;
+			Object.assign(message, {
+				content: [
+					{
+						type: "input_text",
+						text,
+						prompt_cache_breakpoint: { mode: "explicit" },
+					},
+				],
+			});
+			return true;
+		}
+		if (!isResponsesPromptCacheableMessage(message)) continue;
+		for (let j = message.content.length - 1; j >= 0; j--) {
+			const block = message.content[j];
+			if (!isResponsesPromptCacheableContentBlock(block)) continue;
+			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
+			return true;
+		}
+	}
+	return false;
+}
+
+function applyOpenAIResponsesPromptCachePolicy(
+	params: OpenAIResponsesSamplingParams,
+	model: Model<"openai-responses">,
+	options: OpenAIResponsesOptions | undefined,
+	statefulCacheBaseline?: ResponseInput,
+): void {
+	const promptCache = options?.promptCache;
+	if (!promptCache || resolveCacheRetention(options?.cacheRetention) === "none") return;
+	if (!model.compat.supportsPromptCacheBreakpoints) {
+		if (promptCache.mode === "explicit") {
+			throw new AIError.ConfigurationError(
+				`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; enable compat.supportsPromptCacheBreakpoints only for a compatible endpoint.`,
+			);
+		}
+		return;
+	}
+
+	params.prompt_cache_options = {
+		mode: promptCache.mode,
+		ttl: promptCache.ttl ?? model.compat.promptCacheBreakpointTtl,
+	};
+	if (promptCache.mode === "explicit" && promptCache.breakpoint !== "none")
+		markLatestStableResponsesCacheBreakpoint(params.input, statefulCacheBaseline);
 }
 
 export function buildParams(
@@ -877,7 +1109,8 @@ export function buildParams(
 	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
-): { params: OpenAIResponsesSamplingParams; strictToolsApplied: boolean } {
+	statefulCacheBaseline?: ResponseInput,
+): { params: OpenAIResponsesSamplingParams; trailingScaffoldingItems: number; strictToolsApplied: boolean } {
 	const policy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
 		reasoning: options?.reasoning,
@@ -900,6 +1133,10 @@ export function buildParams(
 			filterReasoning: policy.reasoning.filterReasoningHistory,
 		},
 		includeThinkingSignatures: shouldReplayNativeHistory && !policy.reasoning.filterReasoningHistory,
+		requiresReasoningReplayForAllTurns:
+			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForAllAssistantTurns,
+		requiresReasoningReplayForToolCalls:
+			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
 		repairOrphanOutputs: true,
 	});
 
@@ -945,6 +1182,7 @@ export function buildParams(
 		store: false,
 		stream_options: model.compat.supportsObfuscationOptOut ? { include_obfuscation: false } : undefined,
 	};
+	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 	maybeAddOpenRouterAnthropicCacheControl(params, model, cacheRetention);
 	const outputToken = resolveOpenAIOutputTokenParam({
 		field: "max_output_tokens",
@@ -954,10 +1192,11 @@ export function buildParams(
 		omitMaxOutputTokens: model.omitMaxOutputTokens ?? false,
 		isOpenRouterHost: model.compat.isOpenRouterHost,
 		alwaysSendMaxTokens: model.compat.alwaysSendMaxTokens,
+		providerOutputClamp: resolveOpenAIResponsesOutputClamp(model),
 	});
 
 	applyCommonResponsesSamplingParams(params, { ...options, maxTokens: outputToken?.value }, model);
-	if (options?.textVerbosity && isOfficialOpenAIResponsesEndpoint(model)) {
+	if (options?.textVerbosity && model.compat.officialEndpoint) {
 		params.text = { ...params.text, verbosity: options.textVerbosity };
 	}
 	// TODO: openai responses has no top-level `stop`/`stop_sequences`; surface via reasoning.stop?
@@ -980,15 +1219,35 @@ export function buildParams(
 			const emittedNames = new Set(
 				params.tools.map(t => (t as { name?: string }).name).filter((n): n is string => n !== undefined),
 			);
+			const emittedComputer = params.tools.some(tool => tool.type === "computer");
 			const survivingTools =
 				params.tools.length === context.tools.length
 					? context.tools
-					: context.tools.filter(t => emittedNames.has(t.customWireName ?? t.name));
+					: context.tools.filter(
+							t =>
+								emittedNames.has(t.customWireName ?? t.name) ||
+								(t.native?.type === "computer" && emittedComputer),
+						);
 			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
 			if (toolChoice !== undefined && params.tools.length > 0) {
-				params.tool_choice = toolChoice;
+				if (
+					typeof toolChoice === "object" &&
+					toolChoice.type === "function" &&
+					!model.compat.supportsNamedToolChoice
+				) {
+					// String-only hosts cannot receive the named object. Restrict the
+					// catalogue first so "required" still forces the requested tool.
+					params.tools = params.tools.filter(tool => tool.type === "function" && tool.name === toolChoice.name);
+					params.tool_choice = "required";
+				} else {
+					params.tool_choice = toolChoice;
+				}
 			}
 		}
+	}
+
+	if (shouldDropAutoToolChoiceForReasoning(model, model.compat, params.tool_choice, options)) {
+		delete params.tool_choice;
 	}
 
 	const reasoningPolicy = resolveOpenAICompatPolicy(model, {
@@ -1001,14 +1260,9 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
-	const reasoningSummary =
-		model.provider === "xai-oauth"
-			? options?.reasoning === undefined
-				? undefined
-				: null
-			: options?.reasoningSummary;
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
-		reasoningSummary,
+		reasoningSummary: resolveReasoningSummaryOption(model, options),
+		forceReasoningOff: options?.forceReasoningOff,
 		mapEffort: effort =>
 			model.compat.reasoningEffortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
 			model.thinking?.effortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
@@ -1018,15 +1272,31 @@ export function buildParams(
 	// mode survives every policy branch (disabled/omitted effort included) while
 	// keeping whatever effort/summary the policy produced — mode and effort are
 	// independent wire fields.
-	if (model.reasoningMode) {
+	if (model.reasoningMode && !options?.forceReasoningOff) {
 		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
 	}
 
-	applyOpenAIGatewayRouting(params, model.compat);
+	if (model.compat.isVercelGatewayHost) {
+		applyVercelResponsesCacheControls(params, model.compat, cacheRetention);
+	} else {
+		applyOpenAIGatewayRouting(params, model.compat);
+	}
 
 	applyOpenAIExtraBody(params, options?.extraBody);
+	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
 
-	return { params, strictToolsApplied };
+	let trailingScaffoldingItems = 0;
+	if (options?.forceReasoningOff && model.compat.requiresReasoningOffJuiceInstruction) {
+		const effort = options.reasoning ?? "medium";
+		const juice = getJuiceValue(effort);
+		messages.push({
+			role: "developer",
+			content: [{ type: "input_text", text: `# Juice: ${juice} !important` }],
+		});
+		trailingScaffoldingItems = 1;
+	}
+
+	return { params, trailingScaffoldingItems, strictToolsApplied };
 }
 
 /**
@@ -1052,6 +1322,11 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	if (isForcedToolChoice(choice) && !model.compat.supportsForcedToolChoice) {
 		return "auto";
 	}
+	if (typeof choice !== "string" && choice?.type === "computer") {
+		const computer = tools.find(tool => tool.native?.type === "computer");
+		if (!computer) return undefined;
+		return model.supportsComputerUse === true ? { type: "computer" } : { type: "function", name: computer.name };
+	}
 	const mapped = mapToOpenAIResponsesToolChoice(choice);
 	if (!mapped || typeof mapped === "string" || mapped.type !== "function") {
 		return mapped;
@@ -1062,6 +1337,9 @@ export function mapOpenAIResponsesToolChoiceForTools(
 		? tools.find(tool => tool.customFormat && (tool.name === mapped.name || tool.customWireName === mapped.name))
 		: undefined;
 	const offeredTool = customTool ?? directTool;
+	if (offeredTool?.native?.type === "computer") {
+		return model.supportsComputerUse === true ? { type: "computer" } : { type: "function", name: offeredTool.name };
+	}
 	if (!offeredTool) {
 		return undefined;
 	}
@@ -1079,8 +1357,16 @@ export function convertTools(
 		),
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
+	const rejectRootObjectUnion = model.compat.rejectRootObjectUnion;
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
+		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
+			out.push({ type: "computer" });
+			continue;
+		}
+		// Models without native computer support fall through and receive the
+		// tool as a plain function tool (name/description/schema below), so
+		// function-calling models can still drive the desktop.
 		if (allowFreeform && tool.customFormat) {
 			out.push({
 				type: "custom",
@@ -1104,16 +1390,18 @@ export function convertTools(
 		// subschemas ("property schema … must be an object"), so the Moonshot
 		// pass re-coerces them last.
 		const sanitized = sanitizeSchemaForOpenAIResponses(baseParameters);
+		const providerParameters = rejectRootObjectUnion ? flattenExclusiveRequiredRootUnion(sanitized) : sanitized;
 		const responseParameters =
 			model.compat.toolSchemaFlavor === "moonshot-mfjs"
-				? (normalizeSchemaForMoonshot(sanitized) as Record<string, unknown>)
-				: sanitized;
+				? (normalizeSchemaForMoonshot(providerParameters) as Record<string, unknown>)
+				: providerParameters;
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
 		// Quarantine a tool whose emitted schema carries a provider-rejecting
 		// enum/const-vs-type contradiction: dropping just that tool keeps the rest
 		// of the request valid instead of letting one bad MCP schema 400 the whole
-		// turn (#2652). Other tools and built-ins are unaffected.
-		const violation = findStrictToolSchemaViolation(parameters);
+		// turn (#2652). Other tools and built-ins are unaffected. Leftover
+		// object-root unions are rejected only when declared by compatibility policy.
+		const violation = findStrictToolSchemaViolation(parameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			onQuarantine(tool.name, violation);
 			continue;

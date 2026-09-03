@@ -5,7 +5,7 @@
  * behavior series.
  */
 
-import { format } from "date-fns";
+import { format } from "@oh-my-pi/pi-utils/dates";
 
 // OMP brand palette (packages/collab-web/src/styles/tokens.css): pink/purple/cyan.
 // Categorical series lead with the brand gradient hues (pink -> purple -> cyan).
@@ -19,6 +19,22 @@ export const MODEL_COLORS = [
 	"#f5c14b", // amber
 	"#ff6b7d", // rose
 ];
+
+export function buildModelColorLookup(
+	records: readonly { model: string; provider: string; totalRequests: number }[],
+): Map<string, string> {
+	const rankedRecords = [...records].sort(
+		(a, b) =>
+			b.totalRequests - a.totalRequests || `${a.model}::${a.provider}`.localeCompare(`${b.model}::${b.provider}`),
+	);
+
+	return new Map(
+		rankedRecords.map((record, index) => [
+			`${record.model}::${record.provider}`,
+			MODEL_COLORS[index % MODEL_COLORS.length],
+		]),
+	);
+}
 
 export const CHART_THEMES = {
 	dark: {

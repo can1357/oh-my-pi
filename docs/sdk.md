@@ -1,7 +1,7 @@
 # SDK
 
 The SDK is the in-process integration surface for `@oh-my-pi/pi-coding-agent`.
-Use it when you want direct access to agent state, event streaming, tool wiring, and session control from your own Bun/Node process.
+Use it when you want direct access to agent state, event streaming, tool wiring, and session control from a Bun process.
 
 If you need cross-language/process isolation, use RPC mode instead.
 
@@ -11,20 +11,28 @@ If you need cross-language/process isolation, use RPC mode instead.
 bun add @oh-my-pi/pi-coding-agent
 ```
 
+Requires Bun 1.3.14 or newer. Before the first model-backed prompt, configure
+credentials for a provider or run a keyless local provider; see
+[Providers](./providers.md). Session construction can succeed without an
+available model, but prompting cannot.
+
 ## Entry points
 
-`@oh-my-pi/pi-coding-agent` exports the SDK APIs from the package root (and also via `@oh-my-pi/pi-coding-agent/sdk`).
+The package root, `@oh-my-pi/pi-coding-agent`, is the complete embedding surface. It includes `createAgentSession` and the focused `/sdk` exports, plus lower-level session, auth, model, mode, extension, and tool APIs.
 
-Core exports for embedders:
+Import these core embedding APIs from the package root:
 
 - `createAgentSession`
 - `SessionManager`
 - `Settings`
 - `AuthStorage`
 - `ModelRegistry`
+- `AgentRegistry`
 - `discoverAuthStorage`
 - Discovery helpers (`discoverExtensions`, `discoverSkills`, `discoverContextFiles`, `discoverPromptTemplates`, `discoverSlashCommands`, `discoverCustomTSCommands`, `discoverMCPServers`)
 - Tool factory surface (`createTools`, `BUILTIN_TOOLS`, tool classes)
+
+The narrower `@oh-my-pi/pi-coding-agent/sdk` subpath exports `createAgentSession`, its option/result types, `Settings`, `AgentRegistry`, discovery and system-prompt helpers, workspace-tree helpers, selected extension/MCP/tool types, and selected tool classes/factories. It does **not** export `SessionManager`, `AuthStorage`, or `ModelRegistry`; import those three from the package root as the examples below do.
 
 ## Quick start (auto-discovery defaults)
 
@@ -62,8 +70,8 @@ If omitted, it resolves:
 - `authStorage`: `discoverAuthStorage(agentDir)`
 - `modelRegistry`: `new ModelRegistry(authStorage)` + background `refreshInBackground()` when the registry is not provided
 - `settings`: `await Settings.init({ cwd, agentDir })`
-- `sessionManager`: `SessionManager.create(cwd)` (file-backed)
-- skills/context files/prompt templates/slash commands/extensions/custom TS commands
+- `sessionManager`: `SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir))` (file-backed)
+- skills/rules/context files/prompt templates/slash commands/extensions/custom TS commands
 - built-in tools via `createTools(...)`
 - MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in browser tool is enabled)
 - LSP integration (enabled by default)
@@ -73,12 +81,22 @@ If omitted, it resolves:
 
 Typically you must provide only what you want to control:
 
+```ts
+function createAgentSession(
+  options?: CreateAgentSessionOptions,
+): Promise<CreateAgentSessionResult>;
+```
+
 - **Must provide**: nothing for a minimal session
 - **Usually provide explicitly** in embedders:
   - `sessionManager` (if you need in-memory or custom location)
   - `authStorage` + `modelRegistry` (if you own credential/model lifecycle)
   - `model` or `modelPattern` (if deterministic model selection matters)
   - `settings` (if you need isolated/test config)
+
+For multiple concurrent top-level sessions in one process, pass a private
+`AgentRegistry` to each session. The default process-global registry admits
+only one `"Main"` identity per generation.
 
 ## Session manager behavior (persistent vs in-memory)
 
@@ -130,6 +148,10 @@ const opened = listed[0] ? await SessionManager.open(listed[0].path) : null;
 
 `createAgentSession()` uses `ModelRegistry` + `AuthStorage` for model selection and API key resolution.
 
+If both `authStorage` and `modelRegistry` are supplied,
+`modelRegistry.authStorage` MUST be the same instance; session creation rejects
+divergent stores.
+
 ### Explicit wiring
 
 ```ts
@@ -163,7 +185,7 @@ When no explicit `model`/`modelPattern` is provided:
 
 1. restore model from existing session (if restorable + key available)
 2. settings default model role (`default`)
-3. first available model with valid auth
+3. an authenticated provider-default model in availability order (falling back to the first authenticated available model when no provider default is present)
 
 If restore fails, `modelFallbackMessage` explains fallback.
 
@@ -173,10 +195,11 @@ If restore fails, `modelFallbackMessage` explains fallback.
 
 1. runtime override (`setRuntimeApiKey`, used by CLI `--api-key`)
 2. config-sourced API key override (`models.yml` provider `apiKey`)
-3. stored API-key credential in `agent.db` / broker-backed storage
-4. stored OAuth credential, including refresh when needed
+3. stored OAuth credential, including refresh when needed
+4. API key persisted by a successful `/login`
 5. provider environment variables
-6. custom-provider resolver fallback
+6. other stored API-key credential in `agent.db` / broker-backed storage
+7. custom-provider resolver fallback
 
 ## Event subscription model
 
@@ -203,9 +226,19 @@ const unsubscribe = session.subscribe((event) => {
 - `auto_compaction_start` / `auto_compaction_end`
 - `auto_retry_start` / `auto_retry_end`
 - `retry_fallback_applied` / `retry_fallback_succeeded`
+- `model_changed`
+- `thinking_level_changed`
 - `ttsr_triggered`
 - `todo_reminder` / `todo_auto_clear`
 - `irc_message`
+- `notice`
+- `goal_updated`
+
+`agent_end` includes `messages`, optional telemetry fields, and
+`isTerminal?: boolean`. When `isTerminal` is `false`, maintenance or async
+delivery will resume the session before its true final settle. Subscribers that
+use `agent_end` as a completion signal MUST wait for `isTerminal !== false`.
+Treat an absent field as terminal for compatibility with older runtimes.
 
 ## Prompt lifecycle
 
@@ -231,18 +264,48 @@ Related APIs:
 - `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
 - `abort()`
 
+## `AgentSession` lifecycle and disposal
+
+Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.
+
+`beginDispose()` is the synchronous admission barrier for wrappers that must await their own teardown before calling `dispose()`. Call it before the wrapper's first `await`; otherwise deferred work can enter the gap. It immediately marks the session disposed, cancels memory startup, title generation, and auto-learn capture, clears queued yield/asides, stops advisor runtime, detaches aside delivery, and rejects new eval executions. Deferred session work checks the disposed state and is dropped or skipped. `beginDispose()` is also idempotent, and the later `dispose()` call remains required to finish asynchronous cleanup.
+
+```ts
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
+
+async function closeEmbeddedSession(
+  session: AgentSession,
+  closeHostInputAndUi: () => Promise<void>,
+): Promise<void> {
+  session.beginDispose(); // no new deferred work may enter after this point
+  await closeHostInputAndUi();
+  await session.dispose();
+}
+```
+
+During asynchronous disposal, the session records and synchronously flushes its exit diagnostic, emits `session_shutdown` once, stops extension fallback timers, aborts retries, compaction, and the active agent turn, and gives post-prompt and auto-learn work bounded time to settle. It then tears down session-owned async jobs, eval kernels, browser tabs, native computer sessions, MCP connections, advisor state, and memory state concurrently. These subsystem drains are best-effort and bounded where applicable; failures are logged rather than preventing the remaining subsystem cleanup.
+
+Only after work capable of appending session entries has settled does disposal clean up an empty moved session, close the `SessionManager`, close provider session state, disconnect the agent, and remove listeners. A failure from the final persistence cleanup or `SessionManager.close()` rejects the shared disposal promise; individual provider-session close failures are logged.
+
 ## Tools and extension integration
 
 ### Built-ins and filtering
 
 - Built-ins come from `createTools(...)` and `BUILTIN_TOOLS`.
-- `toolNames` acts as an allowlist for built-ins.
-- `customTools` and extension-registered tools are still included.
+- `toolNames` requests named tools and can enable tools that are disabled by
+  default; by itself it is **not** an allowlist.
+- Set `restrictToolNames: true` to limit the session to the names in
+  `toolNames`. Restricted sessions disable ambient MCP, extensions, custom
+  commands, and LSP by default.
+- In a restricted session, SDK-supplied `customTools` are excluded unless
+  `allowRestrictedCustomTools: true` and their names also appear in
+  `toolNames`.
 - Hidden tools (for example `yield`) are opt-in unless required by options.
 
 ```ts
 const { session } = await createAgentSession({
-  toolNames: ["read", "search", "find", "write"],
+  toolNames: ["read", "grep", "glob", "write"],
+  restrictToolNames: true,
   requireYieldTool: true,
 });
 ```
@@ -251,8 +314,12 @@ const { session } = await createAgentSession({
 
 - `extensions`: inline `ExtensionFactory[]`
 - `additionalExtensionPaths`: load extra extension files
-- `disableExtensionDiscovery`: disable automatic extension scanning
-- `preloadedExtensions`: reuse already loaded extension set
+- `disableExtensionDiscovery`: disable ambient scanning; explicit paths and
+  inline factories still load
+- `preloadedExtensions`: reuse an extension set loaded early by the same
+  session-owning process. Never pass loaded extension instances from a parent
+  to another session; use `preloadedExtensionPaths` so each session gets its
+  own `ExtensionAPI` binding.
 
 ### Runtime tool set changes
 
@@ -272,7 +339,7 @@ Use these when you want partial control without recreating internal discovery lo
 - `discoverAuthStorage(agentDir?)`
 - `discoverExtensions(cwd?)`
 - `discoverSkills(cwd?, _agentDir?, settings?)`
-- `discoverContextFiles(cwd?, _agentDir?)`
+- `discoverContextFiles(cwd?, _agentDir?, disabledExtensions?)`
 - `discoverPromptTemplates(cwd?, agentDir?)`
 - `discoverSlashCommands(cwd?)`
 - `discoverCustomTSCommands(cwd?, agentDir?)`
@@ -284,6 +351,7 @@ Use these when you want partial control without recreating internal discovery lo
 For SDK consumers building orchestrators (similar to task executor flow):
 
 - `outputSchema`: passes structured output expectation into tool context
+- `outputSchemaMode`: selects permissive or strict structured-output enforcement
 - `requireYieldTool`: forces `yield` tool inclusion
 - `taskDepth`: recursion-depth context for nested task sessions
 - `parentTaskPrefix`: artifact naming prefix for nested task outputs
@@ -348,7 +416,7 @@ const { session } = await createAgentSession({
   modelRegistry,
   settings,
   sessionManager: SessionManager.inMemory(),
-  toolNames: ["read", "search", "find", "edit", "write"],
+  toolNames: ["read", "grep", "glob", "edit", "write"],
   enableMCP: false,
   enableLsp: true,
 });

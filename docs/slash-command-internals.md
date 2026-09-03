@@ -7,16 +7,21 @@ This document describes how slash commands are discovered, deduplicated, surface
 - [`src/extensibility/slash-commands.ts`](../packages/coding-agent/src/extensibility/slash-commands.ts)
 - [`src/capability/slash-command.ts`](../packages/coding-agent/src/capability/slash-command.ts)
 - [`src/discovery/builtin.ts`](../packages/coding-agent/src/discovery/builtin.ts)
+- [`src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts)
 - [`src/discovery/claude.ts`](../packages/coding-agent/src/discovery/claude.ts)
 - [`src/discovery/codex.ts`](../packages/coding-agent/src/discovery/codex.ts)
 - [`src/discovery/claude-plugins.ts`](../packages/coding-agent/src/discovery/claude-plugins.ts)
+- [`src/discovery/agents.ts`](../packages/coding-agent/src/discovery/agents.ts)
+- [`src/discovery/opencode.ts`](../packages/coding-agent/src/discovery/opencode.ts)
 - [`src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
+- [`src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
+- [`src/slash-commands/acp-builtins.ts`](../packages/coding-agent/src/slash-commands/acp-builtins.ts)
+- [`src/slash-commands/available-commands.ts`](../packages/coding-agent/src/slash-commands/available-commands.ts)
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`src/modes/interactive-mode.ts`](../packages/coding-agent/src/modes/interactive-mode.ts)
 - [`src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
 - [`src/modes/utils/ui-helpers.ts`](../packages/coding-agent/src/modes/utils/ui-helpers.ts)
-- [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts)
 
 ## 1) Discovery model
 
@@ -47,6 +52,8 @@ For `slash-commands`, collisions are resolved strictly by capability dedup:
 
 This applies across providers and also within a provider if it returns duplicate names.
 
+Built-ins are not items in this file capability. They live in the unified built-in registry and are dispatched before session-level extension/custom/file expansion in TUI and ACP/RPC modes. Autocomplete/ACP availability also reserves built-in names and aliases first.
+
 ### File scanning behavior
 
 Providers mostly use `loadFilesFromDir(...)`, which currently:
@@ -64,9 +71,13 @@ So hidden files/directories are not loaded, ignored paths are skipped, and file 
 Search roots come from `.omp` directories:
 
 - project: `<cwd>/.omp/commands/*.md`
-- user: `~/.omp/agent/commands/*.md`
+- user: active profile agent directory `commands/*.md` (`~/.omp/agent/commands/*.md` for the default profile; `~/.omp/profiles/<name>/agent/commands/*.md` for a named profile)
 
 `getConfigDirs()` returns project first, then user, so **project native commands beat user native commands** when names collide.
+
+## `omp-plugins` provider (`omp-plugins.ts`)
+
+Scans `commands/*.md` in configured extension-package roots and enabled npm/link plugins. Root precedence is invocation/CLI, project settings, user settings, then installed plugins. Marketplace roots are excluded here to avoid duplicate discovery and are handled by `claude-plugins`.
 
 ## `claude` provider (`claude.ts`)
 
@@ -105,6 +116,10 @@ Loads plugin command roots via `listClaudePluginRoots(...)`, which reads `~/.cla
 
 Across the three registries, roots are merged by precedence rather than sorted: `--plugin-dir` injected roots come first, then project-scoped entries (which shadow user entries for the same plugin id), then user entries, with the OMP registry authoritative over Claude's for the same plugin id. Within each registry, per-plugin entry order from the JSON data is preserved; there is no additional sort step.
 
+## `agents` provider (`agents.ts`)
+
+Scans non-recursive `commands/*.md` under `.agent/` and `.agents/` from cwd up to the repository root, then `~/.agent/commands` and `~/.agents/commands`. Within this provider, the nearest project root is first; `.agent` precedes `.agents`; project entries precede user entries.
+
 ## 3) Materialization to runtime `FileSlashCommand`
 
 `loadSlashCommands()` in `src/extensibility/slash-commands.ts` converts capability items into `FileSlashCommand` objects used at prompt time.
@@ -118,10 +133,11 @@ For each command:
 3. keep parsed body as executable template content
 4. compute a display source string like `via Claude Code Project`
 
-Frontmatter parse severity is source-dependent:
+Frontmatter parse severity is level-dependent:
 
-- `native` level -> parse errors are `fatal`
-- `user`/`project` levels -> parse errors are `warn` with fallback parsing
+- discovered user/project commands use warning-level parsing with fallback key/value parsing
+- a capability item explicitly marked `native` would use fatal parsing
+- bundled fallback templates use fatal parsing
 
 ### Bundled fallback commands
 
@@ -153,8 +169,9 @@ Then `init()` calls `refreshSlashCommandState(...)` to load file-based commands 
 Slash command state is refreshed:
 
 - during interactive init
-- after `/move` changes working directory (`handleMoveCommand` -> `applyCwdChange`, which calls `resetCapabilities()` then `refreshSlashCommandState(newCwd)`)
-- when the editor component is swapped (`setEditorComponent` re-runs `refreshSlashCommandState()`)
+- after `/move` changes working directory (`applyCwdChange` resets capabilities and refreshes against the new cwd)
+- when the editor component is swapped
+- by explicit plugin reload flows such as `/reload-plugins`
 
 There is no continuous file watcher for command directories.
 
@@ -162,14 +179,16 @@ There is no continuous file watcher for command directories.
 
 The Extensions dashboard also loads `slash-commands` capability and displays active/shadowed command entries, including `_shadowed` duplicates.
 
-## 5) Prompt pipeline placement
+## 5) Routing and prompt-pipeline placement
 
-`AgentSession.prompt(...)` slash handling order (when `expandPromptTemplates !== false`):
+The unified built-in registry is checked before `AgentSession.prompt(...)` in TUI and ACP/RPC modes. A built-in can consume input or return residual prompt text. TUI-only built-ins are omitted from ACP availability and dispatch; ACP-visible built-ins are the entries with a text-mode `handle`.
+
+After that boundary, `AgentSession.prompt(...)` processes slash input in this order when `expandPromptTemplates !== false`:
 
 1. **Extension commands** (`#tryExecuteExtensionCommand`)  
-   If `/name` matches extension-registered command, handler executes immediately and prompt returns.
+   If `/name` matches an extension-registered command, its handler executes immediately and prompt returns.
 2. **TypeScript custom commands and MCP prompt commands** (`#tryExecuteCustomCommand`)
-   Boundary only: if matched, it executes and may return:
+   A match may return:
    - `string` -> replace prompt text with that string
    - `void/undefined` -> treated as handled; no LLM prompt
 3. **File-based slash commands** (`expandSlashCommand`)  
@@ -180,7 +199,7 @@ The Extensions dashboard also loads `slash-commands` capability and displays act
    - idle: prompt is sent immediately to agent
    - streaming: prompt is queued as steer/follow-up depending on `streamingBehavior`
 
-This is why slash command expansion sits before prompt-template expansion, and why custom commands can transform away the leading slash before file-command matching.
+This is why built-ins reserve their names before file commands are considered, slash command expansion sits before prompt-template expansion, and custom commands can transform away the leading slash before file-command matching.
 
 ## 6) Expansion semantics for file-based slash commands
 
@@ -210,9 +229,13 @@ The parser is simple quote-aware splitting:
 
 Unknown slash input is **not rejected** by core slash logic.
 
-If command is not handled by extension/custom/file layers, `expandSlashCommand` returns original text, and the literal `/...` prompt proceeds through normal prompt-template expansion and LLM delivery.
+If no built-in, extension, custom, or file command handles it, `expandSlashCommand` returns the original text and the literal `/...` prompt proceeds through prompt-template expansion and LLM delivery.
 
-Interactive mode separately hard-handles many built-ins in `InputController` (for example `/settings`, `/model`, `/mcp`, `/move`, `/exit`). Those are consumed before `session.prompt(...)` and therefore never reach file-command expansion in that path.
+TUI and ACP/RPC dispatch the shared built-in registry before `session.prompt(...)`. A TUI-only built-in is not advertised or handled in ACP, so an otherwise unhandled spelling can still fall through as ordinary prompt text there.
+
+## ACP/RPC availability
+
+`buildAvailableSlashCommands(...)` publishes commands first-wins in this order: text-capable built-ins, optional skill commands, extension commands, TypeScript/MCP custom commands, then discovered file commands. Built-in primary names and aliases are reserved; extension names such as `model:foo`, whose prefix parses as a built-in, are filtered from ACP availability. The same file-command load updates the session expansion set.
 
 ## 8) Streaming-time differences vs idle
 
@@ -242,3 +265,9 @@ Interactive mode separately hard-handles many built-ins in `InputController` (fo
   - native commands: fatal parse error bubbles
   - non-native commands: warning + fallback key/value parse
 - Extension/custom command handler exceptions are caught and reported via extension error channel (or logger fallback for custom commands without extension runner), and treated as handled (no unintended fallback execution).
+
+## 10) Built-in command note: `/pause`
+
+`/pause` is available only in the interactive TUI. It engages a process-global gate for the main agent, in-process subagents, and the advisor. Each agent parks at its next safe boundary: in-flight calls finish, nothing is aborted, and no new work starts until the gate is released.
+
+From the pause screen, press Esc, Enter, Space, or Ctrl+C to resume. Ctrl+C resumes rather than aborting any agent.

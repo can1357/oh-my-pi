@@ -1,7 +1,7 @@
 /**
  * CLI handler for `omp grievances` — view, clean, and manually push reported tool issues.
  */
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { flushGrievances, openAutoQaDb } from "../tools/report-tool-issue";
 
@@ -41,7 +41,7 @@ export async function listGrievances(options: ListGrievancesOptions): Promise<vo
 			console.log("[]");
 		} else {
 			console.log(
-				chalk.dim("No grievances database found. Enable auto-QA with PI_AUTO_QA=1 or the dev.autoqa setting."),
+				chalk.dim("No grievances database found. Auto-QA has not recorded any reports yet (or was disabled)."),
 			);
 		}
 		return;
@@ -110,7 +110,7 @@ export async function cleanGrievances(options: CleanGrievancesOptions): Promise<
 			console.log(JSON.stringify({ deleted: 0 }));
 		} else {
 			console.log(
-				chalk.dim("No grievances database found. Enable auto-QA with PI_AUTO_QA=1 or the dev.autoqa setting."),
+				chalk.dim("No grievances database found. Auto-QA has not recorded any reports yet (or was disabled)."),
 			);
 		}
 		return;

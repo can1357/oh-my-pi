@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { collectSubSessions } from "../src/export/html";
+import { collectSubSessions, exportFromFile } from "../src/export/html";
 
 /**
  * Contract: a session at `<dir>/<name>.jsonl` embeds subagent transcripts from
@@ -11,9 +11,16 @@ import { collectSubSessions } from "../src/export/html";
  * parent links and last-entry leaf ids. Corrupt/empty/backup files are skipped.
  */
 
-function sessionJsonl(id: string, entryIds: string[]): string {
+function sessionJsonl(id: string, entryIds: string[], previousSessionFiles?: string[]): string {
 	const lines = [
-		JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-06-12T00:00:00.000Z", cwd: "/tmp" }),
+		JSON.stringify({
+			type: "session",
+			version: 3,
+			id,
+			timestamp: "2026-06-12T00:00:00.000Z",
+			cwd: "/tmp",
+			previousSessionFiles,
+		}),
 	];
 	let parent: string | null = null;
 	for (const entryId of entryIds) {
@@ -58,6 +65,28 @@ describe("collectSubSessions", () => {
 		expect(subs.Alpha.header?.id).toBe("alpha");
 		expect(subs["Alpha/Child"]).toMatchObject({ agentId: "Child", parent: "Alpha", leafId: "c1" });
 		expect(subs.Beta).toMatchObject({ agentId: "Beta", parent: null, leafId: "b1" });
+	});
+
+	test("omits internal move history from standalone HTML", async () => {
+		const mainPreviousPath = "/Users/private/main.jsonl";
+		const subPreviousPath = "/Users/private/Alpha.jsonl";
+		await Bun.write(mainFile, sessionJsonl("main", ["m1"], [mainPreviousPath]));
+		await Bun.write(path.join(root, "main/Alpha.jsonl"), sessionJsonl("alpha", ["a1"], [subPreviousPath]));
+		const outputPath = path.join(root, "export.html");
+
+		await exportFromFile(mainFile, { outputPath });
+
+		const html = await Bun.file(outputPath).text();
+		const encoded = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/)?.[1];
+		expect(encoded).toBeDefined();
+		const data = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8")) as {
+			header: { previousSessionFiles?: string[] };
+			subSessions: Record<string, { header: { previousSessionFiles?: string[] } }>;
+		};
+		expect(data.header.previousSessionFiles).toBeUndefined();
+		expect(data.subSessions.Alpha.header.previousSessionFiles).toBeUndefined();
+		expect(html).not.toContain(mainPreviousPath);
+		expect(html).not.toContain(subPreviousPath);
 	});
 
 	test("skips corrupt, empty, backup, and non-jsonl files", async () => {

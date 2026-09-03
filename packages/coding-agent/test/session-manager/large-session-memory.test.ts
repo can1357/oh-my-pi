@@ -7,11 +7,12 @@ import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing"
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 
 class CountingMemorySessionStorage extends MemorySessionStorage {
 	writeTextSyncCalls = 0;
 
-	writeTextSync(filePath: string, content: string): void {
+	override writeTextSync(filePath: string, content: string): void {
 		this.writeTextSyncCalls++;
 		super.writeTextSync(filePath, content);
 	}
@@ -59,7 +60,7 @@ describe("large session memory guards", () => {
 		expect(storage.writeTextSyncCalls).toBe(0);
 	});
 
-	it("elides superseded compactions and rewrites the compacted file", async () => {
+	it("elides superseded compactions only in the forward transcript", async () => {
 		const storage = new CountingMemorySessionStorage();
 		const session = SessionManager.create("/work", "/sessions", storage);
 		const firstKeptEntryId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
@@ -67,27 +68,60 @@ describe("large session memory guards", () => {
 
 		const firstSummary = `first-${"x".repeat(4096)}`;
 		const secondSummary = `second-${"y".repeat(4096)}`;
-		session.appendCompaction(firstSummary, undefined, firstKeptEntryId, 1000, undefined, undefined, {
-			openaiRemoteCompaction: { provider: "anthropic", replacementHistory: [] },
+		const archivedFrame = btoa("archived frame");
+		const replacementHistory = [
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "Preserved user" }] },
+		];
+		const firstPreserve = {
+			openaiRemoteCompaction: { provider: "openai", replacementHistory },
+			[snapcompact.PRESERVE_KEY]: {
+				frames: [{ data: archivedFrame, mimeType: "image/png", cols: 10, rows: 10, chars: 14 }],
+				totalChars: 14,
+				truncatedChars: 0,
+				textHead: "archived",
+				textTail: "frame",
+			},
+		};
+		const firstCompactionId = session.appendCompaction(firstSummary, undefined, firstKeptEntryId, 1000, {
+			preserveData: firstPreserve,
 		});
-		session.appendCompaction(secondSummary, undefined, firstKeptEntryId, 1000);
+		const rewindId = session.appendMessage({ role: "user", content: "between compactions", timestamp: 3 });
+		session.appendCompaction(secondSummary, undefined, rewindId, 2000);
 		await session.flush();
 
-		const compactions = session.getEntries().filter(entry => entry.type === "compaction");
-		expect(compactions).toHaveLength(2);
-		expect(compactions[0]?.summary).not.toBe(firstSummary);
-		expect(compactions[0]?.summary).toContain("Superseded compaction");
-		expect(compactions[0]?.preserveData).toBeUndefined();
-		expect(compactions[1]?.summary).toBe(secondSummary);
+		const firstCompaction = session.getEntry(firstCompactionId);
+		if (firstCompaction?.type !== "compaction") throw new Error("Expected first compaction");
+		expect(firstCompaction.summary).toBe(firstSummary);
+		expect(firstCompaction.preserveData).toEqual(firstPreserve);
+
+		const transcriptCompactions = session
+			.buildSessionContext({ transcript: true })
+			.messages.filter(message => message.role === "compactionSummary");
+		const supersededDisplay = transcriptCompactions[0];
+		if (supersededDisplay?.role !== "compactionSummary") throw new Error("Expected superseded transcript compaction");
+		expect(supersededDisplay.summary).toContain("Superseded compaction");
+		expect((supersededDisplay.blocks ?? []).some(block => block.type === "image")).toBeFalse();
+
+		session.branch(rewindId);
+		const rewoundSummary = session.buildSessionContext().messages[0];
+		if (rewoundSummary?.role !== "compactionSummary") throw new Error("Expected rewound compaction summary");
+		expect(rewoundSummary.summary).toBe(firstSummary);
+		expect(rewoundSummary.providerPayload).toEqual({
+			type: "openaiResponsesHistory",
+			provider: "openai",
+			items: replacementHistory,
+		});
+		expect(rewoundSummary.blocks?.find(block => block.type === "image")).toMatchObject({ data: archivedFrame });
 
 		const sessionFile = session.getSessionFile();
 		if (!sessionFile) throw new Error("Expected session file");
 		const persisted = await storage.readText(sessionFile);
-		expect(persisted).not.toContain(firstSummary);
+		expect(persisted).toContain(firstSummary);
+		expect(persisted).toContain(archivedFrame);
 		expect(persisted).toContain(secondSummary);
 	});
 
-	it("streams large session files and keeps only the latest compaction summary", async () => {
+	it("streams large session files without discarding historical compactions", async () => {
 		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-large-session-"));
 		tempDirs.push(tempDir);
 		const sessionFile = path.join(tempDir, "large.jsonl");
@@ -135,9 +169,8 @@ describe("large session memory guards", () => {
 		const compactions = entries.filter(entry => entry.type === "compaction");
 
 		expect(compactions).toHaveLength(2);
-		expect(compactions[0]?.summary).not.toBe(oldSummary);
-		expect(compactions[0]?.summary).toContain("Superseded compaction");
-		expect(compactions[0]?.preserveData).toBeUndefined();
+		expect(compactions[0]?.summary).toBe(oldSummary);
+		expect(compactions[0]?.preserveData).toEqual({ stale: true });
 		expect(compactions[1]?.summary).toBe(latestSummary);
 	});
 
@@ -149,15 +182,9 @@ describe("large session memory guards", () => {
 
 		const branchACompactionSummary = `branch-a-${"x".repeat(1024)}`;
 		const branchAPreserve = { openaiRemoteCompaction: { provider: "anthropic", replacementHistory: [] } };
-		session.appendCompaction(
-			branchACompactionSummary,
-			undefined,
-			rootId,
-			1000,
-			undefined,
-			undefined,
-			branchAPreserve,
-		);
+		session.appendCompaction(branchACompactionSummary, undefined, rootId, 1000, {
+			preserveData: branchAPreserve,
+		});
 		const branchACompactionId = session.getLeafId();
 		if (!branchACompactionId) throw new Error("Expected branch A compaction id");
 
@@ -177,7 +204,7 @@ describe("large session memory guards", () => {
 		expect(branchBCompactions).toHaveLength(1);
 	});
 
-	it("only elides loaded compactions on the active branch", async () => {
+	it("preserves loaded compactions on every branch", async () => {
 		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-branch-load-"));
 		tempDirs.push(tempDir);
 		const sessionFile = path.join(tempDir, "branched.jsonl");
@@ -243,8 +270,8 @@ describe("large session memory guards", () => {
 
 		expect(branchA.summary).toBe(branchASummary);
 		expect(branchA.preserveData).toBeDefined();
-		expect(branchBOld.summary).toContain("Superseded compaction");
-		expect(branchBOld.preserveData).toBeUndefined();
+		expect(branchBOld.summary).toBe(branchBOldSummary);
+		expect(branchBOld.preserveData).toEqual({ stale: true });
 		expect(branchBNew.summary).toBe(branchBNewSummary);
 	});
 

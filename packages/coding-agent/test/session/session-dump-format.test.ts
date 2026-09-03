@@ -8,10 +8,10 @@
  * previous `<parameter>`-per-key JSON Schema dump dropped entirely.
  */
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { Model, Usage } from "@oh-my-pi/pi-ai";
 import { formatSessionDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { type } from "arktype";
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -42,11 +42,11 @@ describe("formatSessionDumpText tool parameters", () => {
 			],
 		});
 
-		expect(out).toContain("# Tool: web_search");
-		expect(out).toContain("Parameters: {");
-		expect(out).toContain("/** search query */");
-		expect(out).toContain("query: string;");
-		expect(out).toContain('recency?: "day" | "week";');
+		expect(out).toContain("namespace functions {");
+		expect(out).toContain("type web_search = (_: {");
+		expect(out).toContain("// search query");
+		expect(out).toContain("query: string,");
+		expect(out).toContain('recency?: "day" | "week",');
 		// Arktype JSON Schema should not leak arktype internals into the dump.
 		expect(out).not.toContain("_arktype");
 		expect(out).not.toContain("ArkType");
@@ -70,12 +70,12 @@ describe("formatSessionDumpText tool parameters", () => {
 			],
 		});
 
-		expect(out).toContain("# Tool: legacy");
-		expect(out).toContain("/** a path */");
-		expect(out).toContain("path: string;");
+		expect(out).toContain("type legacy = (_: {");
+		expect(out).toContain("// a path");
+		expect(out).toContain("path: string,");
 	});
 
-	it("includes tool examples in the model's native syntax", () => {
+	it("includes tool examples in Python call syntax", () => {
 		const findSchema = type({ paths: "string[]" });
 
 		const out = formatSessionDumpText({
@@ -91,8 +91,8 @@ describe("formatSessionDumpText tool parameters", () => {
 		});
 
 		expect(out).toContain("## Available Tools");
-		expect(out).toContain("<examples>");
-		expect(out).toContain('<invoke name="glob">');
+		expect(out).toContain("@example");
+		expect(out).toContain('glob(paths=["src/**/*.ts"])');
 	});
 
 	it("omits the Available Tools section if inlineToolDescriptors is true", () => {
@@ -180,6 +180,52 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		// The 16.x native-dialect transcript wrapper and envelopes must be gone.
 		expect(out).not.toContain("## Transcript");
 		expect(out).not.toContain("<|start|>");
+	});
+
+	it("fences system notices under a readable title without breaking on nested code fences", () => {
+		const notice = `<system-notice>
+Background job completed with:
+\`\`\`sh
+printf 'done\\n'
+\`\`\`
+</system-notice>`;
+		const out = formatSessionDumpText({
+			messages: [
+				{
+					role: "custom",
+					customType: "async-progress",
+					content: notice,
+					display: true,
+					attribution: "agent",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(out).toContain("## System Notice: Async Progress");
+		expect(out).toContain(`\`\`\`\`xml\n${notice}\n\`\`\`\``);
+		expect(out).not.toContain("## async-progress");
+	});
+
+	it("leaves ordinary custom XML messages unchanged", () => {
+		const content = "<system-noticeable>ordinary custom content</system-noticeable>";
+		const out = formatSessionDumpText({
+			messages: [
+				{
+					role: "custom",
+					customType: "plugin-message",
+					content,
+					display: true,
+					attribution: "agent",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(out).toContain("## plugin-message");
+		expect(out).toContain(content);
+		expect(out).not.toContain("## System Notice:");
+		expect(out).not.toContain("```xml");
 	});
 
 	it("does not nest a thinking block that already carries a literal <thinking> envelope (#2700)", () => {

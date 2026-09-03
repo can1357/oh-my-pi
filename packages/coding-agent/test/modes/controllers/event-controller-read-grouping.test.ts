@@ -14,14 +14,15 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { type Component, Container, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { type Component, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "dark", "light");
@@ -44,6 +45,10 @@ type Block = AssistantMessage["content"][number];
 
 function read(path: string): Block {
 	return { type: "toolCall", id: `read-${path}`, name: "read", arguments: { path } } as Block;
+}
+
+function toolCall(name: string, id: string, args: Record<string, unknown>): Block {
+	return { type: "toolCall", id, name, arguments: args } as Block;
 }
 
 function thinking(text: string): Block {
@@ -71,8 +76,8 @@ function assistantMessage(content: Block[]): AssistantMessage {
 }
 
 function createFixture() {
-	const chatContainer = new Container();
-	const sessionMock = { getToolByName: () => undefined, extensionRunner: undefined };
+	const chatContainer = new TranscriptContainer();
+	const sessionMock = { getToolByName: () => undefined, hasBuiltInTool: () => true, extensionRunner: undefined };
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
@@ -89,6 +94,7 @@ function createFixture() {
 		setWorkingMessage: vi.fn(),
 		clearTransientSessionUi: () => {},
 		session: sessionMock,
+		sessionManager: { getCwd: () => process.cwd() },
 		viewSession: sessionMock,
 	} as unknown as InteractiveModeContext;
 	return { controller: new EventController(ctx), chatContainer };
@@ -101,7 +107,7 @@ async function streamCompletion(controller: EventController, content: Block[]): 
 	await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
 }
 
-function readGroups(chatContainer: Container): ReadToolGroupComponent[] {
+function readGroups(chatContainer: TranscriptContainer): ReadToolGroupComponent[] {
 	return chatContainer.children.filter((c): c is ReadToolGroupComponent => c instanceof ReadToolGroupComponent);
 }
 
@@ -130,6 +136,89 @@ describe("EventController read-group accretion", () => {
 		const groups = readGroups(chatContainer);
 		expect(groups.length).toBe(1);
 		expect(header(groups[0]!)).toContain("Read (4)");
+	});
+
+	it("nests a read-only completion's usage inside the active group", async () => {
+		settings.set("display.showTokenUsage", true);
+		const { controller, chatContainer } = createFixture();
+		const message = assistantMessage([thinking("Reviewing the target"), read("usage.ts:1-50")]);
+		message.usage = {
+			input: 1234,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1241,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
+
+		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
+
+		const [group] = readGroups(chatContainer);
+		expect(group).toBeDefined();
+		const usageBlocks = chatContainer.children.filter(component =>
+			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
+		);
+		expect(usageBlocks).toEqual([group!]);
+	});
+
+	it("keeps usage standalone when visible content follows a read", async () => {
+		settings.set("display.showTokenUsage", true);
+		const { controller, chatContainer } = createFixture();
+		const message = assistantMessage([read("usage.ts:1-50"), thinking("Read complete")]);
+		message.usage = {
+			input: 1234,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1241,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
+
+		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
+
+		const [group] = readGroups(chatContainer);
+		expect(group).toBeDefined();
+		const usageBlocks = chatContainer.children.filter(component =>
+			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
+		);
+		expect(usageBlocks).toHaveLength(1);
+		expect(usageBlocks[0]).not.toBe(group!);
+	});
+
+	it("starts a fresh group after standalone usage for a mixed-tool turn ending in read", async () => {
+		settings.set("display.showTokenUsage", true);
+		const { controller, chatContainer } = createFixture();
+		const message = assistantMessage([toolCall("bash", "bash-mixed", { command: "true" }), read("first.ts:1-50")]);
+		message.usage = {
+			input: 1234,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 1241,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
+
+		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
+		await streamCompletion(controller, [read("second.ts:1-50")]);
+
+		const groups = readGroups(chatContainer);
+		expect(groups).toHaveLength(2);
+		const firstGroupIndex = chatContainer.children.indexOf(groups[0]!);
+		const usageIndex = chatContainer.children.findIndex(component =>
+			Bun.stripANSI(component.render(120).join("\n")).includes("2026-01-02 03:04:05"),
+		);
+		const secondGroupIndex = chatContainer.children.indexOf(groups[1]!);
+		expect(firstGroupIndex).toBeLessThan(usageIndex);
+		expect(usageIndex).toBeLessThan(secondGroupIndex);
 	});
 
 	it("starts a new group after a completion that renders visible reasoning", async () => {

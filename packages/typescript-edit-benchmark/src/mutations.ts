@@ -21,16 +21,18 @@ export interface MutationInfo {
 	lineNumber: number;
 	originalSnippet: string;
 	mutatedSnippet: string;
+	/** Correct/misspelled rename pair; set by identifier-multi-edit for rename-style prompts. */
+	identifier?: { correct: string; misspelled: string };
 }
 
 export interface Mutation {
 	name: string;
 	category: string;
-	fixHint: string;
+	/** Whether this mutation intentionally produces multiple separated hunks. */
+	multiHunk?: boolean;
 
 	canApply(content: string): boolean;
 	mutate(content: string, rng: () => number): [string, MutationInfo];
-	describe(info: MutationInfo): string;
 }
 
 type Candidate<TNode extends t.Node = t.Node, TMeta = unknown> = {
@@ -234,12 +236,6 @@ function isLengthMemberExpression(node: t.Node): node is t.MemberExpression {
 abstract class BaseAstMutation implements Mutation {
 	abstract name: string;
 	abstract category: string;
-	abstract fixHint: string;
-	abstract description: string;
-
-	describe(_info: MutationInfo): string {
-		return this.description;
-	}
 
 	abstract collectCandidates(parsed: Parsed): Candidate[];
 	abstract applyCandidate(parsed: Parsed, candidate: Candidate, rng: () => number): MutationInfo;
@@ -281,8 +277,6 @@ abstract class BaseAstMutation implements Mutation {
 class SwapComparisonMutation extends BaseAstMutation {
 	name = "swap-comparison";
 	category = "operator";
-	fixHint = "Swap the comparison operator to the correct variant.";
-	description = "A comparison operator is subtly wrong.";
 
 	#swap: Record<string, t.BinaryExpression["operator"]> = {
 		"<=": "<",
@@ -310,8 +304,6 @@ class SwapComparisonMutation extends BaseAstMutation {
 class SwapEqualityMutation extends BaseAstMutation {
 	name = "swap-equality";
 	category = "operator";
-	fixHint = "Fix the equality comparison operator.";
-	description = "An equality operator is inverted.";
 
 	#swap: Record<string, t.BinaryExpression["operator"]> = {
 		"===": "!==",
@@ -339,8 +331,6 @@ class SwapEqualityMutation extends BaseAstMutation {
 class SwapLogicalMutation extends BaseAstMutation {
 	name = "swap-logical";
 	category = "operator";
-	fixHint = "Use the intended boolean operator.";
-	description = "A boolean operator is incorrect.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.LogicalExpression>[] {
 		const out: Candidate<t.LogicalExpression>[] = [];
@@ -364,8 +354,6 @@ class SwapLogicalMutation extends BaseAstMutation {
 class RemoveNegationMutation extends BaseAstMutation {
 	name = "remove-negation";
 	category = "operator";
-	fixHint = "Add back the missing logical negation (`!`).";
-	description = "A logical negation (`!`) was accidentally removed.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.UnaryExpression>[] {
 		const out: Candidate<t.UnaryExpression>[] = [];
@@ -393,8 +381,6 @@ class RemoveNegationMutation extends BaseAstMutation {
 class SwapIncDecMutation extends BaseAstMutation {
 	name = "swap-increment-decrement";
 	category = "operator";
-	fixHint = "Replace the increment/decrement operator with the intended one.";
-	description = "An increment/decrement operator points the wrong direction.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.UpdateExpression>[] {
 		const out: Candidate<t.UpdateExpression>[] = [];
@@ -417,8 +403,6 @@ class SwapIncDecMutation extends BaseAstMutation {
 class SwapArithmeticMutation extends BaseAstMutation {
 	name = "swap-arithmetic";
 	category = "operator";
-	fixHint = "Correct the arithmetic operator.";
-	description = "An arithmetic operator was swapped.";
 
 	#swap: Record<string, t.BinaryExpression["operator"]> = { "+": "-", "-": "+", "*": "/", "/": "*" };
 
@@ -441,8 +425,6 @@ class SwapArithmeticMutation extends BaseAstMutation {
 class BooleanLiteralFlipMutation extends BaseAstMutation {
 	name = "flip-boolean";
 	category = "literal";
-	fixHint = "Flip the boolean literal to the intended value.";
-	description = "A boolean literal is inverted.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.BooleanLiteral>[] {
 		const out: Candidate<t.BooleanLiteral>[] = [];
@@ -465,9 +447,6 @@ class BooleanLiteralFlipMutation extends BaseAstMutation {
 class OptionalChainRemovalMutation extends BaseAstMutation {
 	name = "remove-optional-chain";
 	category = "access";
-	fixHint =
-		"Restore the optional chaining operator (`?.`) at the ONE location where it was removed. Do not add optional chaining elsewhere.";
-	description = "Optional chaining was removed from a property access.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.OptionalMemberExpression | t.OptionalCallExpression>[] {
 		const out: Candidate<t.OptionalMemberExpression | t.OptionalCallExpression>[] = [];
@@ -498,8 +477,6 @@ class OptionalChainRemovalMutation extends BaseAstMutation {
 class CallArgumentSwapMutation extends BaseAstMutation {
 	name = "swap-call-args";
 	category = "call";
-	fixHint = "Swap the two arguments to their original order.";
-	description = "Two arguments in a call are swapped.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.CallExpression>[] {
 		const out: Candidate<t.CallExpression>[] = [];
@@ -512,7 +489,7 @@ class CallArgumentSwapMutation extends BaseAstMutation {
 		return out;
 	}
 
-	mutate(content: string, rng: () => number): [string, MutationInfo] {
+	override mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
 		const candidates = this.collectCandidates(parsed);
@@ -563,8 +540,6 @@ class CallArgumentSwapMutation extends BaseAstMutation {
 class NullishCoalescingSwapMutation extends BaseAstMutation {
 	name = "swap-nullish";
 	category = "operator";
-	fixHint = "Use the intended nullish/logical operator.";
-	description = "A nullish coalescing operator was swapped.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.LogicalExpression>[] {
 		const out: Candidate<t.LogicalExpression>[] = [];
@@ -588,8 +563,6 @@ class NullishCoalescingSwapMutation extends BaseAstMutation {
 class RegexQuantifierSwapMutation extends BaseAstMutation {
 	name = "swap-regex-quantifier";
 	category = "regex";
-	fixHint = "Fix the ONE regex quantifier that was swapped (between `+` and `*`). Do not modify other quantifiers.";
-	description = "A regex quantifier was swapped, changing whitespace matching.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.RegExpLiteral>[] {
 		const out: Candidate<t.RegExpLiteral>[] = [];
@@ -650,8 +623,6 @@ class RegexQuantifierSwapMutation extends BaseAstMutation {
 class UnicodeHyphenMutation extends BaseAstMutation {
 	name = "unicode-hyphen";
 	category = "unicode";
-	fixHint = "Replace the unicode dash with a plain ASCII hyphen.";
-	description = "A string literal contains a lookalike unicode dash.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.StringLiteral | t.TemplateElement>[] {
 		const out: Candidate<t.StringLiteral | t.TemplateElement>[] = [];
@@ -690,8 +661,7 @@ class UnicodeHyphenMutation extends BaseAstMutation {
 class IdentifierMultiEditMutation extends BaseAstMutation {
 	name = "identifier-multi-edit";
 	category = "identifier";
-	fixHint = "Restore the identifier to its original spelling in all affected locations.";
-	description = "An identifier is misspelled in multiple separate locations.";
+	multiHunk = true;
 
 	#keywords = new Set([
 		"await",
@@ -752,7 +722,7 @@ class IdentifierMultiEditMutation extends BaseAstMutation {
 		return out;
 	}
 
-	mutate(content: string, rng: () => number): [string, MutationInfo] {
+	override mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
 		const candidates = this.collectCandidates(parsed);
@@ -850,6 +820,7 @@ class IdentifierMultiEditMutation extends BaseAstMutation {
 				lineNumber: selectedPaths[0]?.node.loc?.start.line ?? 0,
 				originalSnippet: chosen.name,
 				mutatedSnippet: mutated,
+				identifier: { correct: chosen.name, misspelled: mutated },
 			},
 		];
 	}
@@ -928,6 +899,7 @@ class IdentifierMultiEditMutation extends BaseAstMutation {
 			lineNumber: selectedPaths[0]?.node.loc?.start.line ?? 0,
 			originalSnippet: chosen.name,
 			mutatedSnippet: mutated,
+			identifier: { correct: chosen.name, misspelled: mutated },
 		};
 	}
 }
@@ -935,8 +907,6 @@ class IdentifierMultiEditMutation extends BaseAstMutation {
 class DuplicateLineLiteralFlipMutation extends BaseAstMutation {
 	name = "duplicate-line-flip";
 	category = "duplicate";
-	fixHint = "Fix the literal or operator on the duplicated line.";
-	description = "A duplicated line contains a subtle literal/operator change.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.Statement, { group: string }>[] {
 		const out: Candidate<t.Statement, { group: string }>[] = [];
@@ -1025,8 +995,6 @@ class DuplicateLineLiteralFlipMutation extends BaseAstMutation {
 class SwapAdjacentLinesMutation extends BaseAstMutation {
 	name = "swap-adjacent-lines";
 	category = "structural";
-	fixHint = "Swap the two adjacent lines back to their original order.";
-	description = "Two adjacent statements are in the wrong order.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.Program | t.BlockStatement, { index: number }>[] {
 		const out: Candidate<t.Program | t.BlockStatement, { index: number }>[] = [];
@@ -1068,7 +1036,7 @@ class SwapAdjacentLinesMutation extends BaseAstMutation {
 		return out;
 	}
 
-	mutate(content: string, rng: () => number): [string, MutationInfo] {
+	override mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
 		const candidates = this.collectCandidates(parsed);
@@ -1134,8 +1102,6 @@ class SwapAdjacentLinesMutation extends BaseAstMutation {
 class SwapIfElseBranchesMutation extends BaseAstMutation {
 	name = "swap-if-else";
 	category = "structural";
-	fixHint = "Swap the if and else branch bodies back to their original positions.";
-	description = "The if and else branches are swapped.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.IfStatement>[] {
 		const out: Candidate<t.IfStatement>[] = [];
@@ -1163,29 +1129,31 @@ class SwapIfElseBranchesMutation extends BaseAstMutation {
 	}
 }
 
-class RemoveEarlyReturnMutation extends BaseAstMutation {
-	name = "remove-early-return";
+/**
+ * Remove one label from a fall-through `case A: case B:` pair. The fix inserts
+ * the missing label back — a deterministic pure-insertion task whose content
+ * is dictated by the visible sibling label, not by hidden deleted code.
+ */
+class RemoveCaseLabelMutation extends BaseAstMutation {
+	name = "remove-case-label";
 	category = "structural";
-	fixHint =
-		"Restore the missing guard clause (if statement with early return). Add back the exact 3-line pattern: if condition, return statement, closing brace.";
-	description = "A guard clause (early return) was removed.";
 
-	collectCandidates(parsed: Parsed): Candidate<t.IfStatement>[] {
-		const out: Candidate<t.IfStatement>[] = [];
+	collectCandidates(parsed: Parsed): Candidate<t.SwitchCase>[] {
+		const out: Candidate<t.SwitchCase>[] = [];
 		traverse(parsed.ast, {
-			IfStatement: path => {
+			SwitchCase: path => {
 				const node = path.node;
-				if (node.alternate) return;
-				if (!t.isBlockStatement(node.consequent)) return;
-				if (node.consequent.body.length !== 1) return;
-				if (!t.isReturnStatement(node.consequent.body[0])) return;
+				if (!node.test || node.consequent.length > 0) return;
+				if (!t.isSwitchStatement(path.parent)) return;
+				const index = path.parent.cases.indexOf(node);
+				if (index < 0 || index >= path.parent.cases.length - 1) return;
 				out.push({ path });
 			},
 		});
 		return out;
 	}
 
-	applyCandidate(parsed: Parsed, candidate: Candidate<t.IfStatement>): MutationInfo {
+	applyCandidate(parsed: Parsed, candidate: Candidate<t.SwitchCase>): MutationInfo {
 		const node = candidate.path.node;
 		const before = snippetFromSource(parsed.code, node, snippetFromNode(node));
 		candidate.path.remove();
@@ -1193,131 +1161,331 @@ class RemoveEarlyReturnMutation extends BaseAstMutation {
 	}
 }
 
-class SwapNamedImportsMutation extends BaseAstMutation {
-	name = "swap-named-imports";
-	category = "import";
-	fixHint =
-		"Swap ONLY the two imported names that are in the wrong order. Do not reorder other imports or modify other import statements.";
-	description = "Two named imports are swapped in a destructuring import.";
+/**
+ * Wrap a block's body in a redundant `if (true) { ... }`. The fix removes the
+ * wrapper and dedents — an indentation-shifting multi-line edit whose entire
+ * content stays visible in the buggy file (no invisible-code reconstruction).
+ */
+class WrapRedundantIfMutation extends BaseAstMutation {
+	name = "wrap-redundant-if";
+	category = "structural";
 
-	collectCandidates(parsed: Parsed): Candidate<t.ImportDeclaration, { i: number; j: number }>[] {
-		const out: Candidate<t.ImportDeclaration, { i: number; j: number }>[] = [];
+	#lineSpan(node: t.Node): number {
+		if (!node.loc) return 0;
+		return node.loc.end.line - node.loc.start.line + 1;
+	}
+
+	collectCandidates(parsed: Parsed): Candidate<t.BlockStatement>[] {
+		const out: Candidate<t.BlockStatement>[] = [];
 		traverse(parsed.ast, {
-			ImportDeclaration: path => {
-				const named = path.node.specifiers
-					.map((spec, idx) => ({ spec, idx }))
-					.filter((entry): entry is { spec: t.ImportSpecifier; idx: number } => t.isImportSpecifier(entry.spec))
-					.filter(({ spec }) => t.isIdentifier(spec.imported) && t.isIdentifier(spec.local))
-					.filter(
-						({ spec }) =>
-							t.isIdentifier(spec.imported) &&
-							t.isIdentifier(spec.local) &&
-							spec.imported.name === spec.local.name,
-					);
-				if (named.length < 2) return;
-				for (let i = 0; i < named.length; i++) {
-					for (let j = i + 1; j < named.length; j++) {
-						out.push({ path, meta: { i: named[i]!.idx, j: named[j]!.idx } });
-					}
-				}
+			BlockStatement: path => {
+				const span = this.#lineSpan(path.node);
+				if (span < 4 || span > 160) return;
+				if (path.node.body.length === 0) return;
+				if (path.node.directives.length > 0) return;
+				// Don't wrap a body that is itself just an `if (true)` (repeated mutation noise).
+				if (path.node.body.length === 1 && t.isIfStatement(path.node.body[0])) return;
+				out.push({ path });
 			},
 		});
 		return out;
 	}
 
+	applyCandidate(_parsed: Parsed, candidate: Candidate<t.BlockStatement>): MutationInfo {
+		const node = candidate.path.node;
+		const line = nodeLine(node);
+		node.body = [t.ifStatement(t.booleanLiteral(true), t.blockStatement(node.body))];
+		return { lineNumber: line, originalSnippet: "", mutatedSnippet: "if (true) {" };
+	}
+}
+
+/**
+ * Swap two adjacent multi-line sibling statements (functions, if-chains,
+ * loops). The fix swaps them back — a large contiguous replace whose content
+ * is fully visible.
+ */
+class SwapSiblingBlocksMutation implements Mutation {
+	name = "swap-sibling-blocks";
+	category = "structural";
+
+	#collect(parsed: Parsed): Array<{ left: t.Statement; right: t.Statement }> {
+		const out: Array<{ left: t.Statement; right: t.Statement }> = [];
+		const lineSpan = (node: t.Node): number => (node.loc ? node.loc.end.line - node.loc.start.line + 1 : 0);
+
+		const considerList = (body: Array<t.Statement | t.ModuleDeclaration>): void => {
+			for (let i = 0; i < body.length - 1; i++) {
+				const left = body[i];
+				const right = body[i + 1];
+				if (!left || !right || !t.isStatement(left) || !t.isStatement(right)) continue;
+				if (!left.loc || !right.loc) continue;
+				if (t.isImportDeclaration(left) || t.isImportDeclaration(right)) continue;
+				const leftSpan = lineSpan(left);
+				const rightSpan = lineSpan(right);
+				// At least one true block; bounded total so prompts stay readable.
+				if (Math.max(leftSpan, rightSpan) < 3) continue;
+				if (leftSpan > 80 || rightSpan > 80 || leftSpan + rightSpan > 120) continue;
+				const gap = right.loc.start.line - left.loc.end.line;
+				if (gap > 2) continue;
+				const leftText = snippetFromSource(parsed.code, left, "").trim();
+				const rightText = snippetFromSource(parsed.code, right, "").trim();
+				if (!leftText || !rightText || leftText === rightText) continue;
+				out.push({ left, right });
+			}
+		};
+
+		traverse(parsed.ast, {
+			Program: path => considerList(path.node.body),
+			BlockStatement: path => considerList(path.node.body),
+		});
+		return out;
+	}
+
+	canApply(content: string): boolean {
+		const parsed = parseCode(content);
+		return parsed !== null && this.#collect(parsed).length > 0;
+	}
+
 	mutate(content: string, rng: () => number): [string, MutationInfo] {
 		const parsed = parseCode(content);
 		if (!parsed) return [content, noopInfo()];
-		const candidates = this.collectCandidates(parsed);
+		const candidates = this.#collect(parsed);
 		if (candidates.length === 0) return [content, noopInfo()];
 
-		const chosen = randomChoice(candidates, rng);
-		const node = chosen.path.node;
-		const indices = chosen.meta;
-		if (!indices) return [content, noopInfo()];
-		const { i, j } = indices;
-		if (i < 0 || j < 0 || i >= node.specifiers.length || j >= node.specifiers.length) return [content, noopInfo()];
-
-		const left = node.specifiers[i];
-		const right = node.specifiers[j];
-		if (!left || !right) return [content, noopInfo()];
+		const { left, right } = randomChoice(candidates, rng);
 		const leftRange = nodeRange(left);
 		const rightRange = nodeRange(right);
-		const importRange = nodeRange(node);
-		if (!leftRange || !rightRange || !importRange) return [content, noopInfo()];
-		if (leftRange.end > rightRange.start) return [content, noopInfo()];
+		if (!leftRange || !rightRange || leftRange.end > rightRange.start) return [content, noopInfo()];
 
-		const leftText = content.slice(leftRange.start, leftRange.end);
-		const rightText = content.slice(rightRange.start, rightRange.end);
+		const between = content.slice(leftRange.end, rightRange.start);
+		const swapped = `${content.slice(rightRange.start, rightRange.end)}${between}${content.slice(leftRange.start, leftRange.end)}`;
 		const mutated = applySourceEdits(content, [
-			{ start: leftRange.start, end: leftRange.end, replacement: rightText },
-			{ start: rightRange.start, end: rightRange.end, replacement: leftText },
+			{ start: leftRange.start, end: rightRange.end, replacement: swapped },
 		]);
 		if (!mutated || mutated === content) return [content, noopInfo()];
 
 		return [
 			mutated,
 			{
-				lineNumber: nodeLine(node),
-				originalSnippet: content.slice(importRange.start, importRange.end).trim(),
-				mutatedSnippet: mutated.slice(importRange.start, importRange.end).trim(),
+				lineNumber: left.loc?.start.line ?? 0,
+				originalSnippet: `lines ${left.loc?.start.line ?? 0}-${right.loc?.end.line ?? 0}`,
+				mutatedSnippet: "[swapped]",
 			},
 		];
 	}
-
-	applyCandidate(parsed: Parsed, candidate: Candidate<t.ImportDeclaration, { i: number; j: number }>): MutationInfo {
-		const node = candidate.path.node;
-		const indices = candidate.meta;
-		if (!indices) return noopInfo();
-		const before = snippetFromSource(parsed.code, node, snippetFromNode(node));
-		const { i, j } = indices;
-		if (i < 0 || j < 0 || i >= node.specifiers.length || j >= node.specifiers.length) return noopInfo();
-		[node.specifiers[i], node.specifiers[j]] = [node.specifiers[j]!, node.specifiers[i]!];
-		return {
-			lineNumber: nodeLine(node),
-			originalSnippet: before.trim(),
-			mutatedSnippet: snippetFromNode(node).trim(),
-		};
-	}
 }
 
-class DeleteStatementMutation extends BaseAstMutation {
-	name = "delete-statement";
+/**
+ * Duplicate a multi-line statement right after itself (a copy-paste accident).
+ * The fix deletes the second copy — a large deletion where the surviving copy
+ * stays visible, so the task is deterministic without revealing hidden code.
+ */
+class DuplicateBlockMutation implements Mutation {
+	name = "duplicate-block";
 	category = "structural";
-	fixHint = "Restore the deleted statement.";
-	description = "A critical statement was deleted from the code.";
 
-	collectCandidates(parsed: Parsed): Candidate<t.Statement>[] {
-		const out: Candidate<t.Statement>[] = [];
+	#collect(parsed: Parsed): t.Statement[] {
+		const out: t.Statement[] = [];
+		const consider = (statement: t.Statement | t.ModuleDeclaration): void => {
+			if (!t.isStatement(statement) || !statement.loc) return;
+			const span = statement.loc.end.line - statement.loc.start.line + 1;
+			if (span < 3 || span > 120) return;
+			// Duplicating lexical declarations or exports produces parse/redeclaration
+			// errors; stick to statements that stay syntactically valid twice.
+			if (
+				!t.isIfStatement(statement) &&
+				!t.isExpressionStatement(statement) &&
+				!t.isForStatement(statement) &&
+				!t.isForOfStatement(statement) &&
+				!t.isWhileStatement(statement) &&
+				!t.isTryStatement(statement) &&
+				!t.isSwitchStatement(statement)
+			) {
+				return;
+			}
+			out.push(statement);
+		};
 		traverse(parsed.ast, {
-			Statement: path => {
-				if (!path.node.loc) return;
-				if (t.isVariableDeclaration(path.node)) {
-					out.push({ path: path as NodePath<t.Statement> });
-					return;
-				}
-				if (!t.isExpressionStatement(path.node)) return;
-				if (t.isAssignmentExpression(path.node.expression) || t.isUpdateExpression(path.node.expression)) {
-					out.push({ path: path as NodePath<t.Statement> });
-				}
+			Program: path => {
+				for (const statement of path.node.body) consider(statement);
+			},
+			BlockStatement: path => {
+				for (const statement of path.node.body) consider(statement);
 			},
 		});
 		return out;
 	}
 
-	applyCandidate(parsed: Parsed, candidate: Candidate<t.Statement>): MutationInfo {
-		const node = candidate.path.node;
-		const before = snippetFromSource(parsed.code, node, snippetFromNode(node));
-		candidate.path.remove();
-		return { lineNumber: nodeLine(node), originalSnippet: before.trim(), mutatedSnippet: "[removed]" };
+	canApply(content: string): boolean {
+		const parsed = parseCode(content);
+		return parsed !== null && this.#collect(parsed).length > 0;
+	}
+
+	mutate(content: string, rng: () => number): [string, MutationInfo] {
+		const parsed = parseCode(content);
+		if (!parsed) return [content, noopInfo()];
+		const candidates = this.#collect(parsed);
+		if (candidates.length === 0) return [content, noopInfo()];
+
+		const statement = randomChoice(candidates, rng);
+		const range = nodeRange(statement);
+		if (!range) return [content, noopInfo()];
+
+		const text = content.slice(range.start, range.end);
+		const mutated = applySourceEdits(content, [{ start: range.end, end: range.end, replacement: `\n\n${text}` }]);
+		if (!mutated || mutated === content) return [content, noopInfo()];
+		// Reject mutations that no longer parse (e.g. duplicated declarations).
+		if (!parseCode(mutated)) return [content, noopInfo()];
+
+		return [
+			mutated,
+			{
+				lineNumber: statement.loc?.start.line ?? 0,
+				originalSnippet: text.split("\n")[0]?.trim() ?? "",
+				mutatedSnippet: text.split("\n")[0]?.trim() ?? "",
+			},
+		];
+	}
+}
+
+/**
+ * Move a multi-line statement to a distant position in the same statement
+ * list. The fix moves it back — one delete hunk plus one insert hunk, the two
+ * dominant hunk shapes in real edits — with the moved content fully visible.
+ */
+class MoveDistantBlockMutation implements Mutation {
+	name = "move-distant-block";
+	category = "structural";
+	multiHunk = true;
+
+	#collect(parsed: Parsed): Array<{ moved: t.Statement; next: t.Statement; target: t.Statement }> {
+		const out: Array<{ moved: t.Statement; next: t.Statement; target: t.Statement }> = [];
+
+		const considerList = (body: Array<t.Statement | t.ModuleDeclaration>): void => {
+			if (body.length < 5) return;
+			for (let from = 0; from < body.length - 1; from++) {
+				const moved = body[from];
+				const next = body[from + 1];
+				if (!moved || !next || !t.isStatement(moved) || !t.isStatement(next)) continue;
+				if (!moved.loc || t.isImportDeclaration(moved)) continue;
+				const span = moved.loc.end.line - moved.loc.start.line + 1;
+				if (span < 3 || span > 60) continue;
+				for (let to = from + 3; to < body.length; to++) {
+					const target = body[to];
+					if (!target || !t.isStatement(target) || !target.loc) continue;
+					out.push({ moved, next, target });
+				}
+			}
+		};
+
+		traverse(parsed.ast, {
+			Program: path => considerList(path.node.body),
+			BlockStatement: path => considerList(path.node.body),
+		});
+		return out;
+	}
+
+	canApply(content: string): boolean {
+		const parsed = parseCode(content);
+		return parsed !== null && this.#collect(parsed).length > 0;
+	}
+
+	mutate(content: string, rng: () => number): [string, MutationInfo] {
+		const parsed = parseCode(content);
+		if (!parsed) return [content, noopInfo()];
+		const candidates = this.#collect(parsed);
+		if (candidates.length === 0) return [content, noopInfo()];
+
+		const { moved, next, target } = randomChoice(candidates, rng);
+		const movedRange = nodeRange(moved);
+		const nextRange = nodeRange(next);
+		const targetRange = nodeRange(target);
+		if (!movedRange || !nextRange || !targetRange) return [content, noopInfo()];
+		if (movedRange.end > nextRange.start || nextRange.start > targetRange.end) return [content, noopInfo()];
+
+		const movedText = content.slice(movedRange.start, movedRange.end);
+		const mutated = applySourceEdits(content, [
+			// Cut the statement together with its trailing separator...
+			{ start: movedRange.start, end: nextRange.start, replacement: "" },
+			// ...and splice it back in after the distant target statement.
+			{ start: targetRange.end, end: targetRange.end, replacement: `\n\n${movedText}` },
+		]);
+		if (!mutated || mutated === content) return [content, noopInfo()];
+		if (!parseCode(mutated)) return [content, noopInfo()];
+
+		return [
+			mutated,
+			{
+				lineNumber: moved.loc?.start.line ?? 0,
+				originalSnippet: movedText.split("\n")[0]?.trim() ?? "",
+				mutatedSnippet: movedText.split("\n")[0]?.trim() ?? "",
+			},
+		];
+	}
+}
+
+/**
+ * Apply several independent token-level mutations in one file — the multi-hunk
+ * edit shape that dominates real sessions. Each constituent bug is a
+ * single-line change fully specified by the task's before/after blocks.
+ */
+class CompositeMultiEditMutation implements Mutation {
+	name = "composite-multi-edit";
+	category = "multi";
+	multiHunk = true;
+
+	#parts: Mutation[];
+
+	constructor(parts: Mutation[]) {
+		this.#parts = parts;
+	}
+
+	canApply(content: string): boolean {
+		let applicable = 0;
+		for (const part of this.#parts) {
+			try {
+				if (part.canApply(content)) applicable++;
+			} catch {
+				// Unparseable for this part; skip.
+			}
+			if (applicable >= 2) return true;
+		}
+		return false;
+	}
+
+	mutate(content: string, rng: () => number): [string, MutationInfo] {
+		const applicable = this.#parts.filter(part => {
+			try {
+				return part.canApply(content);
+			} catch {
+				return false;
+			}
+		});
+		if (applicable.length < 2) return [content, noopInfo()];
+
+		const target = Math.min(3 + Math.floor(rng() * 3), applicable.length);
+		const parts = randomSample(applicable, target, rng);
+		let current = content;
+		let firstInfo: MutationInfo | null = null;
+		let applied = 0;
+		for (const part of parts) {
+			try {
+				const [next, info] = part.mutate(current, rng);
+				if (next === current || info.lineNumber === 0) continue;
+				current = next;
+				firstInfo ??= info;
+				applied++;
+			} catch {
+				// A part failing on already-mutated content just shrinks the composite.
+			}
+		}
+		if (applied < 2 || !firstInfo) return [content, noopInfo()];
+		return [current, firstInfo];
 	}
 }
 
 class OffByOneMutation extends BaseAstMutation {
 	name = "off-by-one";
 	category = "literal";
-	fixHint = "Fix the off-by-one error in the numeric literal or comparison.";
-	description = "A numeric boundary has an off-by-one error.";
 
 	collectCandidates(parsed: Parsed): Candidate<t.NumericLiteral | t.BinaryExpression>[] {
 		const out: Candidate<t.NumericLiteral | t.BinaryExpression>[] = [];
@@ -1386,7 +1554,8 @@ class OffByOneMutation extends BaseAstMutation {
 	}
 }
 
-export const ALL_MUTATIONS: Mutation[] = [
+/** Single-line token mutations; also the constituent parts of the composite. */
+const TOKEN_MUTATIONS: Mutation[] = [
 	new SwapComparisonMutation(),
 	new SwapEqualityMutation(),
 	new SwapLogicalMutation(),
@@ -1399,14 +1568,21 @@ export const ALL_MUTATIONS: Mutation[] = [
 	new NullishCoalescingSwapMutation(),
 	new RegexQuantifierSwapMutation(),
 	new UnicodeHyphenMutation(),
+	new OffByOneMutation(),
+];
+
+export const ALL_MUTATIONS: Mutation[] = [
+	...TOKEN_MUTATIONS,
 	new IdentifierMultiEditMutation(),
 	new DuplicateLineLiteralFlipMutation(),
 	new SwapAdjacentLinesMutation(),
 	new SwapIfElseBranchesMutation(),
-	new RemoveEarlyReturnMutation(),
-	new SwapNamedImportsMutation(),
-	new DeleteStatementMutation(),
-	new OffByOneMutation(),
+	new WrapRedundantIfMutation(),
+	new SwapSiblingBlocksMutation(),
+	new DuplicateBlockMutation(),
+	new MoveDistantBlockMutation(),
+	new RemoveCaseLabelMutation(),
+	new CompositeMultiEditMutation(TOKEN_MUTATIONS),
 ];
 
 export const CATEGORY_MAP: Record<string, string[]> = {
@@ -1419,5 +1595,5 @@ export const CATEGORY_MAP: Record<string, string[]> = {
 	identifier: ALL_MUTATIONS.filter(m => m.category === "identifier").map(m => m.name),
 	duplicate: ALL_MUTATIONS.filter(m => m.category === "duplicate").map(m => m.name),
 	structural: ALL_MUTATIONS.filter(m => m.category === "structural").map(m => m.name),
-	import: ALL_MUTATIONS.filter(m => m.category === "import").map(m => m.name),
+	multi: ALL_MUTATIONS.filter(m => m.category === "multi").map(m => m.name),
 };

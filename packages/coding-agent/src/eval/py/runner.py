@@ -40,6 +40,7 @@ import os
 import re
 import runpy
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -576,8 +577,10 @@ class _BoundedLineScanner:
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
     cmd = [sys.executable, "-m", "pip", *argv]
+    # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -737,9 +740,37 @@ def _magic_run(args: str) -> None:
         _STATE.user_ns[name] = value
 
 
+def _resolve_bash() -> str:
+    if os.name != "nt":
+        return "/bin/bash"
+    # Prefer Git Bash over WSL's System32 bash.exe, which runs inside a
+    # separate Linux environment and does not share the Windows filesystem
+    # layout or PATH.
+    for env_var, suffix in (
+        ("ProgramFiles", r"Git\bin\bash.exe"),
+        ("ProgramFiles(x86)", r"Git\bin\bash.exe"),
+        ("LOCALAPPDATA", r"Programs\Git\bin\bash.exe"),
+    ):
+        root = os.environ.get(env_var)
+        if root:
+            candidate = os.path.join(root, suffix)
+            if os.path.isfile(candidate):
+                return candidate
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    # WSL's System32 bash.exe runs in a separate Linux environment, so
+    # silently falling back to it would execute the cell somewhere the user
+    # did not intend; fail loudly instead.
+    raise RuntimeError(
+        "%%bash requires a POSIX bash, but none was found. "
+        "Install Git for Windows or add a non-WSL bash to PATH."
+    )
+
+
 @cell_magic("bash")
 def _magic_cell_bash(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg="/bin/bash")
+    return _run_shell_body(body, shell_arg=_resolve_bash())
 
 
 @cell_magic("capture")
@@ -780,8 +811,12 @@ def _magic_cell_writefile(args: str, body: str) -> str:
 
 
 def _run_shell_body(body: str, *, shell_arg: str) -> int:
+    # stdin=DEVNULL: children must not inherit the runner's stdin, which is
+    # the host's NDJSON control channel (a reading child would steal frames,
+    # and inheriting the pipe deadlocks nested interpreters on Windows).
     proc = subprocess.Popen(
         [shell_arg, "-c", body],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -821,9 +856,11 @@ class _ShellResult(list):
 
 
 def __omp_shell(cmd: str) -> _ShellResult:
+    # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
         shell=True,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -1057,7 +1094,7 @@ async def _run_compiled_async(code, ns: dict, *, want_value: bool) -> Any:
 
 
 def _compile_source(source: str) -> tuple[Any, Any | None, bool]:
-    module = ast.parse(source, mode="exec")
+    module = ast.parse(source, "<cell>", "exec")
     if not module.body:
         return None, None, False
 
@@ -1279,7 +1316,21 @@ async def _handle_request_async(req: dict) -> None:
 
 
 def _emit_error(rid: str, exc: BaseException) -> None:
-    tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    if isinstance(exc, SyntaxError) and exc.filename == "<cell>":
+        # Syntax error in the cell source itself: every stack frame is runner
+        # machinery, so emit only the caret display, like a REPL.
+        tb_lines = traceback.format_exception_only(type(exc), exc)
+    else:
+        # Drop the leading runner-internal frames (_handle_request_async ->
+        # _exec_source_async -> _run_compiled_*) so tracebacks start at user
+        # code. If the exception never reached user code it is a runner bug;
+        # keep the full traceback because those frames are the diagnosis.
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
+            tb = tb.tb_next
+        tb_lines = traceback.format_exception(
+            type(exc), exc, tb if tb is not None else exc.__traceback__
+        )
     _emit(
         {
             "type": "error",
@@ -1296,41 +1347,55 @@ def _emit_error(rid: str, exc: BaseException) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_request(line: str) -> dict | None:
+    """Parse one NDJSON control line, or ``None`` when it should be skipped.
+
+    Emits a ``ProtocolError`` frame for malformed JSON so the host sees the
+    same diagnostic the reader has always produced.
+    """
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        _emit(
+            {
+                "type": "error",
+                "id": "",
+                "ename": "ProtocolError",
+                "evalue": f"Invalid JSON request: {exc}",
+                "traceback": [],
+            }
+        )
+        return None
+
+
 def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) -> None:
+    """Feed control-channel requests to the event loop from a reader thread.
+
+    POSIX only -- see ``_serve_windows`` for why Windows cannot run a
+    perpetually blocked stdin reader.
+    """
     for raw_line in stdin:
         line = raw_line.strip()
         if not line:
             continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _emit(
-                {
-                    "type": "error",
-                    "id": "",
-                    "ename": "ProtocolError",
-                    "evalue": f"Invalid JSON request: {exc}",
-                    "traceback": [],
-                }
-            )
+        req = _parse_request(line)
+        if req is None:
             continue
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
 
-async def _main_async() -> None:
-    sys.stdout = _StreamProxy("stdout")
-    sys.stderr = _StreamProxy("stderr")
-    _install_idle_sigint()
-    _start_parent_watchdog()
-    _start_capture_drain()
+async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
+    """Dispatch requests concurrently, one asyncio task per request.
 
-    stdin = sys.__stdin__
-    if stdin is None:
-        return
-
-    loop = asyncio.get_running_loop()
-    _STATE.loop = loop
+    A background thread reads stdin and enqueues requests so a cell parked on
+    a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
+    block sibling requests: eval sessions are shared across concurrent agents
+    (subagents inherit the parent's eval session id), so multiple requests can
+    be in flight on one kernel at once. The reader thread stays blocked in a
+    ``sys.stdin`` read for its whole life, which is safe on POSIX but wedges
+    native-extension imports on Windows (see ``_serve_windows``).
+    """
     queue: asyncio.Queue = asyncio.Queue()
     reader = threading.Thread(
         target=_read_stdin,
@@ -1364,6 +1429,60 @@ async def _main_async() -> None:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
+    """Dispatch requests serially, reading each control line on demand.
+
+    A thread perpetually parked in a blocking ``sys.stdin`` read deadlocks
+    native-extension imports (NumPy in particular) under a pipe-backed
+    subprocess on Windows: the native DLL load and the concurrent stdin read
+    wedge each other (numpy#24290, issue #7985). Reading each line via
+    ``run_in_executor`` confines the stdin read to the gap *between* requests
+    -- once a line arrives the reader returns, so no thread is reading stdin
+    while a cell (and its imports) run. The trade-off is that requests are
+    handled one at a time instead of interleaved; on Windows that is strictly
+    better than the alternative, since any concurrent reader deadlocks the
+    import outright.
+    """
+    while True:
+        raw_line = await loop.run_in_executor(None, stdin.readline)
+        if not raw_line:
+            break  # EOF: the host closed the control channel.
+        line = raw_line.strip()
+        if not line:
+            continue
+        req = _parse_request(line)
+        if req is None:
+            continue
+        if req.get("type") == "exit":
+            break
+        try:
+            await _handle_request_async(req)
+        except asyncio.CancelledError:
+            raise  # task cancellation must propagate; never swallow it and spin
+        except BaseException as exc:  # noqa: BLE001 - one bad request must not wedge the loop
+            _emit_error(str(req.get("id", "")), exc)
+
+
+async def _main_async() -> None:
+    sys.stdout = _StreamProxy("stdout")
+    sys.stderr = _StreamProxy("stderr")
+    _install_idle_sigint()
+    _start_parent_watchdog()
+    _start_capture_drain()
+
+    stdin = sys.__stdin__
+    if stdin is None:
+        return
+
+    loop = asyncio.get_running_loop()
+    _STATE.loop = loop
+
+    if os.name == "nt":
+        await _serve_windows(loop, stdin)
+    else:
+        await _serve_posix(loop, stdin)
 
 
 def main() -> None:

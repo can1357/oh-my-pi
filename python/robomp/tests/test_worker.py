@@ -630,7 +630,8 @@ async def test_run_rpc_sends_reminder_when_pr_class_quits_early(tmp_path: Path, 
     # kickoff + 2 reminders (default ROBOMP_TASK_COMPLETION_MAX_REMINDERS=2)
     assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
     assert fake.prompts[0] == "kickoff"
-    assert all("terminal action" in p.lower() or "open the pr" in p.lower() for p in fake.prompts[1:])
+    terminal_tools = {"gh_open_pr", "mark_unable_to_reproduce", "abort_task"}
+    assert all(terminal_tools <= set(prompt.split("`")) for prompt in fake.prompts[1:])
 
 
 @pytest.mark.asyncio
@@ -650,7 +651,7 @@ async def test_run_rpc_stops_reminding_after_terminal_tool(tmp_path: Path, setti
             # driver registers the callback before prompt_and_wait, so we
             # replay it here.
             for cb in client._tool_end_callbacks:
-                cb(SimpleNamespace(tool_name="gh_open_pr", result={}))
+                cb(SimpleNamespace(tool_name="gh_open_pr", result={}, is_error=None))
 
     # Capture the registered tool_end callback on the fake.
     original_on_tool_end = _FakeRpcClient.on_tool_execution_end
@@ -759,7 +760,7 @@ async def test_run_rpc_review_pr_stops_after_submit_without_dirty_probe(
 
     def _on_prompt(client: _FakeRpcClient, _prompt: str) -> None:
         for cb in client._tool_end_callbacks:
-            cb(SimpleNamespace(tool_name="submit_pr_review", result={}))
+            cb(SimpleNamespace(tool_name="submit_pr_review", result={}, is_error=None))
 
     _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
     try:
@@ -781,6 +782,55 @@ async def test_run_rpc_review_pr_stops_after_submit_without_dirty_probe(
 
     fake = _FakeRpcClient.instances[0]
     assert fake.prompts == ["kickoff"]
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_review_pr_still_reminds_when_submit_fails(tmp_path: Path, settings: Settings) -> None:
+    """An errored terminal-tool end event does not count as the terminal action.
+
+    omp_rpc normalizes xd:// device dispatches to the host-tool name, so a
+    rejected `submit_pr_review` surfaces as an end event with `is_error=True`
+    under its real name. Counting it would end the review task silently with
+    no review submitted — the completion reminder must still fire.
+    """
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    original_on_tool_end = _FakeRpcClient.on_tool_execution_end
+
+    def _record_tool_end(self, cb) -> None:
+        self._tool_end_callbacks = getattr(self, "_tool_end_callbacks", [])
+        self._tool_end_callbacks.append(cb)
+
+    def _on_prompt(client: _FakeRpcClient, _prompt: str) -> None:
+        for cb in client._tool_end_callbacks:
+            cb(
+                SimpleNamespace(
+                    tool_name="submit_pr_review",
+                    result={"content": [{"type": "text", "text": "GitHub rejected PR review: 422"}]},
+                    is_error=True,
+                )
+            )
+
+    _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
+    try:
+        _FakeRpcClient.on_prompt = staticmethod(_on_prompt)  # type: ignore[attr-defined]
+        loop = asyncio.new_event_loop()
+        try:
+            worker._run_rpc_blocking(
+                inputs,
+                task_kind="review_pr",
+                prompt="kickoff",
+                loop=loop,
+                bindings=bindings,  # type: ignore[arg-type]
+            )
+        finally:
+            loop.close()
+    finally:
+        _FakeRpcClient.on_tool_execution_end = original_on_tool_end  # type: ignore[assignment]
+        delattr(_FakeRpcClient, "on_prompt")
+
+    fake = _FakeRpcClient.instances[0]
+    assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
+    assert all("submit_pr_review" in p for p in fake.prompts[1:])
 
 
 # ---------------------------------------------------------------------------
@@ -983,3 +1033,69 @@ def test_capture_natives_cache_records_on_success(
     assert repo == "acme/widgets"
     assert key == "cafef00d"
     assert native_dir == inputs.workspace.repo_dir / "packages" / "natives" / "native"
+
+
+def _release_inputs(
+    tmp_path: Path,
+    settings: Settings,
+    *,
+    session_has_jsonl: bool,
+) -> tuple[worker.TaskInputs, SimpleNamespace]:
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=session_has_jsonl)
+    inputs.issue = None
+    inputs.release = worker.ReleaseTaskContext(
+        tag="v17.2.8",
+        version="17.2.8",
+        round=2,
+        max_rounds=5,
+        head_sha="abc",
+        default_branch="main",
+        failures_text="tests failed",
+        run_urls=("https://example/run",),
+    )
+    bindings.issue = None
+    bindings.issue_key = "acme/widgets#v17.2.8"
+    return inputs, bindings
+
+
+def test_release_prompt_routes_fresh_and_resumed_sessions(
+    tmp_path: Path,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs, _bindings = _release_inputs(tmp_path, settings, session_has_jsonl=False)
+    monkeypatch.setattr(worker.persona, "kickoff_release", lambda **_kwargs: "fresh", raising=False)
+    monkeypatch.setattr(worker.persona, "followup_release", lambda **_kwargs: "resumed", raising=False)
+    kwargs = {
+        "comment": None,
+        "pr_number": None,
+        "review_payload": None,
+    }
+    assert worker._build_prompt("handle_release_ci", inputs, resuming=False, **kwargs) == "fresh"
+    assert worker._build_prompt("handle_release_ci", inputs, resuming=True, **kwargs) == "resumed"
+
+
+@pytest.mark.asyncio
+async def test_release_task_reminds_until_terminal_tool_runs(
+    tmp_path: Path,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs, bindings = _release_inputs(tmp_path, settings, session_has_jsonl=False)
+    monkeypatch.setattr(worker.persona, "system_append_release", lambda **_kwargs: "SYS RELEASE", raising=False)
+    monkeypatch.setattr(worker.persona, "followup_release", lambda **_kwargs: "retag or abort", raising=False)
+    loop = asyncio.new_event_loop()
+    try:
+        worker._run_rpc_blocking(
+            inputs,
+            task_kind="handle_release_ci",
+            prompt="kickoff",
+            loop=loop,
+            bindings=bindings,  # type: ignore[arg-type]
+        )
+    finally:
+        loop.close()
+    fake = _FakeRpcClient.instances[0]
+    assert fake.kwargs["append_system_prompt"] == "SYS RELEASE"
+    assert fake.kwargs["model"] in settings.release_model_pool
+    assert fake.prompts == ["kickoff", *(["retag or abort"] * settings.task_completion_max_reminders)]

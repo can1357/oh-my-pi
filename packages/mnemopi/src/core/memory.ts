@@ -99,8 +99,10 @@ export interface RememberFacadeOptions {
 	readonly memory_type?: string | null;
 }
 
-export interface RecallFacadeOptions
-	extends Omit<RecallOptions, "temporalHalflife" | "vecWeight" | "ftsWeight" | "importanceWeight"> {
+export interface RecallFacadeOptions extends Omit<
+	RecallOptions,
+	"temporalHalflife" | "vecWeight" | "ftsWeight" | "importanceWeight"
+> {
 	readonly from_date?: string | null;
 	readonly to_date?: string | null;
 	readonly source?: string | null;
@@ -212,7 +214,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		const llmEnabled = hasOwn(options, "llmEnabled")
 			? options.llmEnabled
 			: (nestedLlm?.enabled ??
-					(nestedLlm?.baseUrl !== undefined ||
+				  (nestedLlm?.baseUrl !== undefined ||
 						nestedLlm?.apiKey !== undefined ||
 						nestedLlm?.maxTokens !== undefined ||
 						nestedLlm?.complete !== undefined ||
@@ -329,7 +331,8 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 }
 
 function countRows(db: Database, sql: string, ...params: (string | number | null)[]): number {
-	const row = db.prepare(sql).get(...params) as { total?: number; count?: number } | null;
+	using statement = db.prepare(sql);
+	const row = statement.get(...params) as { total?: number; count?: number } | null;
 	return row?.total ?? row?.count ?? 0;
 }
 
@@ -344,9 +347,8 @@ function dataDirForDbPath(path: string): string | undefined {
 
 function sourceCounts(db: Database): Record<string, number> {
 	const counts: Record<string, number> = {};
-	for (const row of db
-		.prepare("SELECT source, COUNT(*) AS total FROM working_memory GROUP BY source")
-		.all() as Row[]) {
+	using statement = db.prepare("SELECT source, COUNT(*) AS total FROM working_memory GROUP BY source");
+	for (const row of statement.all() as Row[]) {
 		counts[String(row.source ?? "") || "conversation"] = Number(row.total ?? 0);
 	}
 	return counts;
@@ -396,6 +398,7 @@ export class Mnemopi {
 	constructor(options: MnemopiOptions = {}) {
 		this.sessionId = options.sessionId ?? options.session_id ?? "default";
 		this.bank = options.bank ?? "default";
+
 		this.authorId = options.authorId ?? options.author_id ?? null;
 		this.authorType = options.authorType ?? options.author_type ?? null;
 		this.channelId = options.channelId ?? options.channel_id ?? this.sessionId;
@@ -482,7 +485,8 @@ export class Mnemopi {
 		const episodic = this.#withRuntimeOptions(() => this.beam.getEpisodicStats(authorId, authorType, channelId));
 		const totalMemories = countRows(this.conn, "SELECT COUNT(*) AS total FROM working_memory");
 		const totalSessions = countRows(this.conn, "SELECT COUNT(DISTINCT session_id) AS total FROM working_memory");
-		const last = this.conn.prepare("SELECT timestamp FROM working_memory ORDER BY timestamp DESC LIMIT 1").get() as {
+		using lastStatement = this.conn.prepare("SELECT timestamp FROM working_memory ORDER BY timestamp DESC LIMIT 1");
+		const last = lastStatement.get() as {
 			timestamp: string | null;
 		} | null;
 		const tripleTotal = countRows(this.conn, "SELECT COUNT(*) AS total FROM triples");

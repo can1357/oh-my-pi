@@ -1,14 +1,16 @@
 # Resolution devices runtime
 
-Pending previews and plan approval no longer use a `resolve` tool. They finalize through three plain-text writes handled by `packages/coding-agent/src/tools/resolve.ts`:
+Pending previews and plan approval do not use a `resolve` tool. They finalize through plain-text `write` calls to virtual `xd://` devices implemented in `packages/coding-agent/src/tools/resolve.ts`:
 
-- `/xdev/resolve` — apply the pending staged preview; body = reason text
-- `/xdev/reject` — discard the pending staged preview; body = reason text
-- `/xdev/propose` — submit the plan for approval while plan mode is active; body = the plan slug/title (`<slug>` for `local://<slug>-plan.md`)
+- `xd://resolve` — apply the pending staged preview; body = a one-sentence reason
+- `xd://reject` — discard the pending staged preview; body = a one-sentence reason
+- `xd://propose` — submit a plan for approval while plan mode is active; body = the plan slug (`<slug>` for `local://<slug>-plan.md`)
+
+These are internal URLs, not filesystem paths. `read xd://resolve`, `read xd://reject`, and `read xd://propose` return a one-line usage hint. Completed device writes carry `details.xdev` metadata; consumers recover the inner result through `writeDeviceDispatch()` and `resolveDispatchDetails()`.
 
 ## Preview flows
 
-Preview producers call `queueResolveHandler(...)` with `apply(reason)` and optional `reject(reason)` callbacks. That registers a non-forcing pending invoker in `ToolChoiceQueue`.
+Preview producers call `queueResolveHandler(...)` with `apply(reason)` and optional `reject(reason)` callbacks. Each preview receives a unique pending-invoker ID in `ToolChoiceQueue`, so stacked previews do not overwrite one another.
 
 While a preview is pending, `AgentSession.nextToolChoiceDirective()` returns a soft requirement:
 
@@ -16,38 +18,33 @@ While a preview is pending, `AgentSession.nextToolChoiceDirective()` returns a s
 - `satisfies: isPreviewResolutionToolCall`
 - reminder from `resolve-device-reminder.md`
 
-So the model can comply by writing to `/xdev/resolve` or `/xdev/reject`; a write to any other path is still a detour and gets skipped/escalated.
+The model complies by writing to `xd://resolve` or `xd://reject`. A different write does not resolve the preview and is skipped or escalated by the soft-requirement lifecycle.
 
-Dispatch path:
+Dispatch invokes the pending queue head through `runResolveInvocation(...)`.
 
-- `dispatchResolutionDevice(session, "resolve" | "reject", text)`
-- `peekQueueInvoker() ?? peekPendingInvoker()`
-- `runResolveInvocation(...)`
-
-`reject` with no pending action succeeds (`Nothing to reject; no pending action remains.`). `resolve` with no pending action throws.
+- A successful apply or discard consumes that pending invoker exactly once.
+- If apply throws, the same preview is re-registered so the model can reject it or retry after fixing the cause.
+- Rejecting with no pending action succeeds with `Nothing to reject; no pending action remains.`
+- Resolving with no pending action throws.
+- An apply callback's ordinary error becomes `ToolError("Apply failed: ...")`; an existing `ToolError` is preserved.
 
 ## Plan approval
 
 Plan mode installs a separate proposal handler through `setPlanProposalHandler(...)`.
 
-- `InteractiveMode` uses it to hand `PlanApprovalDetails` to the plan-review UI.
-- ACP mode uses it to run elicitation/approval and emit mode updates.
-- PlanYolo uses it to auto-approve and switch to the execution target.
+- Interactive mode hands `PlanApprovalDetails` to the plan-review UI.
+- ACP mode runs elicitation/approval and emits mode updates.
+- PlanYolo auto-approves and switches to the execution target.
 
-Dispatch path:
-
-- `dispatchResolutionDevice(session, "propose", title)`
-- `peekPlanProposalHandler()`
-
-`/xdev/propose` is only valid while plan mode is active.
+`xd://propose` dispatches the written slug to the installed plan proposal handler and is valid only while plan mode is active.
 
 ## Why `write` is guaranteed
 
-Because previews and plan approval now ride `write`, the harness keeps `write` available whenever it is needed:
+Because previews and plan approval ride `write`, the harness keeps `write` available whenever needed:
 
-- `createTools(...)` auto-appends `write` when a `deferrable` tool is active (e.g. `ast_edit`)
-- `createAgentSession(...)` keeps `write` registered when a deferrable tool exists or plan mode is enabled
+- `createTools(...)` auto-appends `write` when a deferrable tool such as `ast_edit` is active.
+- `createAgentSession(...)` keeps `write` registered when a deferrable tool exists or plan mode is enabled.
 
 ## Custom tools
 
-Custom tools still stage previews through `pushPendingAction(...)`; the loader forwards them into `queueResolveHandler(...)`. Nothing about the custom-tool API changes except the model-facing finalization step: the follow-up is now a plain-text write to `/xdev/resolve` or `/xdev/reject`, not a `resolve` tool call.
+Custom tools still stage previews through `pushPendingAction(...)`; the loader forwards them into `queueResolveHandler(...)`. The custom-tool preview API is unchanged except for the model-facing finalization step: follow up with a plain-text write to `xd://resolve` or `xd://reject`, not a `resolve` tool call.

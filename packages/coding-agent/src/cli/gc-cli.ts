@@ -2,13 +2,22 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { getAgentDir, getBlobsDir, getHistoryDbPath, getModelDbPath, getSessionsDir } from "@oh-my-pi/pi-utils";
+import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
+import {
+	getAgentDir,
+	getBlobsDir,
+	getHistoryDbPath,
+	getModelDbPath,
+	getSessionsDir,
+	getStatsDbPath,
+	readLines,
+} from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
+import { BLOB_HASH_RE } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
-const HASH_RE = /^[a-f0-9]{64}$/;
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
@@ -54,6 +63,7 @@ export interface ArchiveGcResult {
 	wouldArchive: number;
 	archived: number;
 	historyRowsDeleted: number;
+	statsRowsDeleted: number;
 	ftsRebuilt: boolean;
 	errors: string[];
 }
@@ -141,11 +151,21 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
 	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
+	const archiveSelected = selected && flags.archive === true;
+	const needsArchiveSettings =
+		archiveSelected &&
+		(flags.coldArchiveAfterDays === undefined ||
+			flags.retainNewestGlobal === undefined ||
+			flags.retainNewestPerCwd === undefined);
 	const settings =
-		flags.apply === true ? await Settings.loadIsolated({ agentDir }) : await Settings.loadReadOnly({ agentDir });
-	const getBoolean = (pathKey: "gc.blobs" | "gc.archive" | "gc.wal") => settings.get(pathKey);
+		!selected || needsArchiveSettings
+			? flags.apply === true
+				? await Settings.loadIsolated({ agentDir })
+				: await Settings.loadReadOnly({ agentDir })
+			: undefined;
+	const getBoolean = (pathKey: "gc.blobs" | "gc.archive" | "gc.wal") => settings?.get(pathKey) ?? getDefault(pathKey);
 	const getNumber = (pathKey: "gc.coldArchiveAfterDays" | "gc.retainNewestGlobal" | "gc.retainNewestPerCwd") =>
-		settings.get(pathKey);
+		settings?.get(pathKey) ?? getDefault(pathKey);
 	return {
 		apply: flags.apply === true,
 		json: flags.json === true,
@@ -268,7 +288,7 @@ async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<
 			const text = await readTextIfPresent(file);
 			for (const match of text.matchAll(BLOB_REF_RE)) {
 				const hash = match[1]?.toLowerCase();
-				if (hash && HASH_RE.test(hash)) hashes.add(hash);
+				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
 			}
 		}
 	}
@@ -420,33 +440,39 @@ function sessionArtifactsPath(sessionPath: string): string {
 	return sessionPath.slice(0, -SESSION_SUFFIX.length);
 }
 
-function sessionIdFromSessionPath(sessionPath: string): string | undefined {
-	const basename = path.basename(sessionPath);
-	if (basename.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-		const id = basename.slice(0, -COMPRESSED_SESSION_SUFFIX.length);
-		return id || undefined;
-	}
-	if (basename.endsWith(SESSION_SUFFIX)) {
-		const id = basename.slice(0, -SESSION_SUFFIX.length);
-		return id || undefined;
-	}
-	return undefined;
+interface SessionLineageHeader {
+	id: string;
+	parentSession?: string;
+	previousSessionFiles: string[];
 }
 
-function sessionIdFromSessionText(text: string): string | undefined {
+function sessionLineageHeaderFromText(text: string): SessionLineageHeader | undefined {
 	let sawTitleSlot = false;
 	for (const rawLine of text.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line) continue;
 		try {
-			const record = JSON.parse(line) as { type?: unknown; id?: unknown };
+			const record = JSON.parse(line) as {
+				type?: unknown;
+				id?: unknown;
+				parentSession?: unknown;
+				previousSessionFiles?: unknown;
+			};
 			if (!sawTitleSlot && record.type === "title") {
 				sawTitleSlot = true;
 				continue;
 			}
-			return record.type === "session" && typeof record.id === "string" && record.id.length > 0
-				? record.id
-				: undefined;
+			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return undefined;
+			return {
+				id: record.id,
+				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
+				previousSessionFiles: Array.isArray(record.previousSessionFiles)
+					? record.previousSessionFiles.filter(
+							(previousSessionFile): previousSessionFile is string =>
+								typeof previousSessionFile === "string" && previousSessionFile.length > 0,
+						)
+					: [],
+			};
 		} catch {
 			return undefined;
 		}
@@ -454,8 +480,17 @@ function sessionIdFromSessionText(text: string): string | undefined {
 	return undefined;
 }
 
-async function archivedSessionIdFromFile(file: string): Promise<string | undefined> {
-	return sessionIdFromSessionText(await readTextIfPresent(file)) ?? sessionIdFromSessionPath(file);
+async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
+	const decoder = new TextDecoder();
+	const lines: string[] = [];
+	for await (const line of readLines(Bun.file(file).stream())) {
+		const decoded = decoder.decode(line).trim();
+		if (!decoded) continue;
+		lines.push(decoded);
+		const header = sessionLineageHeaderFromText(lines.join("\n"));
+		if (header || lines.length >= 2) return header;
+	}
+	return undefined;
 }
 
 async function gzipSessionFile(source: string, destination: string): Promise<void> {
@@ -563,7 +598,7 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]> {
 	const ids = new Set<string>();
 	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
-		const id = await archivedSessionIdFromFile(file);
+		const id = sessionLineageHeaderFromText(await readTextIfPresent(file))?.id;
 		if (id) ids.add(id);
 	}
 	return [...ids].sort();
@@ -594,6 +629,597 @@ async function cleanupHistoryRowsForArchivedSessions(
 	}
 }
 
+const STATS_SESSION_TABLES = ["messages", "user_messages", "tool_calls", "file_offsets"] as const;
+const STATS_ENTRY_TABLES = ["messages", "user_messages", "tool_calls"] as const;
+type StatsEntryTable = (typeof STATS_ENTRY_TABLES)[number];
+
+const STATS_IDENTITY_COLUMNS: Record<StatsEntryTable, readonly string[]> = {
+	messages: ["entry_id", "timestamp"],
+	user_messages: ["entry_id", "timestamp"],
+	tool_calls: ["entry_id", "timestamp", "tool_call_id"],
+};
+
+interface StatsSession {
+	path: string;
+	id: string;
+	parentSession?: string;
+	historicalPaths: string[];
+	identities: Record<StatsEntryTable, StatsEntryIdentity[]>;
+}
+
+interface StatsLineageNode extends StatsSession {
+	statsPaths: Set<string>;
+	identityKeys: Set<string>;
+}
+
+interface StatsEntryIdentity {
+	entryId: string;
+	timestamp: number;
+	toolCallId: string;
+}
+
+interface StatsTransferTarget {
+	path: string;
+	identities: Record<StatsEntryTable, StatsEntryIdentity[]>;
+}
+
+interface StatsCleanupPlan {
+	sessionPaths: string[];
+	retainedSessions: StatsLineageNode[];
+	transfers: StatsTransferTarget[];
+	archivedIdentityKeys: Set<string>;
+	preserveAll: boolean;
+}
+
+interface StatsCleanupContext {
+	plans: StatsCleanupPlan[];
+	incompleteRetainedSessions: StatsLineageNode[];
+}
+
+function createStatsIdentities(): Record<StatsEntryTable, StatsEntryIdentity[]> {
+	return {
+		messages: [],
+		user_messages: [],
+		tool_calls: [],
+	};
+}
+
+function statsIdentityKey(table: StatsEntryTable, identity: StatsEntryIdentity): string {
+	return `${table}\0${identity.entryId}\0${identity.timestamp}\0${identity.toolCallId}`;
+}
+
+function statsIdentityKeys(identities: Record<StatsEntryTable, StatsEntryIdentity[]>): Set<string> {
+	const keys = new Set<string>();
+	for (const table of STATS_ENTRY_TABLES) {
+		for (const identity of identities[table]) keys.add(statsIdentityKey(table, identity));
+	}
+	return keys;
+}
+
+function tableHasColumn(db: Database, table: string, column: string): boolean {
+	const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string | null }>;
+	return rows.some(row => row.name === column);
+}
+
+function collectStoredStatsSessionPaths(db: Database): string[] {
+	const sessionPaths = new Set<string>();
+	for (const table of STATS_SESSION_TABLES) {
+		if (!tableExists(db, table) || !tableHasColumn(db, table, "session_file")) continue;
+		const rows = db.prepare(`SELECT DISTINCT session_file FROM ${table}`).all() as Array<{
+			session_file?: string | null;
+		}>;
+		for (const row of rows) {
+			if (typeof row.session_file === "string") sessionPaths.add(row.session_file);
+		}
+	}
+	return [...sessionPaths];
+}
+
+/**
+ * `/move` preserves the session filename and artifacts-directory basename.
+ * Recover the top-level path represented by any main or nested stats row so
+ * one archived logical session can reconcile every historical location.
+ */
+function logicalSessionRootForStatsPath(statsPath: string, sessionPath: string): string | undefined {
+	const sessionFilename = path.basename(sessionPath);
+	if (path.basename(statsPath) === sessionFilename) return statsPath;
+
+	const artifactsDirname = sessionFilename.slice(0, -SESSION_SUFFIX.length);
+	let directory = path.dirname(path.resolve(statsPath));
+	while (true) {
+		if (path.basename(directory) === artifactsDirname) return `${directory}${SESSION_SUFFIX}`;
+		const parent = path.dirname(directory);
+		if (parent === directory) return undefined;
+		directory = parent;
+	}
+}
+
+function sessionPathEncodesId(sessionPath: string, sessionId: string): boolean {
+	const stem = path.basename(sessionPath, SESSION_SUFFIX);
+	return stem === sessionId || stem.endsWith(`_${sessionId}`);
+}
+
+function managedHistoricalSessionPaths(
+	header: SessionLineageHeader,
+	currentSessionPath: string,
+	sessionsRoot: string,
+): string[] {
+	const root = path.resolve(sessionsRoot);
+	const filename = path.basename(currentSessionPath);
+	const paths = new Set<string>();
+	for (const previousSessionFile of header.previousSessionFiles) {
+		if (!path.isAbsolute(previousSessionFile) || path.basename(previousSessionFile) !== filename) continue;
+		const resolved = path.resolve(previousSessionFile);
+		const relative = path.relative(root, resolved);
+		if (
+			!relative ||
+			relative === ".." ||
+			relative.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relative) ||
+			!resolved.endsWith(SESSION_SUFFIX)
+		) {
+			continue;
+		}
+		paths.add(resolved);
+	}
+	return [...paths];
+}
+
+function resolveLogicalSessionMatch(
+	statsPath: string,
+	nodes: StatsLineageNode[],
+): { node: StatsLineageNode; logicalRoot: string } | undefined {
+	const matches: Array<{ node: StatsLineageNode; logicalRoot: string }> = [];
+	for (const node of nodes) {
+		const logicalRoot = logicalSessionRootForStatsPath(statsPath, node.path);
+		if (logicalRoot) matches.push({ node, logicalRoot });
+	}
+	const exact = matches.filter(match => path.resolve(match.logicalRoot) === path.resolve(match.node.path));
+	if (exact.length === 1) return exact[0];
+	if (exact.length > 1) return undefined;
+
+	const known = matches.filter(match =>
+		[...match.node.statsPaths].some(statsPath => path.resolve(statsPath) === path.resolve(match.logicalRoot)),
+	);
+	if (known.length === 1) return known[0];
+	if (known.length > 1) return undefined;
+
+	const idMatches = matches.filter(match => sessionPathEncodesId(match.logicalRoot, match.node.id));
+	return idMatches.length === 1 ? idMatches[0] : undefined;
+}
+
+/**
+ * Resolve retained peers through `parentSession`, which is historically either
+ * a session id or an absolute path. Ambiguous aliases are deliberately left
+ * unresolved so cleanup fails safe instead of transferring across sessions.
+ */
+function buildStatsCleanupPlans(
+	archivedSessions: StatsSession[],
+	retainedSessions: StatsSession[],
+	dbPath: string,
+): StatsCleanupContext {
+	const archivedNodes: StatsLineageNode[] = archivedSessions.map(session => ({
+		...session,
+		statsPaths: new Set([session.path, ...session.historicalPaths]),
+		identityKeys: statsIdentityKeys(session.identities),
+	}));
+	const retainedNodes: StatsLineageNode[] = retainedSessions.map(session => ({
+		...session,
+		statsPaths: new Set([session.path, ...session.historicalPaths]),
+		identityKeys: statsIdentityKeys(session.identities),
+	}));
+	const nodes = [...archivedNodes, ...retainedNodes];
+
+	const db = new Database(dbPath);
+	try {
+		db.run("PRAGMA busy_timeout = 5000");
+		for (const storedPath of collectStoredStatsSessionPaths(db)) {
+			const match = resolveLogicalSessionMatch(storedPath, nodes);
+			if (match) match.node.statsPaths.add(match.logicalRoot);
+		}
+	} finally {
+		db.close();
+	}
+
+	for (const child of nodes) {
+		if (
+			!child.parentSession ||
+			(!path.isAbsolute(child.parentSession) && !child.parentSession.endsWith(SESSION_SUFFIX))
+		) {
+			continue;
+		}
+		const match = resolveLogicalSessionMatch(child.parentSession, nodes);
+		if (match) match.node.statsPaths.add(match.logicalRoot);
+	}
+
+	const archivedPathClaimCounts = new Map<string, number>();
+	for (const archived of archivedNodes) {
+		for (const statsPath of archived.statsPaths) {
+			const key = path.resolve(statsPath);
+			archivedPathClaimCounts.set(key, (archivedPathClaimCounts.get(key) ?? 0) + 1);
+		}
+	}
+	const ambiguousArchivedPathKeys = new Set(
+		[...archivedPathClaimCounts].filter(([, count]) => count > 1).map(([key]) => key),
+	);
+
+	const aliases = new Map<string, StatsLineageNode | null>();
+	const identityKeysByNode = new Map<StatsLineageNode, Set<string>>();
+	for (const node of nodes) {
+		const keys = new Set([
+			`id:${node.id}`,
+			...[...node.statsPaths].map(statsPath => `path:${path.resolve(statsPath)}`),
+		]);
+		identityKeysByNode.set(node, keys);
+		for (const key of keys) {
+			if (!aliases.has(key)) {
+				aliases.set(key, node);
+			} else if (aliases.get(key) !== node) {
+				aliases.set(key, null);
+			}
+		}
+	}
+
+	const incompleteLineage = new Set<StatsLineageNode>();
+	const lineageKeysByNode = new Map<StatsLineageNode, Set<string>>();
+	for (const node of nodes) {
+		const lineageKeys = new Set(identityKeysByNode.get(node));
+		let current: StatsLineageNode | null = node;
+		const seen = new Set<StatsLineageNode>();
+		while (current?.parentSession) {
+			if (seen.has(current)) {
+				incompleteLineage.add(node);
+				break;
+			}
+			seen.add(current);
+			const parentReference = current.parentSession;
+			const parentKey =
+				path.isAbsolute(parentReference) || parentReference.endsWith(SESSION_SUFFIX)
+					? `path:${path.resolve(parentReference)}`
+					: `id:${parentReference}`;
+			lineageKeys.add(parentKey);
+			const parent = aliases.get(parentKey);
+			if (!parent) {
+				incompleteLineage.add(node);
+				break;
+			}
+			for (const key of identityKeysByNode.get(parent) ?? []) lineageKeys.add(key);
+			current = parent;
+		}
+		lineageKeysByNode.set(node, lineageKeys);
+	}
+
+	const retainedPathKeys = new Set(
+		retainedNodes.flatMap(retained => [...retained.statsPaths].map(statsPath => path.resolve(statsPath))),
+	);
+	const plans = archivedNodes.map(archived => {
+		const archivedLineage = lineageKeysByNode.get(archived) ?? new Set<string>();
+		return {
+			sessionPaths: [...archived.statsPaths].filter(statsPath => {
+				const key = path.resolve(statsPath);
+				return !retainedPathKeys.has(key) && !ambiguousArchivedPathKeys.has(key);
+			}),
+			retainedSessions: retainedNodes.filter(retained => {
+				if (incompleteLineage.has(retained)) return false;
+				const retainedLineage = lineageKeysByNode.get(retained);
+				return retainedLineage ? [...retainedLineage].some(key => archivedLineage.has(key)) : false;
+			}),
+			transfers: [],
+			archivedIdentityKeys: archived.identityKeys,
+			preserveAll: false,
+		};
+	});
+	return {
+		plans,
+		incompleteRetainedSessions: retainedNodes.filter(retained => incompleteLineage.has(retained)),
+	};
+}
+
+function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTable, StatsEntryIdentity[]>): void {
+	if (line.length === 0) return;
+	try {
+		const record: unknown = JSON.parse(line);
+		if (
+			!record ||
+			typeof record !== "object" ||
+			!("type" in record) ||
+			record.type !== "message" ||
+			!("id" in record) ||
+			typeof record.id !== "string" ||
+			record.id.length === 0 ||
+			!("message" in record) ||
+			!record.message ||
+			typeof record.message !== "object"
+		) {
+			return;
+		}
+		const message = record.message;
+		if (!("role" in message)) return;
+		const parsedEntryTimestamp =
+			"timestamp" in record && typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
+		if (message.role === "user") {
+			identities.user_messages.push({
+				entryId: record.id,
+				timestamp: Number.isFinite(parsedEntryTimestamp) ? parsedEntryTimestamp : 0,
+				toolCallId: "",
+			});
+			return;
+		}
+		if (message.role !== "assistant") return;
+		const timestamp =
+			"timestamp" in message && typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+				? message.timestamp
+				: Number.isFinite(parsedEntryTimestamp)
+					? parsedEntryTimestamp
+					: 0;
+		identities.messages.push({ entryId: record.id, timestamp, toolCallId: "" });
+		if (!("content" in message) || !Array.isArray(message.content)) return;
+		for (const block of message.content) {
+			if (
+				block &&
+				typeof block === "object" &&
+				"type" in block &&
+				block.type === "toolCall" &&
+				"id" in block &&
+				typeof block.id === "string"
+			) {
+				identities.tool_calls.push({ entryId: record.id, timestamp, toolCallId: block.id });
+			}
+		}
+	} catch {
+		// Stats parsing is also lenient: a malformed line cannot own a retained row.
+	}
+}
+
+function collectSessionStatsIdentitiesFromText(text: string): Record<StatsEntryTable, StatsEntryIdentity[]> {
+	const identities = createStatsIdentities();
+	for (const line of text.split(/\r?\n/)) addSessionStatsIdentity(line, identities);
+	return identities;
+}
+
+async function collectSessionStatsIdentities(
+	sessionPath: string,
+): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> {
+	const identities = createStatsIdentities();
+	const decoder = new TextDecoder();
+	for await (const line of readLines(Bun.file(sessionPath).stream())) {
+		addSessionStatsIdentity(decoder.decode(line), identities);
+	}
+	return identities;
+}
+
+async function populateStatsTransferTargets(context: StatsCleanupContext): Promise<void> {
+	const identitiesBySession = new Map<string, Promise<Record<StatsEntryTable, StatsEntryIdentity[]>>>();
+	const identitiesFor = (session: StatsLineageNode): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> => {
+		let identities = identitiesBySession.get(session.path);
+		if (!identities) {
+			identities = collectSessionStatsIdentities(session.path);
+			identitiesBySession.set(session.path, identities);
+		}
+		return identities;
+	};
+
+	const incompleteIdentityKeys = new Set<string>();
+	let hasUnidentifiableIncompleteSession = false;
+	for (const retained of context.incompleteRetainedSessions) {
+		const keys = statsIdentityKeys(await identitiesFor(retained));
+		if (keys.size === 0) hasUnidentifiableIncompleteSession = true;
+		for (const key of keys) incompleteIdentityKeys.add(key);
+	}
+
+	for (const plan of context.plans) {
+		if (context.incompleteRetainedSessions.length > 0) {
+			plan.preserveAll =
+				hasUnidentifiableIncompleteSession ||
+				plan.archivedIdentityKeys.size === 0 ||
+				[...plan.archivedIdentityKeys].some(key => incompleteIdentityKeys.has(key));
+		}
+		for (const retained of plan.retainedSessions) {
+			plan.transfers.push({ path: retained.path, identities: await identitiesFor(retained) });
+		}
+	}
+}
+
+/**
+ * Rekey copied entry rows to the newest retained lineage peer before pruning.
+ * The retained file's own offset is never rewritten: it already describes that
+ * file's byte position, while every archived historical offset is deleted.
+ */
+function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]): number {
+	if (plans.length === 0) return 0;
+	const db = new Database(dbPath);
+	try {
+		db.run("PRAGMA busy_timeout = 5000");
+		const sessionTables = STATS_SESSION_TABLES.filter(
+			table => tableExists(db, table) && tableHasColumn(db, table, "session_file"),
+		);
+		const entryTables = STATS_ENTRY_TABLES.filter(
+			table =>
+				sessionTables.includes(table) &&
+				STATS_IDENTITY_COLUMNS[table].every(column => tableHasColumn(db, table, column)),
+		);
+
+		db.run(`
+			CREATE TEMP TABLE gc_retained_entries (
+				table_name TEXT NOT NULL,
+				entry_id TEXT NOT NULL,
+				timestamp INTEGER NOT NULL,
+				tool_call_id TEXT NOT NULL,
+				target_session_file TEXT NOT NULL,
+				PRIMARY KEY (table_name, entry_id, timestamp, tool_call_id)
+			)
+		`);
+		const clearRetainedEntries = db.prepare("DELETE FROM gc_retained_entries");
+		const insertRetainedEntry = db.prepare(`
+			INSERT OR IGNORE INTO gc_retained_entries (
+				table_name, entry_id, timestamp, tool_call_id, target_session_file
+			) VALUES (?, ?, ?, ?, ?)
+		`);
+		const transferStatements = entryTables.map(table => {
+			const toolCallMatch =
+				table === "tool_calls" ? `retained.tool_call_id = ${table}.tool_call_id` : "retained.tool_call_id = ''";
+			const identityMatch = `
+				retained.table_name = '${table}'
+				AND retained.entry_id = ${table}.entry_id
+				AND retained.timestamp = ${table}.timestamp
+				AND ${toolCallMatch}
+			`;
+			return db.prepare(`
+				UPDATE OR IGNORE ${table}
+				SET session_file = (
+					SELECT retained.target_session_file
+					FROM gc_retained_entries AS retained
+					WHERE ${identityMatch}
+				)
+				WHERE session_file = ?
+					AND EXISTS (
+						SELECT 1
+						FROM gc_retained_entries AS retained
+						WHERE ${identityMatch}
+					)
+			`);
+		});
+		const deletionStatements = sessionTables.map(table => ({
+			table,
+			statement: db.prepare(`DELETE FROM ${table} WHERE session_file = ? OR instr(session_file, ?) = 1`),
+		}));
+		let deleted = 0;
+		const tx = db.transaction((cleanupPlans: StatsCleanupPlan[]) => {
+			for (const plan of cleanupPlans) {
+				if (plan.preserveAll) continue;
+				clearRetainedEntries.run();
+				for (const target of plan.transfers) {
+					for (const table of entryTables) {
+						for (const identity of target.identities[table]) {
+							insertRetainedEntry.run(
+								table,
+								identity.entryId,
+								identity.timestamp,
+								identity.toolCallId,
+								target.path,
+							);
+						}
+					}
+				}
+				for (const sessionPath of new Set(plan.sessionPaths)) {
+					for (const statement of transferStatements) statement.run(sessionPath);
+				}
+				for (const sessionPath of new Set(plan.sessionPaths)) {
+					const nestedPrefix = `${sessionArtifactsPath(sessionPath)}${path.sep}`;
+					for (const { table, statement } of deletionStatements) {
+						const requiresTransfer =
+							plan.retainedSessions.length > 0 &&
+							table !== "file_offsets" &&
+							!entryTables.some(entryTable => entryTable === table);
+						if (requiresTransfer) continue;
+						const result = statement.run(sessionPath, nestedPrefix) as SqliteRunResult;
+						deleted += sqliteNumber(result.changes);
+					}
+				}
+			}
+		});
+		tx(plans);
+		return deleted;
+	} finally {
+		db.close();
+	}
+}
+
+async function collectArchivedStatsSessions(
+	archiveRoot: string,
+	sessionsRoot: string,
+	onError: (file: string, error: unknown) => void,
+): Promise<StatsSession[]> {
+	const sessions: StatsSession[] = [];
+	for (const file of await collectCompressedJsonlFiles(archiveRoot)) {
+		const relative = path.relative(archiveRoot, file);
+		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+		const sourcePath = path.join(sessionsRoot, relative.slice(0, -".gz".length));
+		try {
+			const text = await readTextIfPresent(file);
+			const header = sessionLineageHeaderFromText(text);
+			if (!header) throw new Error("archive is missing a valid session header");
+			sessions.push({
+				path: sourcePath,
+				id: header.id,
+				parentSession: header.parentSession,
+				historicalPaths: managedHistoricalSessionPaths(header, sourcePath, sessionsRoot),
+				identities: collectSessionStatsIdentitiesFromText(text),
+			});
+		} catch (error) {
+			onError(file, error);
+		}
+	}
+	return sessions;
+}
+
+async function cleanupStatsRowsForArchivedSessions(
+	options: ResolvedGcOptions,
+	archiveRoot: string,
+	newlyArchivedSessions: SessionInfo[],
+	result: ArchiveGcResult,
+): Promise<void> {
+	const dbPath =
+		path.resolve(options.agentDir) === path.resolve(getAgentDir())
+			? getStatsDbPath()
+			: path.join(options.agentDir, "stats.db");
+	if (!(await pathExists(dbPath))) return;
+	const sessionsRoot = getSessionsDir(options.agentDir);
+
+	const archivedByPath = new Map<string, StatsSession>();
+	for (const session of newlyArchivedSessions) {
+		archivedByPath.set(path.resolve(session.path), {
+			path: session.path,
+			id: session.id,
+			parentSession: session.parentSessionPath,
+			historicalPaths: [],
+			identities: createStatsIdentities(),
+		});
+	}
+
+	let retainedSessions: SessionInfo[];
+	try {
+		for (const session of await collectArchivedStatsSessions(archiveRoot, sessionsRoot, (file, error) => {
+			result.errors.push(`stats cleanup scan ${file}: ${errorMessage(error)}`);
+		})) {
+			archivedByPath.set(path.resolve(session.path), session);
+		}
+	} catch (error) {
+		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
+	}
+	try {
+		retainedSessions = await listActiveSessions(sessionsRoot);
+	} catch (error) {
+		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
+		return;
+	}
+
+	try {
+		await withStatsSyncLock(dbPath, async () => {
+			const retainedStatsSessions = await Promise.all(
+				retainedSessions.map(async session => {
+					const header = await readSessionLineageHeader(session.path);
+					if (!header || header.id !== session.id) {
+						throw new Error(`session header changed during stats cleanup: ${session.path}`);
+					}
+					return {
+						path: session.path,
+						id: session.id,
+						parentSession: header.parentSession,
+						historicalPaths: managedHistoricalSessionPaths(header, session.path, sessionsRoot),
+						identities: createStatsIdentities(),
+					};
+				}),
+			);
+			const context = buildStatsCleanupPlans([...archivedByPath.values()], retainedStatsSessions, dbPath);
+			await populateStatsTransferTargets(context);
+			result.statsRowsDeleted = reconcileStatsRowsForSessions(dbPath, context.plans);
+		});
+	} catch (error) {
+		result.errors.push(`stats cleanup: ${errorMessage(error)}`);
+	}
+}
+
 async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const sessions = await listActiveSessions(sessionsRoot);
@@ -606,6 +1232,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		wouldArchive: 0,
 		archived: 0,
 		historyRowsDeleted: 0,
+		statsRowsDeleted: 0,
 		ftsRebuilt: false,
 		errors: [],
 	};
@@ -651,17 +1278,20 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	if (!options.apply) return result;
 
 	const archivedSessionIds: string[] = [];
+	const archivedSessions: SessionInfo[] = [];
 	for (const candidate of candidates) {
 		try {
 			await moveSessionWithArtifacts(candidate);
 			result.archived += 1;
 			archivedSessionIds.push(candidate.session.id);
+			archivedSessions.push(candidate.session);
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
 		}
 	}
 
 	await cleanupHistoryRowsForArchivedSessions(options, archiveRoot, archivedSessionIds, result);
+	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, archivedSessions, result);
 	return result;
 }
 
@@ -917,7 +1547,7 @@ function renderText(result: GcResult): string {
 	}
 	if (result.archive) {
 		lines.push(
-			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows removed`,
+			`sessions: ${result.archive.archived}/${result.archive.wouldArchive} archived, ${result.archive.historyRowsDeleted} history rows and ${result.archive.statsRowsDeleted} stats rows removed`,
 		);
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);

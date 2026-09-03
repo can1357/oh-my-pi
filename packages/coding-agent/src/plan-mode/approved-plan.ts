@@ -1,3 +1,4 @@
+import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
@@ -149,8 +150,9 @@ export interface ResolvedApprovedPlan {
 
 /** Locate the plan file the agent wrote and finalize its title — without
  *  renaming anything. Tries, in order: the slug derived from `extra.title`
- *  (`local://<slug>-plan.md`), the plan path from plan-mode state, then a scan
- *  of recent plan files. Throws a `ToolError` guiding the agent when none exist. */
+ *  (`local://<slug>-plan.md`), a state plan that the artifact scan can't see,
+ *  scanned plan files newest-to-oldest, then the state plan path as a final
+ *  fallback. Throws a `ToolError` guiding the agent when none exist. */
 export async function resolveApprovedPlan(input: ResolveApprovedPlanInput): Promise<ResolvedApprovedPlan> {
 	const ordered: string[] = [];
 	const consider = (url: string | undefined): void => {
@@ -159,19 +161,25 @@ export async function resolveApprovedPlan(input: ResolveApprovedPlanInput): Prom
 
 	const slug = planSlugFromSupplied(input.suppliedTitle);
 	consider(slug ? planFileUrlForSlug(slug) : undefined);
+
+	const listed = input.listPlanFiles ? await input.listPlanFiles() : [];
+	// A state plan the scan cannot surface (cwd-relative, or a local file whose
+	// name does not end in `plan.md`) has no mtime in `listed` to compete on, so
+	// it keeps precedence over scanned artifacts — otherwise a stale older draft
+	// could shadow the deliberately-set current plan. A state plan already inside
+	// the scan competes purely on the newest-first ordering below (issue #6569).
+	// Compare canonical `local://` spellings so a resumed `local:/…` state path
+	// still matches the scanner's `local://…` entry (normalizeLocalScheme).
+	const canonicalListed = new Set(listed.map(normalizeLocalScheme));
+	if (input.statePlanFilePath && !canonicalListed.has(normalizeLocalScheme(input.statePlanFilePath))) {
+		consider(input.statePlanFilePath);
+	}
+	for (const url of listed) consider(url);
 	consider(input.statePlanFilePath);
 
 	for (const url of ordered) {
 		const content = await input.readPlan(url);
 		if (content !== null) return finalizeApprovedPlan(url, content, input.suppliedTitle);
-	}
-
-	if (input.listPlanFiles) {
-		for (const url of await input.listPlanFiles()) {
-			if (ordered.includes(url)) continue;
-			const content = await input.readPlan(url);
-			if (content !== null) return finalizeApprovedPlan(url, content, input.suppliedTitle);
-		}
 	}
 
 	const target = ordered[0] ?? input.statePlanFilePath;

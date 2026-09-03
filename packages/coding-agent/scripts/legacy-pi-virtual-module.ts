@@ -19,12 +19,12 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
 	{ dir: "coding-agent", identifier: "PiCodingAgent", rootShim: "legacy-pi-coding-agent-shim.ts" },
 	{ dir: "natives", identifier: "PiNatives", rootShim: null },
-	{ dir: "tui", identifier: "PiTui", rootShim: null },
+	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
 	{ dir: "utils", identifier: "PiUtils", rootShim: null },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";
-const TYPEBOX_SHIM = "typebox.ts";
+const TYPEBOX_COMPAT_MODULE = "legacy-typebox.ts";
 const SKIPPED_WILDCARD_BASENAMES = new Set(["index"]);
 const MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES = new Set(["worker-entry"]);
 
@@ -142,16 +142,29 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {
-				const glob = new Bun.Glob(`*${pattern.sourceSuffix}`);
+				// Recursive on purpose: Node matches `*` in an `exports` pattern across
+				// `/`, so `./slash-commands/*` genuinely serves
+				// `slash-commands/helpers/active-oauth-account`. Enumerating only the
+				// top level left every nested key out of the compiled registry, where
+				// it fell through to `Bun.resolveSync` and died under bunfs — so such
+				// an import worked from source and failed inside a binary.
+				const glob = new Bun.Glob(`**/*${pattern.sourceSuffix}`);
 				const matches: string[] = [];
 				for await (const match of glob.scan({ cwd: sourceDir, onlyFiles: true })) {
-					matches.push(match);
+					// Bun.Glob yields host separators; the export keys and generated
+					// identifiers below are `/`-shaped. Same normalization as
+					// `generate-docs-index.ts`.
+					matches.push(match.split(path.sep).join("/"));
 				}
 				matches.sort();
 				for (const match of matches) {
 					if (!match.endsWith(pattern.sourceSuffix)) continue;
 					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
-					if (!isSafeWildcardBasename(basename) || basename.includes("/")) continue;
+					const segments = basename.split("/");
+					// Every directory on the way has to be importable too: a private or
+					// hidden folder is no more exported than a private file.
+					if (segments.some(segment => segment.startsWith(".") || segment.startsWith("_"))) continue;
+					if (!isSafeWildcardBasename(segments.at(-1) ?? "")) continue;
 					const subpath = `${pattern.exportPrefix}${basename}${pattern.exportSuffix}`;
 					const key = `${manifest.name}/${subpath}`;
 					addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
@@ -162,7 +175,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 		}
 	}
 
-	addEntry(TYPEBOX_MODULE_KEY, "bundledTypeBoxShim", shimSpecifier(TYPEBOX_SHIM));
+	addEntry(TYPEBOX_MODULE_KEY, "bundledTypeBoxShim", shimSpecifier(TYPEBOX_COMPAT_MODULE));
 	return entries;
 }
 

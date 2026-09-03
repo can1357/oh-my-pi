@@ -81,6 +81,63 @@ describe("SqliteAuthCredentialStore.open SQLITE_BUSY handling", () => {
 		}
 	});
 
+	test("open() survives a writer holding the lock past the retry budget (#7298)", async () => {
+		const dbPath = path.join(tempDir, "ordering.db");
+		const sentinel = path.join(tempDir, "locked.sentinel");
+		// The child creates the (empty) database and holds an EXCLUSIVE lock for
+		// 750ms: longer than open()'s full retry budget (attempts at
+		// ~0/100/300/700ms), shorter than the headless 1000ms busy_timeout. The
+		// empty file forces open()'s leases DDL to take the write lock, so only
+		// a busy handler installed BEFORE that DDL lets the first attempt wait
+		// out the writer; the pre-fix code (busy_timeout=0 during the DDL)
+		// exhausted its retries and threw. Readiness is signaled via a sentinel
+		// file written after BEGIN EXCLUSIVE — not stdout — so the handshake
+		// cannot be affected by how the runner wires child stdio.
+		const locker = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
+const db = new Database(process.argv[1]);
+db.run("BEGIN EXCLUSIVE");
+writeFileSync(process.argv[2], "locked");
+await Bun.sleep(750);
+db.run("COMMIT");
+db.close();`,
+				dbPath,
+				sentinel,
+			],
+			{ env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" }, stdout: "ignore", stderr: "pipe" },
+		);
+		// Real-time waits are unavoidable here: the lock lives in a separate
+		// process, so fake timers cannot advance the child's sleep or the
+		// filesystem sentinel it writes.
+		const deadline = Date.now() + 5000;
+		let locked = false;
+		while (Date.now() < deadline) {
+			locked = await fs.access(sentinel).then(
+				() => true,
+				() => false,
+			);
+			if (locked || locker.exitCode !== null) break;
+			await Bun.sleep(10);
+		}
+		if (!locked) {
+			throw new Error(`locker never signaled readiness: ${await new Response(locker.stderr).text()}`);
+		}
+
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			// The store is fully usable after contention: the leases DDL ran.
+			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+		const [exitCode, stderr] = await Promise.all([locker.exited, new Response(locker.stderr).text()]);
+		expect(exitCode, stderr).toBe(0);
+	});
+
 	test("retries through a transient SQLITE_BUSY_RECOVERY and eventually succeeds", async () => {
 		const dbPath = path.join(tempDir, "retry.db");
 		let throws = 2;

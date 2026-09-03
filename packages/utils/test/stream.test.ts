@@ -396,6 +396,21 @@ describe("readSseEvents", () => {
 		expect(evt.raw).toEqual(["event: ping", "data: ok"]);
 	});
 
+	it("yields control-only id/retry events for reconnecting transports", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("id: stream-1\nretry: 25\n\n")]);
+		const events = await collectAsync(readSseEvents(stream));
+
+		expect(events).toEqual([
+			{
+				event: null,
+				data: "",
+				raw: ["id: stream-1", "retry: 25"],
+				id: "stream-1",
+				retry: 25,
+			},
+		] satisfies ServerSentEvent[]);
+	});
+
 	it("strips a single optional space after the field colon (and only one)", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode("event:  spaced\ndata:  body\n\n")]);
 		const [evt] = await collectAsync(readSseEvents(stream));

@@ -53,6 +53,27 @@ def test_route_issue_opened_queues_triage() -> None:
     assert decision.issue_key == "octo/widget#4"
 
 
+def test_route_issue_reopened_queues_triage() -> None:
+    # `finalized_issue_comment.md` promises re-triage on reopen; the router must
+    # queue it as a submitter-attributable triage (not drop it to the skip branch).
+    decision = route(
+        "issues",
+        {
+            "action": "reopened",
+            "issue": {"number": 4, "user": {"login": "alice"}, "author_association": "CONTRIBUTOR"},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert decision.should_queue
+    assert decision.task == "triage_issue"
+    assert decision.issue_key == "octo/widget#4"
+    assert decision.reason == "issues.reopened"
+    assert decision.submitter == "alice"
+    assert decision.association == "CONTRIBUTOR"
+
+
 def test_route_skips_disallowed_repo() -> None:
     decision = route(
         "issues",
@@ -956,3 +977,97 @@ def test_route_non_directive_comment_carries_no_pragmas() -> None:
     assert decision.directive_pragmas == ()
 
 
+def _release_workflow_payload(
+    *,
+    action: str = "completed",
+    repo: str = "octo/widget",
+    message: str = "chore: bump version to 17.2.8",
+) -> dict[str, object]:
+    return {
+        "action": action,
+        "repository": {"full_name": repo, "default_branch": "main"},
+        "workflow_run": {
+            "id": 10,
+            "name": "CI",
+            "head_branch": "main",
+            "head_sha": "abc",
+            "conclusion": "failure",
+            "head_commit": {"message": message},
+        },
+    }
+
+
+def test_release_workflow_completion_queues_sentinel() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_release_ci"
+    assert decision.issue_key == "octo/widget#release"
+
+
+def test_release_workflow_from_bot_still_queues() -> None:
+    payload = _release_workflow_payload()
+    payload["sender"] = {"login": BOT, "type": "Bot"}
+    run = payload["workflow_run"]
+    assert isinstance(run, dict)
+    run["actor"] = {"login": BOT, "type": "Bot"}
+    decision = route(
+        "workflow_run",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert decision.should_queue
+
+
+def test_release_workflow_requested_is_ignored() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(action="requested"),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "workflow_run.requested ignored"
+
+
+def test_non_release_workflow_is_ignored() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(message="fix(ci): repair tests"),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "not a release commit"
+
+
+def test_release_workflow_is_ignored_when_sentinel_disabled() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "release sentinel disabled"
+
+
+def test_release_workflow_requires_allowlisted_repo() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(repo="other/repo"),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "repo not on allowlist"

@@ -1,1 +1,1 @@
-Your full operating instructions are attached as PNG image(s) at the start of the first user message. Read every frame carefully, in order, and follow them as your authoritative system prompt before doing anything else.
+Full operating instructions: PNG image(s) attached at start of first user message. Before anything else, read every frame carefully, in order; follow as authoritative system prompt.

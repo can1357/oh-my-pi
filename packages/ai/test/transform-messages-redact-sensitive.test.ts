@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { configureCredentialRedaction, transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { AssistantMessage, Message, Model, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -17,6 +17,25 @@ function makeModel(): Model<"openai-responses"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	});
 }
+
+beforeAll(() => configureCredentialRedaction(true));
+afterAll(() => configureCredentialRedaction(false));
+
+describe("transformMessages credential redaction disabled", () => {
+	it("passes real tokens through untouched when redaction is off", () => {
+		configureCredentialRedaction(false);
+		try {
+			const token = "ghp_AbCd1234EfGh5678IjKl9012MnOp3456QrSt";
+			const transformed = transformMessages(
+				[{ role: "user", content: `Token: ${token}`, timestamp: Date.now() }],
+				makeModel(),
+			);
+			expect(transformed[0]).toMatchObject({ role: "user", content: `Token: ${token}` });
+		} finally {
+			configureCredentialRedaction(true);
+		}
+	});
+});
 
 describe("transformMessages redact sensitive credentials", () => {
 	it("redacts already-masked and real tokens from outbound messages", () => {

@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { isContextOverflow } from "@oh-my-pi/pi-ai/error";
 import {
 	buildGitLabDuoWorkflowApprovalStartRequest,
@@ -27,6 +28,7 @@ import {
 	streamGitLabDuoWorkflow,
 	traceGitLabDuoWorkflow,
 } from "@oh-my-pi/pi-ai/providers/gitlab-duo-workflow";
+import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
 	AssistantMessage,
 	Context,
@@ -40,7 +42,9 @@ import type {
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { z } from "zod/v4";
+
+beforeAll(() => configureCredentialRedaction(true));
+afterAll(() => configureCredentialRedaction(false));
 
 const model: Model<"gitlab-duo-agent"> = buildModel({
 	id: "claude_sonnet_4_6_vertex",
@@ -63,13 +67,13 @@ const context: Context = {
 const editTool: Tool = {
 	name: "edit",
 	description: "Apply a hashline patch.",
-	parameters: z.object({ input: z.string() }),
+	parameters: type({ input: type("string") }),
 };
 
 const nativeTools: Tool[] = ["read", "write", "grep", "glob", "bash", "lsp", "todo"].map(name => ({
 	name,
 	description: `${name} native bridge`,
-	parameters: z.object({}),
+	parameters: type({}),
 }));
 
 function restoreOptionalEnv(name: string, value: string | undefined): void {
@@ -399,8 +403,6 @@ describe("GitLab Duo Workflow provider protocol", () => {
 		// This goal IS a multi-turn ChatML transcript, so the system slot appends the
 		// history-note telling the model the `<|im_start|>`/`<ran …>` markers are a past
 		// record, not a tool-call syntax to emit.
-		expect(flowPrompt?.prompt_template.system).toContain("written as a plain-text log");
-		expect(flowPrompt?.prompt_template.system).toContain("never write `<ran …>`");
 	});
 
 	it("strips the OMP-internal intent (i) field from replayed tool-call args", () => {

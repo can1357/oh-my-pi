@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { isRecord, readJsonl } from "@oh-my-pi/pi-utils";
 
-async function expectRpcModeOwnsStdin(mode: "rpc" | "rpc-ui"): Promise<void> {
+async function expectRpcOwnsStdin(): Promise<void> {
 	const cliPath = path.join(import.meta.dir, "..", "src", "cli.ts");
 	const extensionPath = path.join(import.meta.dir, "fixtures", "locked-stdin-reader.ts");
 	const child = Bun.spawn(
@@ -12,7 +12,7 @@ async function expectRpcModeOwnsStdin(mode: "rpc" | "rpc-ui"): Promise<void> {
 			"--extension",
 			extensionPath,
 			"--mode",
-			mode,
+			"rpc",
 			"--provider",
 			"anthropic",
 			"--model",
@@ -55,11 +55,8 @@ async function expectRpcModeOwnsStdin(mode: "rpc" | "rpc-ui"): Promise<void> {
 	expect(stateResponse?.success).toBe(true);
 }
 
+// rpc-ui shares this exact pre-discovery claim path (`rpc || rpc-ui`) in main;
+// a second full CLI startup would exercise no distinct ownership behavior.
 describe("RPC mode stdin ownership", () => {
-	test("rpc claims stdin before extensions can lock its singleton stream", () => expectRpcModeOwnsStdin("rpc"), 30000);
-	test(
-		"rpc-ui claims stdin before extensions can lock its singleton stream",
-		() => expectRpcModeOwnsStdin("rpc-ui"),
-		30000,
-	);
+	test("claims stdin before extensions can lock its singleton stream", () => expectRpcOwnsStdin(), 30000);
 });

@@ -1,4 +1,4 @@
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type { CommitAgentState } from "../../../commit/agentic/state";
 import { CHANGELOG_CATEGORIES, type ChangelogCategory } from "../../../commit/types";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";

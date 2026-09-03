@@ -58,6 +58,57 @@ describe("Kagi web search error handling", () => {
 			"Kagi API error (502)",
 		);
 	});
+
+	it("reports malformed success responses as Kagi API errors", async () => {
+		const invalidJsonFetch: FetchImpl = async () => new Response("<html>not json</html>", { status: 200 });
+		const invalidEnvelopeFetch: FetchImpl = async () =>
+			new Response(JSON.stringify(["unexpected"]), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await expect(searchWithKagi("invalid json", { fetch: invalidJsonFetch }, fakeAuthStorage)).rejects.toThrow(
+			"Kagi API returned an invalid response: invalid JSON",
+		);
+		await expect(
+			searchWithKagi("invalid envelope", { fetch: invalidEnvelopeFetch }, fakeAuthStorage),
+		).rejects.toThrow("Kagi API returned an invalid response: expected an object envelope");
+	});
+
+	it("recognizes errors plural in a successful HTTP envelope", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ errors: [{ code: 429, message: "quota exceeded" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await expect(searchWithKagi("envelope error", { fetch: fetchMock }, fakeAuthStorage)).rejects.toThrow(
+			"Kagi API error (429): quota exceeded",
+		);
+	});
+	it("applies the configured timeout at the provider fetch boundary", async () => {
+		const timeoutSignal = new AbortController().signal;
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
+		let fetchSignal: AbortSignal | null | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			fetchSignal = init?.signal;
+			return new Response(JSON.stringify({ meta: { trace: "req-timeout" }, data: {} }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await new KagiProvider().search({
+			query: "slow kagi search",
+			systemPrompt: "",
+			authStorage: fakeAuthStorage,
+			timeoutMs: 180_000,
+			fetch: fetchMock,
+		});
+
+		expect(timeoutSpy).toHaveBeenCalledWith(180_000);
+		expect(fetchSignal).toBe(timeoutSignal);
+	});
 });
 
 describe("Kagi search result parsing", () => {
@@ -135,6 +186,39 @@ describe("Kagi search result parsing", () => {
 		expect(result.answer).toBeUndefined();
 	});
 
+	it("accepts documented result aliases and skips malformed items", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: {
+						search: [
+							null,
+							{ title: "Missing URL" },
+							{
+								href: "https://example.com/alias",
+								name: "Alias Result",
+								description: "Alias description",
+							},
+						],
+						related_search: { invalid: true },
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const result = await searchWithKagi("aliases", { fetch: fetchMock }, fakeAuthStorage);
+
+		expect(result.sources).toEqual([
+			{
+				title: "Alias Result",
+				url: "https://example.com/alias",
+				snippet: "Alias description",
+				publishedDate: undefined,
+			},
+		]);
+		expect(result.relatedQuestions).toEqual([]);
+	});
+
 	it("parses direct_answer into the answer field", async () => {
 		const fetchMock: FetchImpl = async () =>
 			new Response(
@@ -196,6 +280,32 @@ describe("Kagi search result parsing", () => {
 		await searchWithKagi("recency test", { recency, fetch: fetchMock }, fakeAuthStorage);
 
 		expect(requestBody?.filters?.after).toBe(expected);
+	});
+
+	it("canonicalizes Google-style directives into the upstream query", async () => {
+		let requestBody: KagiSearchRequest | undefined;
+
+		const fetchMock: FetchImpl = async (input, init) => {
+			const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (urlStr === "https://kagi.com/api/v1/search") {
+				requestBody = JSON.parse(init?.body as string) as KagiSearchRequest;
+				return new Response(JSON.stringify({ meta: { trace: "req-directives" }, data: { search: [] } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("not mocked", { status: 500 });
+		};
+
+		await searchKagi({
+			query: "x domain:kagi.com until:2025",
+			authStorage: fakeAuthStorage,
+			fetch: fetchMock,
+		});
+		expect(requestBody?.query).toBe("x site:kagi.com before:2025-01-01");
+
+		await searchKagi({ query: "plain kagi query", authStorage: fakeAuthStorage, fetch: fetchMock });
+		expect(requestBody?.query).toBe("plain kagi query");
 	});
 
 	it("uses a Bearer authorization header", async () => {

@@ -7,8 +7,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/memory-render";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
+const themePromise = getThemeByName("dark");
+
 async function theme() {
-	const t = await getThemeByName("dark");
+	const t = await themePromise;
 	expect(t).toBeDefined();
 	return t!;
 }
@@ -65,6 +67,17 @@ describe("retainToolRenderer", () => {
 		const bullet = uiTheme.format.bullet;
 		const rendered = lines(retainToolRenderer.renderCall(args, { expanded: false, isPartial: true }, uiTheme));
 		expect(rendered.filter(line => line.includes(bullet))).toHaveLength(3);
+	});
+
+	it("ignores transient non-array items while the call streams", async () => {
+		const uiTheme = await theme();
+		const bullet = uiTheme.format.bullet;
+		const rendered = lines(
+			retainToolRenderer.renderCall({ items: "[" }, { expanded: false, isPartial: true }, uiTheme),
+		);
+
+		expect(rendered[0]).toContain("Retain");
+		expect(rendered.some(line => line.includes(bullet))).toBe(false);
 	});
 });
 

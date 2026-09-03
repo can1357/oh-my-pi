@@ -13,6 +13,36 @@ import type { InternalUrl } from "./types";
 
 const SCHEME_HOST_RE = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)/i;
 const PATHNAME_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*(\/[^?#]*)?/i;
+// Opaque URI form (`urn:example:document`, `custom:item`) — an RFC 3986 scheme
+// followed by `:` without `//`. Guarded separately in `extractUriScheme`.
+const OPAQUE_URI_RE = /^([a-z][a-z0-9+.-]*):(.+)$/is;
+// A read-tool selector chain (`12`, `1-20,30+5`, `raw`, `raw:2-4`, `conflicts`)
+// so `Makefile:12` or `notes:raw` is not mistaken for an opaque URI.
+const SELECTOR_CHUNK_SRC = String.raw`(?:raw|conflicts|-?\d+(?:[-+]\d+)?(?:,\d+(?:[-+]\d+)?)*)`;
+const SELECTOR_CHAIN_RE = new RegExp(`^${SELECTOR_CHUNK_SRC}(?::${SELECTOR_CHUNK_SRC})*$`, "i");
+
+/**
+ * Extract the lowercased scheme from a URI-shaped input, or `undefined` when
+ * the input does not look like a URI.
+ *
+ * Accepts both hierarchical (`scheme://…`) and opaque (`scheme:rest`) forms —
+ * MCP resource URIs may be opaque (`urn:example:document`, `custom:item`).
+ * The opaque form is guarded against path-like false positives:
+ * - Windows drive paths (`C:\…`, `C:/…`, `C:foo`) — single-letter scheme.
+ * - Filenames with extensions (`foo.ts:50`) — dot in the scheme segment.
+ * - Read-tool selector tails (`Makefile:12`, `README:raw:1-20`).
+ */
+export function extractUriScheme(input: string): string | undefined {
+	const hierarchical = input.match(SCHEME_HOST_RE);
+	if (hierarchical) return hierarchical[1].toLowerCase();
+	const opaque = input.match(OPAQUE_URI_RE);
+	if (!opaque) return undefined;
+	const [, scheme, rest] = opaque;
+	if (scheme.length === 1) return undefined;
+	if (scheme.includes(".")) return undefined;
+	if (SELECTOR_CHAIN_RE.test(rest)) return undefined;
+	return scheme.toLowerCase();
+}
 
 /**
  * Parse an internal URL into an InternalUrl.
@@ -68,5 +98,6 @@ export function parseInternalUrl(input: string): InternalUrl {
 	const result = parsed as InternalUrl;
 	result.rawHost = rawHost;
 	result.rawPathname = pathMatch?.[1] ?? parsed.pathname;
+	result.rawHref = input;
 	return result;
 }

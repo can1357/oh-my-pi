@@ -273,8 +273,7 @@ function parseRecipient(header: string): string {
 	return match?.[1] ?? "";
 }
 
-function renderToolCall(call: ToolCall, options: DialectRenderOptions = {}): string {
-	if (options.example) return stringifyJson(call.arguments);
+function renderToolCall(call: ToolCall, _options: DialectRenderOptions = {}): string {
 	return `${START}assistant${CHANNEL}commentary to=${harmonyRecipient(call.name)}${MESSAGE}${stringifyJson(call.arguments)}${CALL}`;
 }
 
@@ -299,7 +298,7 @@ function renderThinking(text: string): string {
 
 function renderTranscript(messages: readonly Message[], options: DialectRenderOptions = {}): string {
 	let out = "";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			const parts = assistantTranscriptParts(message);

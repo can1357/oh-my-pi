@@ -6,7 +6,7 @@ Terminology follows `docs/natives-architecture.md`:
 
 - **Generated binding**: public API in `packages/natives/native/index.d.ts`.
 - **Rust module layer**: N-API exports in `crates/pi-natives/src/*`.
-- **Shared scan cache**: `fs_cache`-backed directory-entry cache used by discovery/search flows.
+- **Shared scan cache**: `pi-walker`-backed directory-entry cache (`crates/pi-walker/src/cache.rs`) used by discovery flows; N-API filesystem DTOs/conversions live in `crates/pi-natives/src/iofs.rs`.
 
 ## Implementation files
 
@@ -14,8 +14,10 @@ Terminology follows `docs/natives-architecture.md`:
 - `crates/pi-natives/src/grep.rs`
 - `crates/pi-natives/src/glob.rs`
 - `crates/pi-natives/src/glob_util.rs`
-- `crates/pi-natives/src/fs_cache.rs`
 - `crates/pi-natives/src/fd.rs`
+- `crates/pi-natives/src/iofs.rs`
+- `crates/pi-walker/src/lib.rs`
+- `crates/pi-walker/src/cache.rs`
 - `crates/pi-natives/src/ast.rs`
 - `crates/pi-natives/src/text.rs`
 - `crates/pi-natives/src/highlight.rs`
@@ -30,7 +32,7 @@ Terminology follows `docs/natives-architecture.md`:
 | `hasMatch(content, pattern, ignoreCase?, multiline?)`                           | `hasMatch`                                       | `grep.rs`      |
 | `fuzzyFind(options)`                                                            | `fuzzyFind`                                      | `fd.rs`        |
 | `glob(options, onMatch?)`                                                       | `glob`                                           | `glob.rs`      |
-| `invalidateFsScanCache(path?)`                                                  | `invalidateFsScanCache`                          | `fs_cache.rs`  |
+| `invalidateFsScanCache(path?)`                                                  | `invalidateFsScanCache`                          | `iofs.rs`      |
 | `astGrep(options)`                                                              | `astGrep`                                        | `ast.rs`       |
 | `astMatch(options)`                                                             | `astMatch`                                       | `ast.rs`       |
 | `astEdit(options)`                                                              | `astEdit`                                        | `ast.rs`       |
@@ -39,6 +41,7 @@ Terminology follows `docs/natives-architecture.md`:
 | `sliceWithWidth(line, startCol, length, strict, tabWidth)`                      | `sliceWithWidth`                                 | `text.rs`      |
 | `extractSegments(line, beforeEnd, afterStart, afterLen, strictAfter, tabWidth)` | `extractSegments`                                | `text.rs`      |
 | `visibleWidth(text, tabWidth)`                                                  | `visibleWidth`                                   | `text.rs`      |
+| `setHangulCompatJamoWidthOverride(value)`                                       | `setHangulCompatJamoWidthOverride`               | `text.rs`      |
 | `highlightCode(code, lang, colors)`                                             | `highlightCode`                                  | `highlight.rs` |
 | `supportsLanguage(lang)`                                                        | `supportsLanguage`                               | `highlight.rs` |
 | `getSupportedLanguages()`                                                       | `getSupportedLanguages`                          | `highlight.rs` |
@@ -51,8 +54,8 @@ Terminology follows `docs/natives-architecture.md`:
 ### Input/options flow
 
 1. Callers invoke generated native exports directly; there is no package-local TS wrapper that renames `search` to `searchContent`.
-2. Rust option structs in `grep.rs` deserialize camelCase fields (`ignoreCase`, `maxCount`, `contextBefore`, `contextAfter`, `maxColumns`, `timeoutMs`).
-3. `grep` creates `CancelToken` from `timeoutMs` + `AbortSignal` and runs inside `task::blocking("grep", ...)`.
+2. Rust option structs in `grep.rs` deserialize camelCase fields including `ignoreCase`, `maxCount`, `maxCountPerFile`, `contextBefore`, `contextAfter`, `maxColumns`, and `timeoutMs`.
+3. `grep` creates `CancelToken` from `timeoutMs` + `AbortSignal` and runs inside `task::blocking("grep", ...)`. Filesystem grep does not expose or use the shared walker cache.
 4. `search` and `hasMatch` operate on provided string/`Uint8Array` content and do not scan the filesystem.
 
 ### Execution branches
@@ -60,40 +63,44 @@ Terminology follows `docs/natives-architecture.md`:
 - **In-memory branch**
   - `search` -> `search_sync` / search helpers over provided content bytes.
   - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
-  - No filesystem scan, no `fs_cache`.
+  - No filesystem scan or walker cache.
 - **Single-file branch**
   - `grep` resolves path, checks metadata is file, and searches that file.
 - **Directory branch**
-  - Optional cache lookup via `fs_cache::get_or_scan` when `cache: true`.
-  - Fresh scan via `fs_cache::force_rescan` when `cache: false`.
-  - Optional empty-result recheck when cached results are older than the empty-result recheck threshold.
-  - Entry filtering: file-only + optional glob filter (`glob_util`) + optional type filter mapping (`js`, `ts`, `rust`, etc.).
+  - Rust builds a `pi_walker::WalkRequest` with `.cache(false)` hard-coded (`build_grep_walk_request`): directory searches stream while the tree is walked and never read or populate the shared scan cache.
+  - The walk yields file candidates directly to searchers (`glob`/type filters run walker-side; the type filter is applied per candidate).
+  - Files larger than the size cap are deferred to a trailing prefix pass that reads only the leading window into an owned buffer.
 
 ### Search/collection semantics
 
-- Regex engine: `grep_regex::RegexMatcherBuilder` with `ignoreCase` and `multiline`.
+- Matcher selection: the Rust regex engine is tried first, then PCRE2 for features such as lookaround/backreferences. `OMP_PCRE2_JIT=0`/`false` disables PCRE2 JIT and `1` enables it; when unset, JIT is enabled except on macOS.
 - Context resolution:
   - `contextBefore/contextAfter` override legacy `context`.
   - Non-content modes do not collect context.
 - Output modes:
   - `content` -> one `GrepMatch` per hit.
   - `count` and `filesWithMatches` map to count-style entries (`lineNumber=0`, `line=""`, `matchCount` set).
-  - `offset` and `maxCount` are applied during aggregation across sorted file results.
-  - Directory searches use parallel filesystem walking/searching, then aggregate per-file results to preserve global offset/limit semantics in the returned result and callback stream.
+  - `offset` and `maxCount` are applied during aggregation across sorted file results; `maxCountPerFile` can additionally prevent one hot file consuming the content-mode budget.
+  - Directory streaming model (`run_streaming_grep`):
+    - With a content-mode match budget (`maxCount`, no `offset`), the budget terminates the walk itself: small budgets (up to 64 matches) run a sequential early-exit walk, larger ones run a path-ordered walk that searches in windows and commits results after each window (`run_windowed_streaming_grep`), stopping once the budget is satisfied. Deterministic path-ordered first pages are preserved at every budget size.
+    - Without an early-stop budget, an unordered work-stealing parallel traversal feeds searchers directly (`run_parallel_streaming_grep`); per-file results are sorted by path afterwards.
+    - `maxCountPerFile` (content mode) caps matches collected per file so one hot file cannot exhaust the global `maxCount` budget before other files are reached.
+    - Oversized files (beyond the 4 MiB cap) are deferred behind normal-sized results and searched over their leading window only (bounded prefix read via `read_owned_prefix`; no full-file read and no mmap — the bounded owned read avoids mmap page faults).
+    - `offset` and `maxCount` are applied while aggregating per-file results; the `onMatch` callback fires after aggregation so callback and returned-result semantics match.
 
 ### Result shaping back to JS
 
 - Rust `SearchResult`/`GrepResult` fields map to TS interfaces via N-API object conversion.
 - Counters are clamped before crossing N-API where needed.
-- `GrepResult.limitReached` is optional and emitted when true.
+- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be searched even via the trailing bounded prefix pass.
 - Streaming callback receives each shaped `GrepMatch` for content or count-style entries.
 
 ### Failure behavior
 
 - `search` returns `SearchResult.error` for regex/search failures instead of throwing.
-- `grep` rejects on hard errors such as invalid path, invalid glob/regex, or cancellation timeout/abort.
-- `hasMatch` returns a boolean on success and throws on invalid pattern/UTF-8 conversion errors.
-- File open/search errors in multi-file scans are skipped per-file; scan continues.
+- `grep` rejects on hard errors such as invalid path or cancellation timeout/abort. Patterns rejected by both regex engines fall back to a literal search rather than producing a regex error.
+- `hasMatch` returns a boolean on success; matcher construction uses the same tolerant fallback.
+- Unreadable/non-regular files in multi-file scans are skipped; oversized files are counted in `skippedOversized`.
 
 ### Malformed regex handling
 
@@ -101,20 +108,18 @@ Terminology follows `docs/natives-architecture.md`:
 
 - Invalid repetition-like braces are escaped (`{`/`}` -> `\{`/`\}`) when they cannot form `{N}`, `{N,}`, `{N,M}`.
 - This prevents common literal-template fragments (for example `${platform}`) from failing as malformed repetition.
-- After brace sanitization, a compile error reporting an unclosed/unopened group triggers one retry with unescaped parentheses escaped, so literal snippets like `fetchAnthropicProvider(` still search instead of erroring.
-- Remaining invalid regex syntax still returns a regex error.
+- A compile failure for an unclosed/unopened group triggers one targeted retry with unescaped parentheses escaped while preserving the rest of the regex.
+- If both engines still reject the pattern, the entire original pattern is escaped and searched literally.
 
 ## 2) File discovery (`glob`) and fuzzy path search (`fuzzyFind`)
 
-`glob` and `fuzzyFind` share `fs_cache` scans; matching logic differs.
+`glob` and `fuzzyFind` share the optional `pi-walker` scan cache; matching logic differs. Cache use defaults to `false` for both APIs.
 
 ### `glob` flow
 
 1. Caller passes `GlobOptions` directly. `pattern` and `path` are required in the generated type.
-2. Rust resolves the search path and compiles pattern via `glob_util::compile_glob`.
-3. Entry source:
-   - `cache=true` -> `get_or_scan` + optional stale-empty `force_rescan`.
-   - `cache=false` -> `force_rescan(..., store=false)` (fresh only).
+2. Rust resolves the search path (via `pi_walker::resolve_search_path`) and normalizes the pattern via `glob_util::build_glob_pattern`, compiled into a walker-side `pi_walker::CompiledWalkGlob` filter.
+3. Entry source: a `pi_walker::WalkRequest` with the glob filter pushed down walker-side; `.cache(config.cache)` selects cached vs fresh collection, and the walker's `EmptyRecheck` policy performs one fresh rescan when a cached scan filters to empty.
 4. Filtering:
    - skip `.git` always;
    - skip `node_modules` unless requested (`includeNodeModules`) or pattern mentions `node_modules`;
@@ -125,7 +130,7 @@ Terminology follows `docs/natives-architecture.md`:
 ### `fuzzyFind` flow
 
 1. Rust implementation lives in `fd.rs`; generated export is `fuzzyFind`.
-2. Shared scan source from `fs_cache` with the same cache/no-cache split and stale-empty recheck policy.
+2. Shared scan source from `pi-walker` with the same cache/no-cache split and walker-side stale-empty recheck policy.
 3. Scoring:
    - exact / starts-with / contains / subsequence-based fuzzy score;
    - separator/punctuation-normalized scoring path;
@@ -134,9 +139,9 @@ Terminology follows `docs/natives-architecture.md`:
 
 ### Failure behavior
 
-- Invalid glob pattern returns an error from `glob_util::compile_glob`.
+- Invalid glob pattern returns an error from walker glob compilation (`pi_walker::CompiledWalkGlob`).
 - Search root must resolve to an existing directory for directory discovery flows.
-- Cancellation/timeouts propagate as abort errors via `CancelToken::heartbeat()` checks in loops.
+- Cancellation/timeouts propagate as abort errors via `CancelToken::heartbeat()` checks in walker and result-processing loops.
 
 ### Malformed glob handling
 
@@ -155,40 +160,37 @@ Terminology follows `docs/natives-architecture.md`:
 - `astEdit(options)` returns replacement changes, per-file counts, searched/touched file counts, parse errors, and whether edits were applied.
 - `dryRun` defaults to true for edit options in the generated documentation.
 - Options include language override, path/glob/selector, strictness, limits, parse-error policy, `signal`, and `timeoutMs`.
+- For `astGrep` and `astEdit`, a directory `path` uses the shared cache for candidate discovery with configured stale-empty rechecking; a direct file `path` returns that file without traversal or cache access. `astMatch` remains in-memory.
 
 These exports are direct native APIs used by tooling; they are not mediated by a TS wrapper in `packages/natives`.
 
-## 4) Shared scan/cache lifecycle (`fs_cache`)
+## 4) Shared scan/cache lifecycle (`pi-walker`)
 
-`fs_cache` stores scan results as normalized relative entries (`path`, `fileType`, optional `mtime` and regular-file `size`) keyed by:
+`pi-walker` owns traversal and cache policy. `crates/pi-natives/src/iofs.rs` contains only JavaScript-facing DTO conversion, error mapping, and the invalidation export.
 
-- canonical search root,
-- `include_hidden`,
-- `use_gitignore`,
-- `skip_node_modules`,
-- scan detail (`Minimal` vs `Full`).
+The cache stores normalized relative entries (`path`, `fileType`, optional `mtime` and regular-file `size`) keyed by canonical search root plus the full traversal-level `WalkOptions` with the cache flag itself excluded — calls that differ only in `cache` share an entry. Keyed dimensions: hidden/gitignore and directory-pruning policy, link following, metadata detail, traversal order/depth, root emission, directory-error handling, and filesystem boundary. `WalkFilter` predicates, ranking, and result limits run after collection and do not independently partition the cache, so requests with different glob, file-type, size-threshold, or limit values can share an entry. A filter or rank that requires extra metadata can still promote the effective detail policy and thereby select a different key.
 
-`follow_links` affects a fresh scan but is not currently part of the cache key.
+Configuration is read from environment once:
+
+- `FS_SCAN_CACHE_TTL_MS`: cache TTL, default `1000`.
+- `FS_SCAN_EMPTY_RECHECK_MS`: cached-empty recheck age, default `200`.
+- `FS_SCAN_CACHE_MAX_ENTRIES`: maximum entries in the cache map, default `16`.
+- `PI_WALK_WORKERS`: walker Rayon pool size, default `4`.
 
 ### Cache state transitions
 
-1. **Miss / disabled**
-   - TTL is `0` or key absent/expired -> fresh collection.
+1. **Disabled / miss / expired**
+   - disabled requests collect fresh without reading or updating the cache;
+   - enabled misses and entries at or beyond TTL collect fresh and populate it.
 2. **Hit**
-   - Entry age is within TTL -> return cached entries + `cache_age_ms`.
+   - an entry younger than TTL returns cached entries and cache age.
 3. **Stale-empty recheck**
-   - If query yields zero matches and cache age exceeds the empty-result threshold, force one rescan.
+   - when the caller enables configured rechecking, an empty cached query at or beyond the threshold is scanned once again.
 4. **Invalidation**
-   - `invalidateFsScanCache(path?)`:
-     - no arg: clear all keys;
-     - path arg: remove keys for roots affected by that path.
+   - `invalidateFsScanCache()` clears all keys;
+   - `invalidateFsScanCache(path)` removes every entry whose cached root is a prefix of the target (canonicalization with parent fallback supports create/delete/rename invalidation). The binding lives in `iofs.rs` and forwards to `pi_walker::invalidate_path_string` / `pi_walker::invalidate_all`.
 
-### Stale-result tradeoff
-
-- Cache favors low-latency repeated scans over immediate consistency.
-- TTL window can return stale positives/negatives.
-- Empty-result recheck reduces stale negatives for older cached scans at the cost of one extra scan.
-- Explicit invalidation is the intended correctness hook after file mutations.
+Cache favors low-latency repeated scans over immediate consistency. Explicit invalidation is the correctness hook after writes, edits, renames, or deletes.
 
 ## 5) ANSI text utilities (`text`)
 
@@ -211,6 +213,7 @@ These are pure, in-memory utilities.
 - `truncateToWidth`: visible-cell truncation with ellipsis policy (`Unicode`, `Ascii`, `Omit`), optional right padding.
 - `sliceWithWidth`: column slicing with optional strict width enforcement.
 - `extractSegments`: extracts before/after segments around an overlay while restoring ANSI state for the `after` segment.
+- `setHangulCompatJamoWidthOverride(value)` controls U+3131–U+318E width correction for client-terminal compatibility: `0` uses the platform fallback, `1` forces one cell, `2` forces two, and `3` follows Unicode width.
 - `sanitizeText` (ANSI/control/surrogate stripping with line-ending normalization) no longer lives in `text.rs`; it moved to `@oh-my-pi/pi-utils` as a pure-JS implementation in `packages/utils/src/sanitize-text.ts`. The native binding was removed in the same change because the JS version was competitive on the benchmarked workloads, and keeping a Rust copy forced every caller (including `pi-utils`) to pull in `@oh-my-pi/pi-natives`.
 - `visibleWidth`: counts visible terminal cells using caller-supplied tab width.
 
@@ -245,17 +248,17 @@ Text functions generally return deterministic transformed output; errors are lim
 
 ## Pure utility vs filesystem-dependent flows
 
-| Flow                         | Filesystem access | Shared cache         | Notes                                         |
-| ---------------------------- | ----------------- | -------------------- | --------------------------------------------- |
-| `search` / `hasMatch`        | No                | No                   | regex on provided bytes/string only           |
-| `text` module functions      | No                | No                   | ANSI/width utilities only                     |
-| `highlight` module functions | No                | No                   | syntax + ANSI coloring only                   |
-| `countTokens`                | No                | No                   | tokenization only                             |
-| `astMatch`                   | No                | No                   | in-memory syntax-aware match (no disk)        |
-| `astGrep` / `astEdit`        | Yes               | No                   | syntax-aware file search/edit                 |
-| `glob`                       | Yes               | Optional             | directory scans + glob filtering              |
-| `fuzzyFind`                  | Yes               | Optional             | directory scans + fuzzy scoring               |
-| `grep` (file/dir path)       | Yes               | Optional in dir mode | ripgrep over files, optional filters/callback |
+| Flow                         | Filesystem access | Shared cache | Notes                                                        |
+| ---------------------------- | ----------------- | ------------ | ------------------------------------------------------------ |
+| `search` / `hasMatch`        | No                | No           | regex on provided bytes/string only                          |
+| `text` module functions      | No                | No           | ANSI/width utilities only                                    |
+| `highlight` module functions | No                | No           | syntax + ANSI coloring only                                  |
+| `countTokens`                | No                | No           | tokenization only                                            |
+| `astMatch`                   | No                | No           | in-memory syntax-aware match (no disk)                       |
+| `astGrep` / `astEdit`        | Yes               | Always       | directory discovery is cached; a direct file path bypasses it |
+| `glob`                       | Yes               | Optional     | directory scans + glob filtering (`cache` opt-in)            |
+| `fuzzyFind`                  | Yes               | Optional     | directory scans + fuzzy scoring (`cache` opt-in)             |
+| `grep` (file/dir path)       | Yes               | Never        | streaming uncached walk feeding searchers                    |
 
 ## End-to-end lifecycle summary
 

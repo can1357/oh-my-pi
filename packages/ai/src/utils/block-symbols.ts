@@ -25,6 +25,18 @@ export const kStreamingBlockIndex = Symbol("provider.block.index");
 /** Stores the last parsed argument prefix length for throttled streaming JSON parsing. */
 export const kStreamingLastParseLen = Symbol("provider.block.lastParseLen");
 
+/**
+ * The Cursor interaction envelope's `call_id` for a streamed tool-call block.
+ *
+ * Tracked separately from the block's own `id` because they are NOT the same
+ * key: MCP and Pi blocks are filed under the id inside the call's `args`, which
+ * is what the exec channel pairs its result under, while every streamed
+ * `ToolCall*Update` correlates on the envelope's `call_id`. Matching
+ * completions against the block id would mis-route every call whose args carry
+ * their own id.
+ */
+export const kStreamingEnvelopeId = Symbol("provider.block.envelopeId");
+
 /** Marks streamed tool-call arguments that already received an authoritative done payload. */
 export const kStreamingArgumentsDone = Symbol("provider.block.argumentsDone");
 
@@ -46,6 +58,24 @@ export const kCursorExecResolved = Symbol("provider.block.cursorExecResolved");
 
 /** Carries the resolved marker without exposing a string-keyed property. */
 export type CursorExecResolvedCarrier = object & { [kCursorExecResolved]?: true };
+
+/** True when a toolCall block was already executed by Cursor's exec channel. */
+export function isCursorExecResolved(block: CursorExecResolvedCarrier | null | undefined): boolean {
+	return block?.[kCursorExecResolved] === true;
+}
+
+/**
+ * Copy {@link kCursorExecResolved} onto a cloned/projected toolCall block.
+ *
+ * Stream projectors (owned/in-band dialect, leaked-thinking heal) rebuild
+ * toolCall objects field-by-field. Dropping this marker lets `agent-loop.ts`
+ * re-execute a call Cursor already settled — duplicate toolResults and a
+ * second bash/write/delete. Partial-JSON is already copied explicitly; this
+ * marker is the other load-bearing symbol that must survive the same way.
+ */
+export function copyCursorExecResolved(target: CursorExecResolvedCarrier, source: CursorExecResolvedCarrier): void {
+	if (source[kCursorExecResolved] === true) target[kCursorExecResolved] = true;
+}
 
 /**
  * Marks a text block synthesized by cross-model thinking demotion in

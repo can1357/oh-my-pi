@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
+import { getAgentDir, MAIN_CONFIG_FILENAMES } from "./dirs";
 import { $env, filterChildShellEnv } from "./env";
 import { $which } from "./which";
 
@@ -10,6 +11,12 @@ export interface ShellConfig {
 	args: string[];
 	env: Record<string, string>;
 	prefix: string | undefined;
+}
+
+/** Identifies the settings source users should edit when shell resolution fails. */
+export interface ShellConfigOptions {
+	/** File path or runtime layer that supplied the active shell setting. */
+	configSource?: string;
 }
 let cachedShellConfig: ShellConfig | null = null;
 
@@ -42,12 +49,37 @@ function buildSpawnEnv(shell: string): Record<string, string> {
 }
 
 /**
- * Get shell args, optionally including login shell flag.
- * Supports PI_BASH_NO_LOGIN and CLAUDE_BASH_NO_LOGIN to skip -l.
+ * Get shell args for the resolved shell.
+ * cmd.exe takes `/c`; PowerShell (powershell.exe / pwsh) takes
+ * `-NoLogo -Command`, with `-NoProfile` when PI_BASH_NO_LOGIN /
+ * CLAUDE_BASH_NO_LOGIN is set (profile scripts are PowerShell's login-shell
+ * analog); POSIX shells take `-c`, with `-l` unless the same env is set.
+ *
+ * Exported for tests; `env` overrides the process env gate.
  */
-function getShellArgs(): string[] {
-	const noLogin = $env.PI_BASH_NO_LOGIN || $env.CLAUDE_BASH_NO_LOGIN;
+export function getShellArgs(shell: string, env: Record<string, string | undefined> = $env): string[] {
+	if (isCmdShell(shell)) return ["/c"];
+	const noLogin = env.PI_BASH_NO_LOGIN || env.CLAUDE_BASH_NO_LOGIN;
+	if (isPowerShell(shell)) {
+		return noLogin ? ["-NoLogo", "-NoProfile", "-Command"] : ["-NoLogo", "-Command"];
+	}
 	return noLogin ? ["-c"] : ["-l", "-c"];
+}
+
+/** Whether the shell is Windows cmd.exe (spawn paths must use `/c`, not `-c`). */
+export function isCmdShell(shell: string): boolean {
+	const basename = shell.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
+	return basename === "cmd.exe" || basename === "cmd";
+}
+
+/**
+ * Whether the shell is Windows PowerShell or PowerShell Core (pwsh). Spawn
+ * paths must use `-Command`: passing the POSIX `-l -c` pair makes PowerShell
+ * parse `-l` as the command and fail with `The term '-l' is not recognized`.
+ */
+export function isPowerShell(shell: string): boolean {
+	const basename = shell.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
+	return basename === "powershell.exe" || basename === "powershell" || basename === "pwsh.exe" || basename === "pwsh";
 }
 
 /**
@@ -63,7 +95,7 @@ function getShellPrefix(): string | undefined {
 function buildConfig(shell: string): ShellConfig {
 	return {
 		shell,
-		args: getShellArgs(),
+		args: getShellArgs(shell),
 		env: buildSpawnEnv(shell),
 		prefix: getShellPrefix(),
 	};
@@ -94,62 +126,82 @@ export function resolveBasicShell(): string | undefined {
 }
 
 /**
+ * Resolve the external shell to advertise on Windows.
+ *
+ * A host bash is OPTIONAL: bash tool commands always execute in the embedded
+ * brush-core shell. The resolved binary only serves the spawn-a-shell paths
+ * (interactive PTY sessions, ACP client terminals, SHELL env), so this
+ * prefers a real Git Bash when one exists and otherwise falls back to
+ * cmd.exe — it never fails.
+ *
+ * Search order:
+ * 1. Git for Windows install roots (machine + per-user installers)
+ * 2. scoop installs — scoop's git manifest sets GIT_INSTALL_ROOT and shims
+ *    sh.exe/git.exe but never bash.exe, so PATH lookup alone misses it
+ * 3. bash.exe on PATH (Cygwin, MSYS2, ...)
+ * 4. sh.exe on PATH (Git for Windows' sh.exe is bash; prefer a sibling
+ *    bash.exe when present)
+ * 5. cmd.exe from ComSpec
+ *
+ * Exported for tests; `env` overrides Bun.env-based discovery.
+ */
+export function resolveWindowsShell(env: Record<string, string | undefined> = Bun.env): string {
+	const gitRoots = [
+		env.ProgramFiles && path.join(env.ProgramFiles, "Git"),
+		env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"], "Git"),
+		env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Programs", "Git"),
+		env.GIT_INSTALL_ROOT,
+		env.SCOOP && path.join(env.SCOOP, "apps", "git", "current"),
+		env.USERPROFILE && path.join(env.USERPROFILE, "scoop", "apps", "git", "current"),
+	];
+	for (const root of gitRoots) {
+		if (!root) continue;
+		const candidate = path.join(root, "bin", "bash.exe");
+		if (fs.existsSync(candidate)) return candidate;
+	}
+
+	const bashOnPath = $which("bash.exe");
+	if (bashOnPath) return bashOnPath;
+
+	const shOnPath = $which("sh.exe");
+	if (shOnPath) {
+		const siblingBash = path.join(path.dirname(shOnPath), "bash.exe");
+		return fs.existsSync(siblingBash) ? siblingBash : shOnPath;
+	}
+
+	return env.ComSpec || env.COMSPEC || "C:\\Windows\\System32\\cmd.exe";
+}
+
+/**
  * Get shell configuration based on platform.
  * Resolution order:
- * 1. User-specified shellPath in settings.json
- * 2. On Windows: Git Bash in known locations, then bash on PATH
+ * 1. User-specified shellPath from the active settings source
+ * 2. On Windows: Git Bash / bash / sh discovery, then cmd.exe (see
+ *    {@link resolveWindowsShell}) — never fails
  * 3. On Unix: $SHELL if bash/zsh, then fallback paths
  * 4. Fallback: sh
  */
-export function getShellConfig(customShellPath?: string): ShellConfig {
+export function getShellConfig(customShellPath?: string, options: ShellConfigOptions = {}): ShellConfig {
+	const configSource = options.configSource ?? path.join(getAgentDir(), MAIN_CONFIG_FILENAMES[0]);
+	// 1. Check user-specified shell path. Validated even on the cached path so a
+	// broken shellPath surfaces its guidance error instead of being masked by an
+	// earlier successful resolution in the same process.
+	if (customShellPath) {
+		if (!fs.existsSync(customShellPath)) {
+			throw new Error(`Custom shell path not found: ${customShellPath}\nPlease update shellPath in ${configSource}`);
+		}
+		if (cachedShellConfig?.shell !== customShellPath) {
+			cachedShellConfig = buildConfig(customShellPath);
+		}
+		return cachedShellConfig;
+	}
 	if (cachedShellConfig) {
 		return cachedShellConfig;
 	}
 
-	// 1. Check user-specified shell path
-	if (customShellPath) {
-		if (fs.existsSync(customShellPath)) {
-			cachedShellConfig = buildConfig(customShellPath);
-			return cachedShellConfig;
-		}
-		throw new Error(
-			`Custom shell path not found: ${customShellPath}\nPlease update shellPath in ~/.omp/agent/settings.json`,
-		);
-	}
-
 	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations
-		const paths: string[] = [];
-		const programFiles = Bun.env.ProgramFiles;
-		if (programFiles) {
-			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
-		}
-		const programFilesX86 = Bun.env["ProgramFiles(x86)"];
-		if (programFilesX86) {
-			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
-		}
-
-		for (const path of paths) {
-			if (fs.existsSync(path)) {
-				cachedShellConfig = buildConfig(path);
-				return cachedShellConfig;
-			}
-		}
-
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
-		const bashOnPath = $which("bash.exe");
-		if (bashOnPath) {
-			cachedShellConfig = buildConfig(bashOnPath);
-			return cachedShellConfig;
-		}
-
-		throw new Error(
-			`No bash shell found. Options:\n` +
-				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
-				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
-				`  3. Set shellPath in ~/.omp/agent/settings.json\n\n` +
-				`Searched Git Bash in:\n${paths.map(p => `  ${p}`).join("\n")}`,
-		);
+		cachedShellConfig = buildConfig(resolveWindowsShell());
+		return cachedShellConfig;
 	}
 
 	// Unix: prefer user's shell from $SHELL if it's bash/zsh and executable

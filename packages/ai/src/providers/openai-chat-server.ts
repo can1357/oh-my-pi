@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import { resolvePromptCacheKey } from "../auth-gateway/http";
 /**
  * Parsed inbound OpenAI chat-completions request, ready to feed into pi-ai
@@ -29,6 +29,7 @@ import {
 	type OpenAIChatToolChoice,
 	openaiChatRequestSchema,
 } from "./openai-chat-server-schema";
+import { decodeDataUri } from "./openai-data-uri";
 
 export type { ParsedRequest };
 
@@ -49,6 +50,35 @@ function isServiceTier(value: unknown): value is ServiceTier {
 	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
 }
 
+const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
+	"openai-chat: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
+
+function hasUnsupportedExplicitPromptCacheFields(body: unknown): boolean {
+	if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+	const request = body as Record<string, unknown>;
+	if ("prompt_cache_options" in request || "prompt_cache_breakpoint" in request) return true;
+	if (!Array.isArray(request.messages)) return false;
+
+	return request.messages.some(message => {
+		if (typeof message !== "object" || message === null || Array.isArray(message)) return false;
+		const wireMessage = message as Record<string, unknown>;
+		if ("prompt_cache_breakpoint" in wireMessage) return true;
+		return (
+			Array.isArray(wireMessage.content) &&
+			wireMessage.content.some(
+				part =>
+					typeof part === "object" && part !== null && !Array.isArray(part) && "prompt_cache_breakpoint" in part,
+			)
+		);
+	});
+}
+
+function rejectUnsupportedExplicitPromptCacheFields(body: unknown): void {
+	if (hasUnsupportedExplicitPromptCacheFields(body)) {
+		throw new AIError.ValidationError(UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE);
+	}
+}
+
 // ---------------------------------------------------------------------------
 // parseRequest
 // ---------------------------------------------------------------------------
@@ -59,6 +89,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// land on `options.headers` automatically). We consult `headers` here too
 	// for `resolvePromptCacheKey` to pull a cache identity out of inbound
 	// vendor-neutral headers when the body doesn't carry one.
+	rejectUnsupportedExplicitPromptCacheFields(body);
 	const parsed = openaiChatRequestSchema(body);
 	if (parsed instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);
@@ -220,18 +251,6 @@ function parseUserLikeContent(
 		}
 	}
 	return parts;
-}
-
-function decodeDataUri(url: string): { data: string; mimeType: string } | undefined {
-	if (!url.startsWith("data:")) return undefined;
-	const comma = url.indexOf(",");
-	if (comma < 0) return undefined;
-	const header = url.slice(5, comma);
-	const payload = url.slice(comma + 1);
-	const isBase64 = header.endsWith(";base64");
-	const mimeType = (isBase64 ? header.slice(0, -";base64".length) : header) || "application/octet-stream";
-	const data = isBase64 ? payload : Buffer.from(decodeURIComponent(payload), "utf8").toString("base64");
-	return { data, mimeType };
 }
 
 function buildAssistantMessage(
@@ -552,9 +571,9 @@ export function encodeStream(
 		async start(controller) {
 			// contentIndex (from pi-ai events) -> tool_calls index on the wire.
 			const toolIndexByContentIndex = new Map<number, number>();
-			// wire index -> id/name emitted on the start chunk, to detect late-arriving
-			// upstream id/name that needs a corrective chunk before the finish.
-			const sentToolMeta = new Map<number, { id: string; name: string }>();
+			// wire index -> metadata emitted so far, to detect values that need a
+			// concatenation-safe corrective chunk before the finish.
+			const sentToolMeta = new Map<number, { id: string; name: string; hasArgumentBytes: boolean }>();
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
@@ -590,7 +609,7 @@ export function encodeStream(
 							toolIndexByContentIndex.set(event.contentIndex, idx);
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
-							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "" });
+							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "", hasArgumentBytes: false });
 							writeSse(
 								controller,
 								baseChunk(
@@ -613,6 +632,8 @@ export function encodeStream(
 						case "toolcall_delta": {
 							const idx = toolIndexByContentIndex.get(event.contentIndex);
 							if (idx === undefined) break;
+							const sent = sentToolMeta.get(idx);
+							if (sent && event.delta.length > 0) sent.hasArgumentBytes = true;
 							writeSse(
 								controller,
 								baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null),
@@ -625,14 +646,17 @@ export function encodeStream(
 							if (idx === undefined) break;
 							const sent = sentToolMeta.get(idx);
 							if (sent === undefined) break;
-							// Upstream completions providers can receive the real id/name in a
-							// later chunk than toolcall_start. Emit a corrective chunk only when
-							// the streamed value was empty: accumulating clients concatenate
-							// string fields, so "" + value is the only safe correction.
+							// Upstream providers can settle id, name, or arguments after the
+							// start chunk. Emit corrections only for fields whose streamed
+							// value was empty: accumulating clients concatenate each field,
+							// so "" + value is the only safe correction.
 							const correctId = sent.id === "" && event.toolCall.id !== "" ? event.toolCall.id : undefined;
 							const correctName =
 								sent.name === "" && event.toolCall.name !== "" ? event.toolCall.name : undefined;
-							if (correctId !== undefined || correctName !== undefined) {
+							const correctArguments = sent.hasArgumentBytes
+								? undefined
+								: stringifyArgs(event.toolCall.arguments);
+							if (correctId !== undefined || correctName !== undefined || correctArguments !== undefined) {
 								writeSse(
 									controller,
 									baseChunk(
@@ -641,7 +665,16 @@ export function encodeStream(
 												{
 													index: idx,
 													...(correctId !== undefined ? { id: correctId } : {}),
-													...(correctName !== undefined ? { function: { name: correctName } } : {}),
+													...(correctName !== undefined || correctArguments !== undefined
+														? {
+																function: {
+																	...(correctName !== undefined ? { name: correctName } : {}),
+																	...(correctArguments !== undefined
+																		? { arguments: correctArguments }
+																		: {}),
+																},
+															}
+														: {}),
 												},
 											],
 										},

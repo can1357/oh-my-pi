@@ -26,25 +26,23 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts) — on-disk layout, dir encoding, terminal breadcrumbs
 - [`src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts) — discovery (list/recent/resolve)
 - [`src/session/session-storage.ts`](../packages/coding-agent/src/session/session-storage.ts) — storage abstractions
+- [`src/session/session-title-slot.ts`](../packages/coding-agent/src/session/session-title-slot.ts) — fixed-width current-title slot
+- [`src/session/indexed-session-storage.ts`](../packages/coding-agent/src/session/indexed-session-storage.ts) — local index + ordered remote-backed storage adapter
 - [`src/session/messages.ts`](../packages/coding-agent/src/session/messages.ts) — custom-message transformers
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts) — content-addressed blob store
 - [`src/session/history-storage.ts`](../packages/coding-agent/src/session/history-storage.ts) — prompt history (separate subsystem)
 
 ## On-Disk Layout
 
-Default session file location:
+Default file-session location:
 
 ```text
-~/.omp/agent/sessions/<dir-encoded>/<timestamp>_<sessionId>.jsonl
+~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<sessionId>.jsonl
 ```
 
-`<dir-encoded>` depends on where the canonicalized cwd lives:
+`<encoded-cwd>` is derived from the canonicalized cwd (so symlink aliases share a bucket): `-<relative>` for directories under home, `-tmp-<relative>` for directories under the temp root, and `--<encoded-absolute>--` for anything else, with path separators replaced by `-`.
 
-- inside the home directory: `-<relative-path>` with `/`, `\\`, and `:` replaced by `-` (bare `-` for home itself)
-- inside the OS temp root: `-tmp-<relative-path>` with the same replacement
-- anywhere else: legacy absolute form `--<cwd-without-leading-slash-with-same-replacement>--`
-
-Old `--<home-encoded>-*--` directories are migrated to the new home-relative names once per sessions root on first access (best-effort).
+On access, buckets written by the short-lived hashed scheme (`<scope>-<project-basename>-<sha256(canonical-cwd)>`, used in 17.2.5-17.2.8 and reverted in 17.2.9 by #7397) are migrated back into the path-encoded names best-effort, along with older `--<home-encoded>-*--` spellings of home-relative buckets.
 
 Blob store location:
 
@@ -58,14 +56,14 @@ Terminal breadcrumb files are written under:
 ~/.omp/agent/terminal-sessions/<terminal-id>
 ```
 
-Breadcrumb content is two lines: original cwd, then session file path. `continueRecent()` prefers this terminal-scoped pointer before scanning most-recent mtime.
+Breadcrumb content is original cwd and session file path, plus an optional third line `fresh`. A fresh breadcrumb preserves a `/new` boundary whose lazily-created JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Writes are synchronous, ordered, and best-effort.
 
 ## File Format
 
-Session files are JSONL: one JSON object per line.
+Session files are JSONL: one JSON object per line. Current files physically begin with a fixed-width, 256-byte `type: "title"` slot, followed by the session header and then `SessionEntry` values. Legacy files may begin directly with the header. Loaders strip the physical slot and fold its current title/source into the logical header.
 
-- Line 1 is always the session header (`type: "session"`).
-- Remaining lines are `SessionEntry` values.
+- The logical first entry is always the session header (`type: "session"`).
+- Remaining logical entries are `SessionEntry` values.
 - Entries are append-only at runtime; branch navigation moves a pointer (`leafId`) rather than mutating existing entries.
 
 ### Header (`SessionHeader`)
@@ -79,14 +77,21 @@ Session files are JSONL: one JSON object per line.
   "cwd": "/work/pi",
   "title": "optional session title",
   "titleSource": "auto",
+  "additionalDirectories": ["/work/shared"],
+  "previousSessionFiles": ["/old/location/session.jsonl"],
+  "providerPromptCacheKey": "optional inherited cache identity",
   "parentSession": "optional lineage marker"
 }
 ```
 
 Notes:
 
-- `version` is optional in v1 files; absence means v1.
-- `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat as metadata, not a typed foreign key.
+- `additionalDirectories` records normalized, deduplicated workspace roots beyond `cwd`.
+- `previousSessionFiles` records prior absolute locations after successful moves.
+- `providerPromptCacheKey` carries an inherited provider prompt-cache identity for eligible full forks.
+- `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat it as metadata, not a typed foreign key.
+
+- `titleSource` is `auto` or `user`; automatic renames cannot overwrite a user title.
 
 ### Entry Base (`SessionEntryBase`)
 
@@ -113,10 +118,13 @@ All non-header entries include:
 - `service_tier_change`
 - `compaction`
 - `branch_summary`
+- `reset_boundary`
 - `custom`
 - `custom_message`
 - `label`
+- `title_change`
 - `ttsr_injection`
+- `credential_pin`
 - `session_init`
 - `mode_change`
 
@@ -194,6 +202,8 @@ Stores an `AgentMessage` directly.
 }
 ```
 
+`configured` may additionally preserve the selector the user chose (`"auto"` or a concrete level). Readers of older entries fall back to `thinkingLevel`.
+
 ### `compaction`
 
 ```json
@@ -229,9 +239,13 @@ Stores an `AgentMessage` directly.
 
 If branching from root (`branchFromId === null`), `fromId` is the literal string `"root"`.
 
+### `reset_boundary`
+
+A payload-free marker appended by `/clear`. The collapsed live transcript and rebuilt model context begin after the latest applicable boundary; full-history transcript export still retains entries before it.
+
 ### `custom`
 
-Extension state persistence; ignored by `buildSessionContext`.
+Opaque, non-LLM records owned by core subsystems or extensions. `buildSessionContext` does not directly turn them into model messages, but subsystem-specific replay code can consume `customType` values to restore runtime state or diagnose an interrupted turn.
 
 ```json
 {
@@ -239,10 +253,24 @@ Extension state persistence; ignored by `buildSessionContext`.
   "id": "f1a2b3c4",
   "parentId": "e1f2a3b4",
   "timestamp": "2026-02-16T10:25:00.000Z",
-  "customType": "my-extension",
+  "customType": "com.example.my-extension.state",
   "data": { "state": 1 }
 }
 ```
+
+Current core-owned values include:
+
+| `customType`             | `data` schema                                                                                                                                                                                                                                            | Writer and consumer                                                                                                                                                                                                                                                                                        |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool_execution_start`   | `{ toolCallId: string, toolName: string, startedAt: string, args?: { command?: string, path?: string }, intent?: string }`                                                                                                                               | `AgentSession` writes a marker immediately before a tool implementation starts. Exit diagnostics combine it with assistant tool calls and tool results to reconstruct calls left pending. Argument summaries are truncated projections; older full argument objects are accepted on read.                  |
+| `session_exit`           | `{ reason: string, kind: "normal" \| "signal" \| "fatal" \| "process_exit", recordedAt: string, pendingToolCalls?: Array<{ toolCallId?: string, toolName: string, args?: unknown, intent?: string, assistantTimestamp?: number, startedAt?: string }> }` | Normal disposal and postmortem teardown record the exit when the session has assistant history or pending tool calls. The writer immediately calls `flushSync()` so a subsequent process can inspect the last durable turn; a flush failure is logged. Resume diagnostics consume the latest valid record. |
+| `user_todo_edit`         | `{ phases: TodoPhase[] }`                                                                                                                                                                                                                                | SDK/UI todo editing persists the complete phase snapshot. Todo restoration scans backward for the latest snapshot (or a successful `todo` tool result) and restores its phases.                                                                                                                            |
+| `vibe-session-lifecycle` | Version-1 event with `{ version: 1, id, ownerId, parentSessionId, action, ... }`; `spawn` adds `cli`, `agent`, `childSessionFile`, and `createdAt`; turn events add `turn`; tombstone events add `reason`.                                               | Vibe runtime persists and replays child spawn, turn-started/settled, tombstone, and tombstone-revoked transitions to recover owned child sessions and in-flight state. Invalid or out-of-scope events are ignored.                                                                                         |
+| `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal.                                              |
+
+On resume, a valid latest `session_exit` after a non-terminal conversation tail causes the loader to append a synthetic assistant message with `stopReason: "aborted"` and rebuild the display/agent context. A normal exit only triggers that transition when it recorded pending tool calls; abnormal exit kinds can trigger it without that list. This prevents the restored transcript from presenting an interrupted turn as still live.
+
+The strings in the table are reserved for their core consumers. Extensions MUST NOT use them. Use a namespaced identifier such as a reverse-domain or package-qualified name for extension records; a collision can cause core replay logic to interpret extension data as lifecycle state. Unknown namespaced values remain opaque to core session-context reconstruction.
 
 ### `custom_message`
 
@@ -277,6 +305,10 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 `label: undefined` clears a label for `targetId`.
 
+### `title_change`
+
+Append-only audit entry for a session rename. It records `title`, `source` (`auto` or `user`), and optionally `previousTitle` and `trigger`. The current title is also updated in the fixed-width title slot so listing does not require a full-file rewrite.
+
 ### `ttsr_injection`
 
 ```json
@@ -288,6 +320,10 @@ Extension-provided message that does participate in LLM context. `content` can b
   "injectedRules": ["ruleA", "ruleB"]
 }
 ```
+
+### `credential_pin`
+
+Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pin resumed OAuth traffic to the serving account and preserve account-scoped prompt-cache reuse. It does not store the raw account identity; exported hashes remain linkable and are not anonymous.
 
 ### `session_init`
 
@@ -301,6 +337,8 @@ Extension-provided message that does participate in LLM context. `content` can b
   "task": "...",
   "tools": ["read", "edit"],
   "outputSchema": { "type": "object" },
+  "outputSchemaMode": "strict",
+  "restrictToolNames": true,
   "spawns": "*",
   "readSummarize": false
 }
@@ -342,20 +380,22 @@ Applied when header `version < 3`:
 ### Migration Trigger and Persistence
 
 - Migrations run during session load (`setSessionFile`).
-- If any migration ran, the session is flagged for a full rewrite (`#rewriteRequired`) rather than rewritten immediately.
-- Migration mutates in-memory entries first; the flagged rewrite persists the updated JSONL on the next write (a synchronous full rewrite on the next append).
+- If any migration ran, the in-memory representation is marked for a full rewrite rather than rewritten immediately.
+- The next persistence operation performs the full rewrite before incremental appends continue.
 
 ## Load and Compatibility Behavior
 
 `loadEntriesFromFile(path)` behavior:
 
 - Missing file (`ENOENT`) -> returns `[]`.
-- Non-parseable lines are handled by lenient JSONL parser (`parseJsonlLenient`).
-- If first parsed entry is not a valid session header (`type !== "session"` or missing string `id`) -> returns `[]`.
+- Current files at least 8 MiB use a streaming JSONL loader; smaller or non-file storage uses a full text read.
+- Non-parseable lines are handled by the lenient JSONL parser.
+- The optional fixed-width title slot is removed and folded into the header.
+- If the first logical entry is not a valid session header (`type !== "session"` or missing string `id`) -> returns `[]`.
 
 `SessionManager.setSessionFile()` behavior:
 
-- `[]` from loader is treated as empty/nonexistent session and replaced with a new initialized session file at that path.
+- `[]` from the loader is treated as empty/nonexistent session and replaced with a new initialized session at that exact path; its header is materialized immediately.
 - Valid files are loaded, migrated if needed, blob refs resolved, then indexed.
 
 ## Tree and Leaf Semantics
@@ -372,7 +412,7 @@ The underlying model is append-only tree + mutable leaf pointer:
 
 ## Context Reconstruction (`buildSessionContext`)
 
-`buildSessionContext(entries, leafId?, byId?, options?)` resolves what is sent to the model. Passing `options.transcript: true` instead builds the full-history display transcript (compactions emitted inline at the position they fired) — display-only, never sent to a provider.
+`buildSessionContext(entries, leafId?, byId?, options?)` resolves what is sent to the model. `options.transcript: true` instead builds a display transcript. Full transcript mode preserves compactions inline; `collapseCompactedHistory` renders only the current compacted tail, and `keepDanglingToolCalls` preserves still-running tool calls during a mid-turn UI rebuild.
 
 Algorithm:
 
@@ -380,24 +420,19 @@ Algorithm:
    - `leafId === null` -> return empty context.
    - explicit `leafId` -> use that entry if found.
    - otherwise fallback to last entry.
-2. Walk `parentId` chain from leaf to root and reverse to root->leaf path.
-3. Derive runtime state across path:
-   - `thinkingLevel` from latest `thinking_level_change` (default `"off"`)
-   - `serviceTier` from latest `service_tier_change`
-   - model map from `model_change` entries (`role ?? "default"`)
-   - fallback `models.default` from assistant message provider/model if no explicit model change
-   - deduplicated `injectedTtsrRules` from all `ttsr_injection` entries
+2. Walk `parentId` to root, stopping on a repeated id to bound corrupt cycles, then reverse to root->leaf.
+3. Derive runtime state across the path:
+   - resolved and configured thinking selectors from latest `thinking_level_change`
+   - service tier from latest `service_tier_change`
+   - model map from `model_change` entries (`role ?? "default"`); assistant-message inference is legacy fallback only until an explicit default is seen
+   - deduplicated `injectedTtsrRules`
    - mode/modeData from latest `mode_change` (default mode `"none"`)
-4. Build message list:
-   - `message` entries pass through
-   - `custom_message` entries become `custom` AgentMessages via `createCustomMessage`
-   - `branch_summary` entries become `branchSummary` AgentMessages via `createBranchSummaryMessage`
-   - if a `compaction` exists on path:
-     - emit compaction summary first (`createCompactionSummaryMessage`)
-     - emit path entries starting at `firstKeptEntryId` up to the compaction boundary
-     - emit entries after the compaction boundary
-
-`custom`, `session_init`, `service_tier_change`, and `ttsr_injection` entries do not inject model context directly.
+4. Choose the emission boundary:
+   - a later `reset_boundary` hides everything through that boundary from model context and collapsed live transcript
+   - otherwise the latest compaction emits its summary plus kept/post-compaction messages (provider-native replacement history may supply the kept model context)
+   - full transcript export retains pre-reset history and renders compactions chronologically
+5. Convert `message`, `custom_message`, and `branch_summary` entries into messages. Other entry types only affect replay state or metadata.
+6. Remove dangling tool calls from replay (unless explicitly retained for a mid-turn transcript), neutralizing protected reasoning metadata on rewritten turns; drop unsafe aborted/error assistant turns and their paired tool results from model context.
 
 ## Persistence Guarantees and Failure Model
 
@@ -408,67 +443,62 @@ Algorithm:
 
 ### Write pipeline
 
-Appends are written synchronously in-body through a `SessionStorageWriter` (from `storage.openWriter`), so an entry is durable the instant the append returns. Async disk work (flush, close, atomic rewrite) is serialized through an internal promise chain (`#diskTail`); appends bypass it.
+Completed entries update memory and are handed to file/memory storage synchronously in the append call once the lazy file-creation gate has been crossed. There is no `fsync`, so the guarantee covers software crashes, not power loss. Streaming partial text is not persisted until the completed message is appended.
 
-- `append*` updates in-memory state immediately.
-- Persistence is deferred until at least one assistant message exists.
-  - Before first assistant: entries are retained in memory; no file append occurs.
-  - When first assistant exists: full in-memory session is flushed to file.
-  - Afterwards: new entries append incrementally.
-
-Rationale in code: avoid persisting sessions that never produced an assistant response.
+- A new ordinary session remains memory-only until it contains an assistant message or a caller invokes `ensureOnDisk()`.
+- Before that gate, entries remain in memory; crossing it writes the full title slot, header, and accumulated entries.
+- Afterwards, entries append incrementally.
+- Saving an editor draft forces a discoverable header and stores `draft.txt` with a marker; if the draft disappears while only startup metadata remains, close removes that draft-only session. Explicit `ensureOnDisk()` sessions remain resumable.
+- Concurrent completed appends supersede an in-flight atomic rewrite with an authoritative full-body rewrite so stale publication cannot clobber them.
 
 ### Durability operations
 
-- `flush()` drains the async disk chain and the open writer's queued appends (no `fsync`); `flushSync()` performs a synchronous full rewrite for exit paths that cannot await.
-- Atomic full rewrites (`#rewriteAtomically`) delegate to `storage.writeTextAtomic`: temp-write then rename over the target (with an EPERM-safe move-aside fallback).
-- Used for `setSessionName`, `rewriteEntries` (tool-output pruning/supersede passes), and move/fork operations. Load-time migrations and other in-memory divergence (`#rewriteRequired`) instead trigger a synchronous full rewrite (`#rewriteSynchronously`) on the next persist.
+- `flush()` drains async disk/storage queues and the open writer (no `fsync`); `flushSync()` performs synchronous draining/full rewrite where supported.
+- Atomic full rewrites use storage `writeTextAtomic` with a commit guard; file storage stages then renames over the target, including an EPERM-safe move-aside fallback.
+- Rewrites serve renames, entry rewrites, migrations/sanitization, move/fork, and recovery. Session-title changes normally update the fixed-width title slot and append a `title_change` audit entry instead of rewriting the body.
 
 ### Error behavior
 
-- Persistence errors are latched (`#diskFailure`) and rethrown on subsequent operations.
-- First error is logged once with session file context.
-- Writer close is best-effort but propagates the first meaningful error.
+- Persistence errors are latched and rethrown by later flush/close/write operations; the first is logged once with session-file context.
+- Failed atomic publication attempts authoritative repair. If storage may have published a write and repair cannot be proven durable, `SessionPersistenceIndeterminateError` fails closed with the original and recovery errors.
+- Writer close propagates the first meaningful error.
 
 ## Data Size Controls and Blob Externalization
 
 Before persisting entries:
 
-- Large strings are truncated to `MAX_PERSIST_CHARS` (500,000 chars) with notice:
-  - `"[Session persistence truncated large content]"`
-- Transient fields `partialJson` and `jsonlEvents` are removed.
-- If object has both `content` and `lineCount`, line count is recomputed after truncation.
-- Image blocks in `content` arrays with base64 length >= 1024 are externalized to blob refs:
-  - stored as `blob:sha256:<hash>`
-  - raw bytes written to blob store (`BlobStore.put`)
+- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, and complete Anthropic native web-search history blocks, which must remain byte-exact for replay.
+- Transient `jsonlEvents` is removed.
+- If an object has both string `content` and numeric `lineCount`, line count is recomputed after truncation.
+- Image data URLs in `image_url` fields are always content-addressed in the blob store and replaced with `blob:sha256:<hash>`, regardless of length. Other base64 image payloads are externalized at 1,024 characters: image content/data payloads and image-generation results.
+- Redundant OpenAI Responses `thinkingSignature` copies are omitted when the authoritative reasoning item already exists in `providerPayload`.
 
-On load, blob refs are resolved back to base64 for message/custom_message image blocks.
+On load, persisted blob references are resolved back to the inline payload shapes expected by downstream transports.
 
 ## Storage Abstractions
 
-`SessionStorage` interface provides all filesystem operations used by `SessionManager`:
+`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain.
 
-- sync: `ensureDirSync`, `existsSync`, `writeTextSync`, `statSync`, `listFilesSync`
-- async: `exists`, `readText`, `readTextSlices`, `writeText`, `writeTextAtomic`, `rename`, `unlink`, `deleteSessionWithArtifacts`, `openWriter`
+Implementations and adapters:
 
-Implementations:
+- `FileSessionStorage`: real local files
+- `MemorySessionStorage`: map/chunk-backed in-memory storage for non-persistent sessions and tests
+- `IndexedSessionStorage`: shared local index plus ordered remote publication used by Redis/SQL-backed storage
 
-- `FileSessionStorage`: real filesystem (Bun + node fs)
-- `MemorySessionStorage`: map-backed in-memory implementation for tests/non-persistent sessions
-
-`SessionStorageWriter` exposes `append`, `flush`, `isOpen`, `close`, `getError`.
+`SessionStorageWriter` exposes `append`, optional `appendSync`, `flush`, optional `flushSync`, `isOpen`, `close`, and `getError`.
 
 ## Session Discovery Utilities
 
-Discovery helpers live in `session-listing.ts`; `SessionManager` re-exposes the project-scoped lists as thin static wrappers:
+Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project-scoped wrappers:
 
-- `getRecentSessions(sessionDir, limit?)` -> lightweight metadata for UI/session picker, capped by `limit` (default 4)
+- `getRecentSessions(sessionDir, limit?)` -> lightweight welcome metadata, default limit 4
 - `findMostRecentSession(sessionDir)` -> newest by mtime
-- `listSessions(sessionDir, storage)` (a.k.a. `SessionManager.list(cwd, sessionDir?)`) -> sessions in one project scope
-- `listAllSessions(storage)` (a.k.a. `SessionManager.listAll()`) -> sessions across all project scopes under `~/.omp/agent/sessions`
-- `resolveResumableSession(sessionArg, cwd, sessionDir?)` -> local then global resume/fork target lookup
+- `listSessions(sessionDir, storage)` / `SessionManager.list(...)` -> project scope with lifecycle status
+- `listSessionsReadOnly(...)` -> same metadata without backup recovery
+- `listAllSessions(storage)` / `SessionManager.listAll()` -> all project scopes
+- `resolveResumableSession(...)` -> local lookup then optional global fallback
 
-Metadata extraction for `getRecentSessions` reads a prefix via `readTextSlices(..., 4096, 0)`. `listSessions`/`listAllSessions` read a 4KB prefix plus a bounded 32 KiB tail through one `readTextSlices(...)` call per file, using the prefix for metadata and the tail for lifecycle status. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp in `<timestamp>_<sessionId>.jsonl`.
+Recent/most-recent scans read only a 4 KiB prefix. Full lists read that prefix plus a bounded 32 KiB tail for lifecycle status. Scans are stat-keyed and cached; large sets are processed with bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp.
 
 ## Related but Distinct: Prompt History Storage
 

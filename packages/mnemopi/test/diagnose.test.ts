@@ -29,9 +29,12 @@ describe("diagnose helpers", () => {
 				const id = memory.remember("Diagnose working row", { source: "test" });
 				memory.consolidateToEpisodic("Diagnose episodic row", [id], "test", 0.6);
 				memory.scratchpadWrite("diagnose scratchpad row");
-				memory.db
-					.prepare("INSERT INTO triples (subject, predicate, object, source) VALUES (?, ?, ?, ?)")
-					.run("alice", "uses", "beam", "test");
+				memory.db.run("INSERT INTO triples (subject, predicate, object, source) VALUES (?, ?, ?, ?)", [
+					"alice",
+					"uses",
+					"beam",
+					"test",
+				]);
 			} finally {
 				memory.close();
 			}

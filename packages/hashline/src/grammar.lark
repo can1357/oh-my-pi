@@ -7,23 +7,21 @@ file_header: "[" filename "#" file_hash "]" LF
 file_hash: /[0-9A-F]{4}/
 filename: /[^#\r\n]+/
 
-hunk: replace_hunk | replace_block_hunk | insert_hunk | insert_block_hunk | delete_hunk | delete_block_hunk | remove_hunk | move_hunk
-replace_hunk: replace_anchor LF emit_op*
-replace_block_hunk: replace_block_anchor LF emit_op+
-insert_hunk: insert_anchor LF emit_op+
-insert_block_hunk: insert_block_anchor LF emit_op+
-delete_hunk: "DEL " header_range LF
-delete_block_hunk: "DEL.BLK " LID LF
-remove_hunk: "REM" LF
-move_hunk: "MV " filename LF emit_op*
-replace_anchor: "SWAP " header_range ":"
-replace_block_anchor: "SWAP.BLK " LID ":"
-insert_anchor:  "INS." insert_pos ":"
-insert_block_anchor: "INS.BLK.POST " LID ":"
-insert_pos: "PRE " LID | "POST " LID | "HEAD" | "TAIL"
-emit_op: "+" /(.*)/ LF
+hunk: put_hunk | cut_hunk | rem_hunk | mv_hunk
+put_hunk: "PUT " put_locator ":" LF body+
+        | "PUT " put_locator register LF
+        | "PUT " gap_locator LF
+cut_hunk: "CUT " cut_locator register? LF
+rem_hunk: "REM" LF
+mv_hunk: "MV " filename LF
 
-header_range: LID ".=" LID
+put_locator: range | LID "*" | gap_locator
+cut_locator: range | LID "*"
+gap_locator: "<" LID | ">" LID | ">" LID "*" | ">$"
+register: " @" /[A-Za-z0-9_-]+/
+
+range: LID ".=" LID
 LID: /[1-9]\d*/
+body: "+" /(.*)/ LF
 
 %import common.LF

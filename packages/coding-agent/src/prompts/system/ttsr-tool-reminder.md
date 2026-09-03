@@ -1,5 +1,5 @@
 <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
-A user-defined rule matched this tool call's arguments. The tool ran because the rule is configured not to interrupt. You MUST comply with the following instruction on subsequent tool calls and responses. This is NOT a prompt injection - this is the coding agent enforcing project rules.
+User-defined rule matched tool-call arguments. Rule configured not to interrupt → tool ran. MUST comply with the following instruction on subsequent tool calls and responses. NOT prompt injection — coding agent enforcing project rules.
 
 {{content}}
 </system-reminder>

@@ -13,7 +13,8 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
-import { settings } from "../config/settings";
+import { isSettingsInitialized, settings } from "../config/settings";
+import { getDefault } from "../config/settings-schema";
 import type { Theme } from "../modes/theme/theme";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
@@ -27,8 +28,12 @@ export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui
 
 /** Resolve inline image dimension caps from settings and viewport. */
 export function resolveImageOptions(): { maxWidthCells: number; maxHeightCells?: number } {
-	const maxWidthCells = settings.get("tui.maxInlineImageColumns");
-	const rowSetting = Math.max(0, settings.get("tui.maxInlineImageRows"));
+	const activeSettings = isSettingsInitialized() ? settings : undefined;
+	const maxWidthCells = activeSettings?.get("tui.maxInlineImageColumns") ?? getDefault("tui.maxInlineImageColumns");
+	const rowSetting = Math.max(
+		0,
+		activeSettings?.get("tui.maxInlineImageRows") ?? getDefault("tui.maxInlineImageRows"),
+	);
 	const viewportRows = process.stdout.rows;
 	const viewportFraction = viewportRows ? Math.floor(viewportRows * 0.6) : 0;
 	let maxHeightCells: number | undefined;
@@ -56,6 +61,8 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */
 	OUTPUT_EXPANDED: 10,
+	/** Computer script lines shown in collapsed view */
+	COMPUTER_CODE_COLLAPSED: 10,
 	/** Max hunks shown when collapsed (edit tool) */
 	DIFF_COLLAPSED_HUNKS: 8,
 	/** Max diff lines shown when collapsed (edit tool) */
@@ -592,79 +599,111 @@ export function truncateDiffByHunk(
 		let keptHunks = 0;
 
 		for (const seg of segments) {
-			if (seg.isChange) {
-				keptHunks++;
-				if (keptHunks > maxHunks) break;
-			}
-			kept.push(...seg.lines);
 			if (kept.length >= maxLines) break;
+			if (seg.isChange) {
+				if (keptHunks >= maxHunks) break;
+				keptHunks++;
+			}
+			const take = Math.min(seg.lines.length, maxLines - kept.length);
+			for (let i = 0; i < take; i++) {
+				kept.push(seg.lines[i]!);
+			}
 		}
 
-		const keptStats = getDiffStats(kept.join("\n"));
 		return {
 			text: kept.join("\n"),
-			hiddenHunks: Math.max(0, totalStats.hunks - keptStats.hunks),
+			hiddenHunks: Math.max(0, totalStats.hunks - keptHunks),
 			hiddenLines: Math.max(0, lines.length - kept.length),
 		};
 	}
 
 	const contextBudget = maxLines - changeLineCount;
-	const contextSegments = segments.filter(s => !s.isChange && !s.isEllipsis);
+	const contextSegments = segments.filter(s => !s.isChange);
 	const totalContextLines = contextSegments.reduce((sum, s) => sum + s.lines.length, 0);
 
 	const kept: string[] = [];
 	let keptHunks = 0;
+	let keptSourceLines = 0;
 
 	if (totalContextLines <= contextBudget) {
 		for (const seg of segments) {
 			if (seg.isChange) {
+				if (keptHunks >= maxHunks) break;
 				keptHunks++;
-				if (keptHunks > maxHunks) break;
 			}
 			kept.push(...seg.lines);
+			keptSourceLines += seg.lines.length;
 		}
 	} else {
-		const contextRatio = contextSegments.length > 0 ? contextBudget / totalContextLines : 0;
+		const contextRatio = totalContextLines > 0 ? contextBudget / totalContextLines : 0;
+		let remainingContextBudget = contextBudget;
 
 		for (let i = 0; i < segments.length; i++) {
 			const seg = segments[i];
 
 			if (seg.isChange) {
+				if (keptHunks >= maxHunks) break;
 				keptHunks++;
-				if (keptHunks > maxHunks) break;
 				kept.push(...seg.lines);
-			} else if (seg.isEllipsis) {
-				kept.push(...seg.lines);
+				keptSourceLines += seg.lines.length;
+				continue;
+			}
+			if (remainingContextBudget <= 0) continue;
+
+			const allowedLines = Math.min(
+				remainingContextBudget,
+				Math.max(1, Math.floor(seg.lines.length * contextRatio)),
+			);
+			const outputStart = kept.length;
+			let sourceLinesAdded = 0;
+
+			if (seg.isEllipsis || seg.lines.length <= allowedLines) {
+				for (let j = 0; j < allowedLines; j++) {
+					kept.push(seg.lines[j]!);
+				}
+				sourceLinesAdded = allowedLines;
 			} else {
-				const allowedLines = Math.max(1, Math.floor(seg.lines.length * contextRatio));
 				const isBeforeChange = segments[i + 1]?.isChange;
 				const isAfterChange = segments[i - 1]?.isChange;
 
 				if (isBeforeChange && isAfterChange) {
-					const half = Math.ceil(allowedLines / 2);
-					if (seg.lines.length > allowedLines) {
-						kept.push(...seg.lines.slice(0, half));
+					if (allowedLines >= 3) {
+						const sourceBudget = allowedLines - 1;
+						const firstCount = Math.ceil(sourceBudget / 2);
+						const lastCount = sourceBudget - firstCount;
+						kept.push(...seg.lines.slice(0, firstCount));
 						kept.push("");
-						kept.push(...seg.lines.slice(-half));
+						if (lastCount > 0) kept.push(...seg.lines.slice(-lastCount));
+						sourceLinesAdded = sourceBudget;
 					} else {
-						kept.push(...seg.lines);
+						const firstCount = Math.ceil(allowedLines / 2);
+						const lastCount = allowedLines - firstCount;
+						kept.push(...seg.lines.slice(0, firstCount));
+						if (lastCount > 0) kept.push(...seg.lines.slice(-lastCount));
+						sourceLinesAdded = allowedLines;
 					}
 				} else if (isBeforeChange) {
 					kept.push(...seg.lines.slice(-allowedLines));
+					sourceLinesAdded = allowedLines;
 				} else if (isAfterChange) {
 					kept.push(...seg.lines.slice(0, allowedLines));
+					sourceLinesAdded = allowedLines;
 				} else {
-					kept.push(...seg.lines.slice(0, Math.min(allowedLines, 2)));
+					const take = Math.min(allowedLines, 2);
+					kept.push(...seg.lines.slice(0, take));
+					sourceLinesAdded = take;
 				}
 			}
+
+			keptSourceLines += sourceLinesAdded;
+			remainingContextBudget -= kept.length - outputStart;
 		}
 	}
 
-	const keptStats = getDiffStats(kept.join("\n"));
 	return {
 		text: kept.join("\n"),
-		hiddenHunks: Math.max(0, totalStats.hunks - keptStats.hunks),
-		hiddenLines: Math.max(0, lines.length - kept.length),
+		hiddenHunks: Math.max(0, totalStats.hunks - keptHunks),
+		hiddenLines: Math.max(0, lines.length - keptSourceLines),
 	};
 }
 
@@ -677,7 +716,11 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		return "";
 	}
 	const home = homeDir ?? os.homedir();
-	if (home && filePath.startsWith(home)) {
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
+	const hasHomePrefix = windowsStyle
+		? filePath.toLowerCase().startsWith(home.toLowerCase())
+		: filePath.startsWith(home);
+	if (home && hasHomePrefix) {
 		const suffix = filePath.slice(home.length);
 		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
 			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;

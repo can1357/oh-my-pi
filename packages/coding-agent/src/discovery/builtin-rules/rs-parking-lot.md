@@ -33,12 +33,12 @@ let guard = data.lock();
 
 ## Equivalents
 
-| std::sync | parking_lot |
-| --- | --- |
-| `Mutex<T>` | `Mutex<T>` |
-| `RwLock<T>` | `RwLock<T>` |
-| `Condvar` | `Condvar` |
-| `Once` | `Once` |
+|std::sync|parking_lot|
+|---|---|
+|`Mutex<T>`|`Mutex<T>`|
+|`RwLock<T>`|`RwLock<T>`|
+|`Condvar`|`Condvar`|
+|`Once`|`Once`|
 
 ## Keep async locks async
 

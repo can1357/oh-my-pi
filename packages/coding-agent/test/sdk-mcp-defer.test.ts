@@ -2,13 +2,15 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
+import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type CustomTool, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 // Contract for B1 (interactive MCP deferral): when `hasUI` is true, MCP
 // discovery is deferred off the first-paint path, so an explicitly requested
@@ -19,7 +21,6 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 // false there is no deferral, so an MCP tool name with no real backing is not
 // registered at all (the non-UI paths keep the blocking discover path).
 describe("createAgentSession MCP deferral (B1)", () => {
-	let registryDir: string;
 	let tempDir: string;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -40,23 +41,23 @@ describe("createAgentSession MCP deferral (B1)", () => {
 		slashCommands: [],
 		enableLsp: false,
 		skipPythonPreflight: true,
+		rules: [],
+		preloadedCustomToolPaths: [],
 		// No .mcp.json in tempDir, so no real MCP server can ever back this name.
 		enableMCP: true,
 		toolNames: ["read", PENDING_MCP_TOOL],
 	});
 
-	beforeAll(async () => {
-		registryDir = path.join(os.tmpdir(), `pi-sdk-mcp-defer-registry-${Snowflake.next()}`);
-		fs.mkdirSync(registryDir, { recursive: true });
-		authStorage = await AuthStorage.create(path.join(registryDir, "auth.db"));
-		modelRegistry = new ModelRegistry(authStorage);
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
+		modelRegistry = new ModelRegistry(
+			authStorage,
+			path.join(os.tmpdir(), `pi-sdk-mcp-defer-models-${Snowflake.next()}.yml`),
+		);
 	});
 
 	afterAll(() => {
 		authStorage.close();
-		if (registryDir && fs.existsSync(registryDir)) {
-			removeSyncWithRetries(registryDir);
-		}
 	});
 
 	beforeEach(() => {
@@ -76,6 +77,20 @@ describe("createAgentSession MCP deferral (B1)", () => {
 			// The explicitly requested MCP tool is a known, resolvable tool even
 			// though no server has connected — deterministic, not "unknown tool".
 			expect(session.getActiveToolNames()).toContain(PENDING_MCP_TOOL);
+			await session.refreshMCPTools([
+				{
+					name: PENDING_MCP_TOOL,
+					label: "Connected MCP tool",
+					description: "Connected replacement.",
+					parameters: type({}),
+					mcpServerName: "pending",
+					mcpToolName: "connectingtool",
+					async execute() {
+						return { content: [{ type: "text", text: "connected" }] };
+					},
+				} satisfies CustomTool,
+			]);
+			expect(session.getToolByName(PENDING_MCP_TOOL)?.label).toBe("Connected MCP tool");
 		} finally {
 			await session.dispose();
 		}

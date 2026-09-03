@@ -1,13 +1,12 @@
-Stop and write the complete plan in your NEXT reply — before any further exploration. You have already seen enough to commit to a plan; do not defer this.
+STOP: In NEXT reply, before further exploration, write complete plan. Enough known; do not defer.
 
-First, state the plan itself, explicitly and comprehensively:
+Plan first; explicit, comprehensive; reference for remainder:
+- Remaining execution-order steps: exact files, symbols, commands, checks.
+- Risks, edge cases; verify each landed: specific commands, expected outputs. NEVER modify tests or verification assets to pass checks.
+- Already done, brief; prevent repetition.
 
-- Every remaining step in execution order, with the exact files, symbols, commands, and checks involved.
-- Known risks, edge cases, and how you will verify each step actually landed (specific commands, expected outputs). Never modify tests or verification assets to make checks pass.
-- What is already done, stated briefly, so no step gets repeated.
+Thorough, concrete. Tools may verify details only after plan.
 
-Be thorough and concrete — this plan is the reference for the remainder of the run. You may verify details with tools after the plan is written, never before.
+Then, same reply and only after complete plan, use todo tool to capture 5–9 items: one per MEANINGFUL step; each concrete target + verification. Only code-changing or code-verifying steps; exclude reporting, bookkeeping, cleanup-ceremony, release-note items. Todo serves task, not reverse: reality/item conflict → fix actual problem, not checklist.
 
-Then, only once the plan above is complete, in the SAME reply, capture it as a todo list (the todo tool): 5-9 items, one per MEANINGFUL step, each naming its concrete target and its verification. Only steps that change or verify code belong on the list — no reporting, bookkeeping, cleanup-ceremony, or release-note items. The todo list serves the task, never the reverse: when reality disagrees with an item, fix the actual problem rather than working the checklist.
-
-This is a checkpoint, not a final answer: do not end your turn on the plan alone — after recording the todo list, continue the task; do not stop here.
+Checkpoint, not final answer: after todo list, continue task; do not stop on plan alone.

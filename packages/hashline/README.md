@@ -26,7 +26,7 @@ await fs.writeText("hello.ts", before);
 const tag = snapshots.record("hello.ts", before);
 const patcher = new Patcher({ fs, snapshots });
 const patch = Patch.parse(String.raw`[hello.ts#${tag}]
-SWAP 1.=1:
+PUT 1.=1:
 +const greeting = "hello";`);
 const result = await patcher.apply(patch);
 
@@ -47,11 +47,12 @@ still matches the recorded content hash, and refusing or attempting
 session-aware recovery on mismatch.
 
 Inside a section:
-- `SWAP A.=B:` — replace lines A.=B with following `+TEXT` body rows.
-- `SWAP.BLK A:` — replace the syntactic block beginning on line A.
-- `DEL A.=B` / `DEL.BLK A` — delete concrete lines or a resolved block.
-- `INS.PRE A:` / `INS.POST A:` / `INS.HEAD:` / `INS.TAIL:` — insert following body rows.
-- `INS.BLK.POST A:` — insert following body rows after the resolved block's last line.
+- `PUT A.=B:` — replace lines A through B (inclusive) with following `+TEXT` body rows.
+- `PUT A*:` — replace the syntactic block beginning on line A.
+- `PUT <A:` / `PUT >A:` — insert following body rows before/after line A (`<1` = head, `>$` = tail).
+- `PUT >A*:` — insert following body rows after the resolved block's last line.
+- `PUT <A` / `PUT >A` / `PUT A.=B @name` / `PUT A* @name` — paste a captured register at a gap, over a range, or over a resolved block (no `:` header or body rows; `@name` is optional only at gaps).
+- `CUT A.=B` / `CUT A*` — delete concrete lines or a resolved block and capture them (anonymous, or `@name` when given).
 - `REM` — delete the whole file named by the section header.
 - `MV DEST` — move/rename the section file to `DEST` (optionally after line edits).
 - `+TEXT` — literal body row (use `+` alone for a blank line).

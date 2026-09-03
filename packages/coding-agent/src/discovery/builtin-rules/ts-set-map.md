@@ -5,9 +5,9 @@ scope: "tool:edit(**/*.{ts,tsx}), tool:write(**/*.{ts,tsx})"
 interruptMode: never
 ---
 
-Use `Record<K, V>` / `Record<K, true>` for small, static string-keyed lookup tables.
+Small, static string-keyed lookup tables: `Record<K, V>` / `Record<K, true>`.
 
-Use `Set` / `Map` when keys are dynamic, non-string, inserted or deleted at runtime, or when code needs `.size`, `.clear()`, stable insertion order, or iterator APIs.
+`Set` / `Map`: dynamic/non-string keys; runtime insertion/deletion; `.size`, `.clear()`, stable insertion order, or iterator APIs.
 
 ```typescript
 // Static literal → Record
@@ -24,5 +24,3 @@ for (const item of items) {
 	seen.add(item.id);
 }
 ```
-
-Small fixed table? `Record`. Runtime collection? `Set` / `Map`.

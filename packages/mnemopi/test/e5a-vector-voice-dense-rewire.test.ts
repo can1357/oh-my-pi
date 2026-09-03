@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import "./setup";
+
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { PolyphonicRecallEngine } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 

@@ -21,7 +21,7 @@ function tag(line: number): string {
 }
 
 function sameLineRange(anchor: string): string {
-	return `SWAP ${anchor}..${anchor}:`;
+	return `PUT ${anchor}:`;
 }
 
 function applyDiff(content: string, diff: string): string {
@@ -71,7 +71,7 @@ class BlockingFilesystem extends InMemoryFilesystem {
 		for (const filePath of blocked) this.#blocked.add(filePath);
 	}
 
-	async preflightWrite(filePath: string): Promise<void> {
+	override async preflightWrite(filePath: string): Promise<void> {
 		if (this.#blocked.has(filePath)) throw new Error(`blocked write: ${filePath}`);
 	}
 }
@@ -87,50 +87,50 @@ describe("hashline parser — range-anchor contracts", () => {
 	const content = "aaa\nbbb\nccc";
 
 	it("keeps parsed sections reusable across target snapshots", () => {
-		const section = Patch.parseSingle(["[a.ts]", `INS.POST ${tag(2)}:`, repl("tail")].join("\n"));
+		const section = Patch.parseSingle(["[a.ts]", `PUT >${tag(2)}:`, repl("tail")].join("\n"));
 
 		expect(section.applyTo("aaa\nbbb").text).toBe("aaa\nbbb\ntail");
 		expect(section.applyTo("aaa\nbbb\nccc").text).toBe("aaa\nbbb\ntail\nccc");
 	});
 
-	it("applies replace/delete/insert operations against concrete anchors", () => {
+	it("applies canonical PUT/CUT operations against concrete anchors", () => {
 		const diff = [
-			`INS.PRE ${tag(2)}:`,
+			`PUT <${tag(2)}:`,
 			repl("before b"),
-			`INS.POST ${tag(2)}:`,
+			`PUT >${tag(2)}:`,
 			repl("after b"),
-			"INS.HEAD:",
+			"PUT <1:",
 			repl("top"),
-			"INS.TAIL:",
+			"PUT >$:",
 			repl("tail"),
 		].join("\n");
 		expect(applyDiff(content, diff)).toBe("top\naaa\nbefore b\nbbb\nafter b\nccc\ntail");
-		expect(applyDiff(content, `DEL ${tag(2)}`)).toBe("aaa\nccc");
-		expect(applyDiff(content, `DEL ${tag(2)}..${tag(3)}`)).toBe("aaa");
+		expect(applyDiff(content, `CUT ${tag(2)}`)).toBe("aaa\nccc");
+		expect(applyDiff(content, `CUT ${tag(2)}-${tag(3)}`)).toBe("aaa");
 		expect(applyDiff(content, `${sameLineRange(tag(2))}\n${repl("BBB")}`)).toBe("aaa\nBBB\nccc");
 	});
 
 	it("inserts after the final line without falling off the file", () => {
-		expect(applyDiff(content, `INS.POST ${tag(3)}:\n${repl("tail")}`)).toBe("aaa\nbbb\nccc\ntail");
+		expect(applyDiff(content, `PUT >${tag(3)}:\n${repl("tail")}`)).toBe("aaa\nbbb\nccc\ntail");
 	});
 
 	it("preserves whitespace-bearing and sigil-leading payload exactly", () => {
 		const payload = "\tconst streamKeepaliveMs = opts.streamKeepaliveMs;";
-		expect(applyDiff(content, `INS.POST ${tag(2)}:\n${repl(payload)}`)).toBe(`aaa\nbbb\n${payload}\nccc`);
+		expect(applyDiff(content, `PUT >${tag(2)}:\n${repl(payload)}`)).toBe(`aaa\nbbb\n${payload}\nccc`);
 		expect(
 			applyDiff(content, `${sameLineRange(tag(2))}\n${repl("|literal")}\n${repl("^literal")}\n${repl("↓literal")}`),
 		).toBe("aaa\n|literal\n^literal\n↓literal\nccc");
 	});
 
 	it("strips copied read-output prefixes only inside pasted bare body rows", () => {
-		const diff = `SWAP ${tag(2)}..${tag(4)}:\n${repl("line one")}\n${tag(3)}:line two`;
+		const diff = `PUT ${tag(2)}-${tag(4)}:\n${repl("line one")}\n${tag(3)}:line two`;
 		const { edits, warnings } = parsePatch(diff);
 		expect(applyEdits("aaa\nbbb\nccc\nddd\neee", edits).text).toBe("aaa\nline one\nline two\neee");
 		expect(warnings.some(w => /Auto-prefixed bare body row/.test(w))).toBe(true);
 	});
 
 	it("rejects overlapping replacement ranges", () => {
-		const diff = `SWAP ${tag(2)}..${tag(4)}:\n${repl("NEW1")}\nSWAP ${tag(3)}..${tag(5)}:\n${repl("NEW2")}`;
+		const diff = `PUT ${tag(2)}-${tag(4)}:\n${repl("NEW1")}\nPUT ${tag(3)}-${tag(5)}:\n${repl("NEW2")}`;
 		expect(() => parsePatch(diff).edits).toThrow(/anchor line 3 is already targeted by another hunk on line 1/);
 	});
 
@@ -151,34 +151,34 @@ describe("hashline input splitter", () => {
 	});
 
 	it("normalizes leading blanks, cwd-relative paths, and explicit fallback paths", () => {
-		expect(splitHashlineInput(`\n[foo.ts]\nINS.HEAD:\n${repl("x")}`)).toEqual({
+		expect(splitHashlineInput(`\n[foo.ts]\nPUT <1:\n${repl("x")}`)).toEqual({
 			path: "foo.ts",
-			diff: `INS.HEAD:\n${repl("x")}`,
+			diff: `PUT <1:\n${repl("x")}`,
 		});
 
 		const cwd = process.cwd();
 		const absolute = `${cwd}/src/foo.ts`;
-		expect(splitHashlineInput(`[${absolute}]\nINS.HEAD:\n${repl("x")}`, { cwd }).path).toBe("src/foo.ts");
-		expect(splitHashlineInput(`INS.HEAD:\n${repl("x")}`, { path: "a.ts" })).toEqual({
+		expect(splitHashlineInput(`[${absolute}]\nPUT <1:\n${repl("x")}`, { cwd }).path).toBe("src/foo.ts");
+		expect(splitHashlineInput(`PUT <1:\n${repl("x")}`, { path: "a.ts" })).toEqual({
 			path: "a.ts",
-			diff: `INS.HEAD:\n${repl("x")}`,
+			diff: `PUT <1:\n${repl("x")}`,
 		});
 		expect(() => splitHashlineInput("plain text", { path: "a.ts" })).toThrow(/must begin with/);
 	});
 
 	it("splits multiple sections and drops a trailing header without operations", () => {
-		const input = ["[a.ts]", "INS.HEAD:", repl("a"), "[b.ts]", "INS.TAIL:", repl("b")].join("\n");
+		const input = ["[a.ts]", "PUT <1:", repl("a"), "[b.ts]", "PUT >$:", repl("b")].join("\n");
 		expect(splitHashlineInputs(input)).toEqual([
-			{ path: "a.ts", diff: `INS.HEAD:\n${repl("a")}` },
-			{ path: "b.ts", diff: `INS.TAIL:\n${repl("b")}` },
+			{ path: "a.ts", diff: `PUT <1:\n${repl("a")}` },
+			{ path: "b.ts", diff: `PUT >$:\n${repl("b")}` },
 		]);
-		expect(splitHashlineInputs(["[a.ts]", "INS.HEAD:", repl("a"), "[b.ts]"].join("\n"))).toEqual([
-			{ path: "a.ts", diff: `INS.HEAD:\n${repl("a")}` },
+		expect(splitHashlineInputs(["[a.ts]", "PUT <1:", repl("a"), "[b.ts]"].join("\n"))).toEqual([
+			{ path: "a.ts", diff: `PUT <1:\n${repl("a")}` },
 		]);
 	});
 
 	it("rejects unified-diff hunk headers on the first line", () => {
-		const input = ["@@ -1,3 +1,3 @@", "INS.HEAD:", repl("x")].join("\n");
+		const input = ["@@ -1,3 +1,3 @@", "PUT <1:", repl("x")].join("\n");
 		expect(() => splitHashlineInputs(input)).toThrow(/unified-diff hunk header/);
 	});
 });
@@ -247,7 +247,7 @@ describe("Recovery", () => {
 			path: filePath,
 			currentText,
 			tag: v0Tag,
-			edits: parsePatch(`SWAP 10.=10:\n${repl("L10-EDITED")}`).edits,
+			edits: parsePatch(`PUT 10-10:\n${repl("L10-EDITED")}`).edits,
 		});
 
 		expect(recovered).not.toBeNull();
@@ -259,7 +259,7 @@ describe("hashline abort sentinel", () => {
 	const sentinel = "*** Abort";
 
 	it("terminates parsing without surfacing a warning", () => {
-		const diff = [`INS.POST ${tag(1)}:`, repl("HELLO"), sentinel, `INS.POST ${tag(99)}:`, repl("never")].join("\n");
+		const diff = [`PUT >${tag(1)}:`, repl("HELLO"), sentinel, `PUT >${tag(99)}:`, repl("never")].join("\n");
 		const { edits, warnings } = parsePatch(diff);
 		expect(edits).toHaveLength(1);
 		expect(edits[0]).toMatchObject({ kind: "insert", text: "HELLO" });
@@ -269,11 +269,11 @@ describe("hashline abort sentinel", () => {
 	it("stops the input splitter before later sections", () => {
 		const input = [
 			"[a.ts]",
-			`INS.POST ${tag(1)}:`,
+			`PUT >${tag(1)}:`,
 			repl("a-payload"),
 			sentinel,
 			"[b.ts]",
-			`INS.POST ${tag(1)}:`,
+			`PUT >${tag(1)}:`,
 			repl("never"),
 		].join("\n");
 		const sections = splitHashlineInputs(input);
@@ -283,14 +283,11 @@ describe("hashline abort sentinel", () => {
 	});
 });
 
-describe("hashline parser — delete and blank payload semantics", () => {
-	it("applies inline delete and empty replace operations", () => {
-		expect(applyDiff("line1\nline2\nline3\n", splitHashlineInput("[a.ts]\nDEL 2\n").diff)).toBe("line1\nline3\n");
-		expect(applyDiff("line1\nline2\nline3\nline4\n", splitHashlineInput("[a.ts]\nDEL 2.=3\n").diff)).toBe(
+describe("hashline parser — cut and blank payload semantics", () => {
+	it("applies inline cut operations", () => {
+		expect(applyDiff("line1\nline2\nline3\n", splitHashlineInput("[a.ts]\nCUT 2\n").diff)).toBe("line1\nline3\n");
+		expect(applyDiff("line1\nline2\nline3\nline4\n", splitHashlineInput("[a.ts]\nCUT 2-3\n").diff)).toBe(
 			"line1\nline4\n",
-		);
-		expect(applyDiff("line1\nline2\nline3\n", splitHashlineInput("[a.ts]\nSWAP 2.=2:\n").diff)).toBe(
-			"line1\nline3\n",
 		);
 	});
 
@@ -301,10 +298,10 @@ describe("hashline parser — delete and blank payload semantics", () => {
 
 	it("preserves explicit blank replacement rows", () => {
 		const text = "a\nb\nc\nd\ne\n";
-		const ops = `[a.ts]\nSWAP 2.=2:\n${repl("")}\n${repl("")}\nSWAP 4.=4:\n${repl("D")}\n`;
+		const ops = `[a.ts]\nPUT 2-2:\n${repl("")}\n${repl("")}\nPUT 4-4:\n${repl("D")}\n`;
 		expect(applyDiff(text, splitHashlineInput(ops).diff)).toBe("a\n\n\nc\nD\ne\n");
 
-		const embedded = `[a.ts]\nSWAP 2.=2:\n${repl("first")}\n${repl("")}\n${repl("second")}\n`;
+		const embedded = `[a.ts]\nPUT 2-2:\n${repl("first")}\n${repl("")}\n${repl("second")}\n`;
 		expect(applyDiff("a\nb\nc\n", splitHashlineInput(embedded).diff)).toBe("a\nfirst\n\nsecond\nc\n");
 	});
 });

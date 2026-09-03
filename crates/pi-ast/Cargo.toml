@@ -2,7 +2,7 @@
 name = "pi-ast"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 repository.workspace = true
 
@@ -73,3 +73,4 @@ tree-sitter-vue.workspace = true
 tree-sitter-xml.workspace = true
 tree-sitter-yaml.workspace = true
 tree-sitter-zig.workspace = true
+xxhash-rust.workspace = true

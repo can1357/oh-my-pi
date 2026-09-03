@@ -107,6 +107,57 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("SchemaMigrator: Migrating the users table");
 	});
 
+	it("shows a non-default role badge and hides descriptions that only echo the id", () => {
+		const withRole = render([
+			makeSession({
+				id: "AuthLoader",
+				agent: "scout",
+				description: "Refactor the auth flow",
+			}),
+		]);
+		expect(withRole).toContain("AuthLoader");
+		expect(withRole).toMatch(/AuthLoader.*scout/);
+		expect(withRole).toContain("Refactor the auth flow");
+
+		const echoed = render([
+			makeSession({
+				id: "AuthLoader",
+				agent: "scout",
+				description: "AuthLoader",
+			}),
+		]);
+		expect(echoed).toContain("AuthLoader");
+		expect(echoed).toMatch(/AuthLoader.*scout/);
+		expect(echoed).not.toContain("AuthLoader: AuthLoader");
+
+		const collision = render([
+			makeSession({
+				id: "AuthLoader-3",
+				agent: "scout",
+				description: "AuthLoader",
+			}),
+		]);
+		expect(collision).toContain("AuthLoader-3");
+		expect(collision).toMatch(/AuthLoader-3.*scout/);
+		expect(collision).not.toContain("AuthLoader-3: AuthLoader");
+
+		const mixedCase = render([
+			makeSession({
+				id: "AuthLoader-3",
+				agent: "scout",
+				description: "authloader",
+			}),
+		]);
+		expect(mixedCase).toContain("AuthLoader-3");
+		expect(mixedCase).not.toContain("AuthLoader-3: authloader");
+
+		const defaultWorker = render([
+			makeSession({ id: "SchemaMigrator", agent: "task", description: "Migrate users" }),
+		]);
+		expect(defaultWorker).toContain("SchemaMigrator: Migrate users");
+		expect(defaultWorker).not.toMatch(/SchemaMigrator.*task/);
+	});
+
 	it("only shows active subagents and clears once everything finished", () => {
 		const finishedStates = ["completed", "failed", "aborted"] as const;
 		const sessions: ObservableSession[] = [
@@ -131,8 +182,33 @@ describe("subagent HUD lines", () => {
 			makeSession({ id: "Worker", progress: makeProgress({ id: "Worker", task: "Investigate flaky CI on macOS" }) }),
 		]);
 		expect(fromTask).toContain("Worker Investigate flaky CI on macOS");
-	});
 
+		const multiLineTask = render([
+			makeSession({
+				id: "ReviewShell",
+				agent: "scout",
+				progress: makeProgress({
+					id: "ReviewShell",
+					agent: "scout",
+					task: "Complete assignment thoroughly:\n\n# Target\nFiles: src/foo.ts",
+				}),
+			}),
+		]);
+		expect(multiLineTask).toContain("ReviewShell");
+		expect(multiLineTask).toContain("Complete assignment thoroughly: ↵ # Tar");
+		expect(multiLineTask).not.toContain("\n# Target");
+
+		const multiLineDesc = render([
+			makeSession({
+				id: "ReviewShell",
+				agent: "scout",
+				description: "First line\n\nSecond line",
+			}),
+		]);
+		expect(multiLineDesc).toContain("ReviewShell");
+		expect(multiLineDesc).toContain("First line ↵ Second line");
+		expect(multiLineDesc).not.toContain("\nSecond line");
+	});
 	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
 		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn
 		// (no detached flag at all) both stay off the HUD.
@@ -151,7 +227,7 @@ describe("subagent HUD lines", () => {
 	it("threads the detached flag from lifecycle and progress payloads", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();
-		registry.subscribeToEventBus(eventBus);
+		registry.subscribeToEventBus(eventBus, eventBus);
 
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Detached", 0, "background work", true));
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Inline", 1, "sync work"));
@@ -172,10 +248,24 @@ describe("subagent HUD lines", () => {
 		}
 	});
 
+	it("dedupes frames dual-published on the session bus and the shared bus", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus, eventBus);
+		const kinds: string[] = [];
+		registry.onChange(kind => kinds.push(kind));
+		const payload = makeLifecycle("DualPublished", 0, "dual-published frame");
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload);
+		expect(kinds).toEqual(["lifecycle"]);
+		expect(registry.getActiveSubagentCount()).toBe(1);
+		registry.dispose();
+	});
+
 	it("keeps subagent registry order stable while progress arrives out of order", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();
-		registry.subscribeToEventBus(eventBus);
+		registry.subscribeToEventBus(eventBus, eventBus);
 		const activeIds = () =>
 			registry
 				.getSessions()

@@ -1,0 +1,52 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# build.rs concatenates src/minimizer/defs/*.toml into OUT_DIR/builtin_filters.toml,
+# consumed via include_str!(concat!(env!("OUT_DIR"), ...)) in minimizer/engine.rs.
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    data = glob(["src/minimizer/defs/*.toml"]),
+    edition = "2024",
+    deps = all_crate_deps(build = True),
+)
+
+rust_library(
+    name = "pi-shell",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob([
+        "src/minimizer/filters/fixtures/**",
+    ]),
+    crate_name = "pi_shell",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "17.1.5",
+    deps = all_crate_deps(normal = True) + [
+        ":build_script",
+        "//crates/pi-builtins",
+        "//crates/vendor/brush-core",
+    ],
+)
+
+rust_test(
+    name = "pi-shell_test",
+    crate = ":pi-shell",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "minimizer_fixtures_test",
+    srcs = ["tests/minimizer_fixtures.rs"],
+    data = glob(["tests/fixtures/minimizer/**"]),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [":pi-shell"],
+)

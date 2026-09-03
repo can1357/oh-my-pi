@@ -11,7 +11,7 @@ import {
 	type EditToolDetails,
 	executeHashlineSingle,
 	executePatchSingle,
-	executeReplaceSingle,
+	executeReplace,
 	getFileSnapshotStore,
 	MAX_EDIT_SNAPSHOT_TEXT_CHARS,
 	pruneOversizedEditSnapshots,
@@ -156,14 +156,14 @@ describe("executePatchSingle on oversized files", () => {
 	});
 });
 
-describe("executeReplaceSingle on oversized files", () => {
+describe("executeReplace on oversized files", () => {
 	test("prunes oldText / newText while keeping diff", async () => {
 		await Bun.write(path.join(tempDir, "big.txt"), `${FILLER}LINE A\n${FILLER}`);
 
-		const result = await executeReplaceSingle({
+		const result = await executeReplace({
 			session: makeSession(tempDir),
 			path: "big.txt",
-			params: { old_text: "LINE A", new_text: "LINE B" },
+			params: { old_string: "LINE A", new_string: "LINE B" },
 			allowFuzzy: false,
 			fuzzyThreshold: DEFAULT_FUZZY_THRESHOLD,
 			writethrough: writethroughNoop,
@@ -187,29 +187,27 @@ describe("EditTool single-path aggregation across mixed-size entries", () => {
 		// render a misleading partial diff.
 		await Bun.write(path.join(tempDir, "shrink.txt"), `${FILLER}TAIL\n`);
 
-		// Replace mode lets us shrink the file in one edit, then tweak the result.
-		const replaceSession = {
-			cwd: tempDir,
-			hasUI: false,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			enableLsp: false,
-			settings: Settings.isolated({ "edit.mode": "replace" }),
-			getArtifactsDir: () => null,
-			getSessionId: () => null,
-			getPlanModeState: () => undefined,
-		} as unknown as ToolSession;
-		const tool = new EditTool(replaceSession);
+		// Patch mode is the remaining multi-entry single-path producer (replace
+		// takes exactly one edit per call): entry 1 shrinks the file, entry 2
+		// tweaks the result.
+		const tool = new EditTool(makeSession(tempDir));
+		const shrinkDiff = [
+			"@@",
+			...FILLER.trimEnd()
+				.split("\n")
+				.map(line => `-${line}`),
+			"+tiny",
+		].join("\n");
 
 		const result = await tool.execute("call-shrink", {
 			path: "shrink.txt",
 			edits: [
 				// Entry 1: collapse the entire large prefix into one tiny token —
-				// oldText is ~1.28 MB, newText is tiny → combined > 32 KB → pruned.
-				{ old_text: FILLER, new_text: "tiny\n" },
+				// oldText is the ~1.3 MB pre-image → combined > 32 KB → pruned.
+				{ op: "update", diff: shrinkDiff },
 				// Entry 2: trivial rename on the now-tiny file —
 				// oldText/newText combined well under 32 KB → kept by the inner.
-				{ old_text: "TAIL", new_text: "DONE" },
+				{ op: "update", diff: "@@\n-TAIL\n+DONE" },
 			],
 		});
 
@@ -246,7 +244,7 @@ describe("executeHashlineSingle multi-section aggregate cap", () => {
 		}
 
 		const sections = tags.map((tag, i) =>
-			[formatHashlineHeader(`f${i}.ts`, tag), "SWAP 1.=1:", `+HEADER${i}`].join("\n"),
+			[formatHashlineHeader(`f${i}.ts`, tag), "PUT 1-1:", `+HEADER${i}`].join("\n"),
 		);
 		const input = sections.join("\n");
 

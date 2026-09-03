@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
+
+const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform");
 
 // Geometry-reflow contract for the *real* terminal driven through the *real*
 // renderer. These exercise the seam VirtualTerminal cannot model: the OS channel
@@ -14,6 +17,8 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 	afterEach(() => {
 		harness?.dispose();
 		harness = undefined;
+		if (PLATFORM_DESCRIPTOR) Object.defineProperty(process, "platform", PLATFORM_DESCRIPTOR);
+		vi.restoreAllMocks();
 	});
 
 	it("reflows to the OS width on resize when in-band resize is inactive", async () => {
@@ -100,6 +105,17 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 
 		expect(harness.probe.widths).toHaveLength(rendersBeforeDisconnect);
 		expect(harness.signals.at(-1)).toEqual({ pid: process.pid, signal: "SIGHUP" });
+	});
+
+	it("does not wait for terminal output to drain after input ends on Windows", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const quit = vi.spyOn(postmortem, "quit").mockResolvedValue(undefined);
+		harness = createProcessTerminalRenderHarness(100, 30);
+
+		await harness.endInput();
+
+		expect(quit).toHaveBeenCalledWith(129, { drainStdout: false });
+		expect(harness.signals).toHaveLength(0);
 	});
 
 	it("stops rendering and raises SIGHUP when terminal output fails", async () => {

@@ -1,29 +1,42 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { truncateForPrompt } from "./approval";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
-import { acquireBrowser, type BrowserHandle, type BrowserKind, type BrowserKindTag } from "./browser/registry";
+import {
+	acquireBrowser,
+	type BrowserHandle,
+	type BrowserKind,
+	type BrowserKindTag,
+	holdBrowser,
+	releaseBrowser,
+} from "./browser/registry";
+import { resolveRelayKind } from "./browser/relay/kind";
 import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
-import { acquireTab, dropHeadlessTabs, getTab, releaseAllTabs, releaseTab, runInTab } from "./browser/tab-supervisor";
+import {
+	type AcquireTabResult,
+	acquireTab,
+	dropHeadlessTabs,
+	getTab,
+	releaseAllTabs,
+	releaseTab,
+	runInTab,
+} from "./browser/tab-supervisor";
 import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
-export {
-	type AriaSnapshotOptions,
-	buildAriaSnapshotScript,
-	parseAriaRefSelector,
-} from "./browser/aria/aria-snapshot";
+export { type AriaSnapshotOptions, buildAriaSnapshotScript, parseAriaRefSelector } from "./browser/aria/aria-snapshot";
 export { cmuxSnapshotToObservation, mapWaitUntil, resolveCmuxKind, serializeEval } from "./browser/cmux/rpc";
 export { CmuxSocketClient } from "./browser/cmux/socket-client";
 export { extractReadableFromHtml, type ReadableFormat, type ReadableResult } from "./browser/readable";
+export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
 const DEFAULT_TAB_NAME = "main";
@@ -31,6 +44,7 @@ const DEFAULT_TAB_NAME = "main";
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
+	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe("substring to pick a window"),
 });
@@ -51,7 +65,7 @@ const browserSchema = type({
 	"dialogs?": type("'accept' | 'dismiss'").describe("auto-handle dialogs"),
 	"code?": type("string").describe("js body to run in tab"),
 	"timeout?": type("number").describe("timeout in seconds"),
-	"all?": type("boolean").describe("close every tab"),
+	"all?": type("boolean").describe("release every managed tab"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
 });
 
@@ -80,6 +94,28 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 		const exe = resolveToCwd(app.path, session.cwd);
 		return { kind: "spawned", path: exe };
 	}
+	const relayUrl = session.settings.get("browser.relayUrl") as string | undefined;
+	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
+	// final kill switch (a relay that is down would otherwise brick the tool).
+	if (app?.relay) {
+		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl });
+		if (relayKind) return relayKind;
+	}
+	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
+	// is a deliberate mode selection, while cdpUrl is a standing fallback
+	// endpoint. A configured endpoint is a default, not an override: explicit
+	// app options win.
+	if (app?.relay !== false) {
+		const relayKind = resolveRelayKind({
+			settingEnabled: session.settings.get("browser.relay") as boolean | undefined,
+			url: relayUrl,
+		});
+		if (relayKind) return relayKind;
+	}
+	const configuredCdpUrl = (session.settings.get("browser.cdpUrl") as string | undefined)?.trim();
+	if (configuredCdpUrl) {
+		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
+	}
 	const cmuxKind = resolveCmuxKind({
 		settingEnabled: session.settings.get("browser.cmux") as boolean | undefined,
 	});
@@ -93,7 +129,7 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 /**
  * Browser tool: stateful, multi-tab. Three actions:
  * - `open`  → acquire/create a named tab on a browser kind (headless | spawned | connected) and optionally goto a url.
- * - `close` → release a named tab (or all tabs); dispose browser when refcount hits 0.
+ * - `close` → release a named tab handle (or all handles); attached/relay pages remain open, and spawned pages remain unless killed.
  * - `run`   → execute JS code against an existing tab with `page`/`browser`/`tab` helpers in scope.
  */
 export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolDetails> {
@@ -148,11 +184,11 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			},
 		},
 		{
-			caption: "Screenshot to look at the page — no save path",
+			caption: "Capture a screenshot and return its saved path",
 			call: {
 				action: "run",
 				name: "docs",
-				code: "await tab.screenshot();",
+				code: "return await tab.screenshot();",
 			},
 		},
 		{
@@ -164,7 +200,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			},
 		},
 		{
-			caption: "Close every tab and kill spawned-app processes",
+			caption: "Release every managed tab and kill spawned-app processes",
 			call: { action: "close", all: true, kill: true },
 		},
 	];
@@ -232,52 +268,91 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			);
 		}
 
-		const browser = await untilAborted(signal, () =>
-			acquireBrowser(kind, {
-				cwd: this.session.cwd,
-				viewport: params.viewport
-					? {
-							width: params.viewport.width,
-							height: params.viewport.height,
-							deviceScaleFactor: params.viewport.scale,
-						}
-					: undefined,
-				appArgs: params.app?.args,
-				signal,
-			}),
-		);
+		// The requested timeout must cover the *entire* open — browser
+		// acquisition (CDP discovery/connect), queued tab acquisition, worker
+		// creation, and navigation — not only `acquireTab`. Compose one deadline
+		// from the caller signal and `params.timeout` and thread it through both
+		// stages so a stalled acquisition rejects at the requested boundary.
+		// Capture the deadline start as well: `acquireTab` counts its
+		// worker-init time against this same budget via `deadlineStartMs`
+		// instead of restarting the clock after acquisition.
+		const deadlineStart = performance.now();
+		const timeoutSignal = AbortSignal.timeout(timeoutMs);
+		const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		try {
+			const browser = await untilAborted(openSignal, () =>
+				acquireBrowser(kind, {
+					cwd: this.session.cwd,
+					viewport: params.viewport
+						? {
+								width: params.viewport.width,
+								height: params.viewport.height,
+								deviceScaleFactor: params.viewport.scale,
+							}
+						: undefined,
+					appArgs: params.app?.args,
+					signal: openSignal,
+				}),
+			);
 
-		const result = await untilAborted(signal, () =>
-			acquireTab(name, browser, {
-				url: params.url,
-				waitUntil: params.wait_until,
-				viewport: params.viewport
-					? {
-							width: params.viewport.width,
-							height: params.viewport.height,
-							deviceScaleFactor: params.viewport.scale,
-						}
-					: undefined,
-				target: params.app?.target,
-				timeoutMs,
-				dialogs: params.dialogs,
-				signal,
-				ownerSessionId: this.session.getSessionId?.() ?? undefined,
-			}),
-		);
-		const tab = result.tab;
-		const url = tab.info.url;
-		const title = tab.info.title ?? "";
-		details.url = url;
-		details.viewport = tab.info.viewport;
-		const verb = result.created ? "Opened" : "Reused";
-		const lines = [
-			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(browser)}`,
-			`URL: ${url}`,
-			title ? `Title: ${title}` : null,
-		].filter((l): l is string => typeof l === "string");
-		details.result = lines.join("\n");
-		return toolResult(details).text(lines.join("\n")).done();
+			// Hold one open-acquisition lease across the whole tab acquisition.
+			// A freshly-created browser sits in the registry at refCount 0 until a
+			// tab takes a hold; without this lease an abort/timeout mid-acquisition
+			// (or a sibling open of a different tab name on the same browser that
+			// fails) could dispose it out from under this operation. The lease is
+			// released exactly once — the success and failure paths are mutually
+			// exclusive — transferring ownership to the published tab on success or
+			// rolling the fresh browser back on failure.
+			holdBrowser(browser);
+			let result: AcquireTabResult;
+			try {
+				result = await untilAborted(openSignal, () =>
+					acquireTab(name, browser, {
+						url: params.url,
+						waitUntil: params.wait_until,
+						viewport: params.viewport
+							? {
+									width: params.viewport.width,
+									height: params.viewport.height,
+									deviceScaleFactor: params.viewport.scale,
+								}
+							: undefined,
+						target: params.app?.target,
+						timeoutMs,
+						deadlineStartMs: deadlineStart,
+						dialogs: params.dialogs,
+						signal: openSignal,
+						ownerSessionId: this.session.getSessionId?.() ?? undefined,
+					}),
+				);
+			} catch (error) {
+				await releaseBrowser(browser, {
+					kill: "subprocess" in browser && browser.subprocess !== undefined,
+				});
+				throw error;
+			}
+			await releaseBrowser(browser, { kill: false });
+
+			const tab = result.tab;
+			const url = tab.info.url;
+			const title = tab.info.title ?? "";
+			details.url = url;
+			details.viewport = tab.info.viewport;
+			const verb = result.created ? "Opened" : "Reused";
+			const lines = [
+				`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(browser)}`,
+				`URL: ${url}`,
+				title ? `Title: ${title}` : null,
+			].filter((l): l is string => typeof l === "string");
+			details.result = lines.join("\n");
+			return toolResult(details).text(lines.join("\n")).done();
+		} catch (error) {
+			// Caller cancellation stays a ToolAbortError; the requested timeout
+			// becomes a timeout ToolError; anything else passes through unchanged.
+			if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
+			if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms`);
+			throw error;
+		}
 	}
 
 	async #close(
@@ -290,11 +365,11 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		const kill = !!params.kill;
 		if (params.all) {
 			const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs }));
-			details.result = `Closed ${count} tab(s)`;
+			details.result = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 			return toolResult(details).text(details.result).done();
 		}
 		const closed = await untilAborted(signal, () => releaseTab(name, { kill, timeoutMs }));
-		details.result = closed ? `Closed tab ${JSON.stringify(name)}` : `No tab named ${JSON.stringify(name)}`;
+		details.result = closed ? `Released managed tab ${JSON.stringify(name)}` : `No tab named ${JSON.stringify(name)}`;
 		return toolResult(details).text(details.result).done();
 	}
 
@@ -370,11 +445,13 @@ function describeBrowser(handle: BrowserHandle): string {
 	}
 	switch (handle.kind.kind) {
 		case "headless":
-			return `headless browser (${handle.kind.headless ? "hidden" : "visible"})`;
+			return `headless browser (${handle.kind.headless ? "hidden" : "visible"}${handle.sharedDaemon ? ", shared" : ""})`;
 		case "spawned":
 			return `spawned ${handle.kind.path} (pid ${handle.pid ?? "?"})`;
 		case "connected":
 			return `connected ${handle.cdpUrl ?? handle.kind.cdpUrl}`;
+		case "relay":
+			return `relay ${handle.cdpUrl ?? handle.kind.cdpUrl}`;
 	}
 }
 
@@ -386,6 +463,8 @@ function describeKind(kind: BrowserKind): string {
 			return `spawned:${kind.path}`;
 		case "connected":
 			return `connected:${kind.cdpUrl}`;
+		case "relay":
+			return `relay:${kind.cdpUrl}`;
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 	}
@@ -396,6 +475,7 @@ function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
 	if (a.kind === "headless" && b.kind === "headless") return a.headless === b.headless;
 	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
 	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
+	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
 	if (a.kind === "cmux" && b.kind === "cmux") return a.socketPath === b.socketPath;
 	return false;
 }

@@ -34,20 +34,18 @@ function renderStripped(tree: SessionTreeNode[], leafId: string, width = 120): s
 		() => {},
 		() => {},
 	);
-	return selector.render(width).map(line => Bun.stripANSI(line));
+	return selector.renderContent(width).map(line => Bun.stripANSI(line));
 }
 
-describe("issue #2298: chain rows under last-sibling branches keep their gutter", () => {
+describe("issue #7332: linear branch continuations stay compact", () => {
 	beforeAll(async () => {
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 	});
 
-	// The bug rendered the conversation chain under a `└─` branch with bare
-	// spaces, breaking the visual flow back to the parent message. The fix
-	// anchors chain descendants (rows without their own connector) with a `│`
-	// one level right of the suppressed gutter — directly below the branch
-	// head's content — never in the `└─` corner column itself (#2325).
-	it("draws the inherited `│` for chain descendants of a last-sibling branch", () => {
+	// Linear continuations should align with their branch head. Indenting them
+	// another level leaves the vertical anchor disconnected from the branch
+	// connector and makes heavily branched conversations drift right.
+	it("aligns descendants of a last sibling with the branch head", () => {
 		const root = makeNode("user", "original");
 		const rootAsst = makeNode("assistant", "resp", root.entry.id);
 		root.children.push(rootAsst);
@@ -79,15 +77,13 @@ describe("issue #2298: chain rows under last-sibling branches keep their gutter"
 		const branch1Row = findRow("user: branch1 head");
 		expect(branch1Row).toMatch(/└─\s+user: branch1 head/);
 
-		// Each chain descendant of branch1 must stay anchored by a `│` drawn
-		// below the branch head's content (one level right of the `└─`
-		// connector). Before #2298 these rows rendered as bare spaces and the
-		// chain floated unanchored; after #2325 the anchor must not sit in the
-		// `└─` corner column, which would dangle below the terminal branch.
+		// The terminal branch has no continuing sibling gutter. Its linear
+		// descendants align with the branch head instead of inventing a
+		// disconnected vertical one level farther right.
 		for (const needle of ["assistant: chain-asst-1", "user: chain-user-2"]) {
 			const row = findRow(needle);
-			expect(row).not.toMatch(/^\s{2}│/);
-			expect(row).toMatch(/^\s{5}│\s+\S/);
+			expect(row).not.toContain("│");
+			expect(row).toMatch(/^\s{5}\S/);
 		}
 	});
 
@@ -128,24 +124,20 @@ describe("issue #2298: chain rows under last-sibling branches keep their gutter"
 			expect(row).toMatch(/[├└]─/);
 		}
 
-		// Linear continuations of those branched grandchildren are chain rows.
-		// c is not the last sibling, so its sibling line (`│` in c's connector
-		// column) anchors the continuation. d is the last sibling (`└─`), so its
-		// continuation is anchored one level further right instead — never in
-		// d's own corner column (#2325), and never in the suppressed branch1
-		// column. This is the nested case from the PR review.
+		// Linear continuations stay at their branch head's content depth. The
+		// non-last branch keeps its sibling gutter; the terminal branch needs
+		// no synthetic anchor.
 		{
 			const row = rendered.find(line => line.includes("c continuation"));
 			if (!row) throw new Error("row containing c continuation not rendered");
 			expect(row).not.toMatch(/^\s{2}│/);
-			expect(row).toMatch(/^\s{5}│/);
+			expect(row).toMatch(/^\s{5}│\s{2}\S/);
 		}
 		{
 			const row = rendered.find(line => line.includes("d continuation"));
 			if (!row) throw new Error("row containing d continuation not rendered");
-			expect(row).not.toMatch(/^\s{2}│/);
-			expect(row).not.toMatch(/^\s{5}│/);
-			expect(row).toMatch(/^\s{8}│/);
+			expect(row).not.toContain("│");
+			expect(row).toMatch(/^\s{8}\S/);
 		}
 	});
 });

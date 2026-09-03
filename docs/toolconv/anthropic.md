@@ -116,6 +116,20 @@ Tools are passed in the top-level `tools` array. Each user-defined (client) tool
 
 Anthropic-schema client tools (`bash`, `text_editor`, `computer`, `memory`) and server tools (`web_search`, `web_fetch`, `code_execution`, `tool_search`) instead carry a versioned `type`, e.g. `{"type": "web_search_20250305", "name": "web_search"}`.
 
+### OMP native-adapter schema normalization
+
+The native Anthropic provider does not forward a pi tool's JSON Schema unchanged. Before placing it in `input_schema`, OMP keeps these keywords:
+
+- on every node: `$ref`, `$defs`, `$schema`, `definitions`, `type`, `enum`, `const`, `description`, `title`, `default`, and `nullable`;
+- nested `anyOf` and `allOf` (root combinators are not retained, and `oneOf` is not retained at any depth);
+- on objects: `properties`, `required`, and `additionalProperties`;
+- on arrays: `items`, `prefixItems`, and `minItems` only when it is `0` or `1`;
+- on strings: `format` only for `date-time`, `time`, `date`, `duration`, `email`, `hostname`, `uri`, `ipv4`, `ipv6`, or `uuid`.
+
+Other constraints—including `pattern`, string-length limits, numeric ranges, `maxItems`, unsupported formats, and unsupported combinators—are appended to that node's `description`. They remain model-visible guidance but are no longer machine-enforced schema keywords. Object nodes default to `additionalProperties: false`; an explicit `true` or schema-valued `additionalProperties` remains open (an empty schema normalizes to `true`).
+
+OMP sends `strict: true` only for eligible built-in tools (`bash`, `python`, `edit`, and `find`) when neither `PI_NO_STRICT` nor provider compatibility/runtime fallback has disabled strict tools, the tool has not opted out, the raw schema avoids `oneOf`, `allOf`, `$ref`, `patternProperties`, and `propertyNames`, and every object is closed. Selection is capped at 20 strict tools per request and shares budgets of 24 optional properties and 16 union uses: after the optional budget is exhausted, another optional property must be converted to required-and-nullable using union budget or that tool remains non-strict. Other tools use the normalized non-strict schema. OMP sends `eager_input_streaming: true` only when the model compatibility data and effective endpoint support it: first-party Anthropic endpoints qualify, as do custom endpoints explicitly configured for that capability; a canonical model rerouted to an unqualified non-Anthropic endpoint does not.
+
 `tool_choice` controls invocation (four options):
 - `{"type":"auto"}` — model decides (default when `tools` present).
 - `{"type":"any"}` — must call some tool.
@@ -189,6 +203,14 @@ Before the API converts it, the model literally emits an XML block. The current 
 ```
 
 Current Claude models prefix these tags with an `antml:` XML namespace prefix (e.g. `antml:function_calls`, `antml:invoke name="…"`, `antml:parameter name="…"`). The API strips all of this and exposes only the JSON `tool_use` block; integrators should target the JSON, not the XML.
+
+### OMP `anthropic` dialect
+
+OMP operates on the underlying prompt-driven XML rather than Messages API content blocks. Its renderer always emits the unprefixed attribute form above, wraps multiple calls in one `<function_calls>` block, and renders each argument as a `<parameter name="…">` child. With a tool schema, declared string arguments are inserted as literal text; other values are JSON-serialized. The streaming scanner also accepts `antml:`-prefixed tags, `<tool_calls>` as a wrapper alias, and a bare `<invoke>` outside either wrapper.
+
+The scanner mints call ids because this XML has none. It scans streamed text statefully, emits `toolArgDelta` events while each parameter body arrives, and publishes the coerced argument object with `toolEnd` after `</invoke>`. A parameter value is capped at 1,000,000 JavaScript string code units; overflow gains an explicit truncation suffix. JSON-like values are parsed with repair, while schema-declared strings stay strings. With `parseThinking: true`, `<thinking>`, `<think>`, and `<scratchpad>` (prefixed or unprefixed) become thinking events; otherwise those tags remain visible text.
+
+`</invoke>` gates `toolEnd`, but it does not gate creation of the canonical call. Once an opening `<invoke name="…">` has emitted `toolStart`, EOF only resets scanner-local state. On a normally stopped stream, OMP retains that call, changes the turn to `toolUse`, and may dispatch it even though no `toolEnd` arrived. Any `toolArgDelta` text already accumulated survives in the call (without the close-time coercion); a call with no accumulated parameter text runs with `{}`. A `length` stop remains non-runnable.
 
 ---
 
@@ -300,6 +322,23 @@ Rich result (text + image blocks):
 ```
 
 Server tools require **no** `tool_result` from you — Anthropic executes them and injects the result inline in the assistant turn. (Legacy XML feeds results back as `<function_results><result><tool_name>…</tool_name><stdout>…</stdout></result></function_results>`, or `<error>…</error>` on failure.)
+
+OMP's prompt-driven dialect is different from Anthropic's server-tool behavior. It renders client results as:
+
+```text
+<function_results>
+<result>
+<tool_name>get_weather</tool_name>
+<stdout>15 degrees</stdout>
+</result>
+<error>
+<tool_name>other_tool</tool_name>
+<stderr>execution failed</stderr>
+</error>
+</function_results>
+```
+
+There is no result id in this XML, so results are correlated by call order. OMP includes the tool name in both success and error entries and does not encode `isError` anywhere else.
 
 ---
 

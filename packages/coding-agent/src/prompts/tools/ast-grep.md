@@ -15,5 +15,5 @@ Structural code search via ast-grep. Use when syntax shape matters more than tex
 <critical>
 - AVOID repo-root scans — narrow `path` first.
 - Parse issues = query failure, not absence: fix pattern or tighten `path` before concluding "no matches".
-- Broad cross-subsystem exploration → Task tool + scout subagent first.
+- Broad cross-subsystem exploration → {{#if scoutAvailable}}Task tool + scout{{else}}Task tool{{/if}} subagent first.
 </critical>

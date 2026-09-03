@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { type } from "@oh-my-pi/omptype";
+import { type OpenAICompletionsOptions, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model, Tool } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { type } from "arktype";
 
 const echoTool: Tool = {
 	name: "echo",
@@ -23,10 +24,24 @@ function abortedSignal(): AbortSignal {
 
 async function capturePayload(
 	model: Model<"openai-completions">,
-	opts: Parameters<typeof streamOpenAICompletions>[2],
+	opts: OpenAICompletionsOptions,
 ): Promise<Record<string, unknown>> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	streamOpenAICompletions(model, context, {
+		...opts,
+		apiKey: "test-key",
+		signal: abortedSignal(),
+		onPayload: payload => resolve(payload),
+	});
+	return (await promise) as Record<string, unknown>;
+}
+
+async function captureResponsesPayload(
+	model: Model<"openai-responses">,
+	opts: OpenAIResponsesOptions,
+): Promise<Record<string, unknown>> {
+	const { promise, resolve } = Promise.withResolvers<unknown>();
+	streamOpenAIResponses(model, context, {
 		...opts,
 		apiKey: "test-key",
 		signal: abortedSignal(),
@@ -39,6 +54,16 @@ describe("OpenCode Go tool_choice compatibility", () => {
 	it("marks deepseek-v4-pro as not supporting tool_choice via compat override", () => {
 		const model = getBundledModel("opencode-go", "deepseek-v4-pro") as Model<"openai-completions">;
 		expect(model.compat?.supportsToolChoice).toBe(false);
+	});
+
+	it("omits forced tool_choice from DeepSeek Flash Responses payloads while preserving tools", async () => {
+		const model = getBundledModel("opencode-go", "deepseek-v4-flash") as Model<"openai-responses">;
+		expect(model.compat.supportsToolChoice).toBe(false);
+		const body = await captureResponsesPayload(model, {
+			toolChoice: { type: "tool", name: "echo" },
+		});
+		expect(body.tools).toEqual([expect.objectContaining({ type: "function", name: "echo" })]);
+		expect(body.tool_choice).toBeUndefined();
 	});
 
 	it("marks mimo-v2.5-pro as not supporting tool_choice via compat override", () => {

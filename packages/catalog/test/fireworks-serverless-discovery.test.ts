@@ -79,9 +79,9 @@ function createMockFetch(): { fetch: FetchImpl; controlPlaneUrls: string[] } {
 	const controlPlaneUrls: string[] = [];
 	const fetch = (async (input: string | URL | Request): Promise<Response> => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-		// models.dev reference fetch — return an empty catalog so the mapper relies
+		// stencil.so reference fetch — return an empty catalog so the mapper relies
 		// purely on control-plane + bundled references.
-		if (url.startsWith("https://models.dev")) {
+		if (url.startsWith("https://stencil.so")) {
 			return jsonResponse({});
 		}
 		if (url.includes("/v1/accounts/fireworks/models")) {
@@ -167,7 +167,7 @@ describe("Fireworks control-plane serverless discovery", () => {
 	it("returns null on a control-plane transport failure so the manager keeps its cache", async () => {
 		const fetch = (async (input: string | URL | Request): Promise<Response> => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			if (url.startsWith("https://models.dev")) return jsonResponse({});
+			if (url.startsWith("https://stencil.so")) return jsonResponse({});
 			return new Response("server error", { status: 500 });
 		}) as unknown as FetchImpl;
 		const options = fireworksModelManagerOptions({ apiKey: "fw_test_key", fetch });

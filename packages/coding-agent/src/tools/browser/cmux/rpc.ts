@@ -1,3 +1,4 @@
+import { parseFlag } from "@oh-my-pi/pi-utils";
 import { ToolError } from "../../tool-errors";
 import type { Observation, ObservationEntry } from "../tab-protocol";
 
@@ -174,13 +175,6 @@ export function mapWaitUntil(waitUntil: string | undefined): "interactive" | "co
 	return waitUntil === "domcontentloaded" ? "interactive" : "complete";
 }
 
-const TRUTHY_ENV_VALUES = new Set(["1", "Y", "y", "TRUE", "true", "YES", "yes", "ON", "on"]);
-
-function resolveCmuxEnabled(envValue: string | undefined, settingEnabled: boolean): boolean {
-	if (!envValue) return settingEnabled;
-	return TRUTHY_ENV_VALUES.has(envValue);
-}
-
 export interface ResolveCmuxKindOptions {
 	surface?: string;
 	settingEnabled?: boolean;
@@ -190,7 +184,7 @@ export function resolveCmuxKind(
 	options?: ResolveCmuxKindOptions | null,
 	env: Record<string, string | undefined> = process.env,
 ): CmuxKind | null {
-	if (!resolveCmuxEnabled(env.PI_BROWSER_CMUX, options?.settingEnabled ?? true)) {
+	if (!parseFlag(env.PI_BROWSER_CMUX, options?.settingEnabled ?? true)) {
 		return null;
 	}
 	const socketPath = env.CMUX_SOCKET_PATH;

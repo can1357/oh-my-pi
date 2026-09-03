@@ -4,8 +4,10 @@
  * The script is derived entirely from the declarative command/flag metadata
  * (see `cli/completion-gen.ts`), so it never drifts from the actual CLI surface.
  */
-import { APP_NAME, VERSION } from "@oh-my-pi/pi-utils";
+
+import { APP_NAME, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { Args, type CliConfig, Command, type CommandCtor } from "@oh-my-pi/pi-utils/cli";
+import { completionsHelp as commandHelp } from "../cli/command-help";
 import { buildSpec, generateCompletion, type Shell } from "../cli/completion-gen";
 import { commands } from "../cli-commands";
 
@@ -13,9 +15,23 @@ import { commands } from "../cli-commands";
 const ROOT_COMMAND = "launch";
 const SHELLS = ["bash", "zsh", "fish"] as const;
 
-export default class Completions extends Command {
-	static description = "Print a shell completion script (bash, zsh, or fish)";
+/** Generate a completion script from the live command registry. */
+export async function generateLiveCompletion(shell: Shell): Promise<string> {
+	const loaded = await Promise.all(commands.map(async entry => ({ entry, Cmd: await entry.load() })));
+	const map = new Map<string, CommandCtor>();
+	const aliasMap = new Map<string, readonly string[]>();
+	for (const { entry, Cmd } of loaded) {
+		map.set(entry.name, Cmd);
+		const merged = new Set<string>([...(Cmd.aliases ?? []), ...(entry.aliases ?? [])]);
+		aliasMap.set(entry.name, [...merged]);
+	}
 
+	const config: CliConfig = { bin: APP_NAME, version: VERSION, commands: map };
+	return generateCompletion(shell, buildSpec(config, ROOT_COMMAND, aliasMap));
+}
+
+export default class Completions extends Command {
+	static description = commandHelp.description;
 	static args = {
 		shell: Args.string({
 			description: "Target shell",
@@ -38,20 +54,8 @@ export default class Completions extends Command {
 			return;
 		}
 
-		// Load every command class so we can read its static flag/arg descriptors,
-		// and collect aliases from both the registration table and the class.
-		const loaded = await Promise.all(commands.map(async entry => ({ entry, Cmd: await entry.load() })));
-		const map = new Map<string, CommandCtor>();
-		const aliasMap = new Map<string, readonly string[]>();
-		for (const { entry, Cmd } of loaded) {
-			map.set(entry.name, Cmd);
-			const merged = new Set<string>([...(Cmd.aliases ?? []), ...(entry.aliases ?? [])]);
-			aliasMap.set(entry.name, [...merged]);
-		}
-
-		const config: CliConfig = { bin: APP_NAME, version: VERSION, commands: map };
-		const spec = buildSpec(config, ROOT_COMMAND, aliasMap);
-		await Bun.write(Bun.stdout, generateCompletion(shell, spec));
+		await Bun.write(Bun.stdout, await generateLiveCompletion(shell));
+		await postmortem.quit(0);
 	}
 }
 

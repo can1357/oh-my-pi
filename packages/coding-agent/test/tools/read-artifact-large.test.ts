@@ -104,6 +104,12 @@ describe("read tool large artifact handling", () => {
 		expect(output).not.toContain("line-032");
 	});
 
+	it("records the source line count for an open-ended artifact range that reaches EOF", async () => {
+		const result = await tool.execute("call-raw-tail", { path: "artifact://0:raw:301-" });
+
+		expect(result.details?.totalLines).toBe(400);
+	});
+
 	it("shortens artifact paths under the user's home dir instead of leaking the absolute path", async () => {
 		const homeSpy = spyOn(os, "homedir").mockReturnValue(testDir);
 		try {

@@ -142,6 +142,17 @@ export function isLowSignalTitleInput(message: string): boolean {
  */
 export const NO_TITLE_SENTINEL = "none";
 
+/**
+ * Upper bounds on an accepted title. Titling is a 3-7 word task, so any output
+ * past these limits is a model that ignored the task and answered the user's
+ * message instead — its whole reply must not become the session title (issue
+ * #7303). Rejecting (return null) lets the caller defer titling to the next
+ * user turn; truncating would keep half an assistant blob, which is still an
+ * assistant blob.
+ */
+const MAX_TITLE_CHARS = 80;
+const MAX_TITLE_WORDS = 12;
+
 export function normalizeGeneratedTitle(value: string | null | undefined, sourceText?: string): string | null {
 	const firstLine = value?.trim().split(/\r?\n/, 1)[0]?.trim();
 	if (!firstLine) return null;
@@ -154,6 +165,11 @@ export function normalizeGeneratedTitle(value: string | null | undefined, source
 		.replace(/[.!?]$/, "")
 		.trim();
 	if (!title || title.toLowerCase() === NO_TITLE_SENTINEL) return null;
+	// Zero word characters means pure punctuation/symbol junk (e.g. ".."), which
+	// a sampling model occasionally emits instead of a title; reject so the
+	// caller defers titling rather than naming the session "..".
+	const words = title.match(TITLE_WORD)?.length ?? 0;
+	if (words === 0 || title.length > MAX_TITLE_CHARS || words > MAX_TITLE_WORDS) return null;
 	return sourceText === undefined ? title : reconcileTitleCasing(title, sourceText);
 }
 

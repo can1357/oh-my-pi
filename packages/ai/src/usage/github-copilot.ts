@@ -5,7 +5,7 @@
  */
 
 import { toBoolean, toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { OPENCODE_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { COPILOT_GITHUB_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as AIError from "../error";
 import type {
 	UsageAmount,
@@ -18,6 +18,7 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { parseIsoTimestamp } from "./shared";
 
 type CopilotQuotaDetail = {
 	entitlement: number;
@@ -74,8 +75,8 @@ function resolveGitHubApiBaseUrl(params: UsageFetchParams): string {
 
 function buildWindow(resetDate: string | undefined): UsageWindow | undefined {
 	if (!resetDate) return undefined;
-	const resetAt = Date.parse(resetDate);
-	if (!Number.isFinite(resetAt)) return undefined;
+	const resetAt = parseIsoTimestamp(resetDate);
+	if (resetAt === undefined) return undefined;
 	return {
 		id: "monthly",
 		label: "Monthly",
@@ -180,7 +181,7 @@ async function fetchInternalUsage(
 		"Content-Type": "application/json",
 		Accept: "application/json",
 		Authorization: `Bearer ${token}`,
-		...OPENCODE_HEADERS,
+		...COPILOT_GITHUB_HEADERS,
 	};
 	const data = await fetchJson(ctx, `${githubApiBaseUrl}/copilot_internal/user`, { headers, signal });
 	if (!isRecord(data)) throw new AIError.ProviderHttpError("Invalid Copilot usage response", 200);

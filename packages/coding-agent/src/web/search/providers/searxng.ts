@@ -14,6 +14,9 @@
  *   searxng.basicUsername - Optional RFC 7617 Basic auth username
  *   searxng.basicPassword - Optional RFC 7617 Basic auth password
  *   searxng.categories    - Optional comma-separated categories filter
+ *   searxng.engines       - Optional comma-separated engine names or shortcuts
+ *                           (e.g. "duckduckgo, br, sp"); shortcuts resolve via
+ *                           the instance's /config endpoint
  *   searxng.language      - Optional language code (e.g. en, zh-CN)
  *
  * Environment variable fallbacks:
@@ -21,6 +24,11 @@
  *   SEARXNG_TOKEN          - Optional bearer token
  *   SEARXNG_BASIC_USERNAME - Optional RFC 7617 Basic auth username
  *   SEARXNG_BASIC_PASSWORD - Optional RFC 7617 Basic auth password
+ *
+ * Bang syntax in queries is passed through: `!ddg foo` selects an engine or
+ * category server-side and the bang token is stripped from the upstream query.
+ * External bangs (`!!g`) are removed client-side because SearXNG answers them
+ * with an HTTP redirect even for JSON requests.
  *
  * Reference: https://docs.searxng.org/dev/search_api.html
  */
@@ -30,6 +38,8 @@ import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { settings } from "../../../config/settings";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import type { StructuredQuery } from "../query";
+import { formatScraperQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -52,6 +62,7 @@ interface SearXNGResult {
 	title?: string;
 	url?: string;
 	content?: string;
+	snippet?: string;
 	engine?: string;
 	publishedDate?: string;
 	/** SearXNG sometimes uses publishedDate, sometimes just date */
@@ -66,11 +77,17 @@ interface SearXNGResponse {
 	suggestions?: string[];
 	corrections?: string[];
 	unresponsive_engines?: Array<[string, string]>;
+	answers?: unknown[];
 }
 
 interface SearXNGAuth {
 	type: "basic" | "bearer";
 	value: string;
+}
+
+/** Subset of the SearXNG /config payload used for engine shortcut resolution. */
+interface SearXNGConfig {
+	engines?: Array<{ name?: string; shortcut?: string }>;
 }
 
 /** Find SearXNG endpoint from settings or environment. */
@@ -150,6 +167,168 @@ function findAuth(): SearXNGAuth | null {
 	return token ? { type: "bearer", value: token } : null;
 }
 
+/** Find configured engine names/shortcuts from settings. */
+function findEngines(): string | null {
+	try {
+		const engines = settings.get("searxng.engines");
+		if (engines) return engines;
+	} catch {
+		// Settings not initialized yet
+	}
+	return null;
+}
+
+/** Build request headers including authentication. */
+function buildHeaders(auth: SearXNGAuth | null): Record<string, string> {
+	const headers: Record<string, string> = { Accept: "application/json" };
+	if (auth?.type === "basic") {
+		headers.Authorization = `Basic ${auth.value}`;
+	} else if (auth?.type === "bearer") {
+		headers.Authorization = `Bearer ${auth.value}`;
+	}
+	return headers;
+}
+
+/** Per-endpoint cache of shortcut/name → canonical engine name maps. */
+const engineNameMapCache = new Map<string, Promise<Map<string, string> | null>>();
+
+/** Fetch the instance's /config and build a lookup of lowercased engine names
+ *  and shortcuts to canonical engine names. Returns null on any failure. */
+async function fetchEngineNameMap(
+	base: string,
+	auth: SearXNGAuth | null,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs?: number,
+): Promise<Map<string, string> | null> {
+	try {
+		const response = await (fetchImpl ?? fetch)(`${base}/config`, {
+			headers: buildHeaders(auth),
+			signal: withHardTimeout(signal, timeoutMs),
+		});
+		if (!response.ok) return null;
+		const config = (await response.json()) as SearXNGConfig;
+		const map = new Map<string, string>();
+		for (const engine of config.engines ?? []) {
+			if (!engine.name) continue;
+			map.set(engine.name.toLowerCase(), engine.name);
+			if (engine.shortcut) map.set(engine.shortcut.toLowerCase(), engine.name);
+		}
+		return map.size ? map : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Get the engine name map for an endpoint, cached for the process lifetime.
+ *  Failures are not cached so a transient error retries on the next search. */
+function getEngineNameMap(
+	endpoint: string,
+	auth: SearXNGAuth | null,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs?: number,
+): Promise<Map<string, string> | null> {
+	const base = endpoint.replace(/\/+$/, "");
+	let cached = engineNameMapCache.get(base);
+	if (!cached) {
+		cached = fetchEngineNameMap(base, auth, fetchImpl, signal, timeoutMs).then(map => {
+			if (!map) engineNameMapCache.delete(base);
+			return map;
+		});
+		engineNameMapCache.set(base, cached);
+	}
+	return cached;
+}
+
+/** Resolve configured engine entries (canonical names or shortcuts like `ddg`)
+ *  to canonical names for SearXNG's `engines=` parameter, which accepts names
+ *  only — shortcuts resolve exclusively through bang syntax. Unknown entries
+ *  pass through verbatim; the server drops them and falls back to categories. */
+async function resolveEngineNames(
+	raw: string,
+	endpoint: string,
+	auth: SearXNGAuth | null,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs?: number,
+): Promise<string | undefined> {
+	const entries = raw
+		.split(",")
+		.map(entry => entry.trim())
+		.filter(Boolean);
+	if (!entries.length) return undefined;
+	const map = await getEngineNameMap(endpoint, auth, fetchImpl, signal, timeoutMs);
+	if (!map) return entries.join(",");
+	return entries.map(entry => map.get(entry.toLowerCase()) ?? entry).join(",");
+}
+
+/** Strip external bang tokens (`!!g`, bare `!!`): SearXNG answers them with an
+ *  HTTP redirect even for JSON requests, which breaks response parsing.
+ *  Single-bang engine/category selectors (`!ddg`, `!images`) are kept — the
+ *  instance resolves and removes them server-side. */
+function stripExternalBangs(query: string): string {
+	return query
+		.split(/\s+/)
+		.filter(part => !part.startsWith("!!"))
+		.join(" ");
+}
+
+/** Extract displayable text from both legacy string answers and modern
+ *  structured answer plugins (legacy, translations, weather). */
+function extractAnswerText(answer: unknown): string | undefined {
+	if (typeof answer === "string") return answer.trim() || undefined;
+	if (!answer || typeof answer !== "object") return undefined;
+
+	const record = answer as Record<string, unknown>;
+	if (typeof record.answer === "string") return record.answer.trim() || undefined;
+
+	if (Array.isArray(record.translations)) {
+		const translations: string[] = [];
+		for (const item of record.translations) {
+			if (!item || typeof item !== "object") continue;
+			const text = (item as Record<string, unknown>).text;
+			if (typeof text === "string" && text.trim()) translations.push(text.trim());
+			if (translations.length === 3) break;
+		}
+		if (translations.length) return translations.join("\n");
+	}
+
+	if (record.current && typeof record.current === "object") {
+		const current = record.current as Record<string, unknown>;
+		if (typeof current.summary === "string" && current.summary.trim()) return current.summary.trim();
+		const location =
+			current.location && typeof current.location === "object"
+				? (current.location as Record<string, unknown>).name
+				: undefined;
+		const temperature =
+			current.temperature && typeof current.temperature === "object"
+				? (current.temperature as Record<string, unknown>)
+				: undefined;
+		const temperatureText =
+			temperature && (typeof temperature.val === "string" || typeof temperature.val === "number")
+				? `${temperature.val}${typeof temperature.unit === "string" ? temperature.unit : ""}`
+				: undefined;
+		const condition = typeof current.condition === "string" ? current.condition : undefined;
+		const parts = [location, temperatureText, condition].filter(
+			(part): part is string => typeof part === "string" && part.trim().length > 0,
+		);
+		if (parts.length) return parts.join(": ");
+	}
+
+	return undefined;
+}
+
+function formatAnswers(answers: unknown[] | undefined): string | undefined {
+	const texts: string[] = [];
+	for (const answer of answers ?? []) {
+		const text = extractAnswerText(answer);
+		if (text) texts.push(text);
+		if (texts.length === 3) break;
+	}
+	return texts.length ? texts.join("\n\n") : undefined;
+}
+
 /** Build the search URL and headers for a SearXNG request */
 function buildRequest(
 	endpoint: string,
@@ -158,7 +337,9 @@ function buildRequest(
 		num_results?: number;
 		recency?: "day" | "week" | "month" | "year";
 		categories?: string;
+		engines?: string;
 		language?: string;
+		safesearch?: 0 | 1 | 2;
 		signal?: AbortSignal;
 	},
 	auth: SearXNGAuth | null,
@@ -181,19 +362,19 @@ function buildRequest(
 		url.searchParams.set("categories", params.categories);
 	}
 
+	if (params.engines) {
+		url.searchParams.set("engines", params.engines);
+	}
+
+	if (params.safesearch !== undefined) {
+		url.searchParams.set("safesearch", String(params.safesearch));
+	}
+
 	if (params.language) {
 		url.searchParams.set("language", params.language);
 	}
 
-	const headers: Record<string, string> = {
-		Accept: "application/json",
-	};
-
-	if (auth?.type === "basic") {
-		headers.Authorization = `Basic ${auth.value}`;
-	} else if (auth?.type === "bearer") {
-		headers.Authorization = `Bearer ${auth.value}`;
-	}
+	const headers = buildHeaders(auth);
 
 	return { url, headers };
 }
@@ -205,8 +386,11 @@ async function callSearXNGSearch(
 		num_results?: number;
 		recency?: "day" | "week" | "month" | "year";
 		categories?: string;
+		engines?: string;
 		language?: string;
+		safesearch?: 0 | 1 | 2;
 		signal?: AbortSignal;
+		timeoutMs?: number;
 		fetch?: FetchImpl;
 	},
 	auth: SearXNGAuth | null,
@@ -215,7 +399,7 @@ async function callSearXNGSearch(
 
 	const response = await (params.fetch ?? fetch)(url, {
 		headers,
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -231,9 +415,11 @@ async function callSearXNGSearch(
 /** Execute SearXNG web search. */
 export async function searchSearXNG(params: {
 	query: string;
+	parsedQuery?: StructuredQuery;
 	num_results?: number;
 	recency?: "day" | "week" | "month" | "year";
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 }): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
@@ -249,19 +435,48 @@ export async function searchSearXNG(params: {
 
 	let categories: string | undefined;
 	let language: string | undefined;
+	let configuredSafesearch: number | undefined;
 	try {
 		categories = settings.get("searxng.categories") ?? undefined;
 		language = settings.get("searxng.language") ?? undefined;
+		configuredSafesearch = settings.get("searxng.safesearch");
 	} catch {
 		// Settings not initialized yet
 	}
+	if (
+		configuredSafesearch !== undefined &&
+		configuredSafesearch !== 0 &&
+		configuredSafesearch !== 1 &&
+		configuredSafesearch !== 2
+	) {
+		throw new Error("searxng.safesearch must be 0 (off), 1 (moderate), or 2 (strict).");
+	}
+	const safesearch = configuredSafesearch;
+	const configuredEngines = findEngines();
+
+	// SearXNG forwards `q` to downstream engines, so build it with the shared
+	// scraper formatter: operators are canonicalized and scraper-hostile ones
+	// (path-carrying `site:`, `inurl:`) are structurally demoted to plain
+	// terms before formatting, so paren-grouped `site:` filters are covered
+	// too. `lang:` maps onto the native `language` param (overriding the
+	// configured default).
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const query = formatScraperQuery(params.query, parsed);
+	if (parsed.lang) language = parsed.lang;
+
+	const engines = configuredEngines
+		? await resolveEngineNames(configuredEngines, endpoint, auth, params.fetch, params.signal, params.timeoutMs)
+		: undefined;
 
 	const response = await callSearXNGSearch(
 		endpoint,
 		{
 			...params,
+			query: stripExternalBangs(query),
 			categories,
+			engines,
 			language,
+			safesearch,
 			fetch: params.fetch,
 		},
 		auth,
@@ -275,7 +490,7 @@ export async function searchSearXNG(params: {
 		sources.push({
 			title: result.title ?? result.url,
 			url: result.url,
-			snippet: result.content?.trim() || undefined,
+			snippet: (result.content ?? result.snippet)?.trim() || undefined,
 			publishedDate: publishedDate ?? undefined,
 			ageSeconds: dateToAgeSeconds(publishedDate),
 		});
@@ -295,6 +510,7 @@ export async function searchSearXNG(params: {
 
 	return {
 		provider: "searxng",
+		answer: formatAnswers(response.answers),
 		sources: limitedSources,
 		relatedQuestions: response.suggestions?.length ? response.suggestions : undefined,
 	};
@@ -315,10 +531,12 @@ export class SearXNGProvider extends SearchProvider {
 
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchSearXNG({
+			parsedQuery: params.parsedQuery,
 			query: params.query,
 			num_results: params.numSearchResults ?? params.limit,
 			recency: params.recency,
 			signal: params.signal,
+			timeoutMs: params.timeoutMs,
 			fetch: params.fetch,
 		});
 	}

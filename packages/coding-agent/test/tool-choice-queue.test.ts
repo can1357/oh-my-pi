@@ -54,6 +54,34 @@ describe("ToolChoiceQueue", () => {
 			expect(q.nextToolChoice()).toBeUndefined();
 		});
 
+		it("onRejected returning 'drop_sequence' discards its later yields", () => {
+			const q = new ToolChoiceQueue();
+			q.pushSequence([forced, "none"], {
+				label: "user-force",
+				onRejected: () => "drop_sequence",
+			});
+			q.pushOnce(forcedRead, { label: "later" });
+
+			expect(q.nextToolChoice()).toEqual(forced);
+			q.reject("unavailable");
+			expect(q.nextToolChoice()).toEqual(forcedRead);
+		});
+
+		it("drop_sequence removes the origin after an unavailable replay", () => {
+			const q = new ToolChoiceQueue();
+			q.pushSequence([forced, "none"], {
+				label: "user-force",
+				onRejected: info => (info.reason === "unavailable" ? "drop_sequence" : "requeue"),
+			});
+			q.pushOnce(forcedRead, { label: "later" });
+
+			expect(q.nextToolChoice()).toEqual(forced);
+			q.reject("aborted");
+			expect(q.nextToolChoice()).toEqual(forced);
+			q.reject("unavailable");
+			expect(q.nextToolChoice()).toEqual(forcedRead);
+		});
+
 		it("requeued directive preserves onRejected so it can re-requeue across aborts", () => {
 			const q = new ToolChoiceQueue();
 			let rejectCount = 0;

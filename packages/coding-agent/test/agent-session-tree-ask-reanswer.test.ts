@@ -14,11 +14,68 @@
  * silently reporting a successful no-op navigation (review on #5895).
  */
 import { describe, expect, it, vi } from "bun:test";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { Agent, AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/ask";
-import { assistantMsg, createTestSession, userMsg } from "./utilities";
+
+const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+
+async function createTestSession(
+	options: { inMemory?: boolean; extensionRunner?: ExtensionRunner; obfuscator?: SecretObfuscator } = {},
+) {
+	const sessionManager = SessionManager.inMemory();
+	const settings = Settings.isolated();
+	const modelRegistry = {} as never;
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: TEST_MODEL,
+				systemPrompt: ["test"],
+				tools: [],
+			},
+		}),
+		sessionManager,
+		settings,
+		modelRegistry,
+		extensionRunner: options.extensionRunner,
+		obfuscator: options.obfuscator,
+	});
+	return {
+		session,
+		sessionManager,
+		cleanup: () => session.dispose(),
+	};
+}
+
+function userMsg(text: string) {
+	return { role: "user" as const, content: text, timestamp: Date.now() };
+}
+
+function assistantMsg(text: string) {
+	return {
+		role: "assistant" as const,
+		content: [{ type: "text" as const, text }],
+		api: "anthropic-messages" as const,
+		provider: "anthropic",
+		model: "test",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop" as const,
+		timestamp: Date.now(),
+	};
+}
 
 const ORIGINAL_QUESTIONS = [
 	{
@@ -360,7 +417,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 	it("(i) deobfuscates recovered ask arguments when secret obfuscation is active", async () => {
 		// The recovery path must mirror the live tool path's
 		// `transformToolCallArguments`: persisted `ask` toolCall arguments may
-		// hold `#HASH#` placeholders in place of real secrets, and must be
+		// hold `$$HASH$$` placeholders in place of real secrets, and must be
 		// deobfuscated before validation — otherwise the reopened picker shows
 		// the raw placeholder instead of the original question text
 		// (chatgpt-codex review on #5895).
@@ -454,6 +511,138 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			// The original (stale) answer's branch is still reachable.
 			const originalEntry = sessionManager.getEntry(tr1Id);
 			expect(originalEntry?.parentId).toBe(askCallEntryId);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("(k) reports a committed re-answer and resumes the agent only via resumeAfterAskReanswer", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const { session, sessionManager } = ctx;
+
+			// u1 -> a1(ask toolCall) -> tr1(stale answer) -> a2(next reply, leaf)
+			sessionManager.appendMessage(userMsg("please deploy"));
+			const askCallId = "ask-call-1";
+			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }));
+			const tr1Id = sessionManager.appendMessage(
+				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
+			);
+			sessionManager.appendMessage(assistantMsg("deploying to staging"));
+
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
+
+			const probe = await session.navigateTree(tr1Id, { allowAskReopen: true });
+			expect(probe.reopenAsk).toBeDefined();
+			// The read-only probe commits nothing, so it must not report a re-answer.
+			expect(probe.askReanswerCommitted).toBeFalsy();
+
+			const result = await session.navigateTree(tr1Id, {
+				allowAskReopen: true,
+				reanswerAskResult: newAnswerResult(),
+			});
+			expect(result.cancelled).toBe(false);
+			// navigateTree reports the commit but does NOT resume on its own — the
+			// interactive caller owns the timing so the resumed turn renders against
+			// the rebuilt transcript (issue #6483).
+			expect(result.askReanswerCommitted).toBe(true);
+			await session.waitForIdle();
+			expect(continueSpy).not.toHaveBeenCalled();
+			// The tail the resume will continue from is the new answer toolResult.
+			const messages = session.messages;
+			expect(messages[messages.length - 1]?.role).toBe("toolResult");
+
+			// The caller resumes explicitly after rebuilding its UI.
+			session.resumeAfterAskReanswer();
+			await session.waitForIdle();
+			expect(continueSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("coalesces concurrent continuation sources instead of calling a busy agent", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		const { session } = ctx;
+		const releaseContinue = Promise.withResolvers<void>();
+		const continueStarted = Promise.withResolvers<void>();
+		let continueInFlight = false;
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			if (continueInFlight) throw new AgentBusyError();
+			continueInFlight = true;
+			continueStarted.resolve();
+			await releaseContinue.promise;
+			continueInFlight = false;
+		});
+		try {
+			session.resumeAfterAskReanswer();
+			session.resumeAfterAskReanswer();
+			await continueStarted.promise;
+			releaseContinue.resolve();
+			await session.waitForIdle();
+
+			expect(continueSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			releaseContinue.resolve();
+			continueSpy.mockRestore();
+			await ctx.cleanup();
+		}
+	});
+
+	it("starts a fresh continue for work queued while a scheduled continuation settles", async () => {
+		// A continuation scheduled during the previous attempt's settle drain
+		// (#endInFlight -> #drainStrandedQueuedMessages -> queued-message-drain)
+		// must run its own agent.continue(), not coalesce onto the finished attempt
+		// and strand the queued message until the next prompt.
+		const ctx = await createTestSession({ inMemory: true });
+		const { session } = ctx;
+		let calls = 0;
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			calls++;
+			if (calls === 1) {
+				// The turn ended with a steer stranded past its final queue poll.
+				session.agent.steer({
+					role: "user",
+					content: "stranded",
+					steering: true,
+					attribution: "user",
+					timestamp: Date.now(),
+				});
+			} else {
+				session.agent.replaceQueues([], []);
+			}
+		});
+		try {
+			session.resumeAfterAskReanswer();
+			await session.waitForIdle();
+
+			expect(calls).toBe(2);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+		} finally {
+			continueSpy.mockRestore();
+			await ctx.cleanup();
+		}
+	});
+
+	it("(l) does not report a committed re-answer for a plain non-ask leaf move", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const { session, sessionManager } = ctx;
+
+			sessionManager.appendMessage(userMsg("read the config"));
+			sessionManager.appendMessage(toolCallMsg("read-call-1", "read", { path: "config.txt" }));
+			const tr1Id = sessionManager.appendMessage(toolResultMsg("read-call-1", "read", "file body"));
+			sessionManager.appendMessage(assistantMsg("done reading"));
+
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
+
+			const result = await session.navigateTree(tr1Id, { allowAskReopen: true });
+			expect(result.cancelled).toBe(false);
+			expect(result.reopenAsk).toBeUndefined();
+			expect(result.askReanswerCommitted).toBeFalsy();
+
+			await session.waitForIdle();
+			expect(continueSpy).not.toHaveBeenCalled();
 		} finally {
 			await ctx.cleanup();
 		}

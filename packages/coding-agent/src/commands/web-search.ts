@@ -1,7 +1,9 @@
 /**
  * Test web search providers.
  */
+
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { searchHelp as commandHelp } from "../cli/command-help";
 import { runSearchCommand, type SearchCommandArgs } from "../cli/web-search-cli";
 import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
 
@@ -10,8 +12,7 @@ const PROVIDERS: Array<string> = ["auto", ...SEARCH_PROVIDER_ORDER];
 const RECENCY: NonNullable<SearchCommandArgs["recency"]>[] = ["day", "week", "month", "year"];
 
 export default class Search extends Command {
-	static description = "Test web search providers";
-
+	static description = commandHelp.description;
 	static aliases = ["q"];
 
 	static args = {

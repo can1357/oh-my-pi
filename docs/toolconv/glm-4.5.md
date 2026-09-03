@@ -280,7 +280,49 @@ With a server parser active (`--tool-call-parser glm45 --reasoning-parser glm45`
 - **`skip_special_tokens` must be off.** Although the tool/think tags are `special: false`, vLLM forces `skip_special_tokens = False` when tools are enabled (defensive against transformers 5.x detokenization changes) so the literal `<tool_call>`/`</tool_call>` text survives for the regex.
 - **Streaming.** Long string arguments used to be buffered until the closing tag (vLLM issue #32829); the current parser re-parses the accumulated text each delta and emits only the diff, streaming incremental string content with an open-quote-then-fill strategy and holding back any partial trailing tag (`partial_tag_overlap`). The streamed tool name is the text before the first `\n` or `<arg_key>`. SGLang implements the same as an explicit XML→JSON state machine (`INIT → IN_KEY → WAITING_VALUE → IN_VALUE`). Malformed tails (a missing `</arg_value>` before `</tool_call>`) are closed off heuristically.
 - **Lineage — GLM-4.5 vs GLM-4.6:** identical wire format and identical `chat_template.jinja` (same content hash); the same `glm45` parser serves both.
-- **Lineage — GLM-4.7 / GLM-5 changed the format.** Newer models drop the structural newlines: the function name may sit **directly** before the first `<arg_key>` (no newline), zero-argument calls may be `<tool_call>func</tool_call>`, and parallel calls may be emitted **back-to-back with no separator** (`…</tool_call><tool_call>…`). These require the distinct `Glm47MoeModelToolParser` (vLLM, `structural_tag_model="glm_4_7"`) / `Glm47MoeDetector` (SGLang), whose `func_detail_regex` makes the newline and the argument section optional (`<tool_call>\s*(\S+?)\s*(<arg_key>.*)?</tool_call>`). Do **not** use a GLM-4.7 stream to validate a GLM-4.5 parser or vice versa.
+- **Lineage — GLM-4.7 / GLM-5 changed the format.** Newer models may omit
+  structural newlines: the function name can sit directly before the first
+  `<arg_key>`, zero-argument calls can be `<tool_call>func</tool_call>`, and
+  parallel calls can abut. vLLM/SGLang require their distinct GLM-4.7
+  parsers for this variant. omp's repository scanner is intentionally broader:
+  it accepts newline, `<arg_key>`, or `</tool_call>` as the name delimiter, so
+  the same `glm` dialect scanner handles both layouts.
+
+## omp / pi converter behavior
+
+The repository's `glm` dialect is an **owned in-band converter**. Select it
+with `PI_DIALECT=glm`; legacy `PI_DIALECT=1` and `PI_DIALECT=true` also resolve
+to GLM. With tools present, the agent appends the GLM format guide and compact
+tool catalog to the system prompt, removes native provider tools, rewrites
+prior calls/results into grammar-owned text, and scans assistant text back
+into canonical pi events. GLM-family model affinity resolves to this dialect.
+
+The owned renderer always emits the GLM-4.5 newline layout. It consults each
+tool's normalized schema: string-only properties are emitted raw, while all
+other values are JSON-serialized. Parallel calls are newline-separated. In
+owned history, result batches become a synthetic user message containing
+`<observation>` with one `<tool_response>` per result; the lower-level GLM
+transcript renderer uses the model-native `<|observation|>` role marker
+instead.
+
+The scanner synthesizes `ptc_…` ids, emits `toolStart` once the name delimiter
+arrives, and streams each argument body as keyed `toolArgDelta` events.
+String-only schema properties stay verbatim; every other completed property is
+parsed with strict `JSON.parse` after trimming and falls back to the original
+raw text on failure. On flush, an unfinished key/value drops only the scanner's
+private call state. If `toolStart` was already emitted, OMP retains the
+canonical call and a normal stop may dispatch it; previously accumulated
+arguments—including partial value text published through `toolArgDelta`—remain
+on that call. Input that never yields a valid name emits no `toolStart` and
+therefore leaves no call. The scanner also heals narrowly recognizable model
+mistakes: `</arg_key>` used in place of `</arg_value>`, a stray wrong closer
+before the real closer, and a missing value closer immediately before the next
+argument or call close.
+
+Thinking parsing is enabled by default and excludes `<think>…</think>` from
+visible text. If `<tool_response>` appears in assistant output, the scanner
+drops that tag and the remainder of the currently buffered chunk rather than
+treating the hallucinated result as assistant content.
 
 ## Sources
 

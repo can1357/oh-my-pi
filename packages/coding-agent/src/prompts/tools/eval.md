@@ -1,4 +1,5 @@
-Run one step of code in a persistent kernel. State persists across calls and subagents.
+Run one step of code in a persistent kernel. State persists across calls and `task` subagents.
+{{#if spawns}}Eval `agent()` children use independent kernels.{{/if}}
 
 Work incrementally: imports → define → test → use, each its own cell. Re-run setup ONLY after `reset`, kernel crash.
 Parallelize *within* a cell with `parallel(thunks)`, not by batching.
@@ -20,9 +21,9 @@ tool.<name>(args) → unknown
     Invoke any session tool; `args` = its parameter object.
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → str | dict
     Oneshot, stateless (no history/tools). `model`: "smol" fast | "default" session | "slow" most capable. `schema` (JSON-Schema) → parsed object.
-{{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", model?=None, label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None, handle?=False) → str | dict
+{{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None, handle?=False) → str | dict
     Run a subagent → final output. `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} `schema` overrides agent/session schemas; `schemaMode`/`schema_mode`: "permissive" | "strict". Effective schemas return parsed data. `isolated` requests a worktree; `apply`/`merge` control its changes. Background via `local://` files named in the prompt. `handle` → { text, output, handle: "agent://<id>", id, agent }, parsed `data` when structured.
-{{#if js}}    JS: ONE trailing object — agent(prompt, { agent, model, label, schema, schemaMode, isolated, apply, merge, handle }).{{/if}}
+{{#if js}}    JS: ONE trailing object — agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge, handle }).{{/if}}
 {{/if}}
 parallel(thunks) → list     pipeline(items, ...stages) → list
 log(message) → None         phase(title) → None
@@ -43,3 +44,6 @@ Acyclic waves via `agent(…, handle=true)` + `pipeline`/`parallel`:
 <critical>
 Prior top-level names survive into the next cell — reuse; NEVER re-import/re-declare. Re-read only if file changed since last read.
 </critical>
+
+{{#if autoBackgroundEnabled}}Long-running cells may auto-background by the configured threshold and deliver later; the kernel stays busy until the cell finishes.
+`timeout: 0` disables the cell deadline; otherwise `timeout` sets it without extending foreground waiting.{{/if}}

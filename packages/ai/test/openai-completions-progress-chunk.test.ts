@@ -191,7 +191,7 @@ describe("resolveOpenAICompat stream idle timeout", () => {
 		expect(openAICompletionsModel.compat.streamIdleTimeoutMs).toBeUndefined();
 	});
 
-	it("widens local OpenAI-compatible stream watchdogs", () => {
+	it("widens local idle watchdogs and disables first-event deadlines", () => {
 		const completions = buildModel({
 			...openAICompletionsModel,
 			id: "qwen3-local",
@@ -210,7 +210,9 @@ describe("resolveOpenAICompat stream idle timeout", () => {
 		} as ModelSpec<"openai-responses">);
 
 		expect(completions.compat.streamIdleTimeoutMs).toBe(300_000);
+		expect(completions.compat.streamFirstEventTimeoutMs).toBe(0);
 		expect(responses.compat.streamIdleTimeoutMs).toBe(300_000);
+		expect(responses.compat.streamFirstEventTimeoutMs).toBe(0);
 	});
 
 	it("widens custom loopback OpenAI-compatible responses stream watchdogs", () => {
@@ -224,6 +226,7 @@ describe("resolveOpenAICompat stream idle timeout", () => {
 		} as ModelSpec<"openai-responses">);
 
 		expect(model.compat.streamIdleTimeoutMs).toBe(300_000);
+		expect(model.compat.streamFirstEventTimeoutMs).toBe(0);
 	});
 
 	it("widens Xiaomi MiMo Pro stream watchdog (issue #1770)", () => {

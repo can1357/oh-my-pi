@@ -1,8 +1,19 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import {
+	type ApiKey,
+	type FetchImpl,
+	getEnvApiKey,
+	getOpenRouterHeaders,
+	isOfficialCodexApiUrl,
+	type Model,
+	withAuth,
+} from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import {
+	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
@@ -18,21 +29,23 @@ import {
 	ptree,
 	readSseJson,
 	Snowflake,
+	USER_AGENT,
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
-import packageJson from "../../package.json" with { type: "json" };
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
+import { resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
+import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
 import { resolveReadPath } from "./path-utils";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
 const DEFAULT_ANTIGRAVITY_MODEL = "gemini-3-pro-image";
 const DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image";
+const DEFAULT_DEEPINFRA_IMAGE_MODEL = "black-forest-labs/FLUX-2-pro";
+const DEEPINFRA_IMAGES_URL = "https://api.deepinfra.com/v1/openai/images/generations";
 const IMAGE_TIMEOUT = 3 * 60 * 1000; // 3 minutes
 const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -44,7 +57,7 @@ const DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX = "https://daily-cloudcode-pa.sandbox
 const IMAGE_SYSTEM_INSTRUCTION =
 	"You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";
 
-export type ImageProvider = "antigravity" | "gemini" | "openai" | "openai-codex" | "openrouter" | "xai";
+export type { ImageProvider } from "./image-providers";
 export type ImageProviderPreference = ImageProvider | "auto";
 
 interface ImageApiKey {
@@ -57,17 +70,8 @@ interface ImageApiKey {
 const COMMON_IMAGE_ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9"] as const;
 const XAI_IMAGE_ASPECT_RATIOS = [...COMMON_IMAGE_ASPECT_RATIOS, "3:2", "2:3"] as const;
 const COMMON_IMAGE_ASPECT_RATIO_SET = new Set<string>(COMMON_IMAGE_ASPECT_RATIOS);
-const IMAGE_PROVIDER_CHOICES = [
-	"auto",
-	"antigravity",
-	"gemini",
-	"openai",
-	"openai-codex",
-	"openrouter",
-	"xai",
-] as const;
-const IMAGE_PROVIDER_PREFERENCES = new Set<string>(IMAGE_PROVIDER_CHOICES);
-const AUTO_IMAGE_PROVIDER_ORDER = ["openai", "openai-codex", "antigravity", "xai", "openrouter", "gemini"] as const;
+const IMAGE_PROVIDER_REQUEST_CHOICES = ["auto", ...AUTO_IMAGE_PROVIDER_ORDER] as const;
+const IMAGE_PROVIDER_PREFERENCES = new Set<string>(IMAGE_PROVIDER_REQUEST_CHOICES);
 
 const responseModalitySchema = type('"IMAGE" | "TEXT"');
 
@@ -81,8 +85,8 @@ const inputImageSchema = type({
 });
 
 const imageProviderSchema = type
-	.enumerated(...IMAGE_PROVIDER_CHOICES)
-	.describe("image provider for this request; overrides the providers.image setting (default: use the setting)");
+	.enumerated(...IMAGE_PROVIDER_REQUEST_CHOICES)
+	.describe("image provider for this request; overrides the providers.imageOrder setting (default: use the setting)");
 
 export const imageGenSchema = type({
 	subject: type("string").describe("main subject"),
@@ -447,16 +451,116 @@ function extractOpenRouterImageUrls(message: OpenRouterMessage | undefined): str
 	return urls;
 }
 
-/** Preferred provider set via settings (default: auto) */
-let preferredImageProvider: ImageProviderPreference = "auto";
+/**
+ * Shared POST for OpenAI-style image endpoints (xAI, DeepInfra): bearer auth,
+ * JSON body, and error mapping for both `{error: {message}}` and `{detail}`
+ * error envelopes. Returns the raw response text.
+ */
+async function postImageEndpointRequest(options: {
+	label: string;
+	url: string;
+	body: unknown;
+	apiKey: ApiKey;
+	fetchImpl: FetchImpl;
+	signal: AbortSignal | undefined;
+}): Promise<string> {
+	return withAuth(
+		options.apiKey,
+		async key => {
+			const resp = await options.fetchImpl(options.url, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${key}`,
+					"Content-Type": "application/json",
+					"User-Agent": USER_AGENT,
+				},
+				body: JSON.stringify(options.body),
+				signal: options.signal,
+			});
+			const rawText = await resp.text();
+			if (!resp.ok) {
+				let message = rawText;
+				try {
+					const parsedErr = JSON.parse(rawText) as { detail?: string; error?: { message?: string } };
+					message = parsedErr.detail ?? parsedErr.error?.message ?? message;
+				} catch {
+					// Keep raw text.
+				}
+				throw new ProviderHttpError(
+					`${options.label} image request failed (${resp.status}): ${message}`,
+					resp.status,
+					{
+						headers: resp.headers,
+					},
+				);
+			}
+			return rawText;
+		},
+		{ signal: options.signal },
+	);
+}
+
+/** Decode an OpenAI-style images response (`{data: [{b64_json, url}]}`) into inline images. */
+async function collectImageEndpointImages(
+	rawText: string,
+	fetchImpl: FetchImpl,
+	signal: AbortSignal | undefined,
+): Promise<InlineImageData[]> {
+	const data = JSON.parse(rawText) as { data?: Array<{ b64_json?: string | null; url?: string | null }> };
+	const inlineImages: InlineImageData[] = [];
+	for (const entry of data.data ?? []) {
+		if (entry.b64_json) {
+			const bytes = Buffer.from(entry.b64_json, "base64");
+			const mimeType = parseImageMetadata(bytes)?.mimeType ?? "image/png";
+			inlineImages.push({ data: entry.b64_json, mimeType });
+		} else if (entry.url) {
+			inlineImages.push(await loadImageFromUrl(entry.url, fetchImpl, signal));
+		}
+	}
+	return inlineImages;
+}
+
+/** Standard tool result for an image-endpoint provider (no accompanying response text). */
+async function buildImageEndpointResult(
+	provider: ImageProvider,
+	model: string,
+	inlineImages: InlineImageData[],
+): Promise<AgentToolResult<ImageGenToolDetails, ImageGenParams>> {
+	if (inlineImages.length === 0) {
+		return {
+			content: [{ type: "text", text: "No image data returned." }],
+			details: {
+				provider,
+				model,
+				imageCount: 0,
+				imagePaths: [],
+				images: [],
+			},
+		};
+	}
+	const imagePaths = await saveImagesToTemp(inlineImages);
+	return {
+		content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, undefined) }],
+		details: {
+			provider,
+			model,
+			imageCount: inlineImages.length,
+			imagePaths,
+			images: inlineImages,
+		},
+	};
+}
+
+/** Configured provider priority set via `providers.imageOrder` (default: none). */
+let configuredImageProviderOrder: readonly ImageProvider[] = [];
 
 export function isImageProviderPreference(value: unknown): value is ImageProviderPreference {
 	return typeof value === "string" && IMAGE_PROVIDER_PREFERENCES.has(value);
 }
 
-/** Set the preferred image provider from settings */
-export function setPreferredImageProvider(provider: ImageProviderPreference): void {
-	preferredImageProvider = provider;
+/** Set the configured image-provider priority from settings; invalid IDs are dropped. */
+export function setImageProviderOrder(providers: readonly string[]): void {
+	configuredImageProviderOrder = providers.filter(isImageProviderId);
 }
 function assertImageAspectRatioSupported(provider: ImageProvider, aspectRatio: ImageGenParams["aspect_ratio"]): void {
 	if (!aspectRatio || provider === "xai" || COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)) {
@@ -529,6 +633,21 @@ async function findOpenRouterImageCredentials(
 	return null;
 }
 
+async function findDeepInfraImageCredentials(
+	modelRegistry?: ModelRegistry,
+	sessionId?: string,
+): Promise<ImageApiKey | null> {
+	if (modelRegistry) {
+		// AuthStorage.getApiKey already falls back to env keys, so this covers DEEPINFRA_API_KEY too.
+		const apiKey = await modelRegistry.getApiKeyForProvider("deepinfra", sessionId);
+		if (apiKey) return { provider: "deepinfra", apiKey: modelRegistry.resolver("deepinfra", { sessionId }) };
+		return null;
+	}
+	const apiKey = getEnvApiKey("deepinfra");
+	if (apiKey) return { provider: "deepinfra", apiKey };
+	return null;
+}
+
 async function findGeminiImageCredentials(
 	modelRegistry?: ModelRegistry,
 	sessionId?: string,
@@ -576,13 +695,11 @@ function resolveDefaultCodexImageModel(modelRegistry: ModelRegistry): Model | un
 }
 
 /**
- * Codex subscription (ChatGPT OAuth) image credentials — engages OpenAI's hosted
- * `image_generation` tool through a CONNECTED Codex account, independent of the
- * active chat model. This is what lets image generation run on a ChatGPT
- * subscription (no metered OPENAI_API_KEY) even when the active model is, e.g.,
- * Claude. The active-model-is-codex case is already served by
- * {@link findOpenAIHostedImageCredentials}, so it is skipped here to avoid a
- * duplicate resolution.
+ * Codex image credentials — engages OpenAI's hosted `image_generation` tool
+ * through a connected ChatGPT account or custom Codex-compatible endpoint,
+ * independent of the active chat model. The active-model-is-codex case is
+ * already served by {@link findOpenAIHostedImageCredentials}, so it is skipped
+ * here to avoid a duplicate resolution.
  */
 async function findCodexSubscriptionImageCredentials(
 	modelRegistry: ModelRegistry | undefined,
@@ -593,15 +710,14 @@ async function findCodexSubscriptionImageCredentials(
 	if (isOpenAIHostedImageModel(activeModel) && getOpenAIHostedImageProvider(activeModel) === "openai-codex") {
 		return null;
 	}
-	// A Codex subscription credential is an OAuth JWT with an account claim. API
-	// keys stored under this provider cannot use the ChatGPT backend and must not
-	// prevent fallback providers from being selected.
 	const token = await modelRegistry.getApiKeyForProvider("openai-codex", sessionId);
-	if (!token || !getCodexAccountId(token)) return null;
+	if (!token) return null;
 	const model = resolveDefaultCodexImageModel(modelRegistry);
 	if (!model) return null;
+	const acceptsOpaqueCredentials = !isOfficialCodexApiUrl(getOpenAIResponsesUrl(model));
+	if (!acceptsOpaqueCredentials && !getCodexAccountId(token)) return null;
 	const apiKey = await modelRegistry.getApiKey(model, sessionId);
-	if (!isAuthenticated(apiKey) || !getCodexAccountId(apiKey)) return null;
+	if (!isAuthenticated(apiKey) || (!acceptsOpaqueCredentials && !getCodexAccountId(apiKey))) return null;
 	return { provider: "openai-codex", apiKey, model };
 }
 
@@ -617,6 +733,8 @@ function activeImageProvider(model: Model | undefined): Exclude<ImageProviderPre
 			return "xai";
 		case "openrouter":
 			return "openrouter";
+		case "deepinfra":
+			return "deepinfra";
 		case "google":
 			return "gemini";
 		default:
@@ -624,19 +742,19 @@ function activeImageProvider(model: Model | undefined): Exclude<ImageProviderPre
 	}
 }
 
-function imageProviderOrder(
-	activeModel: Model | undefined,
-	preference: ImageProviderPreference = preferredImageProvider,
-): Array<Exclude<ImageProviderPreference, "auto">> {
-	const providers: Array<Exclude<ImageProviderPreference, "auto">> = [];
-	const added = new Set<Exclude<ImageProviderPreference, "auto">>();
-	const add = (provider: Exclude<ImageProviderPreference, "auto"> | null): void => {
+function imageProviderOrder(activeModel: Model | undefined, requested?: ImageProviderPreference): ImageProvider[] {
+	const providers: ImageProvider[] = [];
+	const added = new Set<ImageProvider>();
+	const add = (provider: ImageProvider | null): void => {
 		if (!provider || added.has(provider)) return;
 		added.add(provider);
 		providers.push(provider);
 	};
 
-	if (preference !== "auto") add(preference);
+	// Per-request provider wins, then the configured priority list, then the
+	// active session's provider, then the built-in auto order.
+	if (requested !== undefined && requested !== "auto") add(requested);
+	for (const provider of configuredImageProviderOrder) add(provider);
 	add(activeImageProvider(activeModel));
 	for (const provider of AUTO_IMAGE_PROVIDER_ORDER) add(provider);
 	return providers;
@@ -659,6 +777,8 @@ async function findImageApiKey(
 			return findXAIImageCredentials(modelRegistry);
 		case "openrouter":
 			return findOpenRouterImageCredentials(modelRegistry, sessionId);
+		case "deepinfra":
+			return findDeepInfraImageCredentials(modelRegistry, sessionId);
 		case "gemini":
 			return findGeminiImageCredentials(modelRegistry, sessionId);
 	}
@@ -903,9 +1023,11 @@ function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string
 		if (accountId) {
 			headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
 		}
+		// Same region gate as the chat transport; the token carries the value.
+		applyCodexResidencyHeader(headers, apiKey);
 		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 		headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
-		headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
+		headers.set("User-Agent", USER_AGENT);
 		if (sessionId) {
 			headers.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
 			headers.set(OPENAI_HEADERS.SESSION_ID, sessionId);
@@ -1109,12 +1231,13 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
 		return untilAborted(signal, async () => {
 			const sessionId = ctx.sessionManager.getSessionId();
-			const providerOrder = imageProviderOrder(ctx.model, params.provider ?? preferredImageProvider);
+			const providerOrder = imageProviderOrder(ctx.model, params.provider);
 			const cwd = ctx.sessionManager.getCwd();
 			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
 			const fetchImpl = ctx.fetch ?? fetch;
 			const failures: Array<{ provider: ImageProvider; error: ProviderHttpError }> = [];
 			let unsupportedAspectRatioProvider: ImageProvider | undefined;
+			let editUnsupportedProvider: ImageProvider | undefined;
 			let foundCredentials = false;
 			let resolvedImageCache: InlineImageData[] | undefined;
 
@@ -1143,7 +1266,9 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									? DEFAULT_OPENROUTER_MODEL
 									: provider === "xai"
 										? DEFAULT_XAI_IMAGE_MODEL
-										: DEFAULT_MODEL;
+										: provider === "deepinfra"
+											? DEFAULT_DEEPINFRA_IMAGE_MODEL
+											: DEFAULT_MODEL;
 					const resolvedModel = provider === "openrouter" ? resolveOpenRouterModel(model) : model;
 					if (
 						params.aspect_ratio &&
@@ -1389,82 +1514,16 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							baseUrl: xaiCreds.baseURL,
 						});
 
-						const xaiRawText = await withAuth(
-							xaiKey,
-							async key => {
-								const resp = await fetchImpl(`${xaiCreds.baseURL}${xaiEndpoint}`, {
-									method: "POST",
-									headers: {
-										Authorization: `Bearer ${key}`,
-										"Content-Type": "application/json",
-										"User-Agent": ohMyPiXAIUserAgent(),
-									},
-									body: JSON.stringify(xaiBody),
-									signal: requestSignal,
-								});
-								const rawText = await resp.text();
-								if (!resp.ok) {
-									let message = rawText;
-									try {
-										const parsedErr = JSON.parse(rawText) as { error?: { message?: string } };
-										message = parsedErr.error?.message ?? message;
-									} catch {
-										// Keep raw text.
-									}
-									throw new ProviderHttpError(
-										`xAI image request failed (${resp.status}): ${message}`,
-										resp.status,
-										{
-											headers: resp.headers,
-										},
-									);
-								}
-								return rawText;
-							},
-							{ signal: requestSignal },
-						);
-
-						const xaiData = JSON.parse(xaiRawText) as {
-							data?: Array<{ b64_json?: string; url?: string }>;
-						};
-						const xaiInlineImages: InlineImageData[] = [];
-						for (const entry of xaiData.data ?? []) {
-							if (entry.b64_json) {
-								const bytes = Buffer.from(entry.b64_json, "base64");
-								const mimeType = parseImageMetadata(bytes)?.mimeType ?? "image/png";
-								xaiInlineImages.push({ data: entry.b64_json, mimeType });
-							} else if (entry.url) {
-								xaiInlineImages.push(await loadImageFromUrl(entry.url, fetchImpl, requestSignal));
-							}
-						}
-
-						if (xaiInlineImages.length === 0) {
-							return {
-								content: [{ type: "text", text: "No image data returned." }],
-								details: {
-									provider,
-									model: resolvedModel,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-								},
-							};
-						}
-
-						const xaiImagePaths = await saveImagesToTemp(xaiInlineImages);
-
-						return {
-							content: [
-								{ type: "text", text: buildResponseSummary(provider, resolvedModel, xaiImagePaths, undefined) },
-							],
-							details: {
-								provider,
-								model: resolvedModel,
-								imageCount: xaiInlineImages.length,
-								imagePaths: xaiImagePaths,
-								images: xaiInlineImages,
-							},
-						};
+						const xaiRawText = await postImageEndpointRequest({
+							label: "xAI",
+							url: `${xaiCreds.baseURL}${xaiEndpoint}`,
+							body: xaiBody,
+							apiKey: xaiKey,
+							fetchImpl,
+							signal: requestSignal,
+						});
+						const xaiInlineImages = await collectImageEndpointImages(xaiRawText, fetchImpl, requestSignal);
+						return buildImageEndpointResult(provider, resolvedModel, xaiInlineImages);
 					}
 
 					if (provider === "openrouter") {
@@ -1487,9 +1546,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									headers: {
 										"Content-Type": "application/json",
 										Authorization: `Bearer ${key}`,
-										"HTTP-Referer": "https://omp.sh/",
-										"X-OpenRouter-Title": "Oh-My-Pi",
-										"X-OpenRouter-Categories": "cli-agent",
+										...getOpenRouterHeaders(),
 									},
 									body: JSON.stringify(requestBody),
 									signal: requestSignal,
@@ -1553,6 +1610,37 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								responseText,
 							},
 						};
+					}
+
+					if (provider === "deepinfra") {
+						// Text-to-image only: images/generations has no reference-image
+						// input, so an edit request falls through to an edit-capable
+						// provider (openai/openrouter/gemini) later in the order.
+						if (resolvedImages.length > 0) {
+							editUnsupportedProvider ??= provider;
+							continue;
+						}
+
+						const prompt = assemblePrompt(params);
+						const size = resolveOpenAIImageSize(params.aspect_ratio, params.image_size);
+						const requestBody = {
+							model: resolvedModel,
+							prompt,
+							n: 1,
+							response_format: "b64_json" as const,
+							...(size ? { size } : {}),
+						};
+
+						const rawText = await postImageEndpointRequest({
+							label: "DeepInfra",
+							url: DEEPINFRA_IMAGES_URL,
+							body: requestBody,
+							apiKey: apiKey.apiKey,
+							fetchImpl,
+							signal: requestSignal,
+						});
+						const inlineImages = await collectImageEndpointImages(rawText, fetchImpl, requestSignal);
+						return buildImageEndpointResult(provider, resolvedModel, inlineImages);
 					}
 
 					const parts = [] as Array<{ text?: string; inlineData?: InlineImageData }>;
@@ -1666,12 +1754,18 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			if (!foundCredentials) {
 				throw new Error(
-					"No image API credentials found. Connect a Codex (ChatGPT) subscription, use a GPT Responses/Codex model with OpenAI credentials, log in with google-antigravity or xAI Grok OAuth, or set OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.",
+					"No image API credentials found. Connect a Codex (ChatGPT) subscription, use a GPT Responses/Codex model with OpenAI credentials, log in with google-antigravity or xAI Grok OAuth, or set OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, or DEEPINFRA_API_KEY.",
 				);
 			}
 
 			if (failures.length === 0 && unsupportedAspectRatioProvider) {
 				assertImageAspectRatioSupported(unsupportedAspectRatioProvider, params.aspect_ratio);
+			}
+
+			if (failures.length === 0 && editUnsupportedProvider) {
+				throw new Error(
+					`${editUnsupportedProvider} image generation is text-to-image only and cannot edit input images. Configure an edit-capable provider (openai, openai-codex, antigravity, xai, openrouter, gemini) or retry without input images.`,
+				);
 			}
 
 			throw new AggregateError(

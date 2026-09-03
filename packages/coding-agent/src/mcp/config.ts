@@ -6,7 +6,7 @@
 
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
-import type { SourceMeta } from "../capability/types";
+import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readDisabledServers, readEnabledServers } from "./config-writer";
@@ -20,6 +20,8 @@ export interface LoadMCPConfigsOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
+	extensionRoots?: EffectiveExtensionRoots;
 }
 
 /** Result of loading MCP configs */
@@ -41,6 +43,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	const shared = {
 		enabled: server.enabled,
 		timeout: server.timeout,
+		requestIdFormat: server.requestIdFormat,
 		auth: server.auth,
 		oauth: server.oauth,
 	};
@@ -53,6 +56,8 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		};
 		if (server.args) config.args = server.args;
 		if (server.env) config.env = server.env;
+		if (server.envPolicy) config.envPolicy = server.envPolicy;
+		if (server.envLiteralKeys) config.envLiteralKeys = server.envLiteralKeys;
 		if (server.cwd) config.cwd = server.cwd;
 		return config;
 	}
@@ -64,6 +69,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
+		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
 		return config;
 	}
 
@@ -74,6 +80,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
+		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
 		return config;
 	}
 
@@ -97,14 +104,6 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 
-	// Load MCP servers via capability system
-	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd });
-
-	// Filter out project-level configs if disabled
-	const servers = enableProjectConfig
-		? result.items
-		: result.items.filter(server => server._source.level !== "project");
-
 	// Load user-level disable/force-enable lists. The denylist always wins; the
 	// allowlist overrides a non-writable source config's `enabled: false`.
 	const userPath = getMCPConfigPath("user", cwd);
@@ -112,14 +111,35 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		readDisabledServers(userPath).then(list => new Set(list)),
 		readEnabledServers(userPath).then(list => new Set(list)),
 	]);
-	// Convert to legacy format and preserve source metadata
+
+	// Scope exclusions drop entries entirely BEFORE deduplication: with project
+	// config disabled, a project entry must not shadow anything.
+	const includeServer = (server: MCPServer & { _source: SourceMeta }): boolean =>
+		enableProjectConfig || server._source.level !== "project";
+
+	// Disabled servers are suppressed rather than dropped: they still own their
+	// name at key-level dedupe (a disabled project `foo` keeps a same-named,
+	// lower-priority user `foo` disabled), but never equivalence-shadow a
+	// differently-named enabled server — otherwise the disabled alias would be
+	// removed downstream and starve the surviving connection.
+	const suppressServer = (server: MCPServer & { _source: SourceMeta }): boolean => {
+		if (disabledServers.has(server.name)) return true;
+		if (server.enabled === false && !forcedEnabled.has(server.name)) return true;
+		return false;
+	};
+
+	const result = await loadCapability<MCPServer>(mcpCapability.id, {
+		cwd,
+		extensionRoots: options?.extensionRoots,
+		filter: includeServer,
+		suppress: suppressServer,
+	});
+
+	// Convert to legacy format and preserve source metadata.
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};
-	for (const server of servers) {
-		const config = convertToLegacyConfig(server);
-		if (disabledServers.has(server.name)) continue;
-		if (config.enabled === false && !forcedEnabled.has(server.name)) continue;
-		configs[server.name] = config;
+	for (const server of result.items) {
+		configs[server.name] = convertToLegacyConfig(server);
 		sources[server.name] = server._source;
 	}
 
@@ -208,6 +228,43 @@ export function extractExaApiKey(config: MCPServerConfig): string | undefined {
 	return undefined;
 }
 
+/** Exa MCP tools already covered by the native Exa integration. */
+const NATIVE_EXA_MCP_TOOLS: Record<string, true> = { web_search_exa: true };
+
+/**
+ * Parse the comma-separated `tools` restriction from an Exa MCP config.
+ * Returns `null` when the config does not restrict its tool set.
+ */
+function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
+	const raw = (() => {
+		if (config.type === "http" || config.type === "sse") {
+			const httpConfig = config as { url?: string };
+			if (!httpConfig.url) return undefined;
+			try {
+				return new URL(httpConfig.url).searchParams.get("tools") ?? undefined;
+			} catch {
+				return undefined;
+			}
+		}
+		if (!config.type || config.type === "stdio") {
+			const stdioConfig = config as { args?: string[] };
+			const args = stdioConfig.args ?? [];
+			for (let i = 0; i < args.length; i++) {
+				if (/^--?tools$/i.test(args[i])) return args[i + 1];
+				const match = args[i].match(/(?:^|[\s?&])tools=([^&\s]+)/i) ?? args[i].match(/--?tools[=\s]([^\s]+)/i);
+				if (match) return match[1];
+			}
+		}
+		return undefined;
+	})();
+	if (!raw) return null;
+	const tools = raw
+		.split(",")
+		.map(tool => tool.trim())
+		.filter(tool => tool.length > 0);
+	return tools.length > 0 ? tools : null;
+}
+
 /** Result of filtering Exa MCP servers */
 export interface ExaFilterResult {
 	/** Configs with Exa servers removed */
@@ -220,7 +277,9 @@ export interface ExaFilterResult {
 
 /**
  * Filter out Exa MCP servers and extract their API keys.
- * Since we have native Exa integration, we don't need the MCP server.
+ * Since we have native Exa integration, we don't need the MCP server —
+ * unless the config explicitly requests Exa tools the native integration
+ * does not provide (e.g. `web_fetch_exa`, `web_search_advanced_exa`).
  */
 export function filterExaMCPServers(
 	configs: Record<string, MCPServerConfig>,
@@ -232,16 +291,21 @@ export function filterExaMCPServers(
 
 	for (const [name, config] of Object.entries(configs)) {
 		if (isExaMCPServer(name, config)) {
-			// Extract API key before filtering
+			// Extract API key for the native Exa integration even when the MCP
+			// server is kept below for its extra tools.
 			const apiKey = extractExaApiKey(config);
 			if (apiKey) {
 				exaApiKeys.push(apiKey);
 			}
-		} else {
-			filtered[name] = config;
-			if (sources[name]) {
-				filteredSources[name] = sources[name];
+			const requested = getRequestedExaMcpTools(config);
+			const hasExtraTools = requested?.some(tool => !NATIVE_EXA_MCP_TOOLS[tool.toLowerCase()]) ?? false;
+			if (!hasExtraTools) {
+				continue;
 			}
+		}
+		filtered[name] = config;
+		if (sources[name]) {
+			filteredSources[name] = sources[name];
 		}
 	}
 

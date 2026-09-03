@@ -617,6 +617,19 @@ impl Job {
 			.representative_pid()
 			.map_or_else(|| self.id.to_string(), |pid| pid.to_string())
 	}
+	/// Returns the number of external processes retained by this job.
+	pub fn external_process_count(&self) -> usize {
+		self.tasks.iter().filter(|task| task.is_external()).count()
+	}
+
+	/// Iterates over the external process IDs that make up this job.
+	pub fn process_ids(&self) -> impl Iterator<Item = sys::process::ProcessId> + '_ {
+		self.tasks.iter().filter_map(|task| match task {
+			JobTask::External(process) => process.pid(),
+			JobTask::Internal(_) => None,
+		})
+	}
+
 
 	/// Tries to retrieve a "representative" pid for the job.
 	pub fn representative_pid(&self) -> Option<sys::process::ProcessId> {

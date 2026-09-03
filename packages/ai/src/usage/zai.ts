@@ -1,4 +1,5 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
 	CredentialRankingStrategy,
 	UsageAmount,
@@ -11,14 +12,11 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { DAY_MS, HOUR_MS, WEEK_MS } from "./shared";
 
 const DEFAULT_ENDPOINT = "https://api.z.ai";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";
 const MODEL_USAGE_PATH = "/api/monitor/usage/model-usage";
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-const WEEK_MS = 7 * DAY_MS;
 const MONTH_MS = 30 * DAY_MS;
 
 interface ZaiUsageDetail {
@@ -53,6 +51,8 @@ interface ZaiQuotaPayload {
 	msg?: string;
 	data?: {
 		limits?: ZaiUsageLimitItem[];
+		/** Coding-plan tier (e.g. "lite", "pro", "max") surfaced as the plan label. */
+		level?: string;
 	};
 }
 
@@ -183,29 +183,45 @@ function isZaiFeatureRequestLimit(parsed: ZaiUsageLimitItem): boolean {
 }
 
 function requestQuotaLabel(parsed: ZaiUsageLimitItem): string {
-	if (isZaiFeatureRequestLimit(parsed)) return "ZAI Web Search / Reader / Zread Quota";
+	if (isZaiFeatureRequestLimit(parsed)) return "ZAI Zread Quota";
 	return "ZAI Request Quota";
 }
 
 function buildModelUsageUrl(baseUrl: string, now: Date): string {
-	const start = new Date(now.getTime() - SEVEN_DAYS_MS);
+	const start = new Date(now.getTime() - WEEK_MS);
 	const startTime = formatDate(start);
 	const endTime = formatDate(now);
 	return `${baseUrl}${MODEL_USAGE_PATH}?startTime=${encodeURIComponent(startTime)}&endTime=${encodeURIComponent(endTime)}`;
 }
 
 function getZaiCredentialLimits(report: UsageReport): UsageLimit[] {
-	const limits = report.limits.filter(
-		limit => limit.id.startsWith("zai:requests:") || limit.id.startsWith("zai:tokens:"),
+	return report.limits.filter(
+		limit =>
+			limit.id.startsWith("zai:requests:") ||
+			limit.id.startsWith("zai:tokens:") ||
+			limit.id.startsWith("zai:credits:"),
 	);
-	return limits;
+}
+
+function zaiLimitPressure(limit: UsageLimit): number {
+	const fraction = limit.amount.usedFraction;
+	return typeof fraction === "number" && Number.isFinite(fraction) ? fraction : -1;
 }
 
 function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
 	const requestLimits = report.limits.filter(limit => limit.id.startsWith("zai:requests:"));
 	const credentialLimits = getZaiCredentialLimits(report);
 	const limits = requestLimits.length > 0 ? requestLimits : credentialLimits;
-	const ranked = [...limits];
+	// Mixed-meter payloads (tokens + credits on the same plan) can repeat a
+	// window; keep the most-binding limit per window so a second 5h row never
+	// displaces the weekly window when primary/secondary are picked positionally.
+	const byWindow = new Map<number, UsageLimit>();
+	for (const limit of limits) {
+		const durationMs = limit.window?.durationMs ?? Number.POSITIVE_INFINITY;
+		const current = byWindow.get(durationMs);
+		if (!current || zaiLimitPressure(limit) > zaiLimitPressure(current)) byWindow.set(durationMs, limit);
+	}
+	const ranked = [...byWindow.values()];
 	ranked.sort((left, right) => {
 		const leftDuration = left.window?.durationMs ?? Number.POSITIVE_INFINITY;
 		const rightDuration = right.window?.durationMs ?? Number.POSITIVE_INFINITY;
@@ -220,14 +236,18 @@ function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
 async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "zai") return null;
 	const credential = params.credential;
-	if (credential.type !== "api_key" || !credential.apiKey) return null;
+	// Sign-in (oauth) stores the minted id.secret key in accessToken; the paste
+	// path stores it in apiKey. Both are the same raw key used verbatim as the
+	// Authorization header (no Bearer prefix).
+	const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+	if (!token) return null;
 
 	const baseUrl = normalizeZaiBaseUrl(params.baseUrl);
 	const url = `${baseUrl}${QUOTA_PATH}`;
 	const headers: Record<string, string> = {
-		Authorization: credential.apiKey,
+		Authorization: token,
 		"Content-Type": "application/json",
-		"User-Agent": "OpenCode-Status-Plugin/1.0",
+		"User-Agent": USER_AGENT,
 	};
 
 	let payload: ZaiQuotaPayload | null = null;
@@ -291,13 +311,40 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			});
 			const featureLimit = isZaiFeatureRequestLimit(parsed);
 			limits.push({
-				id: featureLimit ? `zai:features:web-search-reader-zread:${window.id}` : `zai:requests:${window.id}`,
+				id: featureLimit ? `zai:features:zread:${window.id}` : `zai:requests:${window.id}`,
 				label: requestQuotaLabel(parsed),
 				scope: {
 					provider: params.provider,
 					windowId: window.id,
 					shared: !featureLimit,
-					...(featureLimit ? { tier: "web-search-reader-zread" } : {}),
+					...(featureLimit ? { tier: "zread" } : {}),
+				},
+				window,
+				amount,
+				status: getUsageStatus(amount.usedFraction),
+			});
+		}
+		if (parsed.type === "CREDIT_LIMIT") {
+			// GLM Coding Plan windows (e.g. 12k credits / 5h + 60k credits / week):
+			// `usage` is the plan's credit allotment, `currentValue` the spend.
+			// `percentage` is a server-rounded integer (11 for 1438/12000 ≈ 11.98%),
+			// so prefer the exact ratio and fall back to it only without absolutes.
+			const window = buildZaiWindow(parsed);
+			const hasAbsoluteMeter = parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0;
+			const amount = buildUsageAmount({
+				used: parsed.currentValue,
+				limit: parsed.usage,
+				remaining: parsed.remaining,
+				percentage: hasAbsoluteMeter ? undefined : parsed.percentage,
+				unit: "credits",
+			});
+			limits.push({
+				id: `zai:credits:${window.id}`,
+				label: `ZAI ${window.label} Credit Quota`,
+				scope: {
+					provider: params.provider,
+					windowId: window.id,
+					shared: true,
 				},
 				window,
 				amount,
@@ -316,6 +363,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			endpoint: url,
 			accountId: credential.accountId,
 			email: credential.email,
+			...(typeof payload.data?.level === "string" && payload.data.level ? { planType: payload.data.level } : {}),
 		},
 		raw: payload,
 	};
@@ -345,7 +393,9 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 export const zaiUsageProvider: UsageProvider = {
 	id: "zai",
 	fetchUsage: fetchZaiUsage,
-	supports: params => params.provider === "zai" && params.credential.type === "api_key",
+	supports: params =>
+		params.provider === "zai" &&
+		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
 };
 
 export const zaiRankingStrategy: CredentialRankingStrategy = {

@@ -9,7 +9,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import {
-	directoryExists,
+	directoryIsEnterable,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -21,6 +21,7 @@ import {
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -35,6 +36,7 @@ import { type BuildSessionContextOptions, buildSessionContext, type SessionConte
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
+	type CredentialPinEntry,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
@@ -42,7 +44,9 @@ import {
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type ModelUsageEntry,
 	type NewSessionOptions,
+	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
 	type SessionHeader,
@@ -57,7 +61,13 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import {
+	loadEntriesFromFile,
+	loadSessionFile,
+	resolveBlobRefsInEntries,
+	type SessionLoadResult,
+	visitEntriesFromFile,
+} from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -66,6 +76,7 @@ import {
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import { prepareEntryForPersistence } from "./session-persistence";
+import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
@@ -73,11 +84,16 @@ import {
 	type SessionStorageWriter,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import {
+	additionalWorkspaceDirectories,
+	normalizeSessionWorkspace,
+	normalizeWorkspaceDirectory,
+} from "./session-workspace";
+import { recordSessionTitle } from "./title-index";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
-const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
-const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
+const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
 
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -92,7 +108,31 @@ function fileSafeTimestamp(iso: string): string {
 }
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
-	return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
+	if (!sessionFile?.endsWith(".jsonl")) return null;
+	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
+}
+
+/** Copy a session's artifact directory to another session, matching interactive `/fork`. */
+export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+	const sourceArtifactsDir = artifactsDirectoryFor(sourceSessionFile);
+	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
+	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
+	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
+
+	try {
+		const sourceStat = await fs.promises.stat(sourceArtifactsDir);
+		if (sourceStat.isDirectory()) {
+			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, { recursive: true });
+		}
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Failed to copy artifacts during fork", {
+				sourceArtifactsDir,
+				destinationArtifactsDir,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
 }
 
 /**
@@ -138,6 +178,7 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 }
 
 function entryUsage(entry: SessionEntry): Usage | undefined {
+	if (entry.type === "model_usage") return entry.usage;
 	if (entry.type !== "message") return undefined;
 	const message = entry.message;
 	if (message.role === "assistant") return message.usage;
@@ -159,6 +200,19 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.cost += usage.cost.total;
 }
 
+/**
+ * Zero the monetary attribution on one usage record in place, leaving token
+ * counts untouched. Cost, credit meters, and premium-request counts describe
+ * billing; forks that must not inherit spend (see {@link SessionManager.forkFrom}
+ * `resetInheritedCost`) drop them while keeping the tokens compaction relies on.
+ */
+function resetUsageCost(usage: Usage | undefined): void {
+	if (!usage) return;
+	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	usage.credits = undefined;
+	usage.premiumRequests = undefined;
+}
+
 function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
@@ -176,6 +230,7 @@ function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 		case "thinking_level_change":
 		case "service_tier_change":
 		case "mode_change":
+		case "credential_pin":
 			return true;
 		default:
 			return false;
@@ -321,6 +376,7 @@ class SessionEntryIndex {
 export type ReadonlySessionManager = Pick<
 	SessionManager,
 	| "getCwd"
+	| "getRecordedCwd"
 	| "getSessionDir"
 	| "getSessionId"
 	| "getSessionFile"
@@ -355,6 +411,7 @@ interface SessionManagerStateSnapshot {
 	onDisk: boolean;
 	needsRewrite: boolean;
 	draftOnlySessionCleanupArmed: boolean;
+	fallbackRuntimeOnly: boolean;
 	header: SessionHeader;
 	entries: SessionEntry[];
 }
@@ -365,6 +422,34 @@ interface DiskQueueOptions {
 	epoch?: number;
 }
 
+interface AtomicEntryBatch {
+	collecting: boolean;
+	entryIds: Set<string>;
+	deferredNotifications: SessionEntry[];
+	preBatchLeafId: string | null;
+	externalLeafChanged: boolean;
+	externalLeafId: string | null;
+}
+
+/**
+ * The storage may have published a write that rejected, and an authoritative
+ * repair could not be proven durable. Callers must fail closed until recovery.
+ */
+export class SessionPersistenceIndeterminateError extends AggregateError {
+	readonly operationError: Error;
+	readonly recoveryErrors: readonly Error[];
+
+	constructor(operationError: Error, recoveryErrors: readonly Error[]) {
+		super(
+			[operationError, ...recoveryErrors],
+			`Session persistence is indeterminate after "${operationError.message}" and authoritative repair failed.`,
+		);
+		this.name = "SessionPersistenceIndeterminateError";
+		this.operationError = operationError;
+		this.recoveryErrors = [...recoveryErrors];
+	}
+}
+
 /**
  * Stores and navigates an append-only conversation journal.
  *
@@ -372,14 +457,28 @@ interface DiskQueueOptions {
  * tree by `(id, parentId)`, and the mutable leaf pointer selects which path is
  * active for future appends and for LLM context construction.
  *
- * Durability is software-crash safe but not power-loss safe: appends are handed
- * to the OS synchronously in-body (so an entry survives an OOM/SIGKILL the
- * instant `appendMessage` returns) but never `fsync`'d. Full-file rewrites go
- * through the storage layer's atomic temp-write+rename so a crash mid-rewrite
- * cannot truncate the prior good file.
+ * Durability is software-crash safe but not power-loss safe: completed entries
+ * (user/assistant/toolResult messages, tool_execution_start markers, custom
+ * entries) are handed to the OS synchronously in-body on append and never
+ * `fsync`'d. In-flight streaming text is intentionally not durable until
+ * `message_end` persists the finished message.
+ *
+ * While an in-place atomic rewrite is publishing, a concurrent completed append
+ * supersedes that publish with a synchronous full-body rewrite so the entry is
+ * software-crash durable before the append returns; the abandoned atomic's
+ * `commitGuard` then refuses to clobber the fresher body.
+ *
+ * During {@link moveTo}, appends write a full body to the live relocation path
+ * (source until rename, destination once the rename has landed) so a crash mid-
+ * move still preserves completed entries without recreating a vacated source.
+ * A trailing atomic rewrite still rewrites the header cwd after the path is
+ * repointed.
  */
 export class SessionManager {
 	#cwd: string;
+	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
+	#additionalDirectories: string[] = [];
+	#fallbackRuntimeOnly = false;
 	#sessionDir: string;
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
@@ -421,10 +520,16 @@ export class SessionManager {
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
+	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
+	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
 	#diskTail: Promise<void> = Promise.resolve();
 	#diskFailure: Error | undefined;
 	#diskFailureLogged = false;
+	/** FIFO reservation for atomic batches and authoritative recovery. */
+	#atomicPersistenceTail: Promise<void> = Promise.resolve();
+	/** Observer notifications withheld until their entries are proven durable. */
+	#pendingDurabilityNotifications: SessionEntry[] = [];
 	/** Bumped on every sync rewrite / chain reset so stale queued tasks become no-ops. */
 	#diskEpoch = 0;
 	/**
@@ -438,6 +543,15 @@ export class SessionManager {
 	#atomicRewriteFenceEpoch: number | null = null;
 	/** Set by synchronous appends that land while an atomic replacement is active. */
 	#atomicRewriteDirty = false;
+	/**
+	 * Active {@link moveTo} relocation. Concurrent completed appends write a
+	 * full body to the live path: source while it still exists, destination
+	 * once rename has landed (source gone). Never recreates a vacated source.
+	 * `null` outside an active relocation.
+	 */
+	#sessionFileRelocating: { source: string; dest: string } | null = null;
+	/** Atomic entry batch currently staged for a full-file commit. */
+	#atomicEntryBatch: AtomicEntryBatch | undefined;
 
 	#artifactManager: ArtifactManager | null = null;
 	#artifactManagerSessionFile: string | null = null;
@@ -454,6 +568,7 @@ export class SessionManager {
 	 */
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
+	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -495,6 +610,15 @@ export class SessionManager {
 				error: error.message,
 				stack: error.stack,
 			});
+			for (const callback of this.#persistenceErrorCallbacks) {
+				try {
+					callback(error);
+				} catch (callbackError) {
+					logger.warn("Session persistence error observer failed", {
+						error: toError(callbackError).message,
+					});
+				}
+			}
 		}
 
 		return this.#diskFailure;
@@ -515,6 +639,18 @@ export class SessionManager {
 		});
 		this.#diskTail = reported.catch(() => undefined);
 		return reported;
+	}
+
+	async #withAtomicPersistenceLock<T>(operation: () => Promise<T>): Promise<T> {
+		const predecessor = this.#atomicPersistenceTail;
+		const turn = Promise.withResolvers<void>();
+		this.#atomicPersistenceTail = predecessor.catch(() => undefined).then(() => turn.promise);
+		await predecessor.catch(() => undefined);
+		try {
+			return await operation();
+		} finally {
+			turn.resolve();
+		}
 	}
 
 	async #drainAndCloseWriter(): Promise<void> {
@@ -542,6 +678,127 @@ export class SessionManager {
 		if (!writer) return;
 		this.#writer = undefined;
 		await writer.close();
+	}
+
+	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
+		const error = new SessionPersistenceIndeterminateError(operationError, recoveryErrors);
+		this.#diskFailure = error;
+		if (!this.#diskFailureLogged) {
+			this.#diskFailureLogged = true;
+			logger.error("Session persistence became indeterminate.", {
+				sessionFile: this.#sessionFile,
+				error: error.message,
+			});
+		}
+		return error;
+	}
+
+	#notifyDurableEntries(entries: readonly SessionEntry[] = []): void {
+		const notifications = [...this.#pendingDurabilityNotifications, ...entries];
+		this.#pendingDurabilityNotifications = [];
+		const seen = new Set<string>();
+		for (const entry of notifications) {
+			if (seen.has(entry.id)) continue;
+			seen.add(entry.id);
+			this.#notifyEntryAppended(entry);
+		}
+	}
+
+	async #authoritativelyRewriteCurrentStateLocked(operationError: Error): Promise<void> {
+		if (this.#released) {
+			// Terminal seal: repair would reset the disk tail (escaping the
+			// close() serialization) and atomically publish #fileBody() — after
+			// release that truncates, and a revival may already own the file.
+			// The original operation error still propagates to the caller.
+			logger.warn("Skipped authoritative session repair after terminal release", {
+				error: String(operationError),
+			});
+			return;
+		}
+		if (!this.#persist || !this.#sessionFile) return;
+		const previousDiskTail = this.#diskTail;
+		const writer = this.#writer;
+		this.#diskEpoch++;
+		const epoch = this.#diskEpoch;
+		this.#writer = undefined;
+		this.#diskTail = Promise.resolve();
+		this.#forceFileCreation = true;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#atomicRewriteFenceEpoch = epoch;
+		if (!this.#diskFailure) this.#diskFailure = operationError;
+		try {
+			await previousDiskTail.catch(() => undefined);
+			let closeError: Error | undefined;
+			if (writer) {
+				try {
+					await writer.close();
+				} catch (error) {
+					closeError = toError(error);
+				}
+			}
+			let drainError: Error | undefined;
+			try {
+				await this.#storage.drain();
+			} catch (error) {
+				drainError = toError(error);
+			}
+			if (writer?.isOpen()) {
+				throw this.#latchIndeterminate(operationError, [
+					closeError ?? new Error("Failed to close session writer before authoritative repair."),
+					...(drainError ? [drainError] : []),
+				]);
+			}
+
+			do {
+				this.#atomicRewriteDirty = false;
+				const sessionFile = this.#sessionFile;
+				if (!sessionFile) {
+					throw this.#latchIndeterminate(operationError, [
+						new Error("Session file disappeared during authoritative repair."),
+					]);
+				}
+				const body = this.#fileBody();
+				try {
+					await this.#storage.writeTextAtomic(sessionFile, body, {
+						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+					});
+				} catch (error) {
+					const recoveryErrors = [toError(error)];
+					try {
+						await this.#storage.drain();
+					} catch (drainFailure) {
+						recoveryErrors.push(toError(drainFailure));
+					}
+					let actual: string;
+					try {
+						actual = await this.#storage.readText(sessionFile);
+					} catch (readFailure) {
+						recoveryErrors.push(toError(readFailure));
+						throw this.#latchIndeterminate(operationError, recoveryErrors);
+					}
+					if (actual !== body) {
+						recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
+						throw this.#latchIndeterminate(operationError, recoveryErrors);
+					}
+				}
+				if (this.#diskEpoch !== epoch) {
+					throw this.#latchIndeterminate(operationError, [
+						new Error("Authoritative session repair was superseded before verification."),
+					]);
+				}
+			} while (this.#atomicRewriteDirty);
+
+			this.#fileIsCurrent = true;
+			this.#rewriteRequired = false;
+			this.#hasTitleSlot = true;
+			this.#clearDiskError();
+		} catch (error) {
+			if (error instanceof SessionPersistenceIndeterminateError) throw error;
+			throw this.#latchIndeterminate(operationError, [toError(error)]);
+		} finally {
+			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+		}
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -583,44 +840,58 @@ export class SessionManager {
 		return this.#forceFileCreation || this.#fileIsCurrent || this.#historyContainsAssistantMessage();
 	}
 
-	#elideSupersededCompactionsOnBranch(leafId: string | null): boolean {
-		if (!leafId) return false;
-		let changed = false;
-		for (const entry of this.#index.pathTo(leafId)) {
-			if (entry.type !== "compaction") continue;
-			if (
-				entry.summary === SUPERSEDED_COMPACTION_SUMMARY &&
-				entry.shortSummary === SUPERSEDED_COMPACTION_SHORT_SUMMARY &&
-				entry.preserveData === undefined
-			) {
-				continue;
-			}
-			entry.summary = SUPERSEDED_COMPACTION_SUMMARY;
-			entry.shortSummary = SUPERSEDED_COMPACTION_SHORT_SUMMARY;
-			entry.preserveData = undefined;
-			changed = true;
-		}
-		return changed;
+	/**
+	 * Live path for concurrent completed appends during {@link moveTo}.
+	 * Prefers destination once rename has landed (source gone); otherwise
+	 * source. Never invents a path that does not already exist.
+	 */
+	#liveRelocationWritePath(): string | null {
+		const relocating = this.#sessionFileRelocating;
+		if (!relocating) return null;
+		if (this.#storage.existsSync(relocating.dest)) return relocating.dest;
+		if (this.#storage.existsSync(relocating.source)) return relocating.source;
+		// Rename in flight with neither path visible (rare cross-device edge):
+		// fall back to destination so we do not recreate a vacated source.
+		return relocating.dest;
 	}
 
 	/**
 	 * Synchronously rewrite the whole file (header + entries) and keep no open
 	 * writer; the next append re-opens one. `writeTextSync` returns with the
 	 * bytes in the kernel page cache, so the file is software-crash durable.
+	 *
+	 * During {@link moveTo}, writes to the live relocation path (source pre-
+	 * rename, destination post-rename) rather than always `#sessionFile`, so
+	 * concurrent completed entries are durable without recreating a vacated source.
 	 */
 	#rewriteSynchronously(): void {
-		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
+		if (this.#released) return;
+		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
+		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
+		if (!targetPath) return;
 
 		try {
 			const body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
-			this.#storage.writeTextSync(this.#sessionFile, body);
-			this.#fileIsCurrent = true;
-			this.#materializeBreadcrumb();
-			this.#rewriteRequired = false;
-			this.#hasTitleSlot = true;
+			this.#storage.writeTextSync(targetPath, body);
+			this.#clearDiskError();
+			// Only mark the manager current when writing the active session path.
+			// Mid-move writes update the live relocation path; `#sessionFile` is
+			// still the pre-repoint source until moveTo repoints it.
+			if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
+				this.#fileIsCurrent = true;
+				this.#materializeBreadcrumb();
+				this.#rewriteRequired = false;
+				this.#hasTitleSlot = true;
+			} else {
+				// Destination body is current on disk; in-memory still needs a
+				// header-cwd rewrite after repoint, but entries are durable.
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				this.#hasTitleSlot = true;
+			}
 		} catch (err) {
 			this.#noteDiskFailure(err);
 		}
@@ -638,6 +909,7 @@ export class SessionManager {
 	 */
 	async #rewriteAtomically(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
+		if (this.#released) return;
 
 		const startEpoch = this.#diskEpoch;
 		await this.#scheduleDiskWork(
@@ -663,6 +935,7 @@ export class SessionManager {
 	 * their post-publish state updates.
 	 */
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
+		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		try {
 			do {
@@ -672,7 +945,7 @@ export class SessionManager {
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
 				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
-					commitGuard: () => this.#diskEpoch === epoch,
+					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 				});
 				if (this.#diskEpoch !== epoch) return false;
 			} while (this.#atomicRewriteDirty);
@@ -689,8 +962,20 @@ export class SessionManager {
 	}
 
 	#appendToSessionFile(entry: SessionEntry): void {
-		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#diskFailure) throw this.#diskFailure;
+		if (this.#released || !this.#persist || !this.#sessionFile) return;
+		if (this.#atomicEntryBatch) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#atomicRewriteDirty = true;
+			return;
+		}
+		if (this.#diskFailure) {
+			// The failed entry and any later entries remain in memory. A full
+			// replacement is the writability probe and restores all of them once
+			// transient storage pressure clears.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
 
 		// Lazy gate: a brand-new session is not written until it has an assistant
 		// message (or someone forced creation), so sessions that never produce
@@ -700,17 +985,21 @@ export class SessionManager {
 			return;
 		}
 
-		// Atomic replacement window: the old path may be moved aside underneath
-		// any newly-opened append handle (Windows EPERM fallback). Do not open a
-		// writer here; the active rewrite loops and serializes a fresh full body.
-		// A superseding synchronous rewrite bumps `#diskEpoch`, at which point
-		// the pending atomic publish is guaranteed to abandon via its
-		// `commitGuard`, so appends can (and must) take the hot path so they
-		// don't strand in memory while `close()` returns without a rewrite.
+		// Atomic replacement / move window: do not open a fresh append writer that
+		// a Windows EPERM replace could detach from the current JSONL path.
+		// - moveTo: write a full body to the live relocation path (source pre-
+		//   rename, destination post-rename) so completed entries are durable
+		//   without recreating a vacated source.
+		// - in-place atomic fence: supersede the pending publish with a
+		//   synchronous full-body rewrite; bumping `#diskEpoch` abandons the
+		//   in-flight atomic via its `commitGuard`.
+		if (this.#sessionFileRelocating) {
+			this.#rewriteSynchronously();
+			return;
+		}
 		if (this.#atomicRewriteFenceEpoch !== null && this.#atomicRewriteFenceEpoch === this.#diskEpoch) {
-			this.#fileIsCurrent = false;
-			this.#rewriteRequired = true;
 			this.#atomicRewriteDirty = true;
+			this.#rewriteSynchronously();
 			return;
 		}
 		// Cold/divergent: not on disk yet, or in-memory entries diverged from the
@@ -720,26 +1009,55 @@ export class SessionManager {
 			return;
 		}
 
-		// Hot path: append synchronously so the entry is durable the instant this
-		// returns (file/memory writers perform the write in-body). Never routed
-		// through the async disk chain — durability must hold without a flush().
+		// Hot path: write the entry directly on the writer, outside the async disk
+		// chain. Prefer appendSync so write failures latch `#diskFailure` before
+		// this call returns (not via a discarded rejected Promise after a later
+		// microtask). Callers stay non-throwing here — the core turn loop invokes
+		// appendMessage/appendCustomEntry without try/catch. A later entry retries
+		// all in-memory state through a full rewrite. File writers apply each line
+		// to the OS page cache before return.
 		// A mid-close writer leaves `#writer` undefined, so `#appendWriter` simply
 		// opens a fresh append handle and the entry still lands.
 		try {
-			void this.#appendWriter()
-				.append(this.#lineFor(entry))
-				.catch(err => this.#noteDiskFailure(err));
+			const writer = this.#appendWriter();
+			const line = this.#lineFor(entry);
+			if (writer.appendSync) {
+				writer.appendSync(line);
+			} else {
+				void writer.append(line).catch(err => {
+					this.#fileIsCurrent = false;
+					this.#rewriteRequired = true;
+					this.#noteDiskFailure(err);
+				});
+			}
 		} catch (err) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
 			this.#noteDiskFailure(err);
 		}
 	}
 
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#diskFailure) throw this.#diskFailure;
+		if (this.#diskFailure) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#rewriteSynchronously();
+			if (this.#diskFailure) throw this.#diskFailure;
+			return;
+		}
 
 		if (!this.#shouldHaveSessionFile()) {
 			this.#fileIsCurrent = false;
+			return;
+		}
+
+		// Title changes use their own asynchronous append path rather than
+		// #appendToSessionFile. During move, write the full body (including the
+		// title entry) to the live relocation path so a crash mid-move still
+		// keeps the title change; the trailing rewrite still updates header cwd.
+		if (this.#sessionFileRelocating) {
+			this.#rewriteSynchronously();
 			return;
 		}
 
@@ -757,6 +1075,7 @@ export class SessionManager {
 		const line = this.#lineFor(entry);
 		await this.#scheduleDiskWork(
 			async () => {
+				if (this.#released) return;
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
@@ -789,6 +1108,7 @@ export class SessionManager {
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
+		this.#reconcileSessionDirForFallback();
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -805,6 +1125,14 @@ export class SessionManager {
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 		};
+		const workspace = normalizeSessionWorkspace({
+			cwd: this.#cwd,
+			directories: options?.additionalDirectories ?? [],
+		});
+		this.#additionalDirectories = additionalWorkspaceDirectories(workspace);
+		if (this.#additionalDirectories.length > 0) {
+			this.#header.additionalDirectories = [...this.#additionalDirectories];
+		}
 		this.#titleUpdatedAt = timestamp;
 
 		this.#entries = [];
@@ -853,11 +1181,48 @@ export class SessionManager {
 		};
 	}
 
+	#setLeaf(id: string | null): void {
+		this.#index.setLeaf(id);
+		const batch = this.#atomicEntryBatch;
+		if (batch && !batch.collecting) {
+			batch.externalLeafChanged = true;
+			batch.externalLeafId = id;
+		}
+	}
+
 	#recordEntry(entry: SessionEntry): void {
+		if (this.#released) {
+			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
+			return;
+		}
 		this.#entries.push(entry);
 		this.#index.insert(entry);
+		const batch = this.#atomicEntryBatch;
+		if (batch?.collecting) batch.entryIds.add(entry.id);
+		if (batch && !batch.collecting) {
+			batch.externalLeafChanged = true;
+			batch.externalLeafId = entry.id;
+		}
 		this.#appendToSessionFile(entry);
-		this.#notifyEntryAppended(entry);
+		if (batch) batch.deferredNotifications.push(entry);
+		else this.#notifyEntryAppended(entry);
+	}
+
+	#rollbackAtomicEntryBatch(batch: AtomicEntryBatch): void {
+		const retainedAncestor = (id: string | null): string | null => {
+			const seen = new Set<string>();
+			while (id && batch.entryIds.has(id) && !seen.has(id)) {
+				seen.add(id);
+				id = this.#index.get(id)?.parentId ?? null;
+			}
+			return id;
+		};
+		const retained = this.#entries.filter(entry => !batch.entryIds.has(entry.id));
+		for (const entry of retained) entry.parentId = retainedAncestor(entry.parentId);
+		const restoredLeaf = retainedAncestor(batch.externalLeafChanged ? batch.externalLeafId : batch.preBatchLeafId);
+		this.#entries = retained;
+		this.#index.rebuild(retained);
+		this.#index.setLeaf(restoredLeaf && this.#index.has(restoredLeaf) ? restoredLeaf : null);
 	}
 
 	#draftPath(): string | null {
@@ -909,7 +1274,7 @@ export class SessionManager {
 	}
 
 	#notifySessionNameListeners(): void {
-		for (const callback of [...this.#sessionNameChangedCallbacks]) {
+		for (const callback of Array.from(this.#sessionNameChangedCallbacks)) {
 			try {
 				callback();
 			} catch (err) {
@@ -948,9 +1313,12 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
-			// Snapshot header + entries by reference: switch/reload replaces the
-			// active header/array wholesale, so rollback needs no deep clone.
-			header: this.#header,
+			fallbackRuntimeOnly: this.#fallbackRuntimeOnly,
+			// Entries are snapshotted by reference (switch/reload replaces the
+			// array wholesale). The header is cloned: moveTo mutates it in place
+			// (cwd, additionalDirectories), so a by-reference capture would let
+			// a rollback observe the move it is undoing.
+			header: structuredClone(this.#header),
 			entries: [...this.#entries],
 		};
 	}
@@ -987,8 +1355,11 @@ export class SessionManager {
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
+		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
+		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
+
 		this.#titleSource = snapshot.titleSource;
 		this.#titleUpdatedAt = snapshot.titleUpdatedAt;
 		this.#hasTitleSlot = snapshot.hasTitleSlot;
@@ -999,18 +1370,60 @@ export class SessionManager {
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 	}
 
+	/**
+	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
+	 * session and artifacts back into the captured bucket, then restore the
+	 * captured metadata (cwd, header, additionalDirectories). The captured
+	 * header is persisted after relocation so a fresh open of the source
+	 * session sees the pre-move metadata, including workspace roots the move
+	 * filtered out. Rollbacks must not re-enter forward-move hooks, so this
+	 * bypasses AgentSession entirely. If the rename-back itself fails, the
+	 * manager stays pointed at the actual moved file (restoring the snapshot
+	 * would split the transcript across a recreated source and the stranded
+	 * target) and the error names where the session file actually lives.
+	 */
+	async rollbackMove(snapshot: SessionManagerStateSnapshot): Promise<void> {
+		try {
+			const targetSessionDir = snapshot.sessionFile ? path.dirname(snapshot.sessionFile) : snapshot.sessionDir;
+			await this.moveTo(snapshot.cwd, targetSessionDir);
+		} catch (error) {
+			const movedFile = this.getSessionFile();
+			throw new Error(
+				`could not relocate the session back to ${snapshot.sessionDir} (${error instanceof Error ? error.message : String(error)}); the session file remains at ${movedFile}`,
+			);
+		}
+		this.restoreState(snapshot);
+		// The inverse moveTo already rewrote the source file with the
+		// target-filtered header. Persist the captured one so disk and memory
+		// agree after a fresh open.
+		if (this.#persist && this.#sessionFile) {
+			this.#forceFileCreation = true;
+			this.#rewriteRequired = true;
+			await this.#rewriteAtomically();
+		}
+	}
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
+		await this.#setSessionFile(sessionFile);
+	}
+
+	async #setSessionFile(sessionFile: string, loadedSession?: SessionLoadResult): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
+		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
+		if (loaded.invalidHeader) {
+			throw new Error(
+				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
+			);
+		}
+
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		const titleSlot = await readTitleSlotFromFile(resolvedSessionFile, this.#storage);
-		const fileEntries = await loadEntriesFromFile(resolvedSessionFile, this.#storage);
+		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
 			// keep the requested path and materialize the header immediately.
@@ -1026,24 +1439,35 @@ export class SessionManager {
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
-		// Adopt the loaded session's working directory. Sessions live in a dir
-		// keyed by their cwd, so resuming a session from another project must
-		// re-point cwd/sessionDir at that project — unless that project directory
-		// no longer exists on disk, in which case adopting it (and the process
-		// chdir interactive mode then performs) would fail with ENOENT. Keep the
-		// current cwd so the resumed session stays where the user already is.
+		// Adopt the loaded session's working directory only when it is verifiably
+		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
+		// session from another project must re-point cwd/sessionDir at that
+		// project — but a deleted OR permission-blocked directory (macOS TCC
+		// denial) must not be adopted: callers without a cwd-change callback
+		// (extension UI, RPC) would otherwise track a directory the process
+		// cannot enter. Keep the current cwd so the session stays where the
+		// user already is.
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryExists(headerCwd))) {
+		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
 			this.#cwd = headerCwd;
 			this.#sessionDir = path.dirname(resolvedSessionFile);
+			this.#fallbackRuntimeOnly = false;
 			this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
+		} else if (headerCwd && headerCwd !== path.resolve(this.#cwd)) {
+			// Header cwd not enterable: keep runtime cwd but mark fallback
+			// so workspace changes stay runtime-only until the transcript
+			// is relocated.
+			this.#fallbackRuntimeOnly = true;
+		} else {
+			this.#fallbackRuntimeOnly = false;
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
-		this.#rewriteRequired = migrated;
+		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
@@ -1078,6 +1502,7 @@ export class SessionManager {
 		const parentSessionId = this.#sessionId;
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
+		this.#reconcileSessionDirForFallback();
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
@@ -1090,6 +1515,7 @@ export class SessionManager {
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
 			cwd: this.#cwd,
+			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
 		};
@@ -1109,104 +1535,142 @@ export class SessionManager {
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
 	}
 
-	/**
-	 * Move the session to a new working directory: relocate the session file and
-	 * artifacts on disk, update internal references, and rewrite the header cwd.
-	 */
+	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
-		if (
-			resolvedCwd === path.resolve(this.#cwd) &&
-			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir))
-		) {
-			return;
-		}
-
 		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
 		const nextSessionDir =
 			resolvedTargetDir ??
 			(managedRoot
 				? computeDefaultSessionDir(resolvedCwd, this.#storage, managedRoot)
 				: computeDefaultSessionDir(resolvedCwd, this.#storage));
+		const expectedSessionFile = this.#sessionFile
+			? path.join(nextSessionDir, path.basename(this.#sessionFile))
+			: undefined;
+		if (
+			resolvedCwd === path.resolve(this.#cwd) &&
+			!this.#fallbackRuntimeOnly &&
+			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir)) &&
+			(!expectedSessionFile || path.resolve(this.#sessionFile!) === path.resolve(expectedSessionFile))
+		) {
+			return;
+		}
 
 		let sessionFileExisted = false;
-
+		// Track source+dest for concurrent completed appends during relocation
+		// (see `#sessionFileRelocating`). Existence of either path decides the
+		// live write target — not a `#diskEpoch` bump, which would cancel any
+		// disk task already queued at the current epoch (e.g. a header-only
+		// `ensureOnDisk()` materializing rewrite) before the drain below runs it.
 		if (this.#persist && this.#sessionFile) {
-			this.#storage.ensureDirSync(nextSessionDir);
-			await this.#drainAndCloseWriter();
-			this.#clearDiskError();
+			const source = this.#sessionFile;
+			const dest = path.join(nextSessionDir, path.basename(source));
+			this.#sessionFileRelocating = { source, dest };
+		}
 
-			const oldSessionFile = this.#sessionFile;
-			const newSessionFile = path.join(nextSessionDir, path.basename(oldSessionFile));
-			const oldArtifactsDir = artifactsDirectoryFor(oldSessionFile)!;
-			const newArtifactsDir = artifactsDirectoryFor(newSessionFile)!;
-			const sessionPathChanged = path.resolve(oldSessionFile) !== path.resolve(newSessionFile);
-			const artifactPathChanged = path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
-			sessionFileExisted = this.#storage.existsSync(oldSessionFile);
+		try {
+			if (this.#persist && this.#sessionFile) {
+				this.#storage.ensureDirSync(nextSessionDir);
+				await this.#drainAndCloseWriter();
+				this.#clearDiskError();
 
-			let sessionMoved = false;
-			let artifactsMoved = false;
+				const oldSessionFile = this.#sessionFile;
+				const newSessionFile = path.join(nextSessionDir, path.basename(oldSessionFile));
+				const oldArtifactsDir = artifactsDirectoryFor(oldSessionFile);
+				const newArtifactsDir = artifactsDirectoryFor(newSessionFile);
+				const sessionPathChanged = path.resolve(oldSessionFile) !== path.resolve(newSessionFile);
+				const artifactPathChanged =
+					oldArtifactsDir !== null &&
+					newArtifactsDir !== null &&
+					path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
+				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 
-			try {
-				if (sessionFileExisted && sessionPathChanged) {
-					await fs.promises.rename(oldSessionFile, newSessionFile);
-					sessionMoved = true;
-				}
+				let sessionMoved = false;
+				let artifactsMoved = false;
 
-				if (artifactPathChanged) {
-					try {
-						const artifactStat = await fs.promises.stat(oldArtifactsDir);
-						if (artifactStat.isDirectory()) {
-							await fs.promises.rename(oldArtifactsDir, newArtifactsDir);
-							artifactsMoved = true;
+				try {
+					if (sessionFileExisted && sessionPathChanged) {
+						await fs.promises.rename(oldSessionFile, newSessionFile);
+						sessionMoved = true;
+					}
+
+					if (artifactPathChanged) {
+						try {
+							const artifactStat = await fs.promises.stat(oldArtifactsDir);
+							if (artifactStat.isDirectory()) {
+								await fs.promises.rename(oldArtifactsDir, newArtifactsDir);
+								artifactsMoved = true;
+							}
+						} catch (err) {
+							if (!isEnoent(err)) throw err;
 						}
-					} catch (err) {
-						if (!isEnoent(err)) throw err;
 					}
-				}
-			} catch (err) {
-				if (artifactsMoved) {
-					try {
-						await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
-					} catch (rollbackErr) {
-						throw new Error(
-							`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-						);
+				} catch (err) {
+					if (artifactsMoved && oldArtifactsDir && newArtifactsDir) {
+						try {
+							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
+						} catch (rollbackErr) {
+							throw new Error(
+								`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+							);
+						}
 					}
+
+					if (sessionMoved) {
+						try {
+							await fs.promises.rename(newSessionFile, oldSessionFile);
+						} catch (rollbackErr) {
+							throw new Error(
+								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+							);
+						}
+					}
+
+					throw err;
 				}
 
-				if (sessionMoved) {
-					try {
-						await fs.promises.rename(newSessionFile, oldSessionFile);
-					} catch (rollbackErr) {
-						throw new Error(
-							`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-						);
-					}
+				if (sessionFileExisted && sessionPathChanged) {
+					this.#header.previousSessionFiles = [
+						...new Set([...(this.#header.previousSessionFiles ?? []), path.resolve(oldSessionFile)]),
+					];
 				}
 
-				throw err;
+				this.#sessionFile = newSessionFile;
+				this.#artifactManager = null;
+				this.#artifactManagerSessionFile = null;
+				// Path is repointed; hot-path appends may use `#sessionFile` again.
+				this.#sessionFileRelocating = null;
 			}
 
-			this.#sessionFile = newSessionFile;
-			this.#artifactManager = null;
-			this.#artifactManagerSessionFile = null;
+			this.#cwd = resolvedCwd;
+			this.#sessionDir = nextSessionDir;
+			this.#header.cwd = resolvedCwd;
+			// Clear only after the rename has landed. If the move threw,
+			// keep the flag so the next relocation retries.
+			this.#fallbackRuntimeOnly = false;
+			if (this.#additionalDirectories.length === 0) {
+				this.#header.additionalDirectories = undefined;
+			} else {
+				// Re-filter additional roots: the new cwd may have been an
+				// additional root, or it may now contain one.
+				this.#additionalDirectories = this.#additionalDirectories.filter(d => d !== resolvedCwd);
+				this.#header.additionalDirectories =
+					this.#additionalDirectories.length > 0 ? this.#additionalDirectories : undefined;
+			}
+
+			// Rewrite at the new location when the file already existed (update cwd) or
+			// there is in-memory output worth materializing; otherwise stay lazy.
+			const hasAssistant = this.#historyContainsAssistantMessage();
+			if (this.#persist && this.#sessionFile && (sessionFileExisted || hasAssistant)) {
+				this.#forceFileCreation = true;
+				await this.#rewriteAtomically();
+			}
+
+			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
+		} finally {
+			this.#sessionFileRelocating = null;
 		}
-
-		this.#cwd = resolvedCwd;
-		this.#sessionDir = nextSessionDir;
-		this.#header.cwd = resolvedCwd;
-
-		// Rewrite at the new location when the file already existed (update cwd) or
-		// there is in-memory output worth materializing; otherwise stay lazy.
-		const hasAssistant = this.#historyContainsAssistantMessage();
-		if (this.#persist && this.#sessionFile && (sessionFileExisted || hasAssistant)) {
-			this.#forceFileCreation = true;
-			await this.#rewriteAtomically();
-		}
-
-		if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 	}
 
 	/**
@@ -1218,6 +1682,116 @@ export class SessionManager {
 		this.#forceFileCreation = true;
 		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
 		await this.#rewriteAtomically();
+	}
+
+	/** Persist this session's transcript as a newly identified OMP session. */
+	async persistCopy(
+		options?: { sessionDir?: string; suppressBreadcrumb?: boolean },
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<SessionManager> {
+		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(this.#cwd, undefined, storage);
+		const manager = new SessionManager(this.#cwd, sessionDir, true, storage);
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		manager.#resetToNewSession();
+		manager.#sessionName = this.#sessionName;
+		manager.#titleSource = this.#titleSource;
+		manager.#titleUpdatedAt = this.#titleUpdatedAt;
+		manager.#header.title = this.#sessionName;
+		manager.#header.titleSource = this.#titleSource;
+		manager.#additionalDirectories = [...this.#additionalDirectories];
+		manager.#header.additionalDirectories =
+			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
+		manager.#entries = structuredClone(this.#entries);
+		manager.#index.rebuild(manager.#entries);
+		manager.#forceFileCreation = true;
+		await manager.#rewriteAtomically();
+		return manager;
+	}
+
+	/**
+	 * Stage a synchronous group of entry appends and publish the resulting full
+	 * journal with one atomic replace. A failed publish removes only the staged
+	 * entries, preserves/reparents entries appended concurrently, restores the
+	 * prior durable file view, and clears the failed writer latch for retry.
+	 *
+	 * The callback MUST be synchronous.
+	 */
+	appendEntriesAtomically<T>(append: () => T): Promise<T> {
+		return this.#withAtomicPersistenceLock(() => this.#appendEntriesAtomicallyLocked(append));
+	}
+
+	async #appendEntriesAtomicallyLocked<T>(append: () => T): Promise<T> {
+		if (!this.#persist || !this.#sessionFile) return append();
+		if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
+		try {
+			await this.ensureOnDisk();
+			await this.flush();
+		} catch (error) {
+			const operationError = toError(error);
+			await this.#authoritativelyRewriteCurrentStateLocked(operationError);
+			this.#notifyDurableEntries();
+			throw error;
+		}
+
+		const batch: AtomicEntryBatch = {
+			collecting: true,
+			entryIds: new Set(),
+			deferredNotifications: [],
+			preBatchLeafId: this.#index.leafId(),
+			externalLeafChanged: false,
+			externalLeafId: null,
+		};
+		this.#atomicEntryBatch = batch;
+		let result!: T;
+		try {
+			try {
+				result = append();
+			} finally {
+				batch.collecting = false;
+			}
+			await this.#rewriteAtomically();
+			if (!this.#fileIsCurrent || this.#rewriteRequired) {
+				throw new Error("Atomic session batch was superseded before commit.");
+			}
+			this.#atomicEntryBatch = undefined;
+			this.#notifyDurableEntries(batch.deferredNotifications);
+			return result;
+		} catch (error) {
+			batch.collecting = false;
+			const operationError = toError(error);
+			this.#rollbackAtomicEntryBatch(batch);
+			try {
+				await this.#authoritativelyRewriteCurrentStateLocked(operationError);
+			} catch (repairError) {
+				const retainedNotifications = batch.deferredNotifications.filter(entry => !batch.entryIds.has(entry.id));
+				this.#pendingDurabilityNotifications.push(...retainedNotifications);
+				this.#atomicEntryBatch = undefined;
+				this.#fileIsCurrent = false;
+				this.#rewriteRequired = true;
+				if (repairError instanceof SessionPersistenceIndeterminateError) throw repairError;
+				throw this.#latchIndeterminate(operationError, [toError(repairError)]);
+			}
+			const retainedNotifications = batch.deferredNotifications.filter(entry => !batch.entryIds.has(entry.id));
+			this.#atomicEntryBatch = undefined;
+			this.#notifyDurableEntries(retainedNotifications);
+			throw error;
+		}
+	}
+
+	/**
+	 * Replace an uncertain append tail with the authoritative in-memory journal.
+	 * Callers must only use this for monotonic recovery where every retained
+	 * entry remains intended (for example, an explicit terminal tombstone).
+	 */
+	recoverPersistenceFromCurrentState(): Promise<void> {
+		return this.#withAtomicPersistenceLock(async () => {
+			if (!this.#persist || !this.#sessionFile) return;
+			if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
+			const operationError =
+				this.#diskFailure ?? new Error("Authoritative session persistence recovery was requested.");
+			await this.#authoritativelyRewriteCurrentStateLocked(operationError);
+			this.#notifyDurableEntries();
+		});
 	}
 
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
@@ -1240,8 +1814,10 @@ export class SessionManager {
 	 */
 	flushSync(): void {
 		if (!this.#persist || !this.#sessionFile) return;
+		if (this.#atomicEntryBatch) throw new Error("Cannot synchronously flush during an atomic session batch.");
 		if (this.#diskFailure) throw this.#diskFailure;
 		if (this.#fileIsCurrent && !this.#rewriteRequired) {
+			this.#writer?.flushSync?.();
 			const writerError = this.#writer?.getError();
 			if (writerError) throw writerError;
 			return;
@@ -1299,8 +1875,178 @@ export class SessionManager {
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
+	/**
+	 * Raise the terminal write barrier ahead of the final {@link close}. Once
+	 * sealed:
+	 * - every later append, title change, and rewrite is a dropped no-op —
+	 *   including work an event handler tries to enqueue while dispose is
+	 *   awaiting `close()` on the disk tail;
+	 * - the disk epoch is bumped, so queued-but-unexecuted tail work is
+	 *   superseded and an ALREADY-RUNNING fenced/repair rewrite (awaiting the
+	 *   tail, drain, writer close, or the atomic stage) fails its commit guard
+	 *   at the rename fence instead of publishing over a revived file.
+	 * The final `close()` itself is scheduled after the bump and still runs;
+	 * pre-seal hot-path appends are already in the page cache. Idempotent;
+	 * terminal.
+	 */
+	seal(): void {
+		if (this.#released) return;
+		this.#released = true;
+		this.#diskEpoch++;
+	}
+
+	/**
+	 * Terminal release: drop the in-memory transcript and complete the
+	 * {@link seal}. The entry journal and its index mirror the agent's message
+	 * array (tool results, file contents, base64 frame images); on a disposed
+	 * session — e.g. a parked subagent still referenced by the lifecycle
+	 * adoption record — they would otherwise stay pinned for the process
+	 * lifetime.
+	 *
+	 * Closes the append writer; with the seal up, nothing can reopen it. A
+	 * revival may reopen the same JSONL through a NEW manager the moment
+	 * dispose returns; a late event handler resuming on THIS manager must
+	 * never race that writer — and a post-release rewrite would persist the
+	 * now-empty entry list, truncating the transcript. Reads after this point
+	 * reopen from disk (revival, `history://`). Only call from session
+	 * dispose, after the final `close()`; idempotent.
+	 */
+	releaseRetainedEntries(): void {
+		this.seal();
+		this.#entries = [];
+		this.#index.clear();
+		this.#closeWriterEventually();
+	}
+
 	getCwd(): string {
 		return this.#cwd;
+	}
+
+	/** Recorded cwd from the session header (original project), may differ from runtime {@link getCwd} when fallback retained launch cwd. */
+	getRecordedCwd(): string | undefined {
+		return this.#header?.cwd;
+	}
+
+	setCwdWithoutRelocation(newCwd: string): void {
+		const resolvedCwd = path.resolve(newCwd);
+		if (resolvedCwd === path.resolve(this.#cwd)) {
+			this.#fallbackRuntimeOnly = true;
+			return;
+		}
+		this.#cwd = resolvedCwd;
+		this.#fallbackRuntimeOnly = true;
+		if (this.#sessionFile) {
+			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
+		}
+	}
+	adoptRecordedCwd(): void {
+		const recordedCwd = this.#header.cwd;
+		if (!recordedCwd) return;
+		this.#cwd = path.resolve(recordedCwd);
+		if (this.#sessionFile) this.#sessionDir = path.dirname(this.#sessionFile);
+		this.#fallbackRuntimeOnly = false;
+		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+	}
+
+	/**
+	 * Re-anchor the session bucket to the runtime cwd after a fallback.
+	 * The fallback flag keeps the transcript at its recorded path (stale
+	 * bucket) while runtime cwd is the launch dir; only a true relocation
+	 * should recompute sessionDir. Workspace-dir mutations must not clear
+	 * it early.
+	 */
+	#reconcileSessionDirForFallback(): void {
+		if (this.#fallbackRuntimeOnly) {
+			this.#sessionDir = computeDefaultSessionDir(this.#cwd, this.#storage);
+			this.#fallbackRuntimeOnly = false;
+		}
+	}
+
+	/** Additional workspace directories beyond cwd (multi-root), absolute and normalized. */
+	getAdditionalDirectories(): string[] {
+		return [...this.#additionalDirectories];
+	}
+
+	/**
+	 * Persist a workspace-directory change to the session header. Respects the
+	 * lazy-persistence gate: a session with no durable output yet keeps the
+	 * change in memory (the header lands with the first real write), so seeding
+	 * roots at launch never materializes an empty resumable session file.
+	 */
+	async #persistWorkspaceDirectoriesChange(): Promise<void> {
+		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
+		this.#rewriteRequired = true;
+		await this.#rewriteAtomically();
+	}
+
+	/**
+	 * Add a workspace directory. Normalizes (relative to cwd), dedupes, rejects
+	 * the cwd itself, persists to the session header, and triggers an atomic
+	 * rewrite so the change survives a crash. Returns the resolved absolute
+	 * path or `null` when the directory was already present (no-op).
+	 */
+	async addWorkspaceDirectory(directory: string): Promise<string | null> {
+		const resolved = normalizeWorkspaceDirectory(directory, this.#cwd);
+		if (resolved === path.resolve(this.#cwd)) {
+			throw new Error("The current working directory is already the primary workspace root.");
+		}
+		if (this.#additionalDirectories.includes(resolved)) return null;
+		this.#additionalDirectories = [...this.#additionalDirectories, resolved];
+		// In fallback the transcript is still in the stale bucket; keep
+		// workspace edits runtime-only until relocation.
+		if (this.#fallbackRuntimeOnly) {
+			return resolved;
+		}
+		this.#header.additionalDirectories = this.#additionalDirectories;
+		await this.#persistWorkspaceDirectoriesChange();
+		return resolved;
+	}
+
+	/**
+	 * Remove a workspace directory by absolute or cwd-relative path. Persists
+	 * the trimmed header. Returns the resolved path that was removed, or
+	 * `null` when the directory was not an additional root (no-op).
+	 */
+	async removeWorkspaceDirectory(directory: string): Promise<string | null> {
+		const resolved = normalizeWorkspaceDirectory(directory, this.#cwd);
+		const idx = this.#additionalDirectories.findIndex(p => path.resolve(p) === resolved);
+		if (idx === -1) return null;
+		this.#additionalDirectories = this.#additionalDirectories.filter((_, i) => i !== idx);
+		// In fallback keep edits runtime-only until relocation.
+		if (this.#fallbackRuntimeOnly) {
+			return resolved;
+		}
+		if (this.#additionalDirectories.length === 0) {
+			this.#header.additionalDirectories = undefined;
+		} else {
+			this.#header.additionalDirectories = this.#additionalDirectories;
+		}
+		await this.#persistWorkspaceDirectoriesChange();
+		return resolved;
+	}
+
+	/** Seed additional directories from settings or a passed list. Also called on resumed sessions with --add-dir; persists the updated header when the session file is already durable. No-op when the normalized list is unchanged (avoids rewriting large session files on every startup). */
+	async setAdditionalDirectories(directories: string[]): Promise<void> {
+		const workspace = normalizeSessionWorkspace({ cwd: this.#cwd, directories });
+		const next = additionalWorkspaceDirectories(workspace);
+		// In fallback keep edits runtime-only until relocation.
+		if (this.#fallbackRuntimeOnly) {
+			this.#additionalDirectories = next;
+			return;
+		}
+		if (
+			next.length === this.#additionalDirectories.length &&
+			next.every((d, i) => d === this.#additionalDirectories[i])
+		) {
+			return;
+		}
+		this.#additionalDirectories = next;
+		if (this.#additionalDirectories.length > 0) {
+			this.#header.additionalDirectories = this.#additionalDirectories;
+		} else {
+			this.#header.additionalDirectories = undefined;
+		}
+		await this.#persistWorkspaceDirectoriesChange();
 	}
 
 	getUsageStatistics(): UsageStatistics {
@@ -1337,6 +2083,21 @@ export class SessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.#sessionFile;
+	}
+
+	/**
+	 * Whether the current session has actually been materialized to durable
+	 * storage (the JSONL exists on disk / in the active storage backend).
+	 *
+	 * Session persistence is lazy: the file is only written once the history
+	 * contains an assistant message (or an explicit {@link ensureOnDisk}
+	 * caller forces it). Until then {@link getSessionFile} returns an allocated
+	 * path that leads nowhere, so a `--resume <id>` hint built from it would
+	 * always fail. Consumers that advertise a resume command must gate on this
+	 * (issue #8860).
+	 */
+	isSessionOnDisk(): boolean {
+		return !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);
 	}
 
 	getArtifactsDir(): string | null {
@@ -1437,12 +2198,21 @@ export class SessionManager {
 		};
 	}
 
+	/** Subscribe to persistence failures so hosts can surface lost-durability state. */
+	onPersistenceError(cb: (error: Error) => void): () => void {
+		this.#persistenceErrorCallbacks.add(cb);
+		return () => {
+			this.#persistenceErrorCallbacks.delete(cb);
+		};
+	}
+
 	/**
 	 * Set the session display name.
 	 * @param source "user" for explicit renames; "auto" for generated titles.
 	 *   Auto titles are ignored once the user has set a name.
 	 */
 	async setSessionName(name: string, source: SessionTitleSource = "auto", trigger?: string): Promise<boolean> {
+		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
 		const title = SessionManager.#cleanTitle(name);
@@ -1469,6 +2239,11 @@ export class SessionManager {
 		this.#index.insert(entry);
 		this.#notifyEntryAppended(entry);
 		await this.#persistTitleChangeEntry(entry, { title, source, updatedAt: timestamp });
+		// Keep the recent-sessions title index current so welcome-screen lookups
+		// never have to content-scan this session's file.
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+			recordSessionTitle(this.#sessionId, title);
+		}
 
 		this.#notifySessionNameListeners();
 		return true;
@@ -1538,6 +2313,30 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Record usage on its initiating branch without moving a successor branch or session. */
+	appendModelUsage(
+		usage: Pick<
+			ModelUsageEntry,
+			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+		>,
+		owner: { sessionId: string; parentId: string | null },
+	): string | undefined {
+		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
+			return undefined;
+		}
+		const activeLeafId = this.#index.leafId();
+		const entry: ModelUsageEntry = {
+			type: "model_usage",
+			id: generateId(this.#index),
+			parentId: owner.parentId,
+			timestamp: nowIso(),
+			...usage,
+		};
+		this.#recordEntry(entry);
+		if (activeLeafId !== owner.parentId) this.#index.setLeaf(activeLeafId);
+		return entry.id;
+	}
+
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
 	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
 		const entry: ThinkingLevelChangeEntry = {
@@ -1566,9 +2365,16 @@ export class SessionManager {
 	 * Append a model change as a child of the current leaf, then advance the leaf.
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
+	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
 	 */
-	appendModelChange(model: string, role?: string): string {
-		const entry: ModelChangeEntry = { type: "model_change", ...this.#freshEntryFields(), model, role };
+	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+		const entry: ModelChangeEntry = {
+			type: "model_change",
+			...this.#freshEntryFields(),
+			model,
+			role,
+			resolvedModelIsFallback,
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -1577,11 +2383,16 @@ export class SessionManager {
 		systemPrompt: string;
 		task: string;
 		tools: string[];
+		agent?: string;
+		modelRole?: string;
+		resolvedModel?: string;
+		readOnly?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		advisor?: string;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -1593,11 +2404,15 @@ export class SessionManager {
 		shortSummary: string | undefined,
 		firstKeptEntryId: string,
 		tokensBefore: number,
-		details?: T,
-		fromExtension?: boolean,
-		preserveData?: Record<string, unknown>,
+		options: {
+			details?: T;
+			fromExtension?: boolean;
+			preserveData?: Record<string, unknown>;
+			method?: CompactionMethod;
+			providerReplayThroughEntryId?: string;
+			tokensAfter?: number;
+		} = {},
 	): string {
-		const elidedSupersededCompactions = this.#elideSupersededCompactionsOnBranch(this.#index.leafId());
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			...this.#freshEntryFields(),
@@ -1605,14 +2420,26 @@ export class SessionManager {
 			shortSummary,
 			firstKeptEntryId,
 			tokensBefore,
-			details,
-			fromExtension,
-			preserveData,
+			tokensAfter: options.tokensAfter,
+			method: options.method,
+			providerReplayThroughEntryId: options.providerReplayThroughEntryId,
+			details: options.details,
+			fromExtension: options.fromExtension,
+			preserveData: options.preserveData,
 		};
 		this.#recordEntry(entry);
-		if (elidedSupersededCompactions) {
-			void this.#rewriteAtomically().catch(err => this.#noteDiskFailure(err));
-		}
+		return entry.id;
+	}
+
+	/**
+	 * Append the durable conversation boundary recorded by `/clear`. The
+	 * collapsed live transcript and the model-context rebuild start after the
+	 * latest one, while the full history stays on disk (the plain
+	 * `transcript:true` export walks it unchanged).
+	 */
+	appendResetBoundary(): string {
+		const entry: ResetBoundaryEntry = { type: "reset_boundary", ...this.#freshEntryFields() };
+		this.#recordEntry(entry);
 		return entry.id;
 	}
 
@@ -1645,8 +2472,10 @@ export class SessionManager {
 		display: boolean | undefined,
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
+		timestamp?: number,
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
+		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
 			customType: normalized.customType,
@@ -1655,7 +2484,11 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
-			...this.#freshEntryFields(),
+			...fresh,
+			// Prefer the initiating message's own timestamp: without it the entry
+			// records the emission time, which on rebuild excludes provider
+			// preparation / hook time from the prompt→yield anchor.
+			timestamp: timestamp !== undefined ? new Date(timestamp).toISOString() : fresh.timestamp,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1680,6 +2513,41 @@ export class SessionManager {
 			for (const name of entry.injectedRules) names.add(name);
 		}
 		return [...names];
+	}
+
+	/** Append a credential pin recording which OAuth account served `provider`. */
+	appendCredentialPin(provider: string, hash: string): string {
+		const entry: CredentialPinEntry = {
+			type: "credential_pin",
+			...this.#freshEntryFields(),
+			provider,
+			hash,
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Latest credential pin per provider on the current branch (root → leaf),
+	 * with the effective last-use time of the pinned account.
+	 *
+	 * Pins are appended only when the serving account *changes*, so a long
+	 * session on one account carries a single old pin entry. Any assistant turn
+	 * for the same provider after that pin was necessarily served by the pinned
+	 * account, so its timestamp advances `lastUsedAt` — a resume seconds after
+	 * the last turn seeds a warm sticky instead of a stale one.
+	 */
+	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number }> {
+		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
+		for (const entry of this.getBranch()) {
+			if (entry.type === "credential_pin") {
+				pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
+			} else if (entry.type === "message" && entry.message.role === "assistant") {
+				const pin = pins.get(entry.message.provider);
+				if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, entry.message.timestamp);
+			}
+		}
+		return pins;
 	}
 
 	getLeafId(): string | null {
@@ -1782,19 +2650,50 @@ export class SessionManager {
 	 */
 	branch(branchFromId: string): void {
 		if (!this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-		this.#index.setLeaf(branchFromId);
+		this.#setLeaf(branchFromId);
 	}
 
 	/** Reset the leaf to null so the next append creates a new root entry. */
 	resetLeaf(): void {
-		this.#index.setLeaf(null);
+		this.#setLeaf(null);
+	}
+
+	/**
+	 * Durably move the active branch past a discarded entry.
+	 *
+	 * The loader reconstructs the active branch from the last physical journal
+	 * entry, so changing the in-memory leaf alone is lost on reload. Known
+	 * metadata children are chained onto the discarded entry's parent before the
+	 * entry is removed. If any child may carry content, the subtree is preserved
+	 * off-branch instead. Both paths append a metadata-only branch marker and
+	 * rewrite the journal, making the selected path durable.
+	 */
+	async discardEntryDurably(entryId: string): Promise<void> {
+		const entry = this.#index.get(entryId);
+		if (!entry) return;
+		const children = this.#index.childrenOf(entryId);
+		const canReparentChildren = children.every(child => child.type === "service_tier_change");
+		let leafId = entry.parentId;
+		if (canReparentChildren) {
+			for (const child of children) {
+				child.parentId = leafId;
+				leafId = child.id;
+			}
+			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
+			this.#index.rebuild(this.#entries);
+		}
+		this.branchWithSummary(leafId, "", {
+			kind: DISCARDED_ENTRY_BRANCH_MARKER,
+			discardedEntryId: entryId,
+		});
+		await this.rewriteEntries();
 	}
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromExtension?: boolean): string {
 		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
 
-		this.#index.setLeaf(branchFromId);
+		this.#setLeaf(branchFromId);
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.#index),
@@ -1828,6 +2727,7 @@ export class SessionManager {
 
 		const timestamp = nowIso();
 		const newSessionId = mintSessionId();
+		this.#reconcileSessionDirForFallback();
 		const newSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${newSessionId}.jsonl`);
 		const header: SessionHeader = {
 			type: "session",
@@ -1835,7 +2735,10 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.#cwd,
+			title: this.#sessionName,
+			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
+			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 		};
 
 		const labels: LabelEntry[] = [];
@@ -1926,16 +2829,21 @@ export class SessionManager {
 	 * session file while creating a fresh session file in this sessionDir.
 	 *
 	 * `options.sessionFile` pins the new session's file path (default: an
-	 * auto-named `<timestamp>_<id>.jsonl` in `sessionDir`). Callers that register
-	 * the fork as a named agent (e.g. `/tan`) pass `<agentId>.jsonl` so the
-	 * persisted-subagent scan keys the agent by the same id the live ref uses.
+	 * auto-named `<timestamp>_<id>.jsonl` in `sessionDir`). Artifacts are copied
+	 * recursively by default; nested agents that deliberately share their parent's
+	 * artifact root may disable this with `copyArtifacts: false`.
 	 */
 	static async forkFrom(
 		sourcePath: string,
 		cwd: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
+		options?: {
+			copyArtifacts?: boolean;
+			suppressBreadcrumb?: boolean;
+			sessionFile?: string;
+			resetInheritedCost?: boolean;
+		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
@@ -1947,6 +2855,7 @@ export class SessionManager {
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
@@ -1956,6 +2865,9 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		manager.#header.additionalDirectories =
+			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
 		manager.#sessionName = manager.#header.title;
 		manager.#titleSource = manager.#header.titleSource;
 		manager.#titleUpdatedAt = nowIso();
@@ -1965,7 +2877,25 @@ export class SessionManager {
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
+		if (options?.copyArtifacts !== false) {
+			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		}
 		return manager;
+	}
+
+	/**
+	 * Zero the monetary attribution (cost, credits, premium requests) on the
+	 * forked history's assistant turns and completed `task` results, in place.
+	 *
+	 * A tan fork is a fresh agent that inherits the parent's transcript purely
+	 * for context; its spend must reflect only its own work. Session cost is
+	 * derived by summing `usage.cost` over the transcript, so without this the
+	 * clone's Agent Hub row would open at the parent's entire accumulated cost.
+	 * Token counts are left intact — compaction anchors and context math depend
+	 * on them — since only billing attribution is inherited, not context size.
+	 */
+	static #resetInheritedUsageCost(history: SessionEntry[]): void {
+		for (const entry of history) resetUsageCost(entryUsage(entry));
 	}
 
 	/**
@@ -1979,15 +2909,16 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
-		const loaded = await loadEntriesFromFile(filePath, storage);
-		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
-		// Resume into the session's recorded cwd only when that directory still
-		// exists. A deleted project dir would make the constructor's #cwd — and the
-		// `setProjectDir` chdir interactive mode runs next — point at (and fail on)
-		// a missing path, so fall back to the launch cwd and anchor /new and /branch
-		// there too, keeping the resumed session where the user already is.
+		const loaded = await loadSessionFile(filePath, storage);
+		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
+		// Resume into the session's recorded cwd only when it is verifiably
+		// accessible. A deleted or permission-blocked (macOS TCC denial) project
+		// dir would make the constructor's #cwd — and the `setProjectDir` chdir
+		// interactive mode runs next — fail, so fall back to the launch cwd and
+		// anchor /new and /branch there too, keeping the resumed session where
+		// the user already is.
 		const recordedCwd = header?.cwd;
-		const recordedCwdUsable = !!recordedCwd && (await directoryExists(recordedCwd));
+		const recordedCwdUsable = !!recordedCwd && (await directoryIsEnterable(recordedCwd));
 		const cwd = recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir());
 		const dir =
 			sessionDir ??
@@ -1996,7 +2927,7 @@ export class SessionManager {
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		await manager.setSessionFile(filePath);
+		await manager.#setSessionFile(filePath, loaded);
 		return manager;
 	}
 
@@ -2017,49 +2948,66 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			agent?: string;
+			modelRole?: string;
+			resolvedModel?: string;
+			readOnly?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			advisor?: string;
 		} | null;
 	} | null> {
-		let loaded: FileEntry[];
-		try {
-			loaded = await loadEntriesFromFile(filePath, storage);
-		} catch {
-			return null;
-		}
-		// A missing/empty file has no usable session — nothing to revive from.
-		if (loaded.length === 0) return null;
-		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
+		let header: SessionHeader | undefined;
 		let init: {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			agent?: string;
+			modelRole?: string;
+			resolvedModel?: string;
+			readOnly?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			advisor?: string;
 		} | null = null;
-		for (let index = loaded.length - 1; index >= 0; index--) {
-			const entry = loaded[index];
+		const visit = (entry: FileEntry): void => {
+			if (entry.type === "session") {
+				header ??= entry;
+				return;
+			}
 			if (entry.type === "session_init") {
 				init = {
 					systemPrompt: entry.systemPrompt,
 					task: entry.task,
 					tools: entry.tools,
+					agent: entry.agent,
+					modelRole: entry.modelRole,
+					resolvedModel: entry.resolvedModel,
+					readOnly: entry.readOnly,
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
+					advisor: entry.advisor,
 				};
-				break;
 			}
+		};
+
+		try {
+			await visitEntriesFromFile(filePath, visit, storage);
+		} catch {
+			return null;
 		}
-		return { cwd: header?.cwd ?? getProjectDir(), init };
+		// A missing, empty, or invalid file has no usable session.
+		if (!header) return null;
+		return { cwd: header.cwd ?? getProjectDir(), init };
 	}
 
 	/** Continue the most recent session, or create a new one if none exists. */
@@ -2164,12 +3112,14 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
-		return listSessions(dir, storage);
+		const sessions = await listSessions(dir, storage);
+		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 
-	/** List all sessions across all project directories. */
-	static listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-		return listAllSessions(storage);
+	/** List all sessions across all project directories, pinned sessions first. */
+	static async listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
+		const sessions = await listAllSessions(storage);
+		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
 }
 

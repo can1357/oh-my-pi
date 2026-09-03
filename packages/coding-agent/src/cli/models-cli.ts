@@ -14,15 +14,10 @@
 import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
-import {
-	discoverAndLoadExtensions,
-	ExtensionRunner,
-	emitSessionShutdownEvent,
-	loadExtensions,
-} from "../extensibility/extensions";
+import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
@@ -283,7 +278,7 @@ export interface RunModelsListingOptions {
 	settingsExtensions?: string[];
 	/** Disabled extension ids from settings (`disabledExtensions`). */
 	disabledExtensionIds?: string[];
-	/** When true, skip discovery and only load `additionalExtensionPaths`. */
+	/** When true, exclude ambient factories and resolve only `additionalExtensionPaths`. */
 	disableExtensionDiscovery?: boolean;
 }
 
@@ -301,14 +296,16 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 	} = options;
 
 	const eventBus = new EventBus();
-	const extensionsResult = disableExtensionDiscovery
-		? await loadExtensions(additionalExtensionPaths, cwd, eventBus)
-		: await discoverAndLoadExtensions(
-				[...additionalExtensionPaths, ...settingsExtensions],
-				cwd,
-				eventBus,
-				disabledExtensionIds,
-			);
+	const configuredPaths = disableExtensionDiscovery
+		? additionalExtensionPaths
+		: [...additionalExtensionPaths, ...settingsExtensions];
+	const extensionsResult = await discoverAndLoadExtensions(
+		configuredPaths,
+		cwd,
+		eventBus,
+		disableExtensionDiscovery ? undefined : disabledExtensionIds,
+		{ ambient: !disableExtensionDiscovery, includeAmbientHooks: false },
+	);
 	const extensionRunner =
 		extensionsResult.extensions.length > 0
 			? new ExtensionRunner(
@@ -370,7 +367,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 		}
 		await modelRegistry.refresh(action === "refresh" ? "online" : "online-if-uncached");
 
-		const cliExtensionPaths = command.flags.noExtensions ? [] : (command.flags.extensions ?? []);
+		const cliExtensionPaths = command.flags.extensions ?? [];
 		await runModelsListing({
 			modelRegistry,
 			cwd,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import "./setup";
+
 import {
 	BinaryVectorStore,
 	cosineSimilarity,

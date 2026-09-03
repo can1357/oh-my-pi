@@ -1,36 +1,52 @@
 # Natives media + system utilities
 
-This document covers the media/system/conversion exports currently present in `@oh-my-pi/pi-natives`: terminal SIXEL image encoding, HTML conversion, clipboard access, token counting, macOS appearance/power helpers, and work profiling.
+This document covers the media/system/conversion exports currently present in `@oh-my-pi/pi-natives`: audio capture/playback and live WebRTC media, terminal SIXEL and snapcompact PNG encoding, HTML conversion, clipboard access, token counting, DeviceCheck, macOS appearance/power helpers, and work profiling.
 
 ## Implementation files
 
+- `crates/pi-natives/src/audio.rs`
+- `crates/pi-natives/src/live.rs`
+- `crates/pi-natives/src/snapcompact.rs`
 - `crates/pi-natives/src/sixel.rs`
 - `crates/pi-natives/src/html.rs`
 - `crates/pi-natives/src/clipboard.rs`
 - `crates/pi-natives/src/tokens.rs`
+- `crates/pi-natives/src/devicecheck.rs`
 - `crates/pi-natives/src/appearance.rs`
 - `crates/pi-natives/src/power.rs`
 - `crates/pi-natives/src/prof.rs`
 - `crates/pi-natives/src/task.rs`
 - `packages/natives/native/index.d.ts`
 
-There is no native `PhotonImage` class, `image.rs`, or ProjFS overlay helper module in the current `pi-natives` addon. General-purpose image decode/resize/encode is expected to live outside this native surface; the native image export here is only terminal SIXEL encoding.
+There is no native `PhotonImage` class, `image.rs`, or ProjFS overlay helper module in the current `pi-natives` addon. General-purpose image decode/resize/encode is expected to live outside this surface; the image-specific exports here are terminal SIXEL encoding and snapcompact PNG frame rendering.
 
 ## JS API ↔ Rust export/module mapping
 
-| JS export                             | Rust N-API export              | Rust module     |
-| ------------------------------------- | ------------------------------ | --------------- |
-| `encodeSixel(bytes, width, height)`   | `encode_sixel`                 | `sixel.rs`      |
-| `htmlToMarkdown(html, options?)`      | `html_to_markdown`             | `html.rs`       |
-| `copyToClipboard(text)`               | `copy_to_clipboard`            | `clipboard.rs`  |
-| `readImageFromClipboard()`            | `read_image_from_clipboard`    | `clipboard.rs`  |
-| `countTokens(input, encoding?)`       | `count_tokens`                 | `tokens.rs`     |
-| `detectMacOSAppearance()`             | `detect_macos_appearance`      | `appearance.rs` |
-| `MacAppearanceObserver.start(cb)`     | `MacAppearanceObserver::start` | `appearance.rs` |
-| `MacOSPowerAssertion.start(options?)` | `MacOSPowerAssertion::start`   | `power.rs`      |
-| `getWorkProfile(lastSeconds)`         | `get_work_profile`             | `prof.rs`       |
+| JS export                                | Rust N-API export              | Rust module      |
+| ---------------------------------------- | ------------------------------ | ---------------- |
+| `new AudioCapture(sampleRate, cb)`       | `AudioCapture`                 | `audio.rs`       |
+| `new AudioPlayback(sampleRate)`          | `AudioPlayback`                | `audio.rs`       |
+| `new LiveWebRtcPeer(...)`                | `LiveWebRtcPeer`               | `live.rs`        |
+| `encodeSixel(bytes, width, height)`      | `encode_sixel`                 | `sixel.rs`       |
+| `renderSnapcompactPng(text, options)`    | `render_snapcompact_png`       | `snapcompact.rs` |
+| `snapcompactSupportedChars(font, chars)` | `snapcompact_supported_chars`  | `snapcompact.rs` |
+| `htmlToMarkdown(html, options?)`         | `html_to_markdown`             | `html.rs`        |
+| `copyToClipboard(text)`                  | `copy_to_clipboard`            | `clipboard.rs`   |
+| `readImageFromClipboard()`               | `read_image_from_clipboard`    | `clipboard.rs`   |
+| `countTokens(input, encoding?)`          | `count_tokens`                 | `tokens.rs`      |
+| `detectMacOSAppearance()`                | `detect_macos_appearance`      | `appearance.rs`  |
+| `MacAppearanceObserver.start(cb)`        | `MacAppearanceObserver::start` | `appearance.rs`  |
+| `MacOSPowerAssertion.start(options?)`    | `MacOSPowerAssertion::start`   | `power.rs`       |
+| `getWorkProfile(lastSeconds)`            | `get_work_profile`             | `prof.rs`        |
+| `deviceCheckGenerateToken()`             | `device_check_generate_token`  | `devicecheck.rs` |
 
 ## Data format boundaries and conversions
+
+### Audio and live WebRTC
+
+- `AudioCapture(sampleRate, callback)` opens the default microphone and delivers low-latency mono `Float32Array` PCM chunks at the requested logical rate. `stop()` immediately releases capture.
+- `AudioPlayback(sampleRate)` opens the default speaker. `write(samples)` queues mono `Float32Array` PCM in order; `setGain(gain)` changes render-time gain even for queued samples; `end()` drains and closes, while `stop()` discards queued audio immediately.
+- `LiveWebRtcPeer(onEvent, onLevel, onFailure)` owns a WebRTC peer for Codex live media. `createOffer()` returns SDP, `acceptAnswer(sdp)` applies the remote answer, `waitForOpen(timeoutMs?)` waits for the `oai-events` data channel, `pushAudio()` queues 16 kHz mono PCM, `setMuted()` controls transmission, and `close()` tears down media, data channel, peer, and playback.
 
 ### SIXEL image encoding (`sixel`)
 
@@ -40,6 +56,10 @@ There is no native `PhotonImage` class, `image.rs`, or ProjFS overlay helper mod
 - **Output boundary**: `encodeSixel(...)` returns a SIXEL escape string synchronously.
 
 Supported decode formats are whatever the compiled `image` crate supports for `ImageReader` in this build (commonly PNG/JPEG/WebP/GIF). Invalid target dimensions (`0` width or height) fail with `Target SIXEL dimensions must be greater than zero`.
+
+### Snapcompact PNG rendering
+
+`renderSnapcompactPng(text, options)` renders pre-normalized text on a bounded bitmap and asynchronously returns a **base64-encoded PNG string**. The N-API transport type is `Latin1String`, but the string contains base64 text rather than raw one-byte PNG data; base64-decode it before treating the result as PNG bytes. `options.size` is required; optional controls include `font`, `cellWidth`, `cellHeight`, `variant`, `lineRepeat`, `stretch`, and `columns`. Output height hugs used rows and overflowing input is ignored. `snapcompactSupportedChars(font, chars)` returns only characters supported by the named bundled font.
 
 ### HTML conversion (`html`)
 
@@ -70,6 +90,10 @@ There is no current `packages/natives` TS wrapper that emits OSC52, handles Term
 - Default encoding is `O200kBase`; `Cl100kBase` is also exported.
 - The implementation uses `encode_ordinary`, not special-token handling.
 - BPE tables are initialized once through `LazyLock` and reused.
+
+### DeviceCheck
+
+`deviceCheckGenerateToken()` resolves within the native helper's one-second wait with `{ supported, tokenBase64?, error?, latencyMs }`. It reports unsupported platforms/devices and generation failures in the result rather than requiring a token to be present.
 
 ### macOS appearance and power helpers
 
@@ -108,7 +132,8 @@ Failure transitions:
 
 1. `htmlToMarkdown(html, options)` schedules a blocking conversion task.
 2. Conversion runs with defaulted options (`cleanContent=false`, `skipImages=false`) unless specified.
-3. Returns markdown string or rejects with `Conversion error: ...`.
+3. The upstream converter owns normalization and preprocessing, makes affected auxiliary traversals iterative, and caps remaining recursive DOM traversal at 64; hitting that cap rejects the conversion instead of returning partial Markdown.
+4. Returns markdown string or rejects with `Conversion error: ...`.
 
 ### Clipboard lifecycle
 

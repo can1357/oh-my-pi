@@ -11,32 +11,42 @@
  * and its explicit websocket preference.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
-import type { Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /** Provider-facing advisor session ids must be UUIDv7 (issue #5040): Codex writes
  *  them verbatim onto `conversation_id`/`session_id` headers, so `-advisor`
  *  labels stay local-only (telemetry, transcripts). */
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function metadataSessionId(options: SimpleStreamOptions | undefined): string {
+	const metadata = options?.metadata;
+	if (!metadata || typeof metadata.user_id !== "string") {
+		throw new Error("Expected metadata.user_id");
+	}
+	const userId: unknown = JSON.parse(metadata.user_id);
+	if (!userId || typeof userId !== "object" || !("session_id" in userId) || typeof userId.session_id !== "string") {
+		throw new Error("Expected metadata.user_id.session_id");
+	}
+	return userId.session_id;
+}
+
 describe("AgentSession advisor provider-options parity", () => {
-	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
 
-	beforeAll(async () => {
-		sharedDir = TempDir.createSync("@pi-advisor-parity-shared-");
-		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -44,11 +54,8 @@ describe("AgentSession advisor provider-options parity", () => {
 		model = bundled;
 	});
 
-	afterAll(async () => {
+	afterAll(() => {
 		authStorage.close();
-		try {
-			await sharedDir.remove();
-		} catch {}
 	});
 
 	let tempDir: TempDir;
@@ -61,7 +68,7 @@ describe("AgentSession advisor provider-options parity", () => {
 			"model.loopGuard.enabled": true,
 		});
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-advisor-parity-");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 	});
@@ -73,7 +80,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		} catch {}
 	});
 
-	it("inherits streamFn, promptCacheKey, and providerSessionState from the session", () => {
+	it("wraps the inherited streamFn and preserves promptCacheKey and providerSessionState", () => {
 		const advisorStreamFn: StreamFn = (m, ctx, opts) => streamSimple(m, ctx, opts);
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -93,11 +100,10 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
-		// Stream wrapper from the SDK reaches the advisor — without it,
-		// `providers.openrouterVariant` would never be applied to advisor
-		// requests (issue #3639) and the Agent would fall back to bare
-		// `streamSimple`.
-		expect(advisor.streamFn).toBe(advisorStreamFn);
+		// The advisor keeps an SDK-provided stream function behind its own retry
+		// budget wrapper. The capture tests below prove delegation and option
+		// forwarding; identity must differ so the advisor can apply its cap.
+		expect(advisor.streamFn).not.toBe(advisorStreamFn);
 		expect(advisor.streamFn).not.toBe(streamSimple);
 
 		// Shared transport / fast-mode state map keeps Codex websockets and
@@ -175,6 +181,44 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.preferWebsockets).toBe(true);
 	});
 
+	it("caps Codex SSE attempts inside each advisor-level retry", async () => {
+		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
+		const capturedModels: Model[] = [];
+		let requestCount = 0;
+		const fetchMock: FetchImpl = async () => {
+			requestCount += 1;
+			throw new TypeError("The socket connection was closed unexpectedly");
+		};
+		const captureStreamFn: StreamFn = (requestModel, context, opts) => {
+			capturedModels.push(requestModel);
+			capturedStreamOptions.push(opts);
+			return streamSimple(requestModel, context, { ...opts, preferWebsockets: false, fetch: fetchMock });
+		};
+		const mainAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent: mainAgent,
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: captureStreamFn,
+		});
+		session.settings.setModelRole("advisor", "openai-codex/gpt-5.6-sol");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("ping").catch(() => {});
+
+		expect(capturedModels[0]?.api).toBe("openai-codex-responses");
+		expect(capturedStreamOptions[0]?.codexSseMaxAttempts).toBe(1);
+		expect(requestCount).toBe(1);
+		expect(advisor.state.error).toContain("socket connection was closed unexpectedly");
+	});
+
 	it("reuses the main agent's providerPromptCacheKey unchanged so tan/shared sessions stay on the parent shard", () => {
 		// Regression for codex-connector review on #3640: when the SDK pins
 		// `agent.promptCacheKey` (tan/shared-session callers do this to share
@@ -207,5 +251,130 @@ describe("AgentSession advisor provider-options parity", () => {
 		// the parent.
 		expect(advisor.sessionId).toMatch(UUID_V7_PATTERN);
 		expect(advisor.sessionId).not.toBe(advisor.promptCacheKey);
+	});
+
+	it("propagates the advisor's own provider session id via metadata.user_id, distinct from the main agent", async () => {
+		// Regression for #6625: the separately constructed advisor Agent had no
+		// metadata resolver, so its outbound Anthropic request omitted the
+		// `metadata.user_id` session identity that AgentSession installs for the
+		// main/subagent agents — custom proxies saw advisor traffic with no
+		// stable session id to route or attribute on.
+		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
+		const captureStreamFn: StreamFn = (_m, _ctx, opts) => {
+			capturedStreamOptions.push(opts);
+			throw new Error("capture-stop");
+		};
+		const mainAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent: mainAgent,
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: captureStreamFn,
+		});
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor?.sessionId) throw new Error("Expected advisor agent with a provider session id");
+
+		await advisor.prompt("ping").catch(() => {});
+
+		const opts = capturedStreamOptions[0];
+		if (!opts) throw new Error("Expected captured advisor stream options");
+
+		// The advisor request must carry a non-empty session id keyed to the
+		// advisor's own provider-facing UUIDv7, not the parent session id.
+		expect(metadataSessionId(opts)).toBe(advisor.sessionId);
+
+		// Distinct from the main agent's session identity (both non-empty).
+		expect(metadataSessionId({ metadata: mainAgent.metadataForProvider("anthropic") })).toBeTruthy();
+		expect(metadataSessionId(opts)).not.toBe(
+			metadataSessionId({ metadata: mainAgent.metadataForProvider("anthropic") }),
+		);
+	});
+
+	it("refreshes the advisor provider session identity after starting a new session", async () => {
+		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
+		const captureStreamFn: StreamFn = (_m, _ctx, opts) => {
+			capturedStreamOptions.push(opts);
+			throw new Error("capture-stop");
+		};
+		const mainAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent: mainAgent,
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: captureStreamFn,
+		});
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor?.sessionId) throw new Error("Expected advisor agent with a provider session id");
+		const previousAdvisorSessionId = advisor.sessionId;
+
+		expect(await session.newSession()).toBe(true);
+		expect(session.getAdvisorAgent()).toBe(advisor);
+		expect(advisor.sessionId).toMatch(UUID_V7_PATTERN);
+		expect(advisor.sessionId).not.toBe(previousAdvisorSessionId);
+		expect(advisor.sessionId).not.toBe(mainAgent.sessionId);
+		expect(advisor.promptCacheKey).toBe(advisor.sessionId);
+
+		await advisor.prompt("ping").catch(() => {});
+
+		expect(metadataSessionId(capturedStreamOptions[0])).toBe(advisor.sessionId);
+		expect(metadataSessionId(capturedStreamOptions[0])).not.toBe(previousAdvisorSessionId);
+	});
+
+	it("refreshes the advisor provider session identity on a fork that skips advisor re-prime", async () => {
+		// Regression for #6625 review: `fork()` (like a branch whose hook returns
+		// `skipConversationRestore`) updates the primary provider identity via
+		// `#syncAgentSessionId()` WITHOUT running `resetSessionState()`. The advisor
+		// must still rebind to the new provider session id instead of emitting the
+		// pre-fork one.
+		const capturedStreamOptions: Array<SimpleStreamOptions | undefined> = [];
+		const captureStreamFn: StreamFn = (_m, _ctx, opts) => {
+			capturedStreamOptions.push(opts);
+			throw new Error("capture-stop");
+		};
+		const mainAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		session = new AgentSession({
+			agent: mainAgent,
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: captureStreamFn,
+		});
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor?.sessionId) throw new Error("Expected advisor agent with a provider session id");
+		const previousAdvisorSessionId = advisor.sessionId;
+
+		expect(await session.fork()).toBe(true);
+		expect(session.getAdvisorAgent()).toBe(advisor);
+		expect(advisor.sessionId).toMatch(UUID_V7_PATTERN);
+		expect(advisor.sessionId).not.toBe(previousAdvisorSessionId);
+		expect(advisor.sessionId).not.toBe(mainAgent.sessionId);
+		// Fork inherits the parent's provider prompt-cache key (shared shard), so it
+		// stays pinned to the main agent's key rather than the advisor's own id.
+		expect(advisor.promptCacheKey).toBe(mainAgent.promptCacheKey);
+
+		await advisor.prompt("ping").catch(() => {});
+
+		expect(metadataSessionId(capturedStreamOptions[0])).toBe(advisor.sessionId);
+		expect(metadataSessionId(capturedStreamOptions[0])).not.toBe(previousAdvisorSessionId);
 	});
 });

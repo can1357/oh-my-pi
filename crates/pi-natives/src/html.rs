@@ -1,10 +1,12 @@
 //! HTML to Markdown conversion.
 
-use html_to_markdown_rs::{ConversionOptions, PreprocessingOptions, PreprocessingPreset, convert};
-use napi::bindgen_prelude::*;
+use html_to_markdown_rs::{
+	ConversionOptions, PreprocessingOptions, PreprocessingPreset, WarningKind, convert,
+};
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
-use crate::task;
+use crate::{js::into_string, task};
 
 /// Options for HTML to Markdown conversion.
 #[napi(object)]
@@ -22,14 +24,15 @@ pub struct HtmlToMarkdownOptions {
 /// Returns an error if the conversion fails or the worker task aborts.
 #[napi]
 pub fn html_to_markdown(
-	html: String,
+	html: JsString,
 	options: Option<HtmlToMarkdownOptions>,
-) -> task::Promise<String> {
+) -> Result<task::Promise<String>> {
+	let html = into_string(html)?;
 	let options = options.unwrap_or_default();
 	let clean_content = options.clean_content.unwrap_or(false);
 	let skip_images = options.skip_images.unwrap_or(false);
 
-	task::blocking("html_to_markdown", (), move |_| {
+	Ok(task::blocking("html_to_markdown", (), move |_| {
 		let conversion_opts = ConversionOptions {
 			skip_images,
 			preprocessing: PreprocessingOptions {
@@ -38,10 +41,19 @@ pub fn html_to_markdown(
 				remove_navigation: true,
 				remove_forms:      true,
 			},
+			tier_strategy: html_to_markdown_rs::TierStrategy::Tier2,
 			..Default::default()
 		};
 
-		convert(html.as_str(), Some(conversion_opts))
-			.map_err(|err| Error::from_reason(format!("Conversion error: {err}")))
-	})
+		let result = convert(html.as_str(), Some(conversion_opts))
+			.map_err(|err| Error::from_reason(format!("Conversion error: {err}")))?;
+		if let Some(warning) = result
+			.warnings
+			.iter()
+			.find(|warning| warning.kind == WarningKind::DepthLimitExceeded)
+		{
+			return Err(Error::from_reason(format!("Conversion error: {}", warning.message)));
+		}
+		Ok(result.content.unwrap_or_default())
+	}))
 }

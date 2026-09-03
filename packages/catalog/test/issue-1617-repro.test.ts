@@ -6,7 +6,7 @@
  * `<|minimax|>`) leaking into the UI because OMP POSTs anthropic-shaped
  * requests to /v1/messages and the gateway returns non-Anthropic responses.
  *
- * models.dev declares these ids with `provider.npm = "@ai-sdk/anthropic"`,
+ * stencil.so declares these ids with `provider.npm = "@ai-sdk/anthropic"`,
  * which by default would resolve to anthropic-messages on opencode-zen/-go.
  * The descriptor must override these specific ids to openai-completions so
  * that regenerated models.json keeps the correct routing, AND so the
@@ -29,9 +29,9 @@ describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (iss
 	const zenDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "opencode-zen");
 	const goDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "opencode-go");
 
-	// Per upstream models.dev (verified 2026-06-02 against
-	// https://models.dev/api.json["opencode"].models and
-	// https://models.dev/api.json["opencode-go"].models), the affected ids
+	// Per upstream stencil.so (verified 2026-06-02 against
+	// https://stencil.so/api.json["opencode"].models and
+	// https://stencil.so/api.json["opencode-go"].models), the affected ids
 	// carry `provider.npm = "@ai-sdk/anthropic"`. The naive @ai-sdk/anthropic
 	// rule would route them to /v1/messages on opencode.ai/zen[/go] which
 	// 404s. Per-id overrides must win.

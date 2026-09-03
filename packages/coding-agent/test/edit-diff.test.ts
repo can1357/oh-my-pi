@@ -2,13 +2,19 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatHashlineHeader, InMemorySnapshotStore, missingSnapshotTagMessage } from "@oh-my-pi/hashline";
+import {
+	forkClipboard,
+	formatHashlineHeader,
+	InMemorySnapshotStore,
+	missingSnapshotTagMessage,
+} from "@oh-my-pi/hashline";
 import {
 	adjustIndentation,
 	computeEditDiff,
 	computeHashlineDiff,
 	DEFAULT_FUZZY_THRESHOLD,
 	findMatch,
+	replaceText,
 } from "@oh-my-pi/pi-coding-agent/edit";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -219,6 +225,26 @@ describe("adjustIndentation", () => {
 	});
 });
 
+describe("replaceText", () => {
+	test("does not re-match inserted text while replacing all fuzzy source matches", () => {
+		const oldText = "a".repeat(50);
+		const firstActual = `${"a".repeat(49)}b`;
+		const secondActual = `${"a".repeat(44)}cccccc`;
+		const newText = `${oldText}\nexpanded`;
+
+		expect(
+			replaceText(`${firstActual}\n${secondActual}`, oldText, newText, {
+				all: true,
+				fuzzy: true,
+				threshold: 0.8,
+			}),
+		).toEqual({
+			content: `${newText}\n${newText}`,
+			count: 2,
+		});
+	});
+});
+
 describe("computeHashlineDiff", () => {
 	let tempDir = "";
 
@@ -237,12 +263,12 @@ describe("computeHashlineDiff", () => {
 		const line = "unchanged content";
 		await Bun.write(sourcePath, `${line}\n`);
 
-		// `SWAP 1.=1:` with the same line in the body is a true no-op: the edit
+		// `PUT 1-1:` with the same line in the body is a true no-op: the edit
 		// fires through computeHashlineDiff but produces identical content.
 		const text = `${line}\n`;
 		const snapshotStore = new InMemorySnapshotStore();
 		const tag = snapshotStore.record(sourcePath, text);
-		const input = `${formatHashlineHeader(sourcePath, tag)}\nSWAP 1.=1:\n+${line}\n`;
+		const input = `${formatHashlineHeader(sourcePath, tag)}\nPUT 1-1:\n+${line}\n`;
 		const result = await computeHashlineDiff({ input }, tempDir, snapshotStore);
 		expect("error" in result).toBe(true);
 		if ("error" in result) {
@@ -258,7 +284,7 @@ describe("computeHashlineDiff", () => {
 		const snapshotStore = new InMemorySnapshotStore();
 		const tag = snapshotStore.record(sourcePath, text);
 		const result = await computeHashlineDiff(
-			{ input: `${formatHashlineHeader(sourcePath, tag)}\nINS.TAIL:\n+second` },
+			{ input: `${formatHashlineHeader(sourcePath, tag)}\nPUT >$:\n+second` },
 			tempDir,
 			snapshotStore,
 		);
@@ -268,16 +294,78 @@ describe("computeHashlineDiff", () => {
 		}
 	});
 
+	test("previews a same-file CUT + PASTE as the moved content", async () => {
+		const sourcePath = path.join(tempDir, "source.txt");
+		const text = "l1\nl2\nl3\n";
+		await Bun.write(sourcePath, text);
+
+		const snapshotStore = new InMemorySnapshotStore();
+		const tag = snapshotStore.record(sourcePath, text);
+		const result = await computeHashlineDiff(
+			{ input: `${formatHashlineHeader(sourcePath, tag)}\nCUT 1-1\nPUT >$` },
+			tempDir,
+			snapshotStore,
+		);
+		expect("diff" in result).toBe(true);
+		if ("diff" in result) {
+			expect(result.diff).toContain("-1|l1");
+			expect(result.diff).toContain("+3|l1");
+		}
+	});
+
+	test("previews a PASTE from a forked session register without touching the source", async () => {
+		const sourcePath = path.join(tempDir, "source.txt");
+		const text = "l1\n";
+		await Bun.write(sourcePath, text);
+
+		const snapshotStore = new InMemorySnapshotStore();
+		const tag = snapshotStore.record(sourcePath, text);
+		// Mirror the streaming-strategy contract: the session register is forked
+		// once per preview frame; sections then thread the fork in patch order.
+		const sessionRegister = { lines: ["carried"] };
+		const result = await computeHashlineDiff(
+			{ input: `${formatHashlineHeader(sourcePath, tag)}\nPUT >$` },
+			tempDir,
+			snapshotStore,
+			{ clipboard: forkClipboard(sessionRegister) },
+		);
+		expect("diff" in result).toBe(true);
+		if ("diff" in result) {
+			expect(result.diff).toContain("|carried");
+		}
+		expect(sessionRegister.lines).toEqual(["carried"]);
+	});
+
+	test("streams paste rows in the natural-order preview", async () => {
+		const sourcePath = path.join(tempDir, "source.txt");
+		const text = "l1\nl2\nl3\n";
+		await Bun.write(sourcePath, text);
+
+		const snapshotStore = new InMemorySnapshotStore();
+		const tag = snapshotStore.record(sourcePath, text);
+		const result = await computeHashlineDiff(
+			{ input: `${formatHashlineHeader(sourcePath, tag)}\nCUT 2-2\nPUT <1` },
+			tempDir,
+			snapshotStore,
+			{ streaming: true, skipHashValidation: true },
+		);
+		expect("diff" in result).toBe(true);
+		if ("diff" in result) {
+			expect(result.diff).toContain("-2|l2");
+			expect(result.diff).toContain("+1|l2");
+		}
+	});
+
 	test("rejects a tagless head/tail insert in the preview path, matching apply", async () => {
 		const relativePath = "source.txt";
 		await Bun.write(path.join(tempDir, relativePath), "first\n");
 
-		// A tagless `INS.TAIL:` carries no anchored edit, yet the apply path
+		// A tagless `PUT >$:` carries no anchored edit, yet the apply path
 		// (Patcher.prepare) rejects it for the missing mandatory tag. The
 		// preview/diff path MUST emit the SAME rejection so a successful preview
 		// never precedes a failing apply.
 		const result = await computeHashlineDiff(
-			{ input: `[${relativePath}]\nINS.TAIL:\n+second` },
+			{ input: `[${relativePath}]\nPUT >$:\n+second` },
 			tempDir,
 			new InMemorySnapshotStore(),
 		);
@@ -288,7 +376,7 @@ describe("computeHashlineDiff", () => {
 	});
 	test("returns a handled error when the source path is a local URL", async () => {
 		const result = await computeHashlineDiff(
-			{ input: "[local://PLAN.md]\nINS.TAIL:\n+x" },
+			{ input: "[local://PLAN.md]\nPUT >$:\n+x" },
 			tempDir,
 			new InMemorySnapshotStore(),
 		);
@@ -317,7 +405,7 @@ describe("computeHashlineDiff", () => {
 		const tag = snapshotStore.record(sourcePath, SNAPSHOT_TEXT);
 
 		const result = await computeHashlineDiff(
-			{ input: `${formatHashlineHeader(sourcePath, tag)}\nSWAP 2.=2:\n+edited live` },
+			{ input: `${formatHashlineHeader(sourcePath, tag)}\nPUT 2-2:\n+edited live` },
 			tempDir,
 			snapshotStore,
 		);

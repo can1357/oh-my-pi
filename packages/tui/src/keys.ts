@@ -24,34 +24,37 @@ import {
 	parseKey as parseKeyNative,
 	parseKittySequence as parseKittySequenceNative,
 } from "@oh-my-pi/pi-natives";
+import { isInsideTerminalMultiplexer } from "./terminal-capabilities";
 
 // =============================================================================
 // Platform Detection
 // =============================================================================
 
-function isWindowsTerminalSession(): boolean {
+/** Whether the local process is running directly under Windows Terminal. */
+export function isWindowsTerminalSession(): boolean {
 	return (
 		Boolean(process.env.WT_SESSION) && !process.env.SSH_CONNECTION && !process.env.SSH_CLIENT && !process.env.SSH_TTY
 	);
 }
 
 /**
- * Raw 0x08 (BS) is ambiguous in legacy terminals.
+ * Match ambiguous legacy Backspace bytes against an expected modifier mask.
  *
- * - Windows Terminal uses it for Ctrl+Backspace.
- * - Some legacy terminals and tmux setups send it for plain Backspace.
- *
- * Prefer explicit Kitty / CSI-u / modifyOtherKeys sequences whenever they are
- * available. Fall back to a Windows Terminal heuristic only for raw BS bytes.
+ * Windows Terminal encodes Ctrl+Backspace as raw `0x08` (BS) and plain
+ * Backspace as `0x7f` (DEL). Remote/container sessions lose terminal identity,
+ * and multiplexers (tmux/screen/Zellij) inherit `WT_SESSION` while emitting
+ * raw `0x08` for plain Backspace themselves, so the automatic heuristic is
+ * limited to direct Windows Terminal sessions. `PI_TUI_RAW_BACKSPACE_IS_CTRL=1`
+ * explicitly opts into the mapping everywhere.
  */
-function matchesRawBackspace(data: string, expectedModifier: number): boolean {
+export function matchesRawBackspace(data: string, expectedModifier: number): boolean {
 	if (data === "\x7f") return expectedModifier === 0;
 	if (data !== "\x08") return false;
-	// On Windows Terminal, 0x08 = Ctrl+Backspace. On others, it's plain Backspace.
-	return isWindowsTerminalSession() ? expectedModifier === 4 : expectedModifier === 0;
+	const rawBackspaceIsCtrl =
+		process.env.PI_TUI_RAW_BACKSPACE_IS_CTRL === "1" ||
+		(isWindowsTerminalSession() && !isInsideTerminalMultiplexer(process.env));
+	return rawBackspaceIsCtrl ? expectedModifier === 4 : expectedModifier === 0;
 }
-
-export { isWindowsTerminalSession, matchesRawBackspace };
 
 // =============================================================================
 // Global Kitty Protocol State
@@ -545,6 +548,7 @@ function matchesKeypadKey(data: string, keyId: KeyId): boolean | undefined {
  * @param keyId - Key identifier (e.g., "ctrl+c", "escape", Key.ctrl("c"))
  */
 export function matchesKey(data: string, keyId: KeyId): boolean {
+	if (matchesRawBackspace(data, 4)) return keyId === "ctrl+backspace";
 	return matchesKeypadKey(data, keyId) ?? matchesKeyNative(data, keyId, kittyProtocolActive);
 }
 
@@ -557,5 +561,6 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
  * @param data - Raw input data from terminal
  */
 export function parseKey(data: string): string | undefined {
+	if (matchesRawBackspace(data, 4)) return "ctrl+backspace";
 	return decodeKittyKeypadText(data) ?? parseKeyNative(data, kittyProtocolActive) ?? undefined;
 }

@@ -35,6 +35,7 @@ import {
 	type SttModelKey,
 	type TransformersSttModelSpec,
 } from "./models";
+import { loadSourceSherpaRuntime, type SherpaOfflineRecognizer, type SherpaRuntime } from "./sherpa-runtime";
 
 const ASR_TASK = "automatic-speech-recognition";
 const SHERPA_PACKAGE = "sherpa-onnx-node";
@@ -50,7 +51,6 @@ const HF_RESOLVE_BASE = "https://huggingface.co";
 // Coalesce download progress so streaming a multi-hundred-MB model file doesn't
 // flood the IPC channel with one event per chunk.
 const PROGRESS_EMIT_BYTES = 4_000_000;
-const sourceRequire = createRequire(import.meta.url);
 
 const sttModelDevicePreference = resolveTinyModelDevicePreference();
 const sttModelDtypeOverride = resolveTinyModelDtypeOverride();
@@ -88,41 +88,6 @@ interface TransformersRuntime {
 			progress_callback: (info: ProgressInfo) => void;
 		},
 	) => Promise<AutomaticSpeechRecognitionPipeline>;
-}
-
-/** Recognition result returned by `sherpa-onnx-node`'s offline recognizer. */
-interface SherpaOfflineResult {
-	text?: string;
-}
-
-/** A sherpa-onnx offline stream that accepts a single waveform before decoding. */
-interface SherpaOfflineStream {
-	acceptWaveform(audio: { samples: Float32Array; sampleRate: number }): void;
-}
-
-interface SherpaOfflineRecognizer {
-	createStream(): SherpaOfflineStream;
-	decodeAsync(stream: SherpaOfflineStream): Promise<SherpaOfflineResult>;
-}
-
-/** Offline recognizer config passed to `sherpa-onnx-node` (transducer family). */
-interface SherpaOfflineConfig {
-	modelConfig: {
-		transducer: { encoder: string; decoder: string; joiner: string };
-		tokens: string;
-		modelType: string;
-		numThreads: number;
-		provider: string;
-		debug: number;
-	};
-	decodingMethod: string;
-}
-
-/** Subset of the native `sherpa-onnx-node` module surface we use. */
-interface SherpaRuntime {
-	OfflineRecognizer: {
-		createAsync(config: SherpaOfflineConfig): Promise<SherpaOfflineRecognizer>;
-	};
 }
 
 /** A warm model plus the engine that loaded it; cached per tier key. */
@@ -182,7 +147,7 @@ function getSherpaRuntimeDir(): string {
  */
 function loadSherpaRuntime(transport: SttTransport, requestId: string, modelKey: SttModelKey): Promise<SherpaRuntime> {
 	return sherpaRuntime.load(async () => {
-		if (!isCompiledBinary()) return sourceRequire(SHERPA_PACKAGE) as SherpaRuntime;
+		if (!isCompiledBinary()) return loadSourceSherpaRuntime(import.meta.url);
 		const runtimeDir = await ensureRuntimeInstalled({
 			runtimeDir: getSherpaRuntimeDir(),
 			install: { dependencies: { [SHERPA_PACKAGE]: getSherpaVersionSpec() } },

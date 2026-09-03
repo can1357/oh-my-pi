@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
@@ -6,7 +7,6 @@ import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-response
 import type { Context, Model, Tool, ToolChoice } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { z } from "zod/v4";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -73,19 +73,19 @@ const codexModel: Model<"openai-codex-responses"> = buildModel({
 const forkAgentTool: Tool = {
 	name: "fork_agent",
 	description: "Fork a subagent",
-	parameters: z.object({ prompt: z.string() }),
+	parameters: type({ prompt: type("string") }),
 };
 
 const searchTool: Tool = {
 	name: "dataforseo_search",
 	description: "Search via DataForSEO",
-	parameters: z.object({ query: z.string() }),
+	parameters: type({ query: type("string") }),
 };
 
 const todoTool: Tool = {
 	name: "todo",
 	description: "Manage a phased task list",
-	parameters: z.object({ ops: z.array(z.object({ op: z.string() })) }),
+	parameters: type({ ops: type.array(type({ op: type("string") })) }),
 };
 
 const absentTodoContext: Context = {

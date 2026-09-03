@@ -192,6 +192,34 @@ describe("GuestClient frame apply", () => {
 		client.applyFrameForTest({ t: "state", state: { ...STATE, isStreaming: false } });
 		expect(client.getSnapshot().working).toBe(false);
 	});
+	it("a state frame recovers a stuck-idle guest when agent_start was dropped", () => {
+		// The host begins streaming mid-turn, but the matching `agent_start`
+		// never arrived (e.g. dropped on a reconnect). Before the fix nothing
+		// set `working` true except `agent_start`, so the guest stayed idle.
+		const client = liveClient();
+		expect(client.getSnapshot().working).toBe(false);
+		client.applyFrameForTest({ t: "state", state: { ...STATE, isStreaming: true } });
+		expect(client.getSnapshot().working).toBe(true);
+	});
+
+	it("an idle state frame clears a pinned tool card when tool_execution_end was dropped", () => {
+		// Host reports idle, but the matching `tool_execution_end` was dropped,
+		// leaving a stuck tool card. The authoritative idle signal must clear it.
+		const client = liveClient();
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "tc1",
+				toolName: "bash",
+				args: { command: "ls" },
+				intent: "Listing",
+			},
+		});
+		expect(client.getSnapshot().activeTools.size).toBe(1);
+		client.applyFrameForTest({ t: "state", state: { ...STATE, isStreaming: false } });
+		expect(client.getSnapshot().activeTools.size).toBe(0);
+	});
 
 	it("bus progress frames update the progress map", () => {
 		const client = liveClient();
@@ -232,6 +260,17 @@ describe("GuestClient frame apply", () => {
 		const notices = client.getSnapshot().notices;
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toMatchObject({ level: "error", message: "boom" });
+	});
+
+	it("auto_retry_end failure surfaces an error notice", () => {
+		const client = liveClient();
+		client.applyFrameForTest({
+			t: "event",
+			event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "x" },
+		});
+		const notices = client.getSnapshot().notices;
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toMatchObject({ level: "error", message: "x" });
 	});
 
 	it("a pre-welcome error (hello rejection, e.g. protocol mismatch) ends the session with the host's reason", () => {

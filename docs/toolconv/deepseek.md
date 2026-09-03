@@ -368,6 +368,41 @@ reuse the same fullwidth pipe (`｜`, U+FF5C), but the body is an Anthropic-styl
   structured `tool_calls`; a parser must heal it back into tool calls and strip the markers from
   user-visible text.
 
+## omp / pi converter behavior
+
+The repository's `deepseek` dialect is an **owned in-band converter**, not a
+vLLM parser wrapper. Select it with `PI_DIALECT=deepseek` (or the equivalent
+agent configuration). When tools are present, the agent appends the dialect
+guide and compact tool catalog to the system prompt, removes native provider
+tools from the request, re-encodes prior calls/results with this syntax, and
+scans streamed assistant text back into canonical pi tool-call events.
+
+The current scanner accepts all three forms described above:
+
+- V3.1 `name<｜tool▁sep｜>{json}` calls;
+- legacy `function<｜tool▁sep｜>name` plus a fenced JSON body; and
+- fullwidth or ASCII DSML `invoke` / `parameter` blocks.
+
+For V3.1 and legacy calls, omp emits `toolStart` after the header is complete
+but buffers arguments until `<｜tool▁call▁end｜>`; it then uses the shared
+repairing JSON parser. A missing/invalid completed argument object becomes
+`{}`. Flush emits no `toolEnd` for an unfinished call and only clears the
+scanner's private state. Once `toolStart` has been projected, however, the
+canonical call remains and a normally stopped turn may dispatch it: unfinished
+V3.1/legacy calls retain `{}`, while DSML calls retain any argument text already
+published through `toolArgDelta`. DSML is genuinely incremental: parameter
+body text is streamed as those deltas. A DSML parameter is a raw string unless
+`string="false"`; the latter is repairing-JSON-decoded at a completed close and
+falls back to the raw text if decoding fails. Call IDs for id-less DeepSeek
+forms are synthesized as `ptc_…`.
+
+The scanner also removes leaked DeepSeek chat-template control tokens from
+visible text and, by default, maps `<think>…</think>` to thinking events. Its
+renderer emits V3.1 calls, joins parallel calls without separators, and renders
+multiple results as singular output blocks separated by newlines. The DSML
+syntax is accepted for healing leaked provider output but is not the owned
+dialect's emitted history format.
+
 ## Sources
 
 - DeepSeek-V3.1 model card (Chat Template / ToolCall sections): <https://huggingface.co/deepseek-ai/DeepSeek-V3.1>

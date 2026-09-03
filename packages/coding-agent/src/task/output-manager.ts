@@ -18,10 +18,11 @@ import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
  *
  * The first allocation of a given name keeps the name as-is; subsequent
  * allocations of the same name get a `-2`, `-3`, … suffix. On resume, scans
- * existing output files so previously written outputs are never overwritten.
+ * existing output and child-session files so prior state is never overwritten.
  */
 export class AgentOutputManager {
 	#initialized = false;
+	#initializing: Promise<void> | undefined;
 	/** Final ids already handed out, relative to this manager's scope. */
 	readonly #taken = new Set<string>();
 	readonly #getArtifactsDir: () => string | null;
@@ -42,8 +43,12 @@ export class AgentOutputManager {
 	 */
 	async #ensureInitialized(): Promise<void> {
 		if (this.#initialized) return;
+		this.#initializing ??= this.#seedFromDisk();
+		await this.#initializing;
 		this.#initialized = true;
+	}
 
+	async #seedFromDisk(): Promise<void> {
 		const dir = this.#getArtifactsDir();
 		if (!dir) return;
 
@@ -56,8 +61,9 @@ export class AgentOutputManager {
 
 		const prefix = this.#parentPrefix ? `${this.#parentPrefix}.` : "";
 		for (const file of files) {
-			if (!file.endsWith(".md")) continue;
-			let rest = file.slice(0, -3); // drop ".md"
+			const extension = file.endsWith(".jsonl") ? ".jsonl" : file.endsWith(".md") ? ".md" : undefined;
+			if (!extension) continue;
+			let rest = file.slice(0, -extension.length);
 			if (prefix) {
 				if (!rest.startsWith(prefix)) continue;
 				rest = rest.slice(prefix.length);
@@ -78,6 +84,22 @@ export class AgentOutputManager {
 		}
 		this.#taken.add(candidate);
 		return this.#parentPrefix ? `${this.#parentPrefix}.${candidate}` : candidate;
+	}
+
+	/** Reserve final IDs discovered outside the output directory scan. */
+	async reserve(ids: Iterable<string>): Promise<void> {
+		await this.#ensureInitialized();
+		const prefix = this.#parentPrefix ? `${this.#parentPrefix}.` : "";
+		for (const id of ids) {
+			let rest = id;
+			if (prefix) {
+				if (!rest.startsWith(prefix)) continue;
+				rest = rest.slice(prefix.length);
+			}
+			const dot = rest.indexOf(".");
+			const segment = dot === -1 ? rest : rest.slice(0, dot);
+			if (segment) this.#taken.add(segment);
+		}
 	}
 
 	/**

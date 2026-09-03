@@ -25,10 +25,17 @@ export interface AggregatedStats {
 	totalCacheReadTokens: number;
 	/** Total cache write tokens */
 	totalCacheWriteTokens: number;
-	/** Cache hit rate (0-1) */
+	/** Percentage of prompt input tokens served from cache (0-1). */
 	cacheRate: number;
+	/**
+	 * Prompt-input cost saved relative to billing the same tokens uncached
+	 * (0-1; negative when cache writes cost more than reads save).
+	 */
+	cacheSavings: number;
 	/** Total cost */
 	totalCost: number;
+	/** Requests with token usage but no public-equivalent subscription price. */
+	unpricedRequests: number;
 	/** Total premium requests */
 	totalPremiumRequests: number;
 	/** Average duration in ms */
@@ -117,6 +124,8 @@ export interface CostTimeSeriesPoint {
 	provider: string;
 	/** Total cost for this bucket */
 	cost: number;
+	/** Requests excluded because no public-equivalent subscription price exists. */
+	unpricedRequests: number;
 	/** Cost breakdown */
 	costInput: number;
 	costOutput: number;
@@ -124,6 +133,21 @@ export interface CostTimeSeriesPoint {
 	costCacheWrite: number;
 	/** Request count */
 	requests: number;
+}
+
+/**
+ * One local calendar day of aggregate request activity, for the `/usage`
+ * activity heatmap in the coding-agent TUI.
+ */
+export interface DailyActivityPoint {
+	/** Local calendar date, `YYYY-MM-DD`. */
+	day: string;
+	/** Summed API-equivalent cost for the day. */
+	cost: number;
+	/** Request count for the day. */
+	requests: number;
+	/** Total tokens (input + output + cache) for the day. */
+	totalTokens: number;
 }
 
 /**
@@ -297,6 +321,8 @@ export interface ToolUsageStats {
 	outputTokensShare: number;
 	/** Cost (USD) of invoking turns, attributed per call share. */
 	costShare: number;
+	/** Share of unpriced subscription requests attributed to this tool. */
+	unpricedRequestsShare: number;
 	/** Unix ms of the most recent call in range. */
 	lastUsed: number;
 }
@@ -320,4 +346,243 @@ export interface ToolDashboardStats {
 	byTool: ToolUsageStats[];
 	byToolModel: ToolModelStats[];
 	series: ToolTimeSeriesPoint[];
+}
+
+/**
+ * Aggregated request/token/cost totals for one provider over the active range.
+ */
+export interface ProviderAggregate {
+	provider: string;
+	totalRequests: number;
+	failedRequests: number;
+	/** Distinct models used through this provider in the range. */
+	models: number;
+	totalInputTokens: number;
+	totalOutputTokens: number;
+	totalCacheReadTokens: number;
+	totalCacheWriteTokens: number;
+	/** Uncached input + cache reads + cache writes + output. */
+	totalTokens: number;
+	totalCost: number;
+	/** Requests excluded because no public-equivalent subscription price exists. */
+	unpricedRequests: number;
+	totalPremiumRequests: number;
+	avgTokensPerSecond: number | null;
+}
+
+/**
+ * Token burn attributed to one local hour-of-day (0-23) for one provider.
+ * Powers the "peak burn hours" histogram.
+ */
+export interface ProviderHourlyPoint {
+	provider: string;
+	/** Local hour of day, 0-23. */
+	hour: number;
+	totalTokens: number;
+	outputTokens: number;
+	requests: number;
+}
+
+/** Provider token/cost time-series point (bucketed like the model series). */
+export interface ProviderTimeSeriesPoint {
+	timestamp: number;
+	provider: string;
+	totalTokens: number;
+	cost: number;
+	/** Requests excluded because no public-equivalent subscription price exists. */
+	unpricedRequests: number;
+	requests: number;
+}
+
+/** One recorded usage-limit snapshot for an (account, window) series. */
+export interface UsageWindowPoint {
+	timestamp: number;
+	/** Used fraction 0..1 (>1 = overage) when the provider reported one. */
+	usedFraction: number | null;
+	exhausted: boolean;
+}
+
+/**
+ * Utilization history for one (account, limit window) pair of a provider,
+ * sourced from the auth store's recorded usage-limit snapshots.
+ */
+export interface UsageWindowSeries {
+	provider: string;
+	accountKey: string;
+	/** Email/account id when known, else the stable account key. */
+	accountLabel: string;
+	/** Groups the same limit window across accounts (the provider limit id). */
+	windowKey: string;
+	/** Human label of the limit (distinguishes same-duration windows). */
+	windowLabel: string;
+	points: UsageWindowPoint[];
+}
+
+/**
+ * Derived subscription insight for one provider limit window across all
+ * accounts: how much of the window was consumed, what one window is worth in
+ * tokens, and how many accounts peak demand would have needed.
+ */
+export interface ProviderWindowInsight {
+	provider: string;
+	/** Groups the same limit window across accounts (the provider limit id). */
+	windowKey: string;
+	/** Human label of the limit (distinguishes same-duration windows). */
+	windowLabel: string;
+	/** Accounts with at least one snapshot for this window in range. */
+	accounts: number;
+	/** Window resets observed (drops in used fraction). */
+	cycles: number;
+	/**
+	 * Subscription-window equivalents consumed in range: sum of positive
+	 * used-fraction deltas across accounts (1.0 = one full window burned).
+	 */
+	fractionConsumed: number;
+	/**
+	 * Estimated tokens one full window buys: provider tokens burned in range
+	 * divided by {@link fractionConsumed}. Null when too little of the window
+	 * was consumed to extrapolate.
+	 */
+	estTokensPerWindow: number | null;
+	/** Peak of sum-across-accounts used fraction at any sampled instant. */
+	peakConcurrentFraction: number;
+	/**
+	 * Accounts needed to keep peak demand under 90% of fleet capacity:
+	 * max(1, ceil(peakConcurrentFraction / 0.9)).
+	 */
+	idealAccounts: number;
+	/** Transitions into an exhausted state observed in range. */
+	exhaustedEvents: number;
+}
+
+/** Complete providers dashboard payload. */
+export interface ProviderDashboardStats {
+	providers: ProviderAggregate[];
+	hourly: ProviderHourlyPoint[];
+	series: ProviderTimeSeriesPoint[];
+	usageSeries: UsageWindowSeries[];
+	windowInsights: ProviderWindowInsight[];
+}
+/**
+ * One row of the Traces session list: a root session with every child
+ * transcript (task subagents, advisors) folded in.
+ */
+export interface SessionSummary {
+	/** Absolute root session file path (trace key). */
+	file: string;
+	/** Decoded project path (e.g. `/work/pi`). */
+	folder: string;
+	title: string | null;
+	/** ms epoch of first activity. */
+	startedAt: number;
+	/** ms epoch of last activity, children included. */
+	endedAt: number;
+	/** Assistant messages, children folded in. */
+	requests: number;
+	toolCalls: number;
+	/** Child transcript count. */
+	subagents: number;
+	totalTokens: number;
+	costTotal: number;
+	models: string[];
+}
+
+export type TraceSpanKind = "turn" | "model" | "tool" | "subagent" | "background";
+
+/** One rendered block on a trace track lane. */
+export interface TraceSpan {
+	/** `${track.id}:${entryId}` (+`:${toolCallId}` for tool spans); stable across refetch. */
+	id: string;
+	kind: TraceSpanKind;
+	/** ms epoch. */
+	start: number;
+	/** ms epoch, >= start. */
+	end: number;
+	/** ≤80 chars: tool name / model id / user-text head / agent name. */
+	label: string;
+	/** ≤160 chars: args projection / result head / task text. */
+	detail?: string;
+	/** Journal entry id for /api/session/entry. */
+	entryId?: string;
+	toolCallId?: string;
+	model?: string;
+	/** usage.totalTokens (model spans). */
+	tokens?: number;
+	/** usage.cost.total (model spans). */
+	cost?: number;
+	/** Time to first token, ms offset from start. */
+	ttft?: number;
+	isError?: boolean;
+	/** End synthesized (no result / pending at session exit). */
+	unterminated?: boolean;
+	/** Set on `subagent` spans whose child transcript became a track. */
+	childTrackId?: string;
+}
+
+/** Point event drawn on a track header row. */
+export interface TraceMarker {
+	/** ms epoch. */
+	time: number;
+	kind: "compaction" | "model_change" | "mode_change" | "reset" | "session_exit";
+	/** e.g. "compaction 142k→38k", model id, mode name, exit kind. */
+	label: string;
+}
+
+/** One transcript (main session, subagent, advisor) in a trace. */
+export interface TraceTrack {
+	/** "main" or slash-joined child key: "Scout1", "Scout1/Nested2", "__advisor". */
+	id: string;
+	parentId: string | null;
+	label: string;
+	/** session_init.agent when recorded. */
+	agent: string | null;
+	/** session_init.resolvedModel ?? first assistant model. */
+	model: string | null;
+	/** Absolute transcript path (for entry fetch). */
+	file: string;
+	/** Sorted by start. */
+	spans: TraceSpan[];
+	markers: TraceMarker[];
+}
+
+/** Per-tool duration aggregate across all tracks of one trace. */
+export interface TraceToolStat {
+	tool: string;
+	calls: number;
+	errors: number;
+	totalMs: number;
+	maxMs: number;
+}
+
+/** Headline aggregates for one trace. */
+export interface TraceSummary {
+	wallMs: number;
+	/** Summed model-span duration on the main track. */
+	modelMs: number;
+	/** Summed tool-span duration on the main track. */
+	toolMs: number;
+	/** Wall time not covered by any span on any track. */
+	idleMs: number;
+	turns: number;
+	requests: number;
+	toolCalls: number;
+	subagents: number;
+	totalTokens: number;
+	costTotal: number;
+	/** Sorted totalMs desc. */
+	toolStats: TraceToolStat[];
+}
+
+/** Complete span tree for one session, `/api/session/trace` payload. */
+export interface SessionTrace {
+	file: string;
+	title: string | null;
+	cwd: string | null;
+	startedAt: number;
+	endedAt: number;
+	/** Root transcript mtime; doubles as the ETag. */
+	mtimeMs: number;
+	/** DFS order, main first. */
+	tracks: TraceTrack[];
+	summary: TraceSummary;
 }

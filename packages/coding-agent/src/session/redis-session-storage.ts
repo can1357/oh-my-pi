@@ -13,6 +13,7 @@ import type { SessionTitleUpdate } from "./session-title-slot";
  * without dragging the entire Bun typings into this module.
  */
 export interface RedisSessionStorageClient {
+	send(command: string, args: string[]): Promise<unknown>;
 	get(key: string): Promise<string | null>;
 	getrange(key: string, start: number, end: number): Promise<string>;
 	strlen(key: string): Promise<number>;
@@ -44,6 +45,26 @@ export interface RedisSessionStorageOptions {
 
 const DEFAULT_PREFIX = "omp:sessions:";
 const DEFAULT_SCAN_COUNT = 500;
+
+const WRITE_FULL_SCRIPT = `-- OMP_WRITE_FULL
+redis.call("SET", KEYS[1], ARGV[1])
+redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+if ARGV[4] == "1" then
+	redis.call("HSET", KEYS[3], ARGV[2], ARGV[5])
+else
+	redis.call("HDEL", KEYS[3], ARGV[2])
+end
+return 1`;
+
+const APPEND_SCRIPT = `-- OMP_APPEND
+local size = redis.call("APPEND", KEYS[1], ARGV[1])
+redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+return size`;
+
+const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
+redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
+redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
+return 1`;
 
 function encodeTitleMeta(title: SessionTitleUpdate): string {
 	return JSON.stringify(title);
@@ -155,23 +176,42 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
-		await this.#client.set(this.#fileKey(path), content);
-		await this.#client.hset(this.#metaKey(), path, String(mtimeMs));
-		if (title) {
-			await this.#client.hset(this.#titleMetaKey(), path, encodeTitleMeta(title));
-		} else {
-			await this.#client.hdel(this.#titleMetaKey(), path);
-		}
+		await this.#client.send("EVAL", [
+			WRITE_FULL_SCRIPT,
+			"3",
+			this.#fileKey(path),
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			content,
+			path,
+			String(mtimeMs),
+			title ? "1" : "0",
+			title ? encodeTitleMeta(title) : "",
+		]);
 	}
 
 	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.append(this.#fileKey(path), line);
-		await this.#client.hset(this.#metaKey(), path, String(mtimeMs));
+		await this.#client.send("EVAL", [
+			APPEND_SCRIPT,
+			"2",
+			this.#fileKey(path),
+			this.#metaKey(),
+			line,
+			path,
+			String(mtimeMs),
+		]);
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
-		await this.#client.hset(this.#metaKey(), path, String(mtimeMs));
-		await this.#client.hset(this.#titleMetaKey(), path, encodeTitleMeta(title));
+		await this.#client.send("EVAL", [
+			UPDATE_TITLE_SCRIPT,
+			"2",
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			path,
+			String(mtimeMs),
+			encodeTitleMeta(title),
+		]);
 	}
 
 	async truncate(path: string, mtimeMs: number): Promise<void> {

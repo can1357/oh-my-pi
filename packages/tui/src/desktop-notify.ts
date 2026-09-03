@@ -20,6 +20,8 @@
 // iTerm2, WezTerm, …) keep working unchanged and the BEL emission still fires
 // for tmux `monitor-bell`, X11 urgency hints, and audible-bell handlers.
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import type { TerminalId, TerminalNotification } from "./terminal-capabilities";
 
@@ -36,15 +38,19 @@ export interface DesktopNotifier {
 
 /**
  * Whether the current process can reach a freedesktop notification daemon:
- * Linux platform + a session bus address in env. Caller is still responsible
- * for resolving a delivery binary via {@link resolveDesktopNotifier}.
+ * Linux platform plus either a session bus address in env or the
+ * systemd user-bus socket at `$XDG_RUNTIME_DIR/bus`. Caller is still responsible for
+ * resolving a delivery binary via {@link resolveDesktopNotifier}.
  */
 export function hasLinuxDesktopSession(
 	platform: NodeJS.Platform = process.platform,
 	env: NodeJS.ProcessEnv = Bun.env,
+	fileExists: (path: string) => boolean = fs.existsSync,
 ): boolean {
 	if (platform !== "linux") return false;
-	return Boolean(env.DBUS_SESSION_BUS_ADDRESS);
+	if (env.DBUS_SESSION_BUS_ADDRESS) return true;
+	const runtimeDir = env.XDG_RUNTIME_DIR;
+	return Boolean(runtimeDir && fileExists(path.join(runtimeDir, "bus")));
 }
 
 /**

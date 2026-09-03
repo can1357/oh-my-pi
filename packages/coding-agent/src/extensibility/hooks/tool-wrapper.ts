@@ -16,9 +16,10 @@ import type { ToolCallEventResult, ToolResultEventResult } from "./types";
  * - Emits tool_result event after execution (can modify result)
  * - Forwards onUpdate callback to wrapped tool for progress streaming
  */
-export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown>
-	implements AgentTool<TParameters, TDetails>
-{
+export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown> implements AgentTool<
+	TParameters,
+	TDetails
+> {
 	declare name: string;
 	declare description: string;
 	declare parameters: TParameters;
@@ -39,8 +40,9 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	) {
-		// Emit tool_call event - hooks can block execution
+		// Emit tool_call event - hooks can block execution or revise the input the tool runs with.
 		// If hook errors/times out, block by default (fail-safe)
+		let effectiveParams = params;
 		if (this.hookRunner.hasHandlers("tool_call")) {
 			try {
 				const callResult = (await this.hookRunner.emitToolCall({
@@ -57,6 +59,12 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					const reason = callResult.reason || "Tool execution was blocked by a hook";
 					throw new Error(reason);
 				}
+				// A non-blocking handler may replace the execution input. The returned object is the raw
+				// input the tool runs with (handler-owned); it is not re-normalized. Skipped for `computer`
+				// tool calls, whose real parameters are not represented by the event input.
+				if (callResult?.input !== undefined && context?.toolCall?.providerMetadata?.type !== "computer") {
+					effectiveParams = callResult.input as Static<TParameters>;
+				}
 			} catch (err) {
 				// Hook error or block - throw to mark as error
 				if (err instanceof Error) {
@@ -68,7 +76,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 
 		// Execute the actual tool, forwarding onUpdate for progress streaming
 		try {
-			const result = await this.tool.execute(toolCallId, params, signal, onUpdate, context);
+			const result = await this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context);
 
 			// Emit tool_result event - hooks can modify the result
 			if (this.hookRunner.hasHandlers("tool_result")) {
@@ -78,7 +86,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					toolCallId,
 					input: normalizeToolEventInput(
 						this.tool.name,
-						resolveToolEventInput(this.tool, params as Record<string, unknown>),
+						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
 					content: result.content,
 					details: result.details,
@@ -104,7 +112,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					toolCallId,
 					input: normalizeToolEventInput(
 						this.tool.name,
-						resolveToolEventInput(this.tool, params as Record<string, unknown>),
+						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
 					content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
 					details: undefined,

@@ -1,7 +1,16 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import type { AssistantMessage, Context, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function zeroUsage(): AssistantMessage["usage"] {
@@ -168,6 +177,289 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
+	it("preserves canonical multimodal order and nullable fallback sources", () => {
+		const imageData = Buffer.from("tool image").toString("base64");
+		const parsed = parseRequest({
+			model: "gpt-5.6-sol",
+			input: [
+				{
+					type: "function_call",
+					id: "fc_read",
+					call_id: "call_read",
+					name: "read",
+					arguments: '{"path":"image.png"}',
+				},
+				{
+					type: "function_call_output",
+					call_id: "call_read",
+					output: [
+						{
+							type: "input_image",
+							image_url: `data:image/png;base64,${imageData}`,
+							file_id: null,
+							detail: "original",
+						},
+						{ type: "input_text", text: "Read image file [image/png]" },
+						{ type: "input_image", image_url: "", file_id: "file_image_123", detail: null },
+						{ type: "input_text", text: "done" },
+					],
+				},
+			],
+		});
+
+		const result = parsed.context.messages[1];
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		expect(result.content).toEqual([
+			{ type: "image", data: imageData, mimeType: "image/png", detail: "original" },
+			{ type: "text", text: "Read image file [image/png]" },
+			{
+				type: "image",
+				data: "",
+				mimeType: "application/octet-stream",
+				providerFile: { provider: "openai", id: "file_image_123" },
+			},
+			{ type: "text", text: "done" },
+		]);
+	});
+
+	it("rejects function output images with an empty source", () => {
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6-sol",
+				input: [
+					{
+						type: "function_call_output",
+						call_id: "call_read",
+						output: [{ type: "input_image", image_url: "", file_id: null, detail: null }],
+					},
+				],
+			}),
+		).toThrow(/at least one of `image_url` or `file_id`/);
+	});
+
+	it("rejects file blocks in tool outputs instead of flattening their content", () => {
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6-sol",
+				input: [
+					{
+						type: "function_call_output",
+						call_id: "call_read",
+						output: [{ type: "input_file", filename: "report.pdf", file_data: "opaque" }],
+					},
+				],
+			}),
+		).toThrow(/input_file/);
+	});
+
+	it("concatenates legacy function output text while retaining inline images", () => {
+		const imageData = Buffer.from("legacy image").toString("base64");
+		const parsed = parseRequest({
+			model: "gpt-5.6-sol",
+			input: [
+				{
+					type: "function_call_output",
+					call_id: "call_legacy",
+					output: [
+						{ type: "output_text", text: "foo" },
+						{ type: "text", text: "bar" },
+						{ type: "refusal", refusal: "no" },
+						{ type: "input_image", image_url: `data:image/png;base64,${imageData}` },
+					],
+				},
+			],
+		});
+
+		const result = parsed.context.messages[0];
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		expect(result.content).toEqual([
+			{ type: "text", text: "foobar[refusal: no]" },
+			{ type: "image", data: imageData, mimeType: "image/png" },
+		]);
+	});
+
+	it("round-trips Pi image-read image forms as native function output blocks", () => {
+		const imageData = Buffer.from("read tool image").toString("base64");
+		const imageUrl = "https://blob.example.invalid/read-image.png";
+		const providerFileId = "file_read_image_123";
+		const model = buildModel({
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+		} satisfies ModelSpec<"openai-responses">);
+		const context: Context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "image.png" } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: model.id,
+					usage: zeroUsage(),
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_read",
+					toolName: "read",
+					content: [
+						{ type: "text", text: "Read image file [image/png]" },
+						{ type: "image", data: imageData, mimeType: "image/png", detail: "original" },
+						{ type: "image", data: imageData, mimeType: "image/png", detail: "high", url: imageUrl },
+						{
+							type: "image",
+							data: imageData,
+							mimeType: "image/png",
+							detail: "low",
+							providerFile: { provider: "openai", id: providerFileId },
+						},
+					],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+
+		const wireInput = buildResponsesInput({
+			model,
+			context,
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+		const wireOutput = wireInput.find(item => item.type === "function_call_output");
+		if (wireOutput?.type !== "function_call_output") throw new Error("expected function output");
+		expect(wireOutput.output).toEqual([
+			{ type: "input_text", text: "Read image file [image/png]" },
+			{
+				type: "input_image",
+				detail: "original",
+				image_url: `data:image/png;base64,${imageData}`,
+			},
+			{ type: "input_image", detail: "high", image_url: imageUrl },
+			{ type: "input_image", detail: "low", file_id: providerFileId },
+		]);
+		expect(wireInput.some(item => "role" in item && item.role === "user")).toBe(false);
+
+		const parsed = parseRequest({ model: model.id, input: wireInput });
+		const result = parsed.context.messages.find(message => message.role === "toolResult");
+		if (result?.role !== "toolResult") throw new Error("expected tool result");
+		expect(result.content).toEqual([
+			{ type: "text", text: "Read image file [image/png]" },
+			{ type: "image", data: imageData, mimeType: "image/png", detail: "original" },
+			{
+				type: "image",
+				data: "",
+				mimeType: "application/octet-stream",
+				detail: "high",
+				url: imageUrl,
+			},
+			{
+				type: "image",
+				data: "",
+				mimeType: "application/octet-stream",
+				detail: "low",
+				providerFile: { provider: "openai", id: providerFileId },
+			},
+		]);
+
+		const replayInput = buildResponsesInput({
+			model,
+			context: parsed.context,
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+		const replayOutput = replayInput.find(item => item.type === "function_call_output");
+		if (replayOutput?.type !== "function_call_output") throw new Error("expected replayed function output");
+		expect(replayOutput.output).toEqual(wireOutput.output);
+	});
+
+	it("round-trips array-valued custom tool outputs without demoting them", () => {
+		const imageData = Buffer.from("custom tool image").toString("base64");
+		const model = buildModel({
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			applyPatchToolType: "freeform",
+		} satisfies ModelSpec<"openai-responses">);
+		const parsed = parseRequest({
+			model: model.id,
+			input: [
+				{
+					type: "custom_tool_call",
+					call_id: "call_patch",
+					name: "apply_patch",
+					input: "*** Begin Patch",
+				},
+				{
+					type: "custom_tool_call_output",
+					call_id: "call_patch",
+					output: [
+						{ type: "input_text", text: "Rendered patch preview" },
+						{ type: "input_image", image_url: `data:image/png;base64,${imageData}`, detail: "high" },
+					],
+				},
+			],
+		});
+
+		const result = parsed.context.messages[1];
+		if (result?.role !== "toolResult") throw new Error("expected custom tool result");
+		expect(result.toolName).toBe("apply_patch");
+		expect(result.content).toEqual([
+			{ type: "text", text: "Rendered patch preview" },
+			{ type: "image", data: imageData, mimeType: "image/png", detail: "high" },
+		]);
+
+		const replay = buildResponsesInput({
+			model,
+			context: parsed.context,
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+		const replayOutput = replay.find(item => item.type === "custom_tool_call_output");
+		if (replayOutput?.type !== "custom_tool_call_output") throw new Error("expected custom tool output");
+		expect(replayOutput.output).toEqual([
+			{ type: "input_text", text: "Rendered patch preview" },
+			{ type: "input_image", detail: "high", image_url: `data:image/png;base64,${imageData}` },
+		]);
+		expect(replay.some(item => item.type === "function_call_output")).toBe(false);
+	});
+
+	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6",
+				input: "hi",
+				prompt_cache_options: { mode: "explicit", ttl: "30m" },
+			}),
+		).toThrow("prompt_cache_options and prompt_cache_breakpoint are unsupported");
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6",
+				input: [
+					{
+						role: "user",
+						content: [{ type: "input_text", text: "hi", prompt_cache_breakpoint: { mode: "explicit" } }],
+					},
+				],
+			}),
+		).toThrow("prompt_cache_options and prompt_cache_breakpoint are unsupported");
+	});
+
 	it("accepts a bare string input and rejects a missing model", () => {
 		const parsed = parseRequest({ model: "m", input: "hi" });
 		expect(parsed.context.messages).toHaveLength(1);
@@ -228,6 +520,214 @@ describe("openai-responses parseRequest", () => {
 			thinkingSignature: JSON.stringify(reasoningItem),
 			itemId: "rs_x",
 		});
+	});
+
+	it("parses GA computer tools, calls, screenshot refs, forced choice, and include losslessly", () => {
+		const fileId = "file_电脑_01/%2F";
+		const imageUrl = "https://example.invalid/capture/%E2%98%83.png?sig=a%2Fb+c&raw=✓";
+		const pendingSafetyChecks = [{ id: "safe_1", code: "confirm_domain", message: "Open example.invalid?" }];
+		const acknowledgedSafetyChecks = [{ id: "safe_1", code: "confirm_domain", message: "Open example.invalid?" }];
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			tools: [{ type: "computer" }],
+			tool_choice: { type: "computer" },
+			include: ["computer_call_output.output.image_url", "reasoning.encrypted_content"],
+			input: [
+				{
+					type: "computer_call",
+					id: "item_computer_1",
+					call_id: "call_computer_1",
+					action: { type: "click", button: "left", x: 17, y: 29, keys: ["SHIFT"] },
+					pending_safety_checks: pendingSafetyChecks,
+					status: "completed",
+				},
+				{
+					type: "computer_call_output",
+					call_id: "call_computer_1",
+					output: { type: "computer_screenshot", file_id: fileId },
+					acknowledged_safety_checks: acknowledgedSafetyChecks,
+					status: "failed",
+				},
+				{
+					type: "computer_call",
+					id: "item_computer_2",
+					call_id: "call_computer_2",
+					actions: [
+						{ type: "keypress", keys: ["CTRL", "L"] },
+						{ type: "type", text: imageUrl },
+					],
+					pending_safety_checks: [],
+					status: "completed",
+				},
+				{
+					type: "computer_call_output",
+					call_id: "call_computer_2",
+					output: { type: "computer_screenshot", image_url: imageUrl },
+					acknowledged_safety_checks: [],
+				},
+			],
+		});
+
+		expect(parsed.context.tools).toEqual([
+			{ name: "computer", description: "", parameters: {}, native: { type: "computer" } },
+		]);
+		expect(parsed.options.toolChoice).toEqual({ type: "computer" });
+		expect(parsed.options.include).toEqual(["computer_call_output.output.image_url", "reasoning.encrypted_content"]);
+
+		const [firstAssistant, fileResult, secondAssistant, urlResult] = parsed.context.messages;
+		if (firstAssistant?.role !== "assistant" || secondAssistant?.role !== "assistant") {
+			throw new Error("expected computer calls to be assistant messages");
+		}
+		if (fileResult?.role !== "toolResult" || urlResult?.role !== "toolResult") {
+			throw new Error("expected computer outputs to be tool results");
+		}
+		expect(firstAssistant.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call_computer_1",
+			name: "computer",
+			arguments: { actions: [{ type: "click", button: "left", x: 17, y: 29, keys: ["SHIFT"] }] },
+			providerMetadata: {
+				type: "computer",
+				providerItemId: "item_computer_1",
+				actions: [{ type: "click", button: "left", x: 17, y: 29, keys: ["SHIFT"] }],
+				pendingSafetyChecks,
+			},
+		});
+		expect(fileResult.content).toEqual([]);
+		expect(fileResult.isError).toBe(true);
+		expect(fileResult.providerMetadata).toEqual({
+			type: "computer",
+			screenshot: { type: "computer_screenshot", file_id: fileId },
+			acknowledgedSafetyChecks,
+		});
+		expect(secondAssistant.content[0]).toMatchObject({
+			providerMetadata: {
+				type: "computer",
+				providerItemId: "item_computer_2",
+				actions: [
+					{ type: "keypress", keys: ["CTRL", "L"] },
+					{ type: "type", text: imageUrl },
+				],
+				pendingSafetyChecks: [],
+			},
+		});
+		expect(urlResult.content).toEqual([]);
+		expect(urlResult.providerMetadata).toEqual({
+			type: "computer",
+			screenshot: { type: "computer_screenshot", image_url: imageUrl },
+			acknowledgedSafetyChecks: [],
+		});
+	});
+
+	it("uses the singular GA action when an explicitly empty actions batch is also present", () => {
+		const action = { type: "click" as const, button: "left" as const, x: 41, y: 73 };
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: [
+				{
+					type: "computer_call",
+					id: "item_empty_batch",
+					call_id: "call_empty_batch",
+					actions: [],
+					action,
+					pending_safety_checks: [],
+					status: "completed",
+				},
+			],
+		});
+		const message = parsed.context.messages[0];
+		if (message?.role !== "assistant" || message.content[0]?.type !== "toolCall") {
+			throw new Error("expected computer call");
+		}
+		expect(message.content[0].arguments).toEqual({ actions: [action] });
+		expect(message.content[0].providerMetadata).toEqual({
+			type: "computer",
+			providerItemId: "item_empty_batch",
+			actions: [action],
+			pendingSafetyChecks: [],
+		});
+	});
+
+	it("preserves input image and file refs as replayable native payload without placeholders", () => {
+		const nativeItem = {
+			type: "message" as const,
+			role: "user" as const,
+			content: [
+				{ type: "input_text" as const, text: "inspect these" },
+				{ type: "input_image" as const, file_id: "file_image_电脑/%2F", detail: "original" as const },
+				{
+					type: "input_image" as const,
+					image_url: "https://example.invalid/image?sig=a%2Fb+✓",
+					detail: "auto" as const,
+				},
+				{ type: "input_file" as const, file_url: "https://example.invalid/context/%E9%9B%AA.pdf?sig=a%2Fb+✓" },
+			],
+		};
+		const parsed = parseRequest({ model: "gpt-5.4", input: [nativeItem] });
+		const message = parsed.context.messages[0];
+		if (message?.role !== "user") throw new Error("expected user message");
+		expect(message.content).toBe("inspect these");
+		expect(message.providerPayload).toEqual({ type: "openaiResponsesHistory", items: [nativeItem], dt: true });
+		expect(JSON.stringify(message.content)).not.toContain("[image:");
+		expect(JSON.stringify(message.content)).not.toContain("[file:");
+
+		const replayModel = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		} satisfies ModelSpec<"openai-responses">);
+		const replay = buildResponsesInput({
+			model: replayModel,
+			context: parsed.context,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		expect(replay).toEqual([nativeItem]);
+
+		const nativeSystemItem = {
+			type: "message" as const,
+			role: "system" as const,
+			content: [
+				{ type: "input_text" as const, text: "Inspect this policy image" },
+				{ type: "input_image" as const, file_id: "file_system_image_雪", detail: "auto" as const },
+				{ type: "input_file" as const, file_id: "file_system_document_电脑" },
+			],
+		};
+		const systemParsed = parseRequest({ model: "gpt-5.4", input: [nativeSystemItem] });
+		expect(systemParsed.context.systemPrompt).toBeUndefined();
+		const carrier = systemParsed.context.messages[0];
+		if (carrier?.role !== "developer") throw new Error("expected native system payload carrier");
+		expect(carrier.content).toBe("Inspect this policy image");
+		expect(carrier.providerPayload).toEqual({
+			type: "openaiResponsesHistory",
+			items: [nativeSystemItem],
+			dt: true,
+		});
+		const systemReplay = buildResponsesInput({
+			model: replayModel,
+			context: systemParsed.context,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		expect(systemReplay).toEqual([nativeSystemItem]);
+	});
+
+	it("rejects malformed known computer items instead of accepting them as opaque hosted items", () => {
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.4",
+				input: [{ type: "computer_call", id: "item_only" }],
+			}),
+		).toThrow(/computer_call|call_id|valid bridged Responses input item/);
 	});
 });
 
@@ -359,6 +859,49 @@ describe("openai-responses encodeResponse", () => {
 			phase: "final_answer",
 			content: [{ type: "output_text", text: "Final answer", annotations: [] }],
 		});
+	});
+
+	it("builds a GA computer_call output item from typed metadata", () => {
+		const actions = [
+			{ type: "move" as const, x: 400, y: 250, keys: null },
+			{ type: "click" as const, button: "left" as const, x: 400, y: 250 },
+		];
+		const pendingSafetyChecks = [{ id: "safe_click", code: null, message: "Confirm click" }];
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.4",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_computer_9",
+					name: "computer",
+					arguments: { actions },
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "item_computer_9",
+						actions,
+						pendingSafetyChecks,
+					},
+				},
+			],
+			usage: zeroUsage(),
+			stopReason: "toolUse",
+			timestamp: 1_700_000_000_000,
+		};
+
+		const body = encodeResponse(message, "gpt-5.4-requested");
+		expect(body.output).toEqual([
+			{
+				type: "computer_call",
+				id: "item_computer_9",
+				call_id: "call_computer_9",
+				actions,
+				pending_safety_checks: pendingSafetyChecks,
+				status: "completed",
+			},
+		]);
 	});
 
 	it("marks length-limited responses incomplete", () => {
@@ -550,6 +1093,134 @@ describe("openai-responses encodeStream", () => {
 		expect(output[2]!.id).not.toBe(output[2]!.call_id);
 	});
 
+	it("streams a GA computer_call with provider item id, actions, and safety checks", async () => {
+		const stream = new AssistantMessageEventStream();
+		const actions = [{ type: "scroll" as const, x: 120, y: 240, scroll_x: 0, scroll_y: 650, keys: [] }];
+		const pendingSafetyChecks = [{ id: "safe_scroll", code: "scroll_page", message: null }];
+		const computerCall = {
+			type: "toolCall" as const,
+			id: "call_stream_computer",
+			name: "computer",
+			arguments: actions[0],
+			providerMetadata: {
+				type: "computer" as const,
+				providerItemId: "item_stream_computer",
+				actions,
+				pendingSafetyChecks,
+			},
+		};
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.4",
+			content: [computerCall],
+			usage: zeroUsage(),
+			stopReason: "toolUse",
+			timestamp: 1_700_000_000_000,
+		};
+
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: { ...message, content: [] } });
+			stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+			stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: computerCall, partial: message });
+			stream.push({ type: "done", reason: "toolUse", message });
+		});
+
+		const frames = parseSse(await collectStream(encodeStream(stream, "gpt-5.4-requested")));
+		const computerEvents = frames
+			.filter(f => f.event === "response.output_item.added" || f.event === "response.output_item.done")
+			.map(f => (f.data as Record<string, unknown>).item as Record<string, unknown>)
+			.filter(item => item.type === "computer_call");
+		expect(computerEvents).toEqual([
+			{
+				type: "computer_call",
+				id: "item_stream_computer",
+				call_id: "call_stream_computer",
+				actions,
+				pending_safety_checks: pendingSafetyChecks,
+				status: "in_progress",
+			},
+			{
+				type: "computer_call",
+				id: "item_stream_computer",
+				call_id: "call_stream_computer",
+				actions,
+				pending_safety_checks: pendingSafetyChecks,
+				status: "completed",
+			},
+		]);
+		expect(frames.map(f => f.event)).not.toContain("response.function_call_arguments.delta");
+		const completed = frames.find(f => f.event === "response.completed")?.data as Record<string, unknown> | undefined;
+		const response = completed?.response as Record<string, unknown> | undefined;
+		expect(response?.output).toEqual([computerEvents[1]]);
+	});
+
+	it("keeps interleaved reasoning, text, and computer items open by content index", async () => {
+		const stream = new AssistantMessageEventStream();
+		const computerCall = {
+			type: "toolCall" as const,
+			id: "call_interleaved_server",
+			name: "computer",
+			arguments: {},
+			providerMetadata: {
+				type: "computer" as const,
+				providerItemId: "item_interleaved_server",
+				actions: [{ type: "screenshot" as const }],
+				pendingSafetyChecks: [],
+			},
+		};
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.4",
+			content: [
+				{ type: "thinking", thinking: "think", itemId: "rs_interleaved_server" },
+				computerCall,
+				{ type: "text", text: "answer" },
+			],
+			usage: zeroUsage(),
+			stopReason: "toolUse",
+			timestamp: 1_700_000_000_000,
+		};
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: { ...message, content: [] } });
+			stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+			stream.push({ type: "toolcall_start", contentIndex: 1, partial: message });
+			stream.push({ type: "text_start", contentIndex: 2, partial: message });
+			stream.push({ type: "thinking_delta", contentIndex: 0, delta: "think", partial: message });
+			stream.push({ type: "text_delta", contentIndex: 2, delta: "answer", partial: message });
+			stream.push({ type: "toolcall_end", contentIndex: 1, toolCall: computerCall, partial: message });
+			stream.push({ type: "thinking_end", contentIndex: 0, content: "think", partial: message });
+			stream.push({ type: "text_end", contentIndex: 2, content: "answer", partial: message });
+			stream.push({ type: "done", reason: "toolUse", message });
+		});
+
+		const frames = parseSse(await collectStream(encodeStream(stream, "gpt-5.4-requested")));
+		expect(
+			frames.some(
+				frame =>
+					frame.event === "response.reasoning_summary_text.delta" &&
+					(frame.data as Record<string, unknown>).delta === "think",
+			),
+		).toBe(true);
+		expect(
+			frames.some(
+				frame =>
+					frame.event === "response.output_text.delta" &&
+					(frame.data as Record<string, unknown>).delta === "answer",
+			),
+		).toBe(true);
+		expect(
+			frames.some(
+				frame =>
+					frame.event === "response.output_item.done" &&
+					((frame.data as Record<string, unknown>).item as Record<string, unknown>)?.type === "computer_call",
+			),
+		).toBe(true);
+	});
+
 	it("streams assistant message phase from text signatures", async () => {
 		const stream = new AssistantMessageEventStream();
 		const textSignature = JSON.stringify({ v: 1, id: "msg_commentary", phase: "commentary" });
@@ -690,5 +1361,96 @@ describe("openai-responses encodeStream", () => {
 		const response = incomplete.response as Record<string, unknown>;
 		expect(response.status).toBe("incomplete");
 		expect(response.incomplete_details).toEqual({ reason: "max_output_tokens" });
+	});
+});
+
+describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
+	it("rejects OpenAI image file IDs before dispatching to a non-Responses upstream", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-file-id-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const mock = createMockModel({ provider: "openai", id: "mock/file-id" });
+		mock.push({ content: ["unexpected provider call"] });
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock.model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: "mock/file-id",
+					input: [
+						{
+							type: "function_call_output",
+							call_id: "call_read",
+							output: [{ type: "input_image", file_id: "file_image_123" }],
+						},
+					],
+				}),
+			});
+			expect(response.status).toBe(400);
+			const body = (await response.json()) as { error: { message: string } };
+			expect(body.error.message).toContain("require a Responses-compatible upstream model");
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+describe("auth-gateway OpenAI Responses computer option bridge", () => {
+	it("preserves the native tool, forced choice, and include in stream options", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-computer-options-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openai", "test-key");
+		const mock = createMockModel({ provider: "openai", id: "mock/computer-options" });
+		mock.push({ content: ["ok"] });
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock.model,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({
+					model: "mock/computer-options",
+					input: "inspect the desktop",
+					tools: [{ type: "computer" }],
+					tool_choice: { type: "computer" },
+					include: ["computer_call_output.output.image_url", "reasoning.encrypted_content"],
+				}),
+			});
+			expect(response.status).toBe(200);
+			await response.text();
+			expect(mock.calls).toHaveLength(1);
+			expect(mock.calls[0]!.context.tools).toEqual([
+				{ name: "computer", description: "", parameters: {}, native: { type: "computer" } },
+			]);
+			expect(mock.calls[0]!.options?.toolChoice).toEqual({ type: "computer" });
+			expect((mock.calls[0]!.options as { include?: string[] } | undefined)?.include).toEqual([
+				"computer_call_output.output.image_url",
+				"reasoning.encrypted_content",
+			]);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
 	});
 });

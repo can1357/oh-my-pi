@@ -21,7 +21,7 @@ import { gridToDrawingCoord, lineToDrawing } from './grid'
 import { splitLines } from './multiline-utils'
 import { getCorners } from './shapes/corners'
 import { getShapeAttachmentPoint } from './shapes/index'
-import { displayWidth, toCells, WIDE_PAD } from '../text-metrics'
+import { displayWidth, LABEL_SPACE, toCells, WIDE_PAD } from '../text-metrics'
 
 // ============================================================================
 // Node drawing — renders a node using shape-aware rendering
@@ -76,16 +76,18 @@ function drawBoxWithGridDimensions(node: AsciiNode, graph: AsciiGraph): Canvas {
   // Get corner characters for this shape type
   const corners = getCorners(node.shape, useAscii)
 
-  // State-end uses double border to differentiate from state-start
-  const isDoubleBox = node.shape === 'state-end'
-  const hChar = useAscii ? (isDoubleBox ? '=' : '-') : (isDoubleBox ? '═' : '─')
-  const vChar = useAscii ? (isDoubleBox ? '‖' : '|') : (isDoubleBox ? '║' : '│')
+  const isStateStart = node.shape === 'state-start'
+  const isStateEnd = node.shape === 'state-end'
+  const hChar = useAscii ? (isStateEnd ? '=' : '-') : (isStateEnd ? '═' : '─')
+  const vChar = useAscii ? (isStateEnd ? '‖' : '|') : (isStateEnd ? '║' : '│')
 
-  // Double-box corners (for state-end)
-  const doubleCorners = useAscii
+  const stateStartCorners = useAscii
+    ? { tl: '+', tr: '+', bl: '+', br: '+' }
+    : { tl: '╭', tr: '╮', bl: '╰', br: '╯' }
+  const stateEndCorners = useAscii
     ? { tl: '#', tr: '#', bl: '#', br: '#' }
     : { tl: '╔', tr: '╗', bl: '╚', br: '╝' }
-  const effectiveCorners = isDoubleBox ? doubleCorners : corners
+  const effectiveCorners = isStateEnd ? stateEndCorners : isStateStart ? stateStartCorners : corners
 
   // Draw box border with shape-specific corners
   for (let x = from.x + 1; x < to.x; x++) box[x]![from.y] = hChar
@@ -97,8 +99,8 @@ function drawBoxWithGridDimensions(node: AsciiNode, graph: AsciiGraph): Canvas {
   box[from.x]![to.y] = effectiveCorners.bl
   box[to.x]![to.y] = effectiveCorners.br
 
-  // Center the multi-line display label inside the box
-  const label = node.displayLabel
+  // Pseudostates have no source label; restore their UML marker explicitly.
+  const label = node.displayLabel || (isStateStart ? (useAscii ? '*' : '●') : isStateEnd ? (useAscii ? '*' : '◎') : '')
   const lines = splitLines(label)
   const textCenterY = from.y + Math.floor(h / 2)
   const startY = textCenterY - Math.floor((lines.length - 1) / 2)
@@ -677,7 +679,7 @@ function drawTextOnLine(canvas: Canvas, line: DrawingCoord[], label: string, isU
   for (let i = 0; i < lines.length; i++) {
     const lineText = lines[i]!
     const startX = middleX - Math.floor(displayWidth(lineText) / 2)
-    drawText(canvas, { x: startX, y: startY + i }, lineText)
+    drawText(canvas, { x: startX, y: startY + i }, lineText.replaceAll(' ', LABEL_SPACE))
   }
 }
 
@@ -1223,7 +1225,8 @@ function fillRolesFromCanvases(
 
 /**
  * Special handling for node boxes: border chars get 'border' role, text gets 'text' role.
- * Detects text by checking if character is alphanumeric or common punctuation.
+ * Common final-state border characters (`#` and `=`) count only on the outer edge,
+ * so identical characters inside ordinary node labels retain the text role.
  */
 function fillRolesForNodeBox(
   roleCanvas: RoleCanvas,
@@ -1231,7 +1234,9 @@ function fillRolesForNodeBox(
   offset: DrawingCoord,
 ): void {
   const isBorderChar = (c: string) => /^[┌┐└┘├┤┬┴┼│─╭╮╰╯+\-|.':]$/.test(c)
-
+  const isStateEndBorderChar = (c: string) => /^[╔╗╚╝═║#=‖]$/.test(c)
+  const maxX = canvas.length - 1
+  const maxY = (canvas[0]?.length ?? 1) - 1
   for (let x = 0; x < canvas.length; x++) {
     for (let y = 0; y < (canvas[0]?.length ?? 0); y++) {
       const char = canvas[x]?.[y]
@@ -1240,7 +1245,9 @@ function fillRolesForNodeBox(
         const ry = y + offset.y
         // Use setRole which auto-expands the role canvas if needed
         if (rx >= 0 && ry >= 0) {
-          setRole(roleCanvas, rx, ry, isBorderChar(char) ? 'border' : 'text')
+          const isOuterEdge = x === 0 || x === maxX || y === 0 || y === maxY
+          const role = isBorderChar(char) || (isOuterEdge && isStateEndBorderChar(char)) ? 'border' : 'text'
+          setRole(roleCanvas, rx, ry, role)
         }
       }
     }

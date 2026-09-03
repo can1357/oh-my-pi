@@ -62,4 +62,42 @@ describe("issue #1270: Vertex AI global endpoint", () => {
 			"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse",
 		);
 	});
+
+	it.each([
+		{
+			location: "eu",
+			host: "aiplatform.eu.rep.googleapis.com",
+		},
+		{
+			location: "us",
+			host: "aiplatform.us.rep.googleapis.com",
+		},
+		{
+			location: "europe-west4",
+			host: "europe-west4-aiplatform.googleapis.com",
+		},
+	] as const)("uses the $host host for location $location", async ({ location, host }) => {
+		delete Bun.env.GOOGLE_CLOUD_API_KEY;
+		delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+		const urls: string[] = [];
+		const stream = streamGoogleVertex(model, context, {
+			project: "vertex-project",
+			location,
+			fetch: async input => {
+				const url = input instanceof Request ? input.url : input.toString();
+				urls.push(url);
+				if (url === METADATA_TOKEN_URL || url === OAUTH_TOKEN_URL) {
+					return new Response(JSON.stringify({ access_token: "token", expires_in: 3600 }));
+				}
+				return new Response('{"error":{"message":"stop after capture"}}', { status: 400 });
+			},
+		});
+
+		await stream.result();
+
+		expect(urls).toContain(
+			`https://${host}/v1/projects/vertex-project/locations/${location}/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse`,
+		);
+	});
 });

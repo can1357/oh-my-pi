@@ -292,7 +292,8 @@ pub struct AstMatchResult {
 pub struct AstReplaceOptions<'env> {
 	/// Map of pattern string to replacement template.
 	pub rewrites:            Option<HashMap<String, String>>,
-	/// Language override; otherwise inferred from discovered files.
+	/// Language override applied to every file; otherwise inferred per file, so
+	/// mixed-language paths rewrite each file in its own language.
 	pub lang:                Option<String>,
 	/// Single file or directory to rewrite.
 	pub path:                Option<String>,
@@ -408,45 +409,6 @@ fn is_supported_file(file_path: &Path, explicit_lang: Option<&str>) -> bool {
 	shared_ops::is_supported_file(file_path, explicit_lang)
 }
 
-fn infer_single_replace_lang(
-	candidates: &[FileCandidate],
-	ct: &task::CancelToken,
-) -> Result<String> {
-	let mut inferred = BTreeSet::new();
-	let mut unresolved = Vec::new();
-	for candidate in candidates {
-		ct.heartbeat()?;
-		match resolve_language(None, &candidate.absolute_path) {
-			Ok(language) => {
-				inferred.insert(language.canonical_name().to_string());
-			},
-			Err(err) => unresolved.push(format!("{}: {}", candidate.display_path, err)),
-		}
-	}
-	if !unresolved.is_empty() {
-		let details = unresolved
-			.into_iter()
-			.map(|entry| format!("- {entry}"))
-			.collect::<Vec<_>>()
-			.join("\n");
-		return Err(Error::from_reason(format!(
-			"`lang` is required for ast_edit when language cannot be inferred from all \
-			 files:\n{details}"
-		)));
-	}
-	if inferred.is_empty() {
-		return Err(Error::from_reason(
-			"`lang` is required for ast_edit when no files match path/glob".to_string(),
-		));
-	}
-	if inferred.len() > 1 {
-		return Err(Error::from_reason(format!(
-			"`lang` is required for ast_edit when path/glob resolves to multiple languages: {}",
-			inferred.into_iter().collect::<Vec<_>>().join(", ")
-		)));
-	}
-	Ok(inferred.into_iter().next().expect("non-empty inferred set"))
-}
 fn normalize_search_path(path: Option<String>) -> Result<PathBuf> {
 	let raw = path.unwrap_or_else(|| ".".to_string());
 	let candidate = PathBuf::from(raw.trim());
@@ -582,6 +544,17 @@ fn normalize_rewrite_map(
 }
 struct CompiledFindPattern {
 	pattern:                String,
+	compiled_by_lang:       HashMap<String, Pattern>,
+	compile_errors_by_lang: HashMap<String, String>,
+}
+
+/// A rewrite rule compiled for every language discovered among the candidate
+/// files. A rule that fails to parse in one language of a mixed tree skips
+/// that language's files (reported as parse errors) instead of failing the
+/// whole call.
+struct CompiledRewriteRule {
+	pattern:                String,
+	rewrite:                String,
 	compiled_by_lang:       HashMap<String, Pattern>,
 	compile_errors_by_lang: HashMap<String, String>,
 }
@@ -994,37 +967,72 @@ fn ast_edit_blocking(
 		.into_iter()
 		.filter(|candidate| is_supported_file(&candidate.absolute_path, lang_str))
 		.collect();
-	let effective_lang = if let Some(lang) = lang_str {
-		lang.to_string()
-	} else {
-		infer_single_replace_lang(&candidates, &ct)?
-	};
+	if let Some(explicit) = lang_str {
+		resolve_supported_lang(explicit)?;
+	} else if candidates.is_empty() {
+		return Err(Error::from_reason(
+			"ast_edit found no supported source files for the given path/glob".to_string(),
+		));
+	}
 
-	let language = resolve_supported_lang(&effective_lang)?;
+	let (resolved_candidates, languages) = resolve_candidates_for_find(candidates, lang_str, &ct)?;
+	let files_searched = to_u32(resolved_candidates.len());
+
 	let mut parse_errors = Vec::new();
-	let mut compiled_rules = Vec::new();
+	let mut compiled_rules: Vec<CompiledRewriteRule> = Vec::with_capacity(rewrite_rules.len());
 	for (pattern, rewrite) in rewrite_rules {
 		ct.heartbeat()?;
-		match compile_pattern(&pattern, selector.as_deref(), &strictness, language) {
-			Ok(compiled) => compiled_rules.push((pattern, rewrite, compiled)),
-			Err(err) => {
-				if fail_on_parse_error {
-					return Err(err);
-				}
-				parse_errors.push(format!("{pattern}: {err}"));
-			},
+		let mut compiled_by_lang = HashMap::with_capacity(languages.len());
+		let mut compile_errors_by_lang = HashMap::new();
+		for (lang_key, &language) in &languages {
+			ct.heartbeat()?;
+			match compile_pattern(&pattern, selector.as_deref(), &strictness, language) {
+				Ok(compiled) => {
+					compiled_by_lang.insert(lang_key.clone(), compiled);
+				},
+				Err(err) => {
+					compile_errors_by_lang.insert(lang_key.clone(), err.to_string());
+				},
+			}
 		}
+		// A pattern that parses in NO discovered language is a genuine pattern
+		// error; failing in only some languages of a mixed tree is expected (the
+		// pattern targets one language) and surfaces per skipped file below.
+		if compiled_by_lang.is_empty() && !languages.is_empty() {
+			let mut entries: Vec<_> = compile_errors_by_lang.iter().collect();
+			entries.sort_by_key(|(lang_key, _)| lang_key.as_str());
+			if fail_on_parse_error {
+				let (_, err) = entries
+					.first()
+					.expect("compile failure recorded for every language");
+				return Err(Error::from_reason(format!("{pattern}: {err}")));
+			}
+			for (lang_key, err) in entries {
+				parse_errors.push(if languages.len() > 1 {
+					format!("{pattern} ({lang_key}): {err}")
+				} else {
+					format!("{pattern}: {err}")
+				});
+			}
+			continue;
+		}
+		compiled_rules.push(CompiledRewriteRule {
+			pattern,
+			rewrite,
+			compiled_by_lang,
+			compile_errors_by_lang,
+		});
 	}
 	if compiled_rules.is_empty() {
 		return Ok(AstReplaceResult {
-			file_changes:       vec![],
+			file_changes: vec![],
 			total_replacements: 0,
-			files_touched:      0,
-			files_searched:     to_u32(candidates.len()),
-			applied:            !dry_run,
-			limit_reached:      false,
-			parse_errors:       (!parse_errors.is_empty()).then_some(parse_errors),
-			changes:            vec![],
+			files_touched: 0,
+			files_searched,
+			applied: !dry_run,
+			limit_reached: false,
+			parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
+			changes: vec![],
 		});
 	}
 
@@ -1036,8 +1044,36 @@ fn ast_edit_blocking(
 	// files partially modified on disk; flush only after the whole pass succeeds.
 	let mut pending_writes: Vec<PendingWrite> = Vec::new();
 
-	for candidate in &candidates {
+	for resolved in &resolved_candidates {
 		ct.heartbeat()?;
+		let ResolvedCandidate { candidate, language, language_error } = resolved;
+		if let Some(error) = language_error.as_deref() {
+			if fail_on_parse_error {
+				return Err(Error::from_reason(format!("{}: {error}", candidate.display_path)));
+			}
+			parse_errors.push(format!("{}: {error}", candidate.display_path));
+			continue;
+		}
+		let Some(language) = *language else {
+			continue;
+		};
+		let lang_key = language.canonical_name();
+
+		let mut runnable_rules: Vec<(&str, &Pattern)> = Vec::new();
+		for rule in &compiled_rules {
+			ct.heartbeat()?;
+			if let Some(error) = rule.compile_errors_by_lang.get(lang_key) {
+				parse_errors.push(format!("{}: {}: {error}", rule.pattern, candidate.display_path));
+				continue;
+			}
+			if let Some(compiled) = rule.compiled_by_lang.get(lang_key) {
+				runnable_rules.push((rule.rewrite.as_str(), compiled));
+			}
+		}
+		if runnable_rules.is_empty() {
+			continue;
+		}
+
 		let source = match std::fs::read_to_string(&candidate.absolute_path) {
 			Ok(source) => source,
 			Err(err) => {
@@ -1062,10 +1098,10 @@ fn ast_edit_blocking(
 
 		let mut file_changes = Vec::new();
 		let mut reached_max_replacements = false;
-		'patterns: for (_pattern, rewrite, compiled) in &compiled_rules {
+		'patterns: for &(rewrite, compiled) in &runnable_rules {
 			for matched in ast.root().find_all(compiled.clone()) {
 				ct.heartbeat()?;
-				let edit = matched.replace_by(rewrite.as_str());
+				let edit = matched.replace_by(rewrite);
 				// Multiple rules matching the same node with the same output are one
 				// deterministic edit; list and count it once instead of staging a
 				// duplicate that trips the apply-time overlap check.
@@ -1162,7 +1198,7 @@ fn ast_edit_blocking(
 		file_changes,
 		total_replacements: to_u32(changes.len()),
 		files_touched,
-		files_searched: to_u32(candidates.len()),
+		files_searched,
 		applied: !dry_run,
 		limit_reached,
 		parse_errors: (!parse_errors.is_empty()).then_some(parse_errors),
@@ -1271,6 +1307,7 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert_eq!(paths, vec!["a.ts".to_string(), "nested/b.ts".to_string()]);
 	}
+
 	fn make_mixed_temp_tree() -> TempTree {
 		let unique = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
@@ -1278,34 +1315,51 @@ mod tests {
 			.as_nanos();
 		let root = std::env::temp_dir().join(format!("pi-ast-mixed-lang-test-{unique}"));
 		fs::create_dir_all(&root).expect("temp mixed-lang dir should be created");
-		fs::write(root.join("a.ts"), "const a = 1;\n").expect("temp file a.ts should be written");
+		fs::write(root.join("a.ts"), "const f = (x) => x;\n")
+			.expect("temp file a.ts should be written");
 		fs::write(root.join("b.rs"), "fn main() {}\n").expect("temp file b.rs should be written");
 		TempTree { root }
 	}
 
 	#[test]
-	fn infers_single_replace_lang_for_uniform_candidates() {
-		let tree = make_temp_tree();
-		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), Some("**/*.ts"), &ct)
-				.expect("candidate collection should succeed");
-		let inferred =
-			infer_single_replace_lang(&candidates, &ct).expect("language should be inferred");
-		assert_eq!(inferred, "typescript");
+	fn ast_edit_rewrites_mixed_language_tree_per_file() {
+		let tree = make_mixed_temp_tree();
+		let a_path = tree.root.join("a.ts");
+		let b_path = tree.root.join("b.rs");
+
+		// The arrow pattern only matches TypeScript; the Rust file is searched in
+		// its own language and left untouched instead of failing the whole call.
+		let mut rewrites = HashMap::new();
+		rewrites.insert("($X) => $X".to_string(), "identity".to_string());
+
+		let result = ast_edit_blocking(
+			task::CancelToken::default(),
+			Some(rewrites),
+			None,
+			Some(tree.root.to_string_lossy().into_owned()),
+			None,
+			None,
+			None,
+			Some(false),
+			None,
+			None,
+			None,
+		)
+		.expect("mixed-language tree should rewrite per file");
+
+		assert_eq!(result.total_replacements, 1, "only the TypeScript file matches");
+		assert_eq!(result.files_searched, 2);
+		assert_eq!(
+			fs::read_to_string(&a_path).expect("a.ts should be readable"),
+			"const f = identity;\n",
+		);
+		assert_eq!(
+			fs::read_to_string(&b_path).expect("b.rs should be readable"),
+			"fn main() {}\n",
+			"the Rust file must be untouched",
+		);
 	}
 
-	#[test]
-	fn rejects_mixed_replace_lang_inference() {
-		let tree = make_mixed_temp_tree();
-		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), None, &ct)
-				.expect("candidate collection should succeed");
-		let err = infer_single_replace_lang(&candidates, &ct)
-			.expect_err("mixed language inference should fail");
-		assert!(err.to_string().contains("multiple languages"));
-	}
 	#[test]
 	fn resolves_supported_language_aliases() {
 		assert_eq!(resolve_supported_lang("ts").ok(), Some(SupportLang::TypeScript));

@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # Helpers inlined into `generateSnapshotScript` (shell-snapshot.ts).
 #
 # Activation idioms like `mise activate` install a shell function whose body
@@ -22,8 +24,8 @@ __omp_sq_quote() {
 	__omp_qout=
 	__omp_sq=\'
 	while case "$__omp_qbuf" in *$__omp_sq*) true ;; *) false ;; esac; do
-		__omp_qout=$__omp_qout${__omp_qbuf%%$__omp_sq*}"'\\''"
-		__omp_qbuf=${__omp_qbuf#*$__omp_sq}
+		__omp_qout=$__omp_qout${__omp_qbuf%%"$__omp_sq"*}"'\\''"
+		__omp_qbuf=${__omp_qbuf#*"$__omp_sq"}
 	done
 	__omp_qout=$__omp_qout$__omp_qbuf
 	printf "'%s'" "$__omp_qout"
@@ -45,6 +47,7 @@ __omp_emit_export_for() {
 		*TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*API_KEY*|*PRIVATE_KEY*|*ACCESS_KEY*|*CREDENTIAL*|*SESSION_KEY*) return ;;
 	esac
 	eval "[ \"\${$1+x}\" = x ]" 2>/dev/null || return
+	__omp_xv=
 	eval "__omp_xv=\"\${$1}\"" 2>/dev/null || return
 	printf 'export %s=%s\n' "$1" "$(__omp_sq_quote "$__omp_xv")"
 }

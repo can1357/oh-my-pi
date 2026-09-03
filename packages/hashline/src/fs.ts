@@ -150,11 +150,11 @@ export class InMemoryFilesystem extends Filesystem {
 		return { text: content };
 	}
 
-	async delete(path: string): Promise<void> {
+	override async delete(path: string): Promise<void> {
 		if (!this.#files.delete(path)) throw new NotFoundError(path);
 	}
 
-	async move(from: string, to: string, content?: string): Promise<void> {
+	override async move(from: string, to: string, content?: string): Promise<void> {
 		const existing = this.#files.get(from);
 		if (existing === undefined) throw new NotFoundError(from);
 		const finalContent = content ?? existing;
@@ -162,7 +162,7 @@ export class InMemoryFilesystem extends Filesystem {
 		this.#files.delete(from);
 	}
 
-	async exists(path: string): Promise<boolean> {
+	override async exists(path: string): Promise<boolean> {
 		return this.#files.has(path);
 	}
 
@@ -199,7 +199,7 @@ export class NodeFilesystem extends Filesystem {
 		return file.text();
 	}
 
-	async readBinary(path: string): Promise<Uint8Array> {
+	override async readBinary(path: string): Promise<Uint8Array> {
 		try {
 			return await fs.readFile(path);
 		} catch (error) {
@@ -213,7 +213,7 @@ export class NodeFilesystem extends Filesystem {
 		return { text: content };
 	}
 
-	async delete(path: string): Promise<void> {
+	override async delete(path: string): Promise<void> {
 		try {
 			await fs.rm(path);
 		} catch (error) {
@@ -222,7 +222,7 @@ export class NodeFilesystem extends Filesystem {
 		}
 	}
 
-	async move(from: string, to: string, content?: string): Promise<void> {
+	override async move(from: string, to: string, content?: string): Promise<void> {
 		if (content !== undefined) {
 			await Bun.write(to, content);
 			await this.delete(from);
@@ -236,11 +236,11 @@ export class NodeFilesystem extends Filesystem {
 		}
 	}
 
-	canonicalPath(path: string): string {
+	override canonicalPath(path: string): string {
 		return pathModule.resolve(path);
 	}
 
-	async exists(path: string): Promise<boolean> {
+	override async exists(path: string): Promise<boolean> {
 		return Bun.file(path).exists();
 	}
 }

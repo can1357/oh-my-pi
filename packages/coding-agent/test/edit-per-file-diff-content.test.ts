@@ -8,7 +8,7 @@ import {
 	EditTool,
 	type EditToolDetails,
 	executePatchSingle,
-	executeReplaceSingle,
+	executeReplace,
 } from "@oh-my-pi/pi-coding-agent/edit";
 import { writethroughNoop } from "@oh-my-pi/pi-coding-agent/lsp";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -70,6 +70,8 @@ describe("executePatchSingle — oldText/newText propagation", () => {
 		expect(result.details?.path).toBe(path.join(tempDir, "foo.txt"));
 		expect(result.details?.oldText).toBe("a\n");
 		expect(result.details?.newText).toBe("b\n");
+		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+		expect(text).toBe("[foo.txt]\n1:b");
 	});
 
 	test("create: oldText is undefined, newText is the created content", async () => {
@@ -141,17 +143,17 @@ describe("EditTool patch aggregation — oldText/newText propagation", () => {
 	});
 });
 
-// ─── executeReplaceSingle ─────────────────────────────────────────────────────
+// ─── executeReplace ─────────────────────────────────────────────────────────
 
-describe("executeReplaceSingle — oldText/newText propagation", () => {
+describe("executeReplace — oldText/newText propagation", () => {
 	test("replace: oldText is full file before, newText is full file after", async () => {
 		const originalContent = "line one\nline two\nline three\n";
 		await Bun.write(path.join(tempDir, "bar.txt"), originalContent);
 
-		const result = await executeReplaceSingle({
+		const result = await executeReplace({
 			session: makeSession(tempDir),
 			path: "bar.txt",
-			params: { old_text: "line two", new_text: "line TWO" },
+			params: { old_string: "line two", new_string: "line TWO" },
 			allowFuzzy: false,
 			fuzzyThreshold: DEFAULT_FUZZY_THRESHOLD,
 			writethrough: writethroughNoop,
@@ -161,5 +163,8 @@ describe("executeReplaceSingle — oldText/newText propagation", () => {
 		expect(result.details?.path).toBe(path.join(tempDir, "bar.txt"));
 		expect(result.details?.oldText).toBe(originalContent);
 		expect(result.details?.newText).toBe("line one\nline TWO\nline three\n");
+		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+		expect(text).toContain("[bar.txt]\n1:line one\n2:line TWO\n3:line three");
+		expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
 	});
 });

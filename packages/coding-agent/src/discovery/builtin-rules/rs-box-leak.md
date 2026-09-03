@@ -16,13 +16,13 @@ Never use `Box::leak` to satisfy a lifetime. It intentionally leaks the allocati
 
 ## Use instead
 
-| Need | Use |
-| --- | --- |
-| Shared async/thread data | `Arc<T>` or owned values |
-| Global lazy state | `LazyLock<T>` or `OnceLock<T>` |
-| Text escaping a scope | `String` / `Arc<str>` |
-| `'static` callback | `move` closure with owned captures |
-| FFI pointer | Explicit owner that frees on drop |
+|Need|Use|
+|---|---|
+|Shared async/thread data|`Arc<T>` or owned values|
+|Global lazy state|`LazyLock<T>` or `OnceLock<T>`|
+|Text escaping a scope|`String` / `Arc<str>`|
+|`'static` callback|`move` closure with owned captures|
+|FFI pointer|Explicit owner that frees on drop|
 
 ## Examples
 

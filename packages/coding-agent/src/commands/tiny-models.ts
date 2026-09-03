@@ -1,11 +1,11 @@
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { tinyModelsHelp as commandHelp } from "../cli/command-help";
 import { runTinyModelsCommand, type TinyModelsAction, type TinyModelsCommandArgs } from "../cli/tiny-models-cli";
 
 const ACTIONS: TinyModelsAction[] = ["download", "list"];
 
 export default class TinyModels extends Command {
-	static description = "Download tiny local models (session titles + memory)";
-
+	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
 			description: "Action to perform",

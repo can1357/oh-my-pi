@@ -35,13 +35,7 @@ astCondition:
   - "if ($X != undefined) { clearImmediate($X) }"
 ---
 
-**Do not guard `clearTimeout` / `clearInterval` / `clearImmediate` with a truthiness or `null`/`undefined` check.** Per the WHATWG/Node timers spec these functions are no-ops when handed `null`, `undefined`, or any value that doesn't correspond to a live timer. The guard adds a redundant branch that the reader must still reason about.
-
-## Why it's wrong
-
-- The branch can never change behavior — clearing a missing/`null`/`undefined` handle does nothing.
-- Extra branches inflate the code and hide the one line that matters.
-- It signals a misunderstanding of the timer API to future readers.
+**Do not guard `clearTimeout` / `clearInterval` / `clearImmediate` with truthiness or `null`/`undefined` checks.** Per WHATWG/Node timers spec, calls no-op for `null`, `undefined`, or values without a live timer; guards cannot change behavior, add branches readers must reason about, inflate code, hide the line that matters, and signal timer-API misunderstanding.
 
 ## Avoid
 
@@ -63,7 +57,7 @@ clearImmediate(id);
 
 ## When a guard *is* warranted
 
-Keep the check only when the body does more than clear — e.g. it also reassigns the handle or runs other cleanup:
+Keep it only if the body does more than clear, e.g. reassigns the handle or runs other cleanup:
 
 ```ts
 if (this.timer) {
@@ -72,4 +66,4 @@ if (this.timer) {
 }
 ```
 
-This rule only fires when the clear call is the sole statement in the guarded branch, so those legitimate cases are left alone.
+Rule fires only if the clear call is the guarded branch's sole statement; legitimate cases are left alone.

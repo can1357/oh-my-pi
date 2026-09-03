@@ -1,4 +1,4 @@
-import { tryParseJson } from "@oh-my-pi/pi-utils";
+import { compareVersions, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, loadPage } from "./types";
 
@@ -18,17 +18,6 @@ interface ParsedCabal {
 	bugReports?: string;
 	category?: string;
 	stability?: string;
-}
-
-function compareVersions(a: string, b: string): number {
-	const aParts = a.split(".").map(part => Number.parseInt(part, 10) || 0);
-	const bParts = b.split(".").map(part => Number.parseInt(part, 10) || 0);
-	const max = Math.max(aParts.length, bParts.length);
-	for (let i = 0; i < max; i++) {
-		const delta = (aParts[i] || 0) - (bParts[i] || 0);
-		if (delta !== 0) return delta;
-	}
-	return 0;
 }
 
 function extractCabalField(content: string, fieldName: string): string | undefined {

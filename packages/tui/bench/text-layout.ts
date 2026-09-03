@@ -1,5 +1,12 @@
-import { visibleWidth, wrapTextWithAnsi, truncateToWidth, sliceWithWidth, extractSegments, Ellipsis } from "../src/utils";
 import { matchesKey } from "../src/keys";
+import {
+	Ellipsis,
+	extractSegments,
+	sliceWithWidth,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../src/utils";
 import { makeBench } from "./_harness";
 
 const ITERATIONS = 2000;
@@ -9,7 +16,8 @@ const samples = {
 	ansi: "\x1b[31mred text\x1b[0m and \x1b[4munderlined content\x1b[24m with emoji 😅😅",
 	links: "prefix \x1b]8;;https://example.com\x07link\x1b]8;;\x07 suffix",
 	wide: "日本語のテキストとemoji 🚀✨ mixed with ascii",
-	wrapped: "This is a long line that should wrap multiple times when rendered with ANSI \x1b[32mcolors\x1b[0m and tabs\tbetween words.",
+	wrapped:
+		"This is a long line that should wrap multiple times when rendered with ANSI \x1b[32mcolors\x1b[0m and tabs\tbetween words.",
 };
 
 const wrapWidth = 40;

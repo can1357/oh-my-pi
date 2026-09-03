@@ -26,11 +26,13 @@ class TestCallbackFlow extends OAuthCallbackFlow {
 
 /**
  * Bind a real loopback port so the next `Bun.serve({ port })` against the
- * same port fails with EADDRINUSE. Returns the bound port plus a `release`
- * callback for teardown.
+ * same port fails with EADDRINUSE. Occupies `127.0.0.1` explicitly — the
+ * interface callback flows bind for `localhost` — because macOS lets a
+ * specific-address bind coexist with a wildcard one. Returns the bound port
+ * plus a `release` callback for teardown.
  */
 function occupyLoopbackPort(): { port: number; release: () => void } {
-	const server = Bun.serve({ port: 0, fetch: () => new Response("blocker") });
+	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("blocker") });
 	const port = server.port;
 	if (typeof port !== "number") {
 		server.stop(true);
@@ -47,12 +49,12 @@ describe("OAuthCallbackFlow port fallback policy", () => {
 	it("falls back to a random port by default so historical AI-provider flows keep working", async () => {
 		const blocker = occupyLoopbackPort();
 		const progress: string[] = [];
+		const controller = new AbortController();
 		const flow = new TestCallbackFlow(
 			{
-				onAuth: () => {},
+				onAuth: () => controller.abort(new Error("redirect URI observed")),
 				onProgress: msg => progress.push(msg),
-				// Short abort — we only care that the flow advertised the fallback URI.
-				signal: AbortSignal.timeout(100),
+				signal: controller.signal,
 			},
 			{ preferredPort: blocker.port },
 		);

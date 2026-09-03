@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import {
 	handleRpcSessionChange,
@@ -70,21 +71,22 @@ function createRegistryWithSnapshot(): RpcSubagentRegistry {
 type SessionChangeStubOptions = {
 	newSession?: boolean;
 	switchSession?: boolean;
-	branch?: { selectedText: string; cancelled: boolean };
+	branch?: { selectedText: string; selectedImages: ImageContent[]; cancelled: boolean };
 };
 
 function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessionChangeSession {
 	return {
 		newSession: async (_options?: unknown) => options.newSession ?? true,
 		switchSession: async (_sessionPath: string) => options.switchSession ?? true,
-		branch: async (_entryId: string) => options.branch ?? { selectedText: "branched text", cancelled: false },
+		branch: async (_entryId: string) =>
+			options.branch ?? { selectedText: "branched text", selectedImages: [], cancelled: false },
 	};
 }
 
 describe("RPC subagent registry", () => {
 	test("defaults subagent frame emission to off while tracking snapshots", () => {
-		const eventBus = new EventBus();
 		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
 		const lifecycle: SubagentLifecyclePayload = {
 			id: "SubagentA",
@@ -128,8 +130,8 @@ describe("RPC subagent registry", () => {
 	});
 
 	test("emits progress frames after explicit progress subscription and snapshots tracked subagents", () => {
-		const eventBus = new EventBus();
 		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
 		registry.setSubscriptionLevel("progress");
 		const lifecycle: SubagentLifecyclePayload = {
@@ -208,7 +210,9 @@ describe("RPC subagent registry", () => {
 			},
 			{
 				command: { type: "branch", entryId: "entry-1" },
-				session: createSessionChangeSession({ branch: { selectedText: "Branch text", cancelled: false } }),
+				session: createSessionChangeSession({
+					branch: { selectedText: "Branch text", selectedImages: [], cancelled: false },
+				}),
 				expected: { type: "branch", data: { text: "Branch text", cancelled: false } },
 			},
 		];
@@ -247,7 +251,7 @@ describe("RPC subagent registry", () => {
 			},
 			{
 				command: { type: "branch", entryId: "entry-1" },
-				session: createSessionChangeSession({ branch: { selectedText: "", cancelled: true } }),
+				session: createSessionChangeSession({ branch: { selectedText: "", selectedImages: [], cancelled: true } }),
 				expected: { type: "branch", data: { text: "", cancelled: true } },
 			},
 		];
@@ -296,8 +300,8 @@ describe("RPC subagent registry", () => {
 	});
 
 	test("gates raw subagent events behind the events subscription level", () => {
-		const eventBus = new EventBus();
 		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
 		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
 		const eventPayload: SubagentEventPayload = {
 			id: "SubagentA",
@@ -441,5 +445,58 @@ function handle(frame) {
 		expect(progressTasks).toEqual(["Do work"]);
 		expect(rawEventTypes).toEqual(["agent_start"]);
 		expect(sessionEventTypes).toContain("notice");
+	});
+
+	test("forwards nested subagent frames published on the shared observability bus", () => {
+		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
+		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Kid",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			parentToolCallId: "call-1",
+			index: 1,
+		} satisfies SubagentLifecyclePayload);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Kid.Grandkid",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			parentToolCallId: "call-2",
+			index: 2,
+		} satisfies SubagentLifecyclePayload);
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "Kid.Grandkid",
+			event: { type: "agent_start" } as SubagentEventPayload["event"],
+		} satisfies SubagentEventPayload);
+		expect(frames.map(frame => frame.type)).toEqual(["subagent_lifecycle", "subagent_lifecycle", "subagent_event"]);
+		expect((frames[1] as { payload: SubagentLifecyclePayload }).payload.id).toBe("Kid.Grandkid");
+		expect((frames[2] as { payload: SubagentEventPayload }).payload.id).toBe("Kid.Grandkid");
+		registry.dispose();
+	});
+
+	test("scopes observability to each root session — another tree's bus stays invisible", () => {
+		const busA = new EventBus();
+		const busB = new EventBus();
+		const framesA: RpcSubagentFrame[] = [];
+		const framesB: RpcSubagentFrame[] = [];
+		const registryA = new RpcSubagentRegistry(busA, frame => framesA.push(frame));
+		const registryB = new RpcSubagentRegistry(busB, frame => framesB.push(frame));
+		registryA.setSubscriptionLevel("events");
+		registryB.setSubscriptionLevel("events");
+		busB.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "Kid",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 1,
+		} satisfies SubagentLifecyclePayload);
+		expect(framesA).toEqual([]);
+		expect(framesB).toHaveLength(1);
+		registryA.dispose();
+		registryB.dispose();
 	});
 });

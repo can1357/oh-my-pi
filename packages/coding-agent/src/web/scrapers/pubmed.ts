@@ -1,12 +1,12 @@
 /**
  * PubMed handler for web-fetch
  */
-import { tryParseJson } from "@oh-my-pi/pi-utils";
+import { tryParseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { buildResult, loadPage, type RenderResult, type SpecialHandler } from "./types";
 
 const NCBI_HEADERS = {
 	Accept: "application/json, text/plain;q=0.9, */*;q=0.8",
-	"User-Agent": "CodingAgent/1.0 (web scraper)",
+	"User-Agent": USER_AGENT,
 };
 
 /**

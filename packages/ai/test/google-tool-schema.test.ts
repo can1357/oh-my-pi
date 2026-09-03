@@ -585,14 +585,26 @@ describe("normalizeSchemaForGoogle parity with python-genai process_schema", () 
 		expect(sanitized).toEqual({ type: "string", enum: ["FOO"] });
 	});
 
-	// Mirrors python-genai test_schema.py::test_process_schema_forbids_non_string_const
-	// We deviate intentionally: rather than raise on non-string const we accept
-	// the value as a singleton enum. Google's Schema proto accepts numeric enums
-	// and we prefer permissive normalization over surfacing a transformer-level error.
-	it("accepts non-string const as a singleton enum (intentional deviation from upstream raise)", () => {
-		const sanitized = normalizeSchemaForGoogle({ type: "integer", const: 123 }) as Record<string, unknown>;
-		expect(sanitized.enum).toEqual([123]);
-		expect(sanitized.type).toBe("integer");
+	// Mirrors python-genai test_schema.py::test_process_schema_forbids_non_string_const.
+	// Google enum fields accept strings only, so normalization drops the numeric
+	// singleton enum while preserving the integer type constraint.
+	it("omits a non-string const enum while preserving its type", () => {
+		const sanitized = normalizeSchemaForGoogle({ type: "integer", const: 123 });
+		expect(sanitized).toEqual({ type: "integer" });
+	});
+
+	it("drops negations whose non-string enums cannot be represented", () => {
+		const sanitized = normalizeSchemaForGoogle({ not: { enum: [1] } });
+		expect(sanitized).toEqual({});
+		expect(
+			normalizeSchemaForGoogle({
+				not: { type: "object", properties: { value: { enum: [1] } } },
+			}),
+		).toEqual({});
+	});
+
+	it("drops negations containing snake-case combiners with non-string enums", () => {
+		expect(normalizeSchemaForGoogle({ not: { any_of: [{ const: 1 }] } })).toEqual({});
 	});
 
 	// Mirrors python-genai test_schema.py::test_process_schema_order_properties_propagates_into_defs

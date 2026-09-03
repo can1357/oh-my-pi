@@ -11,6 +11,7 @@ import {
 	callLocalLlm,
 	callRemoteLlm,
 	chunkMemoriesByBudget,
+	cleanOutput,
 	complete,
 	llmAvailable,
 	localGgufAvailable,
@@ -18,8 +19,20 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/local-llm";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const OLD_ENV = { ...process.env };
+
+const tempDirs: TempDir[] = [];
+
+// Per-test SQLite path so `new Mnemopi(...)` never touches the shared default
+// bank file. Full-workspace parallel runs otherwise contend on that single path
+// and throw SQLITE_BUSY at initBeam once busy_timeout is exceeded (#9886).
+function tempDbPath(): string {
+	const tempDir = TempDir.createSync("@mnemopi-local-llm-");
+	tempDirs.push(tempDir);
+	return tempDir.join("mnemopi.db");
+}
 
 function restoreEnv(): void {
 	for (const key in process.env) {
@@ -35,6 +48,9 @@ function restoreEnv(): void {
 afterEach(() => {
 	restoreEnv();
 	resetHostLlmBackendForTests();
+	for (const tempDir of tempDirs.splice(0)) {
+		tempDir.removeSync();
+	}
 });
 
 registerMockApi();
@@ -59,6 +75,32 @@ describe("local LLM TypeScript port", () => {
 		expect(await callRemoteLlm("Test prompt", 0.2, { fetch: fetchMock })).toBe("Remote summary.");
 		expect(auth).toBe("Bearer sk-test");
 		expect(model).toBe("test-model");
+	});
+
+	it("removes leading reasoning blocks from remote summaries", async () => {
+		process.env.MNEMOPI_LLM_BASE_URL = "http://reasoning-llm/v1";
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					choices: [
+						{
+							message: {
+								content:
+									"<think>\nThe user requested a one-sentence summary.\n</think>\nMnemopi uses multilingual-e5-large.",
+							},
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		expect(await summarizeMemories(["Mnemopi uses multilingual-e5-large."], "", { fetch: fetchMock })).toBe(
+			"Mnemopi uses multilingual-e5-large.",
+		);
+	});
+
+	it("preserves a literal think tag that follows real content", () => {
+		expect(cleanOutput("The XML tag is <think>keep</think>")).toBe("The XML tag is <think>keep</think>");
 	});
 
 	it("keeps local GGUF unavailable and returns null for local completion", async () => {
@@ -116,6 +158,7 @@ describe("local LLM TypeScript port", () => {
 			throw new Error("remote should not be called");
 		};
 		const memory = new Mnemopi({
+			dbPath: tempDbPath(),
 			llm: async (prompt, opts) => `fn:${prompt}:${opts?.maxTokens ?? 0}`,
 		});
 		try {
@@ -133,7 +176,7 @@ describe("local LLM TypeScript port", () => {
 		const model = createMockModel({
 			handler: () => ({ content: ["model summary"] }),
 		});
-		const memory = new Mnemopi({ llm: model });
+		const memory = new Mnemopi({ dbPath: tempDbPath(), llm: model });
 		try {
 			const text = await withMnemopiRuntimeOptions(memory.runtimeOptions, () => complete("hello"));
 			expect(text).toBe("model summary");
@@ -150,7 +193,7 @@ describe("local LLM TypeScript port", () => {
 			fetchCalls += 1;
 			throw new Error("remote should not be called");
 		};
-		const memory = new Mnemopi({ llm: false });
+		const memory = new Mnemopi({ dbPath: tempDbPath(), llm: false });
 		try {
 			const text = await withMnemopiRuntimeOptions(memory.runtimeOptions, () =>
 				complete("hello", 0.3, { fetch: fetchMock }),

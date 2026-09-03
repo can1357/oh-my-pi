@@ -17,9 +17,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 describe("issue #3569 fresh launch default role from extension provider", () => {
 	let tempDir: string;
@@ -65,7 +66,7 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 			throw new Error("Expected bundled OpenAI GPT-5.5 default");
 		}
 
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		// Mirrors the reporter's environment: `OPENAI_API_KEY` is configured for a
 		// bundled provider whose `pickDefaultAvailableModel` entry would otherwise
@@ -92,6 +93,9 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
 		});
 
 		try {

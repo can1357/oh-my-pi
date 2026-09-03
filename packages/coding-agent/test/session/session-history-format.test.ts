@@ -310,4 +310,81 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).toContain("→ advise(concern: Avoid shadowing the outer variable.) ⇒ ok · 1 line");
 		expect(output).not.toContain("Recorded.");
 	});
+
+	it("attributes a user bang command to the user, not the preceding agent turn", () => {
+		const delta = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "It's safe to remove it. I'd run `rm -rf .wt/foo` but will stop here." }],
+				stopReason: "endTurn",
+				timestamp: 1,
+			},
+			{
+				role: "bashExecution",
+				command: "rm -rf .wt/foo",
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				excludeFromContext: false,
+				timestamp: 2,
+			},
+			{ role: "user", content: "Done!", timestamp: 3 },
+		];
+
+		const output = formatSessionHistoryMarkdown(delta, { watchedRoles: true });
+
+		// The execution line is prefixed `user-bash!` and sits under a `**user**:`
+		// label, not trailing the `**agent**:` block, so the advisor cannot read
+		// the user-run command as an agent action.
+		expect(output).toContain("→ user-bash! rm -rf .wt/foo ⇒ ok · 0 lines");
+		const agentIdx = output.indexOf("**agent**:");
+		const userIdx = output.indexOf("**user**:");
+		const execIdx = output.indexOf("→ user-bash!");
+		expect(agentIdx).toBeGreaterThanOrEqual(0);
+		expect(userIdx).toBeGreaterThan(agentIdx);
+		expect(execIdx).toBeGreaterThan(userIdx);
+	});
+
+	it("prefixes a user python bang execution with user-python in watched mode", () => {
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "pythonExecution",
+					code: "print(1)",
+					output: "1",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			],
+			{ watchedRoles: true },
+		);
+		expect(output).toContain("**user**:");
+		expect(output).toContain("→ user-python! print(1) ⇒ ok · 1 line");
+	});
+
+	it("keeps the bare user-prefixed line without a role label outside watched mode", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Recommending cleanup." }],
+				stopReason: "endTurn",
+				timestamp: 1,
+			},
+			{
+				role: "bashExecution",
+				command: "rm -rf .wt/foo",
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 2,
+			},
+		]);
+		expect(output).toContain("→ user-bash! rm -rf .wt/foo ⇒ ok · 0 lines");
+		expect(output).not.toContain("**user**:");
+		expect(output).toContain("## assistant");
+	});
 });

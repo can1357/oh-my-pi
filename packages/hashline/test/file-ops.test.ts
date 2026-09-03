@@ -15,7 +15,7 @@ const CONTENT = "one\ntwo\nthree\n";
 describe("hashline file ops", () => {
 	it("parses REM and rejects line ops in the same section", () => {
 		expect(parsePatch("REM").fileOp).toEqual({ kind: "rem" });
-		expect(() => parsePatch(`SWAP 1.=1:\n+one\nREM`)).toThrow(/REM.*line ops/);
+		expect(() => parsePatch(`PUT 1-1:\n+one\nREM`)).toThrow(/REM.*line ops/);
 	});
 
 	it("parses MV with a normalized destination path", () => {
@@ -59,7 +59,7 @@ describe("hashline file ops", () => {
 		const tag = snapshots.record(PATH, CONTENT);
 		const patcher = new Patcher({ fs, snapshots });
 
-		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 2.=2:\n+TWO\nMV ${DEST}`));
+		const result = await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nPUT 2-2:\n+TWO\nMV ${DEST}`));
 
 		expect(result.sections[0]?.moveDest).toBe(DEST);
 		expect(fs.get(PATH)).toBeUndefined();

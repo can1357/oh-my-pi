@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import type * as TypeBox from "@oh-my-pi/omptype/typebox";
+import * as zod from "@oh-my-pi/omptype/zod";
 import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { GreenCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/ci-green";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
-import type * as TypeBox from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as arktype from "arktype";
-import * as zod from "zod/v4";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -22,7 +23,7 @@ function createApi(): CustomCommandAPI {
 			killed: false,
 		}),
 		typebox: {} as unknown as typeof TypeBox,
-		arktype,
+		arktype: Object.assign(Function.prototype.bind.call(type, undefined) as typeof type, type, { type }),
 		zod,
 		pi: piCodingAgent,
 	};
@@ -30,7 +31,9 @@ function createApi(): CustomCommandAPI {
 
 describe("GreenCommand", () => {
 	it("includes tag instructions when HEAD has a tag", async () => {
-		vi.spyOn(git.ref, "tags").mockResolvedValue(["v0.1.0-alpha2"]);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			tagsAt: async () => ["v0.1.0-alpha2"],
+		} as unknown as VcsGitRepo);
 		const command = new GreenCommand(createApi());
 
 		const result = await command.execute([], {} as HookCommandContext);
@@ -40,7 +43,9 @@ describe("GreenCommand", () => {
 	});
 
 	it("omits tag instructions when HEAD is not tagged", async () => {
-		vi.spyOn(git.ref, "tags").mockResolvedValue([]);
+		vi.spyOn(vcs, "requireGit").mockReturnValue({
+			tagsAt: async () => [],
+		} as unknown as VcsGitRepo);
 		const command = new GreenCommand(createApi());
 
 		const result = await command.execute([], {} as HookCommandContext);

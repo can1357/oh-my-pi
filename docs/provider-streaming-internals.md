@@ -4,13 +4,14 @@ This document explains how token/tool streaming is normalized in `@oh-my-pi/pi-a
 
 ## End-to-end flow
 
-1. `streamSimple()` (`packages/ai/src/stream.ts`) maps generic options and dispatches to a provider stream function.
-2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Current built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, pi-native gateway transport, plus GitLab Duo/Kimi/Synthetic/xAI-Grok-Responses wrappers and extension-registered custom APIs.
+1. `streamSimple()` (`packages/ai/src/stream.ts`) maps generic options and dispatches to a provider stream function. Heavy built-ins are reached through the lazy wrappers in `packages/ai/src/providers/register-builtins.ts`; thin routing wrappers remain eager.
+2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Current built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, Devin, pi-native gateway transport, plus GitLab Duo, GitLab Duo Workflow, Kimi, and Synthetic wrappers, and extension-registered custom APIs. (xAI Grok has no dedicated wrapper: both `xai-oauth` and API-key `xai` models are catalog specs with `api: "openai-responses"` at `https://api.x.ai/v1`, riding the shared OpenAI Responses path with catalog-level compat.)
 3. Each provider pushes events into `AssistantMessageEventStream` (`packages/ai/src/utils/event-stream.ts`), which exposes:
    - async iteration for incremental updates
-   - `result()` for final `AssistantMessage`
-4. `agentLoop` (`packages/agent/src/agent-loop.ts`) consumes those events, mutates in-flight assistant state, and emits `message_update` events carrying the raw `assistantMessageEvent`.
-5. `AgentSession` (`packages/coding-agent/src/session/agent-session.ts`) subscribes to agent events, persists messages, drives extension hooks, and applies session behaviors (retry, compaction, TTSR, streaming-edit abort checks).
+   - `result()` for the final `AssistantMessage`
+4. The lazy forwarding wrapper applies first-progress and idle watchdogs. The synthetic `start` event does not count as first progress; a provider can mark server-requested local work with `trackLocalWork()` so that work does not look like a stalled stream.
+5. `agentLoop` (`packages/agent/src/agent-loop.ts`) consumes those events, mutates in-flight assistant state, and emits `message_update` events carrying the raw `assistantMessageEvent`.
+6. `AgentSession` (`packages/coding-agent/src/session/agent-session.ts`) subscribes to agent events, persists messages, drives extension hooks, and applies session behaviors (retry, compaction, TTSR, streaming-edit abort checks).
 
 ## Unified stream contract in `@oh-my-pi/pi-ai`
 
@@ -21,18 +22,21 @@ All providers emit the same shape (`AssistantMessageEvent` in `packages/ai/src/t
   - text: `text_start` → `text_delta`\* → `text_end`
   - thinking: `thinking_start` → `thinking_delta`\* → `thinking_end`
   - tool call: `toolcall_start` → `toolcall_delta`\* → `toolcall_end`
+- complete image blocks: `image_end`
 - terminal event:
   - `done` with `reason: "stop" | "length" | "toolUse"`
   - or `error` with `reason: "aborted" | "error"`
 
 `AssistantMessageEventStream` guarantees:
 
-- final result is resolved by terminal event (`done` or `error`)
+- a `done` or `error` event resolves `result()` to the event's final assistant message
+- `fail(error)` instead rejects iteration and `result()`; `end()` without a final
+  result rejects `result()` rather than leaving it pending
 - events are delivered to consumers immediately, in push order (no batching or merging)
 
 ## Delta throttling behavior
 
-`AssistantMessageEventStream` itself no longer throttles or merges delta events — every provider event is delivered as pushed. The per-delta cost control moved into tool-call argument parsing: providers accumulate partial JSON and re-parse it via `parseStreamingJsonThrottled()` (`packages/ai/src/utils/json-parse.ts`), which skips the re-parse until at least `STREAMING_JSON_PARSE_MIN_GROWTH` (256) new bytes have arrived, bounding mid-stream parse cost from quadratic to linear. The final `toolcall_end` parse is always unconditional and authoritative.
+`AssistantMessageEventStream` itself no longer throttles or merges delta events — every provider event is delivered as pushed. The per-delta cost control moved into tool-call argument parsing: providers accumulate partial JSON and re-parse it via `parseStreamingJsonThrottled()` (`packages/utils/src/json-parse.ts`), which skips the re-parse until at least `STREAMING_JSON_PARSE_MIN_GROWTH` (256) new bytes have arrived, bounding mid-stream parse cost from quadratic to linear. The final parse at the tool-call boundary is unconditional and authoritative.
 
 There is no provider backpressure: providers still produce at full speed, while the local stream queues.
 
@@ -101,7 +105,7 @@ Tool-call argument streaming:
 
 ## Partial tool-call JSON accumulation and recovery
 
-Shared behavior for Anthropic/OpenAI Responses uses `parseStreamingJson()` / `parseStreamingJsonThrottled()` (`packages/ai/src/utils/json-parse.ts`):
+Shared behavior uses `parseStreamingJson()` / `parseStreamingJsonThrottled()` (`packages/utils/src/json-parse.ts`):
 
 1. try `JSON.parse`
 2. fallback to the in-house `RelaxedJson` parser (relaxed/repairing) for incomplete fragments
@@ -141,9 +145,10 @@ Observed behavior in current implementation:
 
 - malformed SSE framing or chunk JSON surfaces as an exception or stream `error` event
 - malformed Codex SSE JSON/framing throws from the local SSE reader
-- provider wrapper converts failures into unified terminal `error` events
-- no provider-specific resume/retry inside the stream function itself, except Codex websocket-to-SSE transport fallback before replay-unsafe output is emitted
-- higher-level retries are handled in `AgentSession` auto-retry logic (message-level retry, not stream-chunk replay)
+- providers do not resume from an individual malformed chunk. Depending on the provider and whether any replay-unsafe output has been emitted, a bounded provider-owned request retry may start a fresh attempt for transient transport or malformed-envelope failures.
+- provider-owned recovery also includes bounded empty-completion retries (OpenAI Responses, OpenAI Completions, Anthropic, Google native/Vertex, Gemini CLI, and Ollama) and capability fallbacks such as retrying without rejected strict-tool fields
+- Codex can fall back from websocket to SSE only before replay-unsafe output is emitted
+- `AgentSession` separately handles message-level auto-retry; it does not replay a stream from the failed chunk
 
 ## Cancellation boundaries
 
@@ -174,7 +179,7 @@ Current design favors responsiveness and simple ordering over bounded-buffer flo
 `agentLoop.streamAssistantResponse()` bridges `AssistantMessageEvent` to `AgentEvent`:
 
 - on `start`: pushes placeholder assistant message and emits `message_start`
-- on block events (`text_*`, `thinking_*`, `toolcall_*`): updates last assistant message, emits `message_update` with raw `assistantMessageEvent`
+- on block events (`text_*`, `thinking_*`, `image_end`, `toolcall_*`): updates the last assistant message and emits `message_update` with the raw `assistantMessageEvent`
 - on terminal (`done`/`error`): resolves final message from `response.result()`, emits `message_end`
 
 `AgentSession` then consumes those events for session-level behaviors:
@@ -206,11 +211,12 @@ Provider-specific (not fully abstracted):
 
 - [`../../ai/src/stream.ts`](../packages/ai/src/stream.ts) — provider dispatch, option mapping, API key/session plumbing, custom API dispatch, and provider-specific credential handling.
 - [`../../ai/src/utils/event-stream.ts`](../packages/ai/src/utils/event-stream.ts) — generic stream queue + final-result resolution.
-- [`../../ai/src/utils/json-parse.ts`](../packages/ai/src/utils/json-parse.ts) — partial JSON parsing for streamed tool arguments.
+- [`../../utils/src/json-parse.ts`](../packages/utils/src/json-parse.ts) — partial JSON parsing for streamed tool arguments.
 - [`../../ai/src/providers/anthropic.ts`](../packages/ai/src/providers/anthropic.ts) — Anthropic event translation and tool JSON delta accumulation.
 - [`../../ai/src/providers/openai-responses.ts`](../packages/ai/src/providers/openai-responses.ts), [`openai-shared.ts`](../packages/ai/src/providers/openai-shared.ts), [`openai-codex-responses.ts`](../packages/ai/src/providers/openai-codex-responses.ts), [`azure-openai-responses.ts`](../packages/ai/src/providers/azure-openai-responses.ts) — Responses-family event translation and status mapping.
 - [`../../ai/src/providers/google.ts`](../packages/ai/src/providers/google.ts), [`google-gemini-cli.ts`](../packages/ai/src/providers/google-gemini-cli.ts), [`google-vertex.ts`](../packages/ai/src/providers/google-vertex.ts) — Gemini stream chunk-to-block translation variants.
 - [`../../ai/src/providers/google-shared.ts`](../packages/ai/src/providers/google-shared.ts) — Gemini finish-reason mapping and shared conversion rules.
 - [`../../ai/src/providers/amazon-bedrock.ts`](../packages/ai/src/providers/amazon-bedrock.ts), [`openai-completions.ts`](../packages/ai/src/providers/openai-completions.ts), [`ollama.ts`](../packages/ai/src/providers/ollama.ts), [`cursor.ts`](../packages/ai/src/providers/cursor.ts), [`pi-native-client.ts`](../packages/ai/src/providers/pi-native-client.ts) — additional built-in stream adapters using the same event contract.
+- [`../../ai/src/providers/register-builtins.ts`](../packages/ai/src/providers/register-builtins.ts) and [`../../ai/src/utils/idle-iterator.ts`](../packages/ai/src/utils/idle-iterator.ts) — lazy provider forwarding, first-progress/idle watchdogs, and local-work-aware stall handling.
 - [`../../agent/src/agent-loop.ts`](../packages/agent/src/agent-loop.ts) — provider stream consumption and `message_update` bridging.
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — session-level handling of streaming updates, abort, retry, and persistence.

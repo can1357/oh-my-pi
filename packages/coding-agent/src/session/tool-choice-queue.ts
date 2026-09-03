@@ -13,15 +13,15 @@ export interface RejectInfo {
 	reason: "aborted" | "error" | "cleared" | "removed" | "unavailable" | "not_invoked";
 }
 
-/** "requeue" replays the lost yield next turn; "drop" (or void/undefined) discards it. */
-export type RejectOutcome = "requeue" | "drop";
+/** Controls whether rejection replays a yield, drops it, or drops its remaining sequence. */
+export type RejectOutcome = "requeue" | "drop" | "drop_sequence";
 
 export interface DirectiveCallbacks {
 	/** Fires when the yield completed; onInvoked directives require the requested tool to run first. */
 	onResolved?: (info: ResolveInfo) => void;
 	/**
-	 * Fires when the yield is being discarded. Return "requeue" to replay the
-	 * same value at the head of the queue for the next turn. Default: "drop".
+	 * Return "requeue" to replay the same value, or "drop_sequence" to discard
+	 * its directive including later yields. Default: drop the rejected yield.
 	 */
 	onRejected?: (info: RejectInfo) => RejectOutcome | undefined;
 	/**
@@ -39,6 +39,8 @@ export interface ToolChoiceDirective {
 	/** Stable label for targeted removal and debugging (e.g. "user-force"). */
 	label: string;
 	callbacks: DirectiveCallbacks;
+	/** Original multi-yield directive retained across one-yield replays. */
+	sequenceRoot?: ToolChoiceDirective;
 }
 
 export interface PushOptions {
@@ -83,6 +85,12 @@ interface PendingInvoker {
 
 export class ToolChoiceQueue {
 	#queue: ToolChoiceDirective[] = [];
+	/**
+	 * In-flight yield awaiting resolve()/reject(). May outlive the run that
+	 * claimed it: a pre-model gate stop ends the run without a `turn_end`, and
+	 * the claim is finalized later — by the next admitted turn's `turn_end`,
+	 * the abort safety net, or an `unavailable` rejection on redeem.
+	 */
 	#inFlight: InFlight | undefined;
 	/**
 	 * Label of the directive whose last yield was resolved this turn.
@@ -178,6 +186,12 @@ export class ToolChoiceQueue {
 			reason,
 		});
 
+		if (outcome === "drop_sequence") {
+			const root = inFlight.directive.sequenceRoot ?? inFlight.directive;
+			this.#queue = this.#queue.filter(directive => directive !== root && directive.sequenceRoot !== root);
+			return;
+		}
+
 		if (outcome === "requeue") {
 			// Re-queue only the lost yield, not the rest of the sequence. Carry forward
 			// callbacks so the replayed yield still executes and finalizes correctly,
@@ -185,6 +199,7 @@ export class ToolChoiceQueue {
 			this.#queue.unshift({
 				generator: onceGen(inFlight.yielded),
 				label: `${inFlight.directive.label}-requeued`,
+				sequenceRoot: inFlight.directive.sequenceRoot ?? inFlight.directive,
 				callbacks: {
 					onResolved: inFlight.directive.callbacks.onResolved,
 					onInvoked: inFlight.directive.callbacks.onInvoked,

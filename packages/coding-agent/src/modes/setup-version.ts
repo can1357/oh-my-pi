@@ -8,4 +8,4 @@
  * the overlay component and their TUI deps. MUST equal `max(scene.minVersion)`
  * across `ALL_SCENES`; the `setup-wizard` barrel and test suite guard it.
  */
-export const CURRENT_SETUP_VERSION = 1;
+export const CURRENT_SETUP_VERSION = 2;

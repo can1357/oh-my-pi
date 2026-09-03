@@ -200,7 +200,7 @@ fn quote_bare_metavars(pattern: &str) -> String {
 }
 
 /// Byte index of the end of the UTF-8 character starting at `index`.
-fn next_char_boundary(bytes: &[u8], index: usize) -> usize {
+const fn next_char_boundary(bytes: &[u8], index: usize) -> usize {
 	let mut end = index + 1;
 	while end < bytes.len() && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
 		end += 1;

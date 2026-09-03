@@ -168,11 +168,19 @@ describe("AgentSession model persistence", () => {
 			initialModel: defaultModel,
 			modelRoles: { default: defaultRoleValue },
 		});
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
 
 		await created.session.setModel(nextModel);
 
 		expect(created.session.model?.id).toBe(nextModel.id);
 		expect(created.settings.getModelRole("default")).toBe(defaultRoleValue);
+		expect(modelChangedCount).toBe(1);
+
+		await created.session.setModel(nextModel);
+		expect(modelChangedCount).toBe(1);
 	});
 
 	it("persists the default role when explicitly requested", async () => {
@@ -201,12 +209,8 @@ describe("AgentSession model persistence", () => {
 
 		const targetWindow = nextModel.contextWindow ?? 0;
 		expect(targetWindow).toBeGreaterThan(0);
-		const overflowTokens = targetWindow + 1;
 
-		const result = await created.session.setModel(nextModel, "default", {
-			persist: true,
-			currentContextTokens: overflowTokens,
-		});
+		const result = await created.session.setModel(nextModel, "default", { persist: true });
 
 		expect(result).toEqual({ switched: true });
 		expect(created.session.model?.id).toBe(nextModel.id);
@@ -464,7 +468,7 @@ describe("AgentSession model persistence", () => {
 		if (!sessionFile) throw new Error("Expected interrupted session file");
 
 		const result = await createStartupResumeSession(sessionFile);
-		const messages = result.session.sessionManager.buildSessionContext().messages;
+		const messages = result.session.sessionManager.buildSessionContext({ transcript: true }).messages;
 		expect(messages.at(-1)).toMatchObject({
 			role: "assistant",
 			content: [],
@@ -567,7 +571,7 @@ describe("AgentSession model persistence", () => {
 
 		await expect(created.session.switchSession(targetFile)).resolves.toBe(true);
 
-		expect(created.session.sessionManager.buildSessionContext().messages.at(-1)).toMatchObject({
+		expect(created.session.sessionManager.buildSessionContext({ transcript: true }).messages.at(-1)).toMatchObject({
 			role: "assistant",
 			api: defaultModel.api,
 			provider: defaultModel.provider,

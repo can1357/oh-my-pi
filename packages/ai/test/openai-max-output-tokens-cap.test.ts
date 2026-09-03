@@ -187,6 +187,12 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_output_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
+	it("lets native Meta Responses requests use the advertised model cap", async () => {
+		const model = getBundledModel("meta", "muse-spark-1.1") as Model<"openai-responses">;
+		const body = await drainResponses(model);
+		expect(body.max_output_tokens).toBe(131_072);
+	});
+
 	it("omits default max_output_tokens for OpenRouter Responses so provider routing is not filtered", async () => {
 		const body = await drainResponses(openRouterResponsesModel(131_072));
 		expect(body.max_output_tokens).toBeUndefined();

@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -203,6 +204,62 @@ describe("buildSessionContext", () => {
 			expect((ctx.messages[2] as any).content[0].text).toBe("response2");
 			expect((ctx.messages[3] as any).content).toBe("third");
 			expect((ctx.messages[4] as any).content[0].text).toBe("response3");
+		});
+
+		it("keeps Anthropic native web-search bytes when compaction retains the assistant turn", () => {
+			const nativeContent: AssistantMessage["content"] = [
+				{ type: "thinking", thinking: "search", thinkingSignature: "sig-1" },
+				{
+					type: "anthropicServerTool",
+					block: {
+						type: "server_tool_use",
+						id: "srvtoolu_1",
+						name: "web_search",
+						input: { query: "current UTC date" },
+					},
+				},
+				{
+					type: "anthropicServerTool",
+					block: {
+						type: "web_search_tool_result",
+						tool_use_id: "srvtoolu_1",
+						content: [{ type: "web_search_result", encrypted_content: "opaque-result" }],
+					},
+				},
+				{ type: "thinking", thinking: "write", thinkingSignature: "sig-2" },
+				{ type: "toolCall", id: "toolu_write", name: "write", arguments: { path: "date.txt" } },
+			];
+			const retainedAssistant = msg("4", "3", "assistant", "placeholder");
+			if (retainedAssistant.message.role !== "assistant") throw new Error("Expected assistant fixture");
+			retainedAssistant.message.content = nativeContent;
+			retainedAssistant.message.stopReason = "toolUse";
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old question"),
+				msg("2", "1", "assistant", "old response"),
+				msg("3", "2", "user", "search then write"),
+				retainedAssistant,
+				{
+					type: "message",
+					id: "5",
+					parentId: "4",
+					timestamp: "2025-01-01T00:00:00Z",
+					message: {
+						role: "toolResult",
+						toolCallId: "toolu_write",
+						toolName: "write",
+						content: [{ type: "text", text: "wrote date.txt" }],
+						isError: false,
+						timestamp: 2,
+					},
+				},
+				compaction("6", "5", "Old history summary", "3"),
+				msg("7", "6", "user", "continue"),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const assistant = ctx.messages.find(message => message.role === "assistant");
+			if (assistant?.role !== "assistant") throw new Error("Expected retained assistant message");
+			expect(assistant.content).toEqual(nativeContent);
 		});
 
 		it("handles compaction keeping from first message", () => {
@@ -638,10 +695,12 @@ describe("buildSessionContext", () => {
 		});
 
 		it("strips dangling tool_use when the leaf lands on a mid-batch assistant turn", () => {
-			// Reproduces the rewind/restore loop: leaf = an assistant turn that emitted
-			// tool calls. Its results are off-path children, so without normalization the
-			// turn ends on unpaired tool_use and transformMessages fabricates phantom
-			// "aborted" results, re-injecting the failed batch.
+			// Reproduces the rewind/restore loop: leaf = a completed assistant turn that
+			// emitted tool calls. Its results are off-path children, so without
+			// normalization the turn ends on unpaired tool_use and transformMessages
+			// fabricates phantom "aborted" results, re-injecting the failed batch.
+			// (Aborted/error turns are dropped from context wholesale — covered in
+			// src/session/session-context.test.ts.)
 			const assistantWithCalls: SessionMessageEntry = {
 				type: "message",
 				id: "a1",
@@ -668,7 +727,7 @@ describe("buildSessionContext", () => {
 						totalTokens: 2,
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
-					stopReason: "aborted",
+					stopReason: "toolUse",
 					timestamp: 1,
 				},
 			};

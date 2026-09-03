@@ -36,6 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
+import { compareVersions } from "../packages/utils/src/version.ts";
 import { packages } from "./ci-release-publish.ts";
 
 const repoRoot = path.join(import.meta.dir, "..");
@@ -179,17 +180,6 @@ async function collectTargets(): Promise<{ names: string[]; repoFromManifest: st
 	return { names, repoFromManifest };
 }
 
-/** Compare dotted version numbers; true when `version` >= `minimum`. */
-function meetsMinimum(version: string, minimum: string): boolean {
-	const a = version.split(".").map(Number);
-	const b = minimum.split(".").map(Number);
-	for (let i = 0; i < Math.max(a.length, b.length); i++) {
-		const diff = (a[i] ?? 0) - (b[i] ?? 0);
-		if (diff !== 0) return diff > 0;
-	}
-	return true;
-}
-
 /** Run npm with the terminal attached so the web 2FA flow stays interactive. */
 function npmInteractive(args: readonly string[]): Promise<number> {
 	return Bun.spawn(["npm", ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
@@ -321,7 +311,7 @@ async function main(): Promise<void> {
 		console.error("Could not determine npm version. Is npm installed and on PATH?");
 		process.exit(1);
 	}
-	if (!meetsMinimum(npmVersion, MIN_NPM)) {
+	if (compareVersions(npmVersion, MIN_NPM) < 0) {
 		console.error(`npm ${MIN_NPM}+ is required for trusted publishing (found ${npmVersion}).`);
 		console.error("Upgrade with: npm install -g npm@latest");
 		process.exit(1);

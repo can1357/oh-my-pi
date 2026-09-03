@@ -1,5 +1,10 @@
 import type { AgentStorage } from "../../../session/agent-storage";
-import { SearchProviderError, type SearchProviderId, type SearchSource } from "../../../web/search/types";
+import {
+	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
+	SearchProviderError,
+	type SearchProviderId,
+	type SearchSource,
+} from "../../../web/search/types";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -44,16 +49,13 @@ export function findCredential(
 }
 
 /**
- * Default hard ceiling for a single web-search round-trip. 60s tolerates
- * legitimate slow LLM-mediated responses (anthropic web_search_20250305,
- * perplexity, gemini, codex) while still guaranteeing the session unfreezes
- * within a minute if Bun's `AbortSignal` fails to propagate on Windows.
- *
- * Pure search APIs (brave, exa, jina, tavily, searxng, synthetic, zai)
- * settle far faster in practice; reusing the same ceiling keeps the wiring
- * uniform without compromising correctness.
+ * The 60-second default tolerates legitimate slow LLM-mediated responses
+ * (Anthropic web_search_20250305, Perplexity, Gemini, Codex) while bounding
+ * Windows stalls when Bun's `AbortSignal` fails to propagate. Callers may
+ * configure a longer provider deadline, capped at five minutes by the
+ * dispatcher; pure search APIs typically settle far faster.
  */
-export const SEARCH_HARD_TIMEOUT_MS = 60_000;
+export const SEARCH_HARD_TIMEOUT_MS = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 
 /**
  * Compose a caller-supplied {@link AbortSignal} with a hard timeout so an

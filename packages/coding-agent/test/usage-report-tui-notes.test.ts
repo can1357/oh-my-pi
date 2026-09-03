@@ -49,24 +49,35 @@ function report(provider: string, email: string, limits: UsageReport["limits"], 
 
 describe("renderUsageReports (#3268 TUI aggregate)", () => {
 	it("renders provider-wide UsageReport.notes exactly once for multiple accounts", () => {
-		const disclaimer = "OMP-observed spend only; OpenCode usage outside OMP is not included.";
+		const providerNote = "Usage data can be delayed by up to five minutes.";
 		const reports: UsageReport[] = [
 			report(
-				"opencode-go",
+				"github-copilot",
 				"acct-a@example.test",
 				[limit("5 Hour limit", "rolling-5h", 5 * HOUR, 0.3)],
-				[disclaimer],
+				[providerNote],
 			),
 			report(
-				"opencode-go",
+				"github-copilot",
 				"acct-b@example.test",
 				[limit("5 Hour limit", "rolling-5h", 5 * HOUR, 0.6)],
-				[disclaimer],
+				[providerNote],
 			),
 		];
 		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
-		const occurrences = text.split(disclaimer).length - 1;
+		const occurrences = text.split(providerNote).length - 1;
 		expect(occurrences).toBe(1);
+	});
+
+	it("lists every model mapped to the provider's live usage data", () => {
+		const reports = [
+			report("github-copilot", "acct@example.test", [limit("Copilot", "monthly", 30 * 24 * HOUR, 0.4)]),
+		];
+		const models = ["github-copilot/gpt-5.6", "github-copilot/claude-sonnet-4.6"];
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120, undefined, models));
+		expect(text).toContain("Models with usage data");
+		expect(text).toContain(models[0]);
+		expect(text).toContain(models[1]);
 	});
 
 	it("deduplicates identical per-limit notes when accounts share one window group", () => {
@@ -106,6 +117,61 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		const text = stripVTControlCharacters(renderUsageReports(reports, theme, now, 160));
 
 		expect(text).toContain("rae@example.com (Team Org)");
+	});
+
+	it("renders used-only absolute amounts with neutral status and no account summary", () => {
+		const reports: UsageReport[] = [
+			report("anthropic", "spend@example.test", [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 123.45, unit: "usd" },
+				},
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).toContain(theme.status.info);
+		expect(text).not.toContain(theme.status.pending);
+		expect(text).toContain("$123.45 used");
+		expect(text).not.toContain("1 accts");
+	});
+
+	it("preserves capped aggregate status when a group mixes capped and used-only amounts", () => {
+		const reports: UsageReport[] = [
+			report("anthropic", "capped@example.test", [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: {
+						used: 50,
+						limit: 100,
+						remaining: 50,
+						usedFraction: 0.5,
+						remainingFraction: 0.5,
+						unit: "usd",
+					},
+					status: "ok",
+				},
+			]),
+			report("anthropic", "spend@example.test", [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 123.45, unit: "usd" },
+				},
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
+
+		expect(text).toContain(theme.status.success);
+		expect(text).toContain("$123.45 used");
+		expect(text).toContain("2 accts");
 	});
 });
 

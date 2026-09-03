@@ -39,6 +39,7 @@ export function buildNamedToolChoice(toolName: string, model?: Model<Api>): Tool
  */
 export function isToolChoiceActive(toolChoice: ToolChoice | undefined, tools: readonly { name: string }[]): boolean {
 	if (!toolChoice || typeof toolChoice === "string") return true;
+	if (toolChoice.type === "computer") return tools.some(tool => tool.name === "computer");
 	const name =
 		toolChoice.type === "tool"
 			? toolChoice.name

@@ -1,14 +1,15 @@
 # macOS signing & notarization
 
-The compiled macOS `omp` binaries shipped on GitHub Releases are signed with a
+The compiled macOS `omp` binaries shipped on GitHub Releases can be signed with a
 **Developer ID Application** certificate and **notarized** by Apple. This makes
 them Gatekeeper-acceptable and is the prerequisite for an official Homebrew
 submission (see [#776](https://github.com/can1357/oh-my-pi/issues/776)).
 
-Signing happens in CI, in the `release_binary` job's darwin matrix legs
-(`.github/workflows/ci.yml`), via `scripts/ci-macos-sign.sh`. It **auto-skips**
-until the `APPLE_*` repository secrets below are configured, so releases keep
-working (ad-hoc signed, as before) in the meantime.
+Signing happens in CI in the `release_binary_darwin` matrix legs
+(`.github/workflows/ci.yml`), via `scripts/ci-macos-sign.sh`. The workflow step
+**auto-skips** unless all five `APPLE_*` repository secrets below are configured,
+so releases remain ad-hoc signed when credentials are absent. The script itself
+does not skip: invoking it without any required credential is an error.
 
 ## How it works
 
@@ -20,18 +21,19 @@ working (ad-hoc signed, as before) in the meantime.
      timestamp) and `--entitlements scripts/macos-entitlements.plist`;
    - runs `--version` and `--smoke-test` under the new signature to fail fast;
    - notarizes the binary via `notarytool submit --wait`.
-3. `release_github_verify` re-downloads the published arm64 asset and asserts it
-   is **not** ad-hoc, passes `codesign --verify --strict`, and boots cleanly.
+3. `release_github_verify` re-downloads the published arm64 asset, runs
+   `codesign --verify --strict` and both launch checks, and—when signing secrets
+   are configured—also asserts that the signature is not ad-hoc.
 
 ### Why the entitlements are mandatory
 
 The binary is a Bun single-file executable, so the hardened runtime needs:
 
-| Entitlement | Reason |
-| --- | --- |
-| `com.apple.security.cs.allow-jit` | JavaScriptCore JITs at runtime. |
-| `com.apple.security.cs.allow-unsigned-executable-memory` | JSC executable memory pages. |
-| `com.apple.security.cs.disable-library-validation` | omp extracts its native addon (`pi_natives.<triple>.node`) and other optional dylibs to a runtime cache and `dlopen()`s them. They do not share the main binary's Team ID, so without this the hardened runtime aborts with *"mapping process and mapped file have different Team IDs"* — breaking effectively every command. |
+| Entitlement                                              | Reason                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `com.apple.security.cs.allow-jit`                        | JavaScriptCore JITs at runtime.                                                                                                                                                                                                                                                                                               |
+| `com.apple.security.cs.allow-unsigned-executable-memory` | JSC executable memory pages.                                                                                                                                                                                                                                                                                                  |
+| `com.apple.security.cs.disable-library-validation`       | omp extracts its native addon (`pi_natives.<triple>.node`) and other optional dylibs to a runtime cache and `dlopen()`s them. They do not share the main binary's Team ID, so without this the hardened runtime aborts with _"mapping process and mapped file have different Team IDs"_ — breaking effectively every command. |
 
 Without `disable-library-validation`, a signed+notarized binary signs and
 notarizes fine but **fails at first real use**. `scripts/ci-macos-sign.sh` runs
@@ -42,21 +44,23 @@ notarizes fine but **fails at first real use**. `scripts/ci-macos-sign.sh` runs
 A bare Mach-O executable **cannot be stapled** (`stapler` only supports
 `.app`/`.pkg`/`.dmg`). The binary is genuinely notarized — `notarytool` returns
 `Accepted` and the ticket exists on Apple's servers keyed to its cdhash — but
-because there is no *stapled* ticket, a direct `spctl -a -t exec` assessment
-reports `rejected / source=Unnotarized Developer ID`. This is expected and is
-**not** a signing or credential failure.
+the ticket must be fetched online rather than read from the executable.
+`release_github_verify` reports `spctl -a -t exec -vv` for visibility but does
+not gate the release on it: an unstapled bare binary can produce a non-zero
+assessment when the online ticket is unavailable, which is not by itself a
+signing or credential failure.
 
 What this means in practice:
 
 - `curl https://omp.sh/install | sh` — `curl` sets no quarantine bit, so
-  Gatekeeper is never consulted; the binary just runs. ✅
+  Gatekeeper is not consulted.
 - Homebrew **formula** installs — Homebrew does not quarantine formula files, so
-  Gatekeeper is never consulted. ✅
+  Gatekeeper is not consulted.
 - Anything that **quarantines** the binary (a browser download, or a Homebrew
-  **cask**) and is assessed offline will be blocked, because there is no stapled
-  ticket. For that route, wrap the binary in a stapleable, notarized **`.pkg` or
-  `.dmg`** (`xcrun stapler staple` works on those). That is a follow-up and is
-  **not** required for the `curl`/formula paths.
+  **cask**) needs Apple's online ticket lookup. For an offline-distributable
+  artifact, wrap the binary in a stapleable, notarized **`.pkg` or `.dmg`**
+  (`xcrun stapler staple` works on those). That is not required for the
+  `curl`/formula paths.
 
 ## Required GitHub secrets
 
@@ -64,31 +68,31 @@ Add these under **Settings → Secrets and variables → Actions** (repo secrets
 All five secrets (cert, password, and API key trio) must be present for
 signing to engage.
 
-| Secret | What it is |
-| --- | --- |
-| `APPLE_CERTIFICATE_P12` | base64 of the exported Developer ID Application `.p12` (cert + private key). |
-| `APPLE_CERTIFICATE_PASSWORD` | password you set when exporting the `.p12`. |
-| `APPLE_API_KEY_ID` | App Store Connect API **Key ID**. |
-| `APPLE_API_ISSUER_ID` | App Store Connect API **Issuer ID** (UUID). |
-| `APPLE_API_KEY` | base64 of the App Store Connect `.p8` private key. |
+| Secret                       | What it is                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `APPLE_CERTIFICATE_P12`      | base64 of the exported Developer ID Application `.p12` (cert + private key). |
+| `APPLE_CERTIFICATE_PASSWORD` | password you set when exporting the `.p12`.                                  |
+| `APPLE_API_KEY_ID`           | App Store Connect API **Key ID**.                                            |
+| `APPLE_API_ISSUER_ID`        | App Store Connect API **Issuer ID** (UUID).                                  |
+| `APPLE_API_KEY`              | base64 of the App Store Connect `.p8` private key.                           |
 
 ### Producing the credential files
 
 Drop these into a working directory (default `~/omp-signing`):
 
-| File | How |
-| --- | --- |
-| `*.p12` | **Keychain Access** → right-click your *Developer ID Application: …* identity (the entry that expands to a cert **with** a private key) → **Export…** → save as `.p12` and set a password. |
-| `p12-password.txt` | the password you just set on the `.p12`. |
+| File                 | How                                                                                                                                                                                                                                     |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `*.p12`              | **Keychain Access** → right-click your _Developer ID Application: …_ identity (the entry that expands to a cert **with** a private key) → **Export…** → save as `.p12` and set a password.                                              |
+| `p12-password.txt`   | the password you just set on the `.p12`.                                                                                                                                                                                                |
 | `AuthKey_<KEYID>.p8` | App Store Connect → **Users and Access → Integrations → App Store Connect API** → create a key (**Account Holder** role also allows API cert creation; **Developer** is enough for notarization) → **download once** (non-recoverable). |
-| `issuer-id.txt` | the **Issuer ID** (UUID) shown above the keys table. |
-| `key-id.txt` | *optional* — the Key ID; otherwise read from the `.p8` filename. |
+| `issuer-id.txt`      | the **Issuer ID** (UUID) shown above the keys table.                                                                                                                                                                                    |
+| `key-id.txt`         | _optional_ — the Key ID; otherwise read from the `.p8` filename.                                                                                                                                                                        |
 
 The App Store Connect API key is the one credential that **cannot** be minted
 from a CLI — it is the bootstrap credential for the API itself, and the `.p8`
 downloads exactly once. Everything else is local.
 
-### Uploading (no value leaves disk)
+### Uploading without printing secret values
 
 `scripts/ci-macos-upload-secrets.sh` validates the files (opens the `.p12` with
 your password, sanity-checks the `.p8`) and pipes each value to `gh secret set`

@@ -13,6 +13,7 @@ export type {
 	CredentialOrigin,
 	CredentialOriginKind,
 	OAuthAccountIdentity,
+	OAuthAccountSummary,
 	OAuthCredential,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,

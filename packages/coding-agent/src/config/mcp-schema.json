@@ -88,6 +88,9 @@
         "clientSecret": {
           "type": "string"
         },
+        "scope": {
+          "type": "string"
+        },
         "redirectUri": {
           "type": "string"
         },
@@ -117,6 +120,11 @@
           "type": "number",
           "minimum": 0,
           "description": "MCP request timeout in milliseconds. Set to 0 to disable client-side MCP timeouts."
+        },
+        "requestIdFormat": {
+          "type": "string",
+          "enum": ["string", "number"],
+          "description": "Encoding for outgoing JSON-RPC request ids (default: \"number\"). Use \"string\" for servers that need collision-resistant snowflake string ids instead of per-transport integers. OMP-specific: set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin). Servers imported from another tool's config (Claude, Cursor, VS Code, Gemini, OpenCode, Windsurf) ignore it, since that key is not part of those formats."
         },
         "auth": {
           "$ref": "#/$defs/authConfig"

@@ -828,8 +828,8 @@ function extractKeySignal(content: string, maxChars: number): string {
 }
 
 function invalidateEpisodicVectors(beam: BeamMemoryState, memoryId: string): void {
-	beam.db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memoryId);
-	beam.db.prepare("UPDATE episodic_memory SET binary_vector = NULL WHERE id = ?").run(memoryId);
+	beam.db.run("DELETE FROM memory_embeddings WHERE memory_id = ?", [memoryId]);
+	beam.db.run("UPDATE episodic_memory SET binary_vector = NULL WHERE id = ?", [memoryId]);
 }
 
 export function degradeEpisodic(beam: BeamMemoryState, dryRun = false): Record<string, JsonValue> {

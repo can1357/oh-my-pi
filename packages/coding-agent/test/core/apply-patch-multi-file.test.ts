@@ -120,5 +120,8 @@ describe("EditTool apply_patch multi-file aggregate (#4074-B)", () => {
 		expect(result.isError).toBeUndefined();
 		expect(await Bun.file(path.join(tempDir, "a.txt")).text()).toBe("A\n");
 		expect(await Bun.file(path.join(tempDir, "b.txt")).text()).toBe("B\n");
+		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+		expect(text).toContain("[a.txt]\n1:A\n\n[b.txt]\n1:B");
+		expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
 	});
 });

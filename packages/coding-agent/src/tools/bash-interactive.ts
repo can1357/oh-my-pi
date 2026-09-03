@@ -11,8 +11,8 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type * as XtermModule from "@xterm/headless";
-import type { Terminal as XtermTerminalType } from "@xterm/headless";
+import type * as XtermModule from "@oh-my-pi/pi-utils/vterm";
+import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { Settings } from "../config/settings";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
@@ -32,13 +32,18 @@ function normalizeCaptureChunk(chunk: string): string {
 	return sanitizeWithOptionalSixelPassthrough(normalized, sanitizeText);
 }
 
-// @xterm/headless is only needed once an interactive PTY session actually starts,
+// Caps only the live xterm display backlog; OutputSink remains the bounded
+// source of truth for the final captured output.
+const MAX_LIVE_WRITE_QUEUE_CHUNKS = 512;
+
+// The virtual terminal is only needed once an interactive PTY session actually starts,
 // so it is loaded lazily (and memoized) instead of weighing down CLI startup.
 let xtermTerminalCtor: typeof XtermModule.Terminal | undefined;
 
-async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> {
+/** Lazily load the headless xterm Terminal shared by PTY render paths. */
+export async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> {
 	if (!xtermTerminalCtor) {
-		const mod = (await import("@xterm/headless")) as typeof XtermModule & { default?: typeof XtermModule };
+		const mod = (await import("@oh-my-pi/pi-utils/vterm")) as typeof XtermModule & { default?: typeof XtermModule };
 		xtermTerminalCtor = (mod.default ?? mod).Terminal;
 	}
 	return xtermTerminalCtor;
@@ -142,7 +147,29 @@ class BashInteractiveOverlayComponent implements Component {
 
 	appendOutput(chunk: string): void {
 		this.#writeQueue.push(chunk);
+		this.#trimWriteQueue();
 		this.#drainQueue();
+	}
+
+	#trimWriteQueue(): void {
+		// Compact the consumed prefix first: the queue only self-resets on a
+		// full drain, which never happens while a fast producer keeps a
+		// backlog alive, so already-written chunks must be released here to
+		// keep the retained array itself bounded.
+		if (this.#writeOffset > 0) {
+			this.#writeQueue.splice(0, this.#writeOffset);
+			this.#writeOffset = 0;
+		}
+		const firstPending = this.#writing ? 1 : 0;
+		const overflow = this.#writeQueue.length - firstPending - MAX_LIVE_WRITE_QUEUE_CHUNKS;
+		if (overflow > 0) {
+			this.#writeQueue.splice(firstPending, overflow);
+			// Dropped chunks can split an in-flight DCS/OSC/APC string (e.g. a
+			// sixel payload) across the gap; a stray string terminator is a
+			// no-op in the ground state but resynchronizes the parser if the
+			// terminator was dropped.
+			this.#writeQueue[firstPending] = `\u001b\\${this.#writeQueue[firstPending]}`;
+		}
 	}
 
 	#drainQueue(): void {
@@ -314,92 +341,96 @@ export async function runInteractiveBashPty(
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
-	const result = await ui.custom<BashInteractiveResult>(
-		(tui, uiTheme, _keybindings, done) => {
-			const session = new PtySession();
-			const component = new BashInteractiveOverlayComponent(
-				options.command,
-				uiTheme,
-				() => tui.terminal.rows,
-				XtermTerminal,
-			);
-			component.setSession(session);
-			let finished = false;
-			const finalize = (run: PtyRunResult) => {
-				if (finished) return;
-				finished = true;
-				component.setComplete({ exitCode: run.exitCode, cancelled: run.cancelled, timedOut: run.timedOut });
-				tui.requestRender();
-				void (async () => {
-					await component.flushOutput();
-					const summary = await sink.dump();
-					done({
-						exitCode: run.exitCode,
-						cancelled: run.cancelled,
-						timedOut: run.timedOut,
-						...summary,
-					});
-				})();
-			};
-			const cols = Math.max(20, tui.terminal.columns - 2);
-			const rows = Math.max(5, tui.terminal.rows - 4);
-			component.setHandlers(
-				data => {
-					try {
-						session.write(data);
-					} catch {
-						// ignore writes after command exits
-					}
-				},
-				() => {
-					try {
-						session.kill();
-					} catch {
-						// ignore
-					}
-				},
-				() => {
-					try {
-						session.kill();
-					} catch {
-						// ignore
-					}
-				},
-			);
-			void session
-				.start(
-					{
-						command: options.command,
-						cwd: options.cwd,
-						timeoutMs: options.timeoutMs,
-						// Interactive PTY: inherit the user's environment (the Rust side
-						// applies these as overrides), with a real TERM so editors,
-						// pagers, and TUIs behave like a normal terminal.
-						env: {
-							TERM: "xterm-256color",
-							...options.env,
+	try {
+		const result = await ui.custom<BashInteractiveResult>(
+			(tui, uiTheme, _keybindings, done) => {
+				const session = new PtySession();
+				const component = new BashInteractiveOverlayComponent(
+					options.command,
+					uiTheme,
+					() => tui.terminal.rows,
+					XtermTerminal,
+				);
+				component.setSession(session);
+				let finished = false;
+				const finalize = (run: PtyRunResult) => {
+					if (finished) return;
+					finished = true;
+					component.setComplete({ exitCode: run.exitCode, cancelled: run.cancelled, timedOut: run.timedOut });
+					tui.requestRender();
+					void (async () => {
+						await component.flushOutput();
+						const summary = await sink.dump();
+						done({
+							exitCode: run.exitCode,
+							cancelled: run.cancelled,
+							timedOut: run.timedOut,
+							...summary,
+						});
+					})();
+				};
+				const cols = Math.max(20, tui.terminal.columns - 2);
+				const rows = Math.max(5, tui.terminal.rows - 4);
+				component.setHandlers(
+					data => {
+						try {
+							session.write(data);
+						} catch {
+							// ignore writes after command exits
+						}
+					},
+					() => {
+						try {
+							session.kill();
+						} catch {
+							// ignore
+						}
+					},
+					() => {
+						try {
+							session.kill();
+						} catch {
+							// ignore
+						}
+					},
+				);
+				void session
+					.start(
+						{
+							command: options.command,
+							cwd: options.cwd,
+							timeoutMs: options.timeoutMs,
+							// Interactive PTY: inherit the user's environment (the Rust side
+							// applies these as overrides), with a real TERM so editors,
+							// pagers, and TUIs behave like a normal terminal.
+							env: {
+								TERM: "xterm-256color",
+								...options.env,
+							},
+							signal: options.signal,
+							cols,
+							rows,
+							shell: resolvedShell,
 						},
-						signal: options.signal,
-						cols,
-						rows,
-						shell: resolvedShell,
-					},
-					(err, chunk) => {
-						if (finished || err || !chunk) return;
-						component.appendOutput(chunk);
-						const normalizedChunk = normalizeCaptureChunk(chunk);
-						sink.push(normalizedChunk);
-						tui.requestRender();
-					},
-				)
-				.then(finalize)
-				.catch(error => {
-					sink.push(`PTY error: ${error instanceof Error ? error.message : String(error)}\n`);
-					finalize({ exitCode: undefined, cancelled: false, timedOut: false });
-				});
-			return component;
-		},
-		{ overlay: true },
-	);
-	return result;
+						(err, chunk) => {
+							if (finished || err || !chunk) return;
+							component.appendOutput(chunk);
+							const normalizedChunk = normalizeCaptureChunk(chunk);
+							sink.push(normalizedChunk);
+							tui.requestRender();
+						},
+					)
+					.then(finalize)
+					.catch(error => {
+						sink.push(`PTY error: ${error instanceof Error ? error.message : String(error)}\n`);
+						finalize({ exitCode: undefined, cancelled: false, timedOut: false });
+					});
+				return component;
+			},
+			{ overlay: true },
+		);
+		return result;
+	} finally {
+		await sink.dispose();
+	}
 }

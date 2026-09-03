@@ -27,14 +27,16 @@ The base `ghcr.io/actions/actions-runner:latest` is a clean Ubuntu 24.04 runner.
 On a normal (GitHub-hosted-style) runner, the CI workflow installs its system
 dependencies at the start of every job: the cairo/pango native stack for canvas
 builds, `fd`/`ripgrep`/`imagemagick`, `bun`, `sccache`, Zig, the cargo-native
-helper CLIs (`cargo-nextest`, `cargo-zigbuild`, `cargo-xwin`), and a pinned Rust
+helper CLIs (`cargo-nextest`, `cargo-zigbuild`, `cargo-xwin`), `bazelisk` with a
+pre-warmed pinned Bazel for the Bazel native pipeline, and a pinned Rust
 nightly with the cross targets/components. Inside a Kata microVM that is
 destroyed after a single job, paying that apt/bun/rustup/tool-download cost on
 **every** job is pure latency - the microVM starts cold each time.
 
 The preloaded image moves that work to build time. Every ephemeral runner then
 starts with the toolchain already present: apt deps are not re-fetched, `bun`,
-`cargo`/`rustc`, `sccache`, `zig`, and the cargo helper CLIs are on `PATH`, and
+`cargo`/`rustc`, `sccache`, `zig`, `bazel`(isk), and the cargo helper CLIs are
+on `PATH`, and
 the pinned Rust toolchain is already the default so target/component installs in
 CI become no-ops.
 
@@ -89,7 +91,7 @@ reproduced verbatim (it contains no secrets or redactable host identifiers; the
 FROM ghcr.io/actions/actions-runner:latest
 
 ARG RUST_NIGHTLY=nightly-2026-04-29
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.0
 ARG SCCACHE_VERSION=0.15.0
 ARG ZIG_VERSION=0.16.0
 
@@ -462,5 +464,5 @@ afterward as shown.
 ---
 
 Continue to [04-arc-and-caching.md](./04-arc-and-caching.md) for how ARC
-wires in the shared `sccache`/Bun/Cargo cache storage, and locks down runner
-egress.
+wires in the shared bazel-remote/Bun/Cargo cache storage, and locks down
+runner egress.

@@ -5,16 +5,20 @@ import {
 	type SgrMouseEvent,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import { SETTINGS_SCHEMA } from "../../../config/settings-schema";
-import { getSearchProvider, setPreferredSearchProvider } from "../../../web/search/provider";
-import { isSearchProviderPreference, type SearchProviderId } from "../../../web/search/types";
+import { getSearchProvider, setSearchProviderOrder } from "../../../web/search/provider";
+import {
+	isSearchProviderId,
+	SEARCH_PROVIDER_OPTIONS,
+	SEARCH_PROVIDER_ORDER,
+	type SearchProviderId,
+} from "../../../web/search/types";
 import { getSelectListTheme, theme } from "../../theme/theme";
 import type { SetupSceneHost, SetupTab } from "./types";
 
 const MAX_VISIBLE = 8;
 
-/** Reuse the settings schema as the single source of truth for labels/descriptions. */
-const WEB_SEARCH_ITEMS: readonly SelectItem[] = SETTINGS_SCHEMA["providers.webSearch"].ui.options.map(option => ({
+/** Reuse the shared provider options as the single source of truth for labels/descriptions. */
+const WEB_SEARCH_ITEMS: readonly SelectItem[] = SEARCH_PROVIDER_OPTIONS.map(option => ({
 	value: option.value,
 	label: option.label,
 	description: option.description,
@@ -42,7 +46,8 @@ export class WebSearchTab implements SetupTab {
 
 	constructor(private readonly host: SetupSceneHost) {
 		this.#list = new SelectList(WEB_SEARCH_ITEMS, MAX_VISIBLE, getSelectListTheme());
-		const current = host.ctx.settings.get("providers.webSearch");
+		const order = host.ctx.settings.get("providers.webSearchOrder");
+		const current = Array.isArray(order) && typeof order[0] === "string" ? order[0] : "auto";
 		const index = WEB_SEARCH_ITEMS.findIndex(item => item.value === current);
 		if (index >= 0) this.#list.setSelectedIndex(index);
 		this.#list.onSelectionChange = item => this.#onHighlight(item.value);
@@ -119,9 +124,12 @@ export class WebSearchTab implements SetupTab {
 	}
 
 	#apply(value: string): void {
-		if (!isSearchProviderPreference(value)) return;
-		this.host.ctx.settings.set("providers.webSearch", value);
-		setPreferredSearchProvider(value);
+		if (value !== "auto" && !isSearchProviderId(value)) return;
+		// The wizard picks one favorite; persist it as the head of the priority
+		// list with the remaining providers in their built-in order (auto = reset).
+		const order = value === "auto" ? [] : [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)];
+		this.host.ctx.settings.set("providers.webSearchOrder", order);
+		setSearchProviderOrder(order);
 		const label = WEB_SEARCH_ITEMS.find(item => item.value === value)?.label ?? value;
 		this.#status = [theme.fg("success", `${theme.status.success} Web search set to ${label}`)];
 		if (value !== "auto" && this.#availability.get(value as SearchProviderId) === false) {

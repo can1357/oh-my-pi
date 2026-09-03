@@ -121,6 +121,13 @@ describe("RpcHostUriBridge", () => {
 		bridge.clear("test cleanup");
 	});
 
+	it("rejects OMP-reserved schemes", () => {
+		const bridge = new RpcHostUriBridge(() => {});
+		expect(() => bridge.setSchemes([{ scheme: "security" }])).toThrow(
+			"Host URI scheme is reserved by OMP: security://",
+		);
+	});
+
 	it("normalizes scheme casing and rejects invalid characters", () => {
 		const bridge = new RpcHostUriBridge(() => {});
 		const accepted = bridge.setSchemes([{ scheme: "  DB  " }]);

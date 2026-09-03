@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
-import { parseHTML } from "linkedom";
-import { Marked } from "marked";
+import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
+import { Marked } from "@oh-my-pi/pi-utils/marked";
 
 const [templateHtml, templateJs] = await Promise.all([
 	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
@@ -45,6 +45,19 @@ function renderSession(session: MinimalSession) {
 		value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 		configurable: true,
 	});
+	// linkedom's HTMLSelectElement.value is getter-only; template.js assigns it
+	// under 'use strict', which would throw. Shim a writable value like a browser.
+	const themeSelect = document.getElementById("theme-select");
+	if (themeSelect) {
+		let themeValue = "auto";
+		Object.defineProperty(themeSelect, "value", {
+			get: () => themeValue,
+			set: next => {
+				themeValue = String(next);
+			},
+			configurable: true,
+		});
+	}
 
 	const context = vm.createContext({
 		window,

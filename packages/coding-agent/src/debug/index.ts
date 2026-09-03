@@ -7,7 +7,6 @@ import * as fs from "node:fs/promises";
 import * as url from "node:url";
 import { getWorkProfile } from "@oh-my-pi/pi-natives";
 import {
-	Container,
 	isNotificationSuppressed,
 	Loader,
 	type OverlayHandle,
@@ -20,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { DynamicBorder } from "../modes/components/dynamic-border";
+import { OverlayPanel } from "../modes/components/overlay-box";
 import { TranscriptBlock } from "../modes/components/transcript-container";
 import { getSelectListTheme, getSymbolTheme, theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
@@ -72,18 +72,15 @@ const formatFileHyperlink = (path: string): string => {
 /**
  * Debug selector component.
  */
-export class DebugSelectorComponent extends Container {
+export class DebugSelectorComponent extends OverlayPanel {
 	#selectList: SelectList;
 
 	constructor(
 		private ctx: InteractiveModeContext,
 		onDone: () => void,
 	) {
-		super();
+		super("Debug Tools");
 
-		// Title
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Debug Tools")), 1, 0));
 		this.addChild(new Spacer(1));
 
 		// Select list
@@ -99,7 +96,6 @@ export class DebugSelectorComponent extends Container {
 		};
 
 		this.addChild(this.#selectList);
-		this.addChild(new DynamicBorder());
 	}
 
 	handleInput(keyData: string): void {
@@ -361,14 +357,13 @@ export class DebugSelectorComponent extends Container {
 
 	async #handleViewRawSse(): Promise<void> {
 		let overlay: OverlayHandle | undefined;
-		let viewer: RawSseViewerComponent | undefined;
 		const close = (): void => {
 			viewer?.dispose();
 			overlay?.hide();
 			overlay = undefined;
 			void this.ctx.showDebugSelector();
 		};
-		viewer = new RawSseViewerComponent({
+		const viewer = new RawSseViewerComponent({
 			buffer: resolveRawSseDebugBuffer(this.ctx.session),
 			terminalRows: this.ctx.ui.terminal.rows,
 			onExit: close,

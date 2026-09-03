@@ -1,6 +1,6 @@
 # Session tree architecture (current)
 
-Reference: [session.md](../docs/session.md)
+Reference: [session.md](./session.md)
 
 This document describes how session tree navigation works today: in-memory tree model, leaf movement rules, branching behavior, and extension/event integration.
 
@@ -71,34 +71,37 @@ There are three leaf movement primitives:
 
 Flow:
 
-1. Validate target and compute abandoned path (`collectEntriesForBranchSummary`)
-2. Emit `session_before_tree` with `TreePreparation`
-3. Optionally summarize abandoned entries (hook-provided summary or built-in summarizer)
-4. Compute new leaf target:
-   - selecting a **user** message: leaf moves to its parent, and message text is returned for editor prefill
-   - selecting a **custom_message**: same rule as user message (leaf = parent, text prefills editor)
-   - selecting any other entry: leaf = selected entry id
-5. Apply leaf move:
+1. Validate the target and compute the abandoned path (`collectEntriesForBranchSummary`).
+2. For an interactive selection of an `ask` tool result whose original questions can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the question UI, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
+3. Emit `session_before_tree` with `TreePreparation`.
+4. Optionally summarize abandoned entries (hook-provided summary or built-in summarizer).
+5. Compute the new leaf target:
+   - selecting a **user** message: leaf moves to its parent, and message text plus image attachments are returned for editor draft restoration
+   - selecting a **custom_message** other than a skill-prompt injection: same parent/prefill rule (text only)
+   - selecting a skill-prompt custom message or any other entry: leaf = selected entry id
+6. Apply leaf move:
    - with summary: `branchWithSummary(newLeafId, ...)`
    - without summary and `newLeafId === null`: `resetLeaf()`
    - otherwise: `branch(newLeafId)`
-6. Rebuild agent context from new leaf and emit `session_tree`
+7. Rebuild agent context from the new leaf, reset branch-scoped todo/advisor/checkpoint state, close Codex provider sessions whose history was rewritten, and emit `session_tree`.
 
 Important: summary entries are attached at the **new navigation position**, not on the abandoned branch tail.
 
-## `/branch` behavior (new session file)
+## `/branch` behavior (new session file in the default configuration)
 
-`/branch` and `/tree` are intentionally different:
+`/branch` and `/tree` normally differ:
 
 - `/tree` navigates within the current session file.
-- `/branch` creates a new session branch file (or in-memory replacement for non-persistent mode).
+- `/branch` opens the user-message selector and creates a new session branch file (or an in-memory replacement for non-persistent mode).
 
-User-facing `/branch` flow (`SelectorController.showUserMessageSelector` → `AgentSession.branch`):
+Default user-facing `/branch` flow (`SelectorController.showUserMessageSelector` → `AgentSession.branch`):
 
 - Branch source must be a **user message**.
-- Selected user text is extracted for editor prefill.
-- If selected user message is root (`parentId === null`): start a new session via `newSession({ parentSession: previousSessionFile })`.
+- Selected user text and image attachments are restored into the editor draft.
+- If selected user message is root (`parentId === null`): start a new session via `newSession({ parentSession: previousSessionFile })`, carrying the prior session title and title source.
 - Otherwise: `createBranchedSession(selectedEntry.parentId)` to fork history up to the selected prompt boundary.
+
+Configuration caveat: when `doubleEscapeAction=tree`, the `/branch` registry entry opens the same tree selector as `/tree`; selections therefore use `navigateTree()` and stay in the current file. This is not merely a different UI for `AgentSession.branch()`.
 
 `SessionManager.createBranchedSession(leafId)` specifics:
 
@@ -112,8 +115,8 @@ User-facing `/branch` flow (`SelectorController.showUserMessageSelector` → `Ag
 
 `buildSessionContext()` (in `session-context.ts`, exposed via `SessionManager.buildSessionContext()`) resolves the active root→leaf path and builds effective LLM context state:
 
-- Tracks latest thinking/model/service-tier/mode/TTSR/MCP-selection state on path.
-- Handles latest compaction on path:
+- Tracks latest configured/effective thinking, role-model, per-family service-tier, mode/data, and injected-TTSR state on the path.
+- Handles latest compaction on the path:
   - emits compaction summary first
   - replays kept messages from `firstKeptEntryId` to compaction point
   - then replays post-compaction messages
@@ -144,16 +147,17 @@ Tree selector behavior (`tree-selector.ts`):
 
 Command routing:
 
-- `/tree` always opens tree selector.
-- `/branch` opens user-message selector unless `doubleEscapeAction=tree`, in which case it also uses tree selector UX.
+- `/tree` always opens the tree selector.
+- `/branch` normally opens the user-message/file-branch selector. With `doubleEscapeAction=tree`, it opens the tree selector and performs same-file navigation instead.
 
 ## Extension and hook touchpoints for tree operations
 
 Command-time extension API (`ExtensionCommandContext`):
 
-- `branch(entryId)` — create branched session file
-- `navigateTree(targetId, { summarize? })` — move within current tree/file
+- `branch(entryId)` — create a branched session file; returns `{ cancelled }`
+- `navigateTree(targetId, { summarize? })` — move within the current tree/file; returns `{ cancelled }`
 
+`HookCommandContext` exposes the same `branch` and `navigateTree` actions, but intentionally omits extension-only session switching/reload/compaction actions.
 Events around tree navigation:
 
 - `session_before_tree`
@@ -180,20 +184,20 @@ Adjacent but related lifecycle hooks:
 
 - `branch()` cannot target `null`; use `resetLeaf()` for root-before-first-entry state.
 - `branchWithSummary()` supports `null` target and records `fromId: "root"`.
-- Selecting current leaf in tree selector is a no-op.
-- Summarization requires an active model; if absent, summarize navigation fails fast.
+- Selecting the current leaf is normally a no-op. Interactive `ask` re-answer is the exception: the two-phase protocol may target the current ask-result leaf to reopen or commit a sibling answer.
+- Summarization requires an active model and API key; either absence fails before navigation.
 - If summarization is aborted, navigation is cancelled and leaf is unchanged.
-- In-memory sessions never return a branch file path from `createBranchedSession`.
-- Tree context reconstruction includes service-tier and MCP tool-selection state, but those entries do not become LLM messages.
+- In-memory sessions never return a branch file path from `createBranchedSession`, though their in-memory entries are replaced.
+- Tree context reconstruction includes role models, configured/effective thinking, per-family service tiers, mode data, and injected TTSR state; state entries do not themselves become LLM messages.
 
 ## Plan approval session naming
 
-When a user approves a plan from plan mode (`InteractiveMode.#approvePlan`), the approval handler seeds the session name from the plan's title so the resulting (fresh or compacted) session does not stay unnamed.
+When a user approves a plan from plan mode (`InteractiveMode.#approvePlan`), the dispatch path seeds the session name from the plan's title so the resulting fresh, preserved, or compacted session does not stay unnamed.
 
 Trigger:
 
 - Plan approval reaches `#approvePlan(...)` with `options.title` populated from the plan-approval details.
-- This runs for every approval choice (`Approve and execute`, `Approve and compact context`, `Approve and keep context`); the synthetic `plan-approved` prompt is what otherwise bypasses the input-controller's title-generation path.
+- This applies to each approval choice that reaches execution dispatch. If approval-time compaction is explicitly cancelled, execution is not dispatched and the naming block is not reached; the next operator turn continues from the preserved plan reference.
 
 Naming source:
 

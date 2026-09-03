@@ -1,0 +1,79 @@
+// Model-lineage compat for "minimax"; regenerated from the frozen census using class taxonomy selectors.
+
+class "minimax" {
+	// Replaces the MiniMax M2 mandatory-reasoning fallback on every host.
+	family "m2" {
+		thinking-requires-effort #true
+	}
+	// Replaces the MiniMax lineage branch in both OpenAI baselines.
+	reasoning-deltas-may-be-cumulative #true
+	on "aimlapi" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" "novita" "nvidia" \
+		"opencode-go" "opencode-zen" "together" "venice" "wafer-serverless" "zenmux" {
+		family "m3" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	on "alibaba-coding-plan" "amazon-bedrock" "coreweave" "fireworks" "huggingface" "kilo" \
+		"minimax" "minimax-cn" "minimax-code" "minimax-code-cn" "nanogpt" "novita" "nvidia" \
+		"ollama-cloud" "opencode-go" "opencode-zen" "openrouter" "together" "venice" "vercel-ai-gateway" \
+		"zenmux" {
+		family "m2" {
+			thinking-requires-effort #true
+		}
+	}
+	// The M2 generation accepts exactly low/medium/high for reasoning_effort
+	// and 400s on minimal/xhigh/none, on every host.
+	family "m2" {
+		thinking-efforts "low" "medium" "high"
+	}
+	// MiniMax-M3: 512K is the standard pricing-tier boundary leaked into
+	// upstream metadata, not the model ceiling (documented: 1M in / 128K out).
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3" {
+			limits-patch {
+				context-window 1000000
+				max-tokens 128000
+			}
+		}
+	}
+	on "alibaba-coding-plan" "minimax-code" "minimax-code-cn" "wafer-serverless" {
+		supports-developer-role #false
+	}
+	// pi ladders these hosts on the generic four-tier scale; priority resolves
+	// the intentional overlap with the class-wide M2 rule.
+	on "amazon-bedrock" "ollama-cloud" priority=1 {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	on "kilo" "novita" {
+		family "m1" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	on "minimax" "minimax-cn" "vercel-ai-gateway" {
+		thinking-mode "anthropic-adaptive"
+		family "m2" {
+			// Replaces the Anthropic-route MiniMax effort remap table.
+			thinking-effort-map {
+				low "adaptive"
+				medium "adaptive"
+				high "adaptive"
+			}
+		}
+		family "m3" {
+			// Replaces the Anthropic-route MiniMax effort remap table.
+			thinking-effort-map {
+				low "adaptive"
+				medium "adaptive"
+				high "adaptive"
+			}
+			thinking-efforts "low" "medium" "high"
+		}
+	}
+	on "minimax-code" "minimax-code-cn" {
+		supports-reasoning-effort #false
+		supports-store #false
+	}
+	on "minimax-code" "minimax-code-cn" "wafer-serverless" {
+		reasoning-content-field "reasoning_content"
+	}
+}

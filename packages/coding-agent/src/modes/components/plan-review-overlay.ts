@@ -23,11 +23,14 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
+	replaceTabs,
 	routeSgrMouseInput,
 	ScrollView,
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeStatusText } from "../shared";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import {
 	matchesAppExternalEditor,
@@ -58,22 +61,59 @@ const MIN_BODY_ROWS = 3;
 const SIDEBAR_MIN_HEADINGS = 2;
 const SIDEBAR_MIN_TOTAL_WIDTH = 64;
 const SIDEBAR_MIN_BODY_WIDTH = 40;
+/** Persisted line-context cap; render-time captions clamp again to the viewport. */
+const MAX_ANNOTATION_CONTEXT_WIDTH = 120;
 
 type Focus = "toc" | "body" | "actions";
+
+type AnnotationTarget = { kind: "section" } | { kind: "line"; row: number; context: string; contextTruncated: boolean };
+
+interface OverlayAnnotation {
+	note: string;
+	target: AnnotationTarget;
+}
 
 interface OverlaySection {
 	level: number;
 	title: string;
 	raw: string;
 	md: Markdown;
-	annotations: string[];
+	annotations: OverlayAnnotation[];
+}
+
+interface LineAnchorContext {
+	text: string;
+	truncated: boolean;
+}
+
+interface BodyRowAnchor {
+	sectionIndex: number;
+	row: number;
+	context: string;
+	contextTruncated: boolean;
+}
+
+/** Serializable annotations retained by the plan-review owner between overlays. */
+export interface PlanReviewAnnotationState {
+	annotations: Array<{
+		section: {
+			index: number;
+			title: string;
+			/** Heading ancestry from the document root, when emitted by this overlay. */
+			path?: string[];
+			/** Hash of the section source, used to reject ambiguous moved headings. */
+			contentHash?: string;
+		};
+		target: { kind: "section" } | { kind: "line"; row: number; context: string; contextTruncated?: boolean };
+		note: string;
+	}>;
 }
 
 /** Undo snapshot: joined plan text, annotations aligned by section, and the
  *  accumulated deleted-section feedback at the time of the snapshot. */
 interface UndoEntry {
 	text: string;
-	annotations: string[][];
+	annotations: OverlayAnnotation[][];
 	deleted: string[];
 }
 
@@ -92,6 +132,8 @@ export interface PlanReviewOverlayCallbacks {
 	onPlanEdited?: (content: string) => void;
 	/** Invoked with the Refine feedback markdown whenever annotations change. */
 	onFeedbackChange?: (feedback: string) => void;
+	/** Invoked with a serializable annotation snapshot whenever annotations change. */
+	onAnnotationStateChange?: (state: PlanReviewAnnotationState) => void;
 }
 
 export interface PlanReviewOverlayOptions {
@@ -108,6 +150,8 @@ export interface PlanReviewOverlayOptions {
 	slider?: HookSelectorSlider;
 	/** Display label for the external-editor key, surfaced in the footer help. */
 	externalEditorLabel?: string;
+	/** Serializable annotations restored into this overlay instance. */
+	annotationState?: PlanReviewAnnotationState;
 }
 
 /** Default trailing footer hint when the caller supplies none. */
@@ -121,6 +165,8 @@ export class PlanReviewOverlay implements Component {
 	/** Shallowest level among ToC entries, used to flatten indentation. */
 	#tocBaseLevel = 1;
 	#sectionOffsets: number[] = [];
+	/** Rendered body row to underlying plan row; callouts retain their owner's anchor. */
+	#bodyRowAnchors: BodyRowAnchor[] = [];
 	#undo: UndoEntry[] = [];
 	/** Titles of sections deleted in the overlay, surfaced as Refine feedback. */
 	#deleted: string[] = [];
@@ -162,6 +208,7 @@ export class PlanReviewOverlay implements Component {
 	#committedLabel: string | undefined;
 	#annotating = false;
 	#input: Input;
+	#annotationTarget: BodyRowAnchor | { sectionIndex: number; row: null; context: null } | undefined;
 
 	constructor(
 		planContent: string,
@@ -194,6 +241,10 @@ export class PlanReviewOverlay implements Component {
 		this.#input.onSubmit = value => this.#submitAnnotation(value);
 		this.#input.onEscape = () => this.#exitAnnotate();
 		this.#setSections(planContent);
+		this.#restoreAnnotationState(options.annotationState);
+		if (Array.isArray(options.annotationState?.annotations) && options.annotationState.annotations.length > 0) {
+			this.#recomputeFeedback();
+		}
 	}
 
 	invalidate(): void {
@@ -204,7 +255,9 @@ export class PlanReviewOverlay implements Component {
 	 *  reset scroll/focus so the operator starts at the top. Does not emit
 	 *  `onPlanEdited` (the editor round-trip already persisted the file). */
 	setPlanContent(planContent: string): void {
+		const annotations = this.#annotationState();
 		this.#setSections(planContent);
+		this.#restoreAnnotationState(annotations);
 		this.#scrollView.scrollToTop();
 		this.#scrollProgress = 0;
 		this.#tocCursor = 0;
@@ -220,10 +273,147 @@ export class PlanReviewOverlay implements Component {
 			title: section.title,
 			raw: section.raw,
 			md: new Markdown(section.raw, 1, 0, this.#mdTheme),
-			annotations: [] as string[],
+			annotations: [],
 		}));
 		this.#rebuildToc();
 		this.#tocCursor = Math.min(this.#tocCursor, Math.max(0, this.#toc.length - 1));
+	}
+	#cloneAnnotation(annotation: OverlayAnnotation): OverlayAnnotation {
+		return {
+			note: annotation.note,
+			target:
+				annotation.target.kind === "section"
+					? { kind: "section" }
+					: {
+							kind: "line",
+							row: annotation.target.row,
+							context: annotation.target.context,
+							contextTruncated: annotation.target.contextTruncated,
+						},
+		};
+	}
+
+	#sectionPaths(): string[][] {
+		const stack: Array<{ level: number; title: string }> = [];
+		return this.#sections.map(section => {
+			if (section.level < 1) return [];
+			while (stack.length > 0 && stack[stack.length - 1]!.level >= section.level) stack.pop();
+			stack.push({ level: section.level, title: section.title });
+			return stack.map(entry => entry.title);
+		});
+	}
+
+	#sectionContentHash(section: OverlaySection): string {
+		return `${section.raw.length}:${Bun.hash(section.raw).toString(16)}`;
+	}
+
+	#annotationState(): PlanReviewAnnotationState {
+		const annotations: PlanReviewAnnotationState["annotations"] = [];
+		const sectionPaths = this.#sectionPaths();
+		for (let sectionIndex = 0; sectionIndex < this.#sections.length; sectionIndex++) {
+			const section = this.#sections[sectionIndex]!;
+			for (const annotation of section.annotations) {
+				annotations.push({
+					section: {
+						index: sectionIndex,
+						title: section.title,
+						path: sectionPaths[sectionIndex]!,
+						contentHash: this.#sectionContentHash(section),
+					},
+					target:
+						annotation.target.kind === "section"
+							? { kind: "section" }
+							: {
+									kind: "line",
+									row: annotation.target.row,
+									context: annotation.target.context,
+									contextTruncated: annotation.target.contextTruncated,
+								},
+					note: annotation.note,
+				});
+			}
+		}
+		return { annotations };
+	}
+
+	#restoreAnnotationState(state: PlanReviewAnnotationState | undefined): void {
+		if (!state || !Array.isArray(state.annotations)) return;
+		const sectionPaths = this.#sectionPaths();
+		const contentHashes = this.#sections.map(section => this.#sectionContentHash(section));
+		for (const entry of state.annotations) {
+			if (
+				!entry ||
+				typeof entry.note !== "string" ||
+				!entry.section ||
+				!entry.target ||
+				typeof entry.section.title !== "string"
+			) {
+				continue;
+			}
+			const note = entry.note.trim();
+			if (!note) continue;
+			const storedIndex = Number.isInteger(entry.section.index) ? entry.section.index : -1;
+			const storedPath = entry.section.path;
+			let matchingSections: number[];
+			if (
+				Array.isArray(storedPath) &&
+				storedPath.every(segment => typeof segment === "string") &&
+				typeof entry.section.contentHash === "string"
+			) {
+				matchingSections = [];
+				for (let i = 0; i < this.#sections.length; i++) {
+					const path = sectionPaths[i]!;
+					if (
+						this.#sections[i]!.title === entry.section.title &&
+						contentHashes[i] === entry.section.contentHash &&
+						path.length === storedPath.length &&
+						path.every((segment, pathIndex) => segment === storedPath[pathIndex])
+					) {
+						matchingSections.push(i);
+					}
+				}
+			} else {
+				matchingSections =
+					storedIndex >= 0 &&
+					storedIndex < this.#sections.length &&
+					this.#sections[storedIndex]!.title === entry.section.title
+						? [storedIndex]
+						: [];
+			}
+			if (matchingSections.length === 0) continue;
+			const sectionIndex = matchingSections.reduce((best, candidate) =>
+				Math.abs(candidate - storedIndex) < Math.abs(best - storedIndex) ? candidate : best,
+			);
+			const section = this.#sections[sectionIndex]!;
+			if (entry.target.kind === "section") {
+				if (section.level >= 1) section.annotations.push({ note, target: { kind: "section" } });
+				continue;
+			}
+			if (
+				entry.target.kind !== "line" ||
+				!Number.isFinite(entry.target.row) ||
+				typeof entry.target.context !== "string"
+			) {
+				continue;
+			}
+			const contexts = section.md.render(MAX_ANNOTATION_CONTEXT_WIDTH).map(line => this.#lineContext(line));
+			const row = this.#resolveLineRow(
+				entry.target.row,
+				{ text: entry.target.context, truncated: entry.target.contextTruncated === true },
+				contexts,
+			);
+			if (row < 0) continue;
+			const context = contexts[row]!;
+			section.annotations.push({
+				note,
+				target: {
+					kind: "line",
+					row,
+					context: context.text,
+					contextTruncated: context.truncated,
+				},
+			});
+		}
 	}
 
 	#rebuildToc(): void {
@@ -443,6 +633,10 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#handleBody(data: string): void {
+		if (data === "a") {
+			this.#startBodyAnnotate();
+			return;
+		}
 		if (matchesKey(data, "left") || matchesKey(data, "h")) {
 			if (this.#sidebarShown) this.#setFocus("toc");
 			return;
@@ -529,7 +723,7 @@ export class PlanReviewOverlay implements Component {
 			return;
 		}
 		if (data === "a") {
-			this.#startAnnotate();
+			this.#startSectionAnnotate();
 			return;
 		}
 		if (data === "u") {
@@ -577,7 +771,9 @@ export class PlanReviewOverlay implements Component {
 	#pushUndo(): void {
 		this.#undo.push({
 			text: joinPlanSections(this.#sections),
-			annotations: this.#sections.map(section => [...section.annotations]),
+			annotations: this.#sections.map(section =>
+				section.annotations.map(annotation => this.#cloneAnnotation(annotation)),
+			),
 			deleted: [...this.#deleted],
 		});
 	}
@@ -607,7 +803,8 @@ export class PlanReviewOverlay implements Component {
 		if (!entry) return;
 		this.#setSections(entry.text);
 		for (let i = 0; i < this.#sections.length; i++) {
-			this.#sections[i]!.annotations = entry.annotations[i] ? [...entry.annotations[i]!] : [];
+			this.#sections[i]!.annotations =
+				entry.annotations[i]?.map(annotation => this.#cloneAnnotation(annotation)) ?? [];
 		}
 		this.#deleted = [...entry.deleted];
 		this.#tocCursor = Math.min(this.#tocCursor, Math.max(0, this.#toc.length - 1));
@@ -616,8 +813,21 @@ export class PlanReviewOverlay implements Component {
 		this.#recomputeFeedback();
 	}
 
-	#startAnnotate(): void {
-		if (this.#toc[this.#tocCursor] === undefined) return;
+	#startSectionAnnotate(): void {
+		const sectionIndex = this.#toc[this.#tocCursor];
+		if (sectionIndex === undefined) return;
+		this.#startAnnotate({ sectionIndex, row: null, context: null });
+	}
+
+	#startBodyAnnotate(): void {
+		const maxRow = this.#bodyRowAnchors.length - 1;
+		if (maxRow < 0) return;
+		const topRow = Math.max(0, Math.min(maxRow, Math.floor(this.#scrollView.getScrollOffset())));
+		this.#startAnnotate(this.#bodyRowAnchors[topRow]!);
+	}
+
+	#startAnnotate(target: BodyRowAnchor | { sectionIndex: number; row: null; context: null }): void {
+		this.#annotationTarget = target;
 		this.#annotating = true;
 		this.#input.setValue("");
 	}
@@ -625,10 +835,23 @@ export class PlanReviewOverlay implements Component {
 	#submitAnnotation(value: string): void {
 		this.#annotating = false;
 		const note = value.trim();
-		const sectionIndex = this.#toc[this.#tocCursor];
-		if (note && sectionIndex !== undefined) {
+		const target = this.#annotationTarget;
+		this.#annotationTarget = undefined;
+		const section = target ? this.#sections[target.sectionIndex] : undefined;
+		if (note && section && target) {
 			this.#pushUndo();
-			this.#sections[sectionIndex]!.annotations.push(note);
+			section.annotations.push({
+				note,
+				target:
+					target.row === null
+						? { kind: "section" }
+						: {
+								kind: "line",
+								row: target.row,
+								context: target.context,
+								contextTruncated: target.contextTruncated,
+							},
+			});
 			this.#recomputeFeedback();
 		}
 		this.#input.setValue("");
@@ -636,11 +859,13 @@ export class PlanReviewOverlay implements Component {
 
 	#exitAnnotate(): void {
 		this.#annotating = false;
+		this.#annotationTarget = undefined;
 		this.#input.setValue("");
 	}
 
 	#recomputeFeedback(): void {
-		const annotated = this.#sections.filter(section => section.level >= 1 && section.annotations.length > 0);
+		this.callbacks.onAnnotationStateChange?.(this.#annotationState());
+		const annotated = this.#sections.filter(section => section.annotations.length > 0);
 		if (annotated.length === 0 && this.#deleted.length === 0) {
 			this.callbacks.onFeedbackChange?.("");
 			return;
@@ -651,8 +876,11 @@ export class PlanReviewOverlay implements Component {
 			for (const title of this.#deleted) feedback += `- ${title}\n`;
 		}
 		for (const section of annotated) {
-			feedback += `\n## ${section.title}\n`;
-			for (const note of section.annotations) feedback += this.#formatAnnotationFeedback(note);
+			feedback += `\n## ${section.title || "Plan preamble"}\n`;
+			for (const annotation of section.annotations) {
+				if (annotation.target.kind === "line") feedback += `> Line: ${annotation.target.context}\n`;
+				feedback += this.#formatAnnotationFeedback(annotation.note);
+			}
 		}
 		this.callbacks.onFeedbackChange?.(feedback);
 	}
@@ -717,7 +945,7 @@ export class PlanReviewOverlay implements Component {
 				parts.push("↑↓ section", "⏎ open", "a annotate", "d delete", "u undo");
 				break;
 			case "body":
-				parts.push("↑↓ scroll", "⇧ faster", "pgup/pgdn", "g/G ends");
+				parts.push("↑↓ scroll", "⇧ faster", "pgup/pgdn", "g/G ends", "a annotate");
 				break;
 		}
 		if (this.callbacks.onCopyPlan) parts.push("c copy");
@@ -744,33 +972,112 @@ export class PlanReviewOverlay implements Component {
 		if (maxOffset > 0) this.#scrollView.setScrollOffset(Math.round(this.#scrollProgress * maxOffset));
 	}
 
-	/** Build the concatenated body lines and record each section's start row. */
+	/** Build the concatenated body lines and map each rendered row back to a plan anchor. */
 	#buildBody(bodyContentWidth: number): string[] {
 		const lines: string[] = [];
+		const anchors: BodyRowAnchor[] = [];
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const offsets: number[] = new Array(this.#sections.length);
-		for (let i = 0; i < this.#sections.length; i++) {
-			const section = this.#sections[i]!;
-			offsets[i] = lines.length;
+		for (let sectionIndex = 0; sectionIndex < this.#sections.length; sectionIndex++) {
+			const section = this.#sections[sectionIndex]!;
+			offsets[sectionIndex] = lines.length;
 			const rendered = section.md.render(bodyContentWidth);
-			if (section.level >= 1 && section.annotations.length > 0 && rendered.length > 0) {
-				lines.push(rendered[0]!);
-				for (const note of section.annotations) {
-					const noteLines = note.split(/\r?\n/);
-					for (let j = 0; j < noteLines.length; j++) {
-						const prefix =
-							j === 0
-								? `${theme.fg("warning", "▎ ")}${theme.fg("dim", "note: ")}`
-								: `${theme.fg("warning", "▎ ")}${theme.fg("dim", "      ")}`;
-						lines.push(`${prefix}${theme.fg("accent", noteLines[j] ?? "")}`);
+			const contexts = rendered.map(line => this.#lineContext(line));
+			for (let row = 0; row < rendered.length; row++) {
+				const context = contexts[row]!;
+				const anchor = {
+					sectionIndex,
+					row,
+					context: context.text,
+					contextTruncated: context.truncated,
+				};
+				lines.push(rendered[row]!);
+				anchors.push(anchor);
+				for (const annotation of section.annotations) {
+					const annotationRow =
+						annotation.target.kind === "section"
+							? 0
+							: this.#resolveLineRow(
+									annotation.target.row,
+									{
+										text: annotation.target.context,
+										truncated: annotation.target.contextTruncated,
+									},
+									contexts,
+								);
+					if (annotationRow === row) {
+						this.#appendAnnotationCallout(lines, anchors, annotation.note, anchor, bodyContentWidth);
 					}
 				}
-				for (let k = 1; k < rendered.length; k++) lines.push(rendered[k]!);
-			} else {
-				for (const line of rendered) lines.push(line);
 			}
 		}
 		this.#sectionOffsets = offsets;
+		this.#bodyRowAnchors = anchors;
 		return lines;
+	}
+
+	#lineContext(line: string): LineAnchorContext {
+		const sanitized = sanitizeStatusText(line);
+		const truncated = visibleWidth(sanitized) > MAX_ANNOTATION_CONTEXT_WIDTH;
+		const text = truncateToWidth(sanitized, MAX_ANNOTATION_CONTEXT_WIDTH, Ellipsis.Unicode);
+		return { text: text || "(blank line)", truncated };
+	}
+
+	#resolveLineRow(
+		storedRow: number,
+		storedContext: LineAnchorContext,
+		contexts: readonly LineAnchorContext[],
+	): number {
+		if (contexts.length === 0) return -1;
+		const targetRow = Math.max(0, Math.floor(storedRow));
+		const normalize = (context: LineAnchorContext): string => {
+			const normalized = sanitizeStatusText(context.text).replace(/\s+/g, " ").trim();
+			return context.truncated && normalized.endsWith("…") ? normalized.slice(0, -1) : normalized;
+		};
+		const normalizedStoredContext = normalize(storedContext);
+		if (!normalizedStoredContext) return -1;
+		let best = -1;
+		let bestDistance = Number.POSITIVE_INFINITY;
+		for (let row = 0; row < contexts.length; row++) {
+			const normalizedContext = normalize(contexts[row]!);
+			if (
+				normalizedContext !== normalizedStoredContext &&
+				!normalizedContext.includes(normalizedStoredContext) &&
+				!normalizedStoredContext.includes(normalizedContext)
+			) {
+				continue;
+			}
+			const distance = Math.abs(row - targetRow);
+			if (distance < bestDistance) {
+				best = row;
+				bestDistance = distance;
+			}
+		}
+		return best;
+	}
+
+	#appendAnnotationCallout(
+		lines: string[],
+		anchors: BodyRowAnchor[],
+		note: string,
+		anchor: BodyRowAnchor,
+		bodyContentWidth: number,
+	): void {
+		const noteLines = note.split(/\r?\n/);
+		for (let i = 0; i < noteLines.length; i++) {
+			const prefix =
+				i === 0
+					? `${theme.fg("warning", "▎ ")}${theme.fg("dim", "note: ")}`
+					: `${theme.fg("warning", "▎ ")}${theme.fg("dim", "      ")}`;
+			const available = Math.max(0, bodyContentWidth - visibleWidth(prefix));
+			const displayLine = truncateToWidth(
+				replaceTabs(sanitizeText(noteLines[i] ?? "")),
+				available,
+				Ellipsis.Unicode,
+			);
+			lines.push(truncateToWidth(`${prefix}${theme.fg("accent", displayLine)}`, bodyContentWidth));
+			anchors.push(anchor);
+		}
 	}
 
 	#sidebarWidthFor(width: number): number {
@@ -832,9 +1139,18 @@ export class PlanReviewOverlay implements Component {
 
 	#renderFooterLines(innerWidth: number): string[] {
 		if (this.#annotating) {
-			const section = this.#sections[this.#toc[this.#tocCursor]!];
-			const title = section?.title ?? "";
-			const caption = `${theme.fg("dim", "Annotate")} ${theme.fg("accent", `‹${title}›`)}`;
+			const target = this.#annotationTarget;
+			const section = target ? this.#sections[target.sectionIndex] : undefined;
+			const title = sanitizeStatusText(section?.title || "Plan preamble");
+			const location =
+				target?.row === null
+					? `‹${title}›`
+					: `‹${title}› · ${truncateToWidth(target?.context ?? "", Math.max(1, innerWidth - 16), Ellipsis.Unicode)}`;
+			const caption = truncateToWidth(
+				`${theme.fg("dim", "Annotate")} ${theme.fg("accent", location)}`,
+				innerWidth,
+				Ellipsis.Unicode,
+			);
 			const hintParts = ["enter save", "esc cancel"];
 			if (this.#externalEditorLabel) hintParts.push(`${this.#externalEditorLabel} editor`);
 			return [caption, this.#input.render(innerWidth)[0] ?? "", theme.fg("dim", hintParts.join(" · "))];

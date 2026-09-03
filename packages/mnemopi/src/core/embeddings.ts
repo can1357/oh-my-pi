@@ -12,8 +12,8 @@ import {
 	getFastembedCacheDir,
 	logger,
 } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { EmbeddingModel } from "fastembed";
-import { LRUCache } from "lru-cache/raw";
 import { ensureFastembedModelSidecars } from "./fastembed-model-cache";
 import { loadFastembed } from "./fastembed-runtime";
 import {
@@ -92,6 +92,41 @@ export async function quarantineCorruptModelFile(message: string, cacheDir?: str
 	return true;
 }
 
+/**
+ * Recover from a partially-extracted fastembed model cache. An interrupted
+ * archive download/extraction leaves `<cacheDir>/<model>/` populated with
+ * sidecars and a truncated `model.onnx_data` but WITHOUT the graph file
+ * (`model.onnx` / `model_optimized.onnx`), so `FlagEmbedding.init` throws
+ * `Model file not found at .../model.onnx`. Upstream `retrieveModel`
+ * short-circuits on the existing model dir and never re-downloads, and
+ * `downloadFileFromGCS` reuses a leftover partial `<model>.tar.gz` as-is, so
+ * the cache is stuck broken forever: recall silently dies and the rebuild
+ * queue grows every session. Delete the incomplete model dir AND the leftover
+ * partial archive so the retry re-downloads from scratch. The model path is
+ * error-message CONTENT, so the dir is only removed when it is a direct child
+ * of the fastembed cache root — never touch a directory a dependency merely
+ * names. Returns true when a retry is worth attempting (the incomplete cache
+ * was cleared, or already gone from a concurrent heal).
+ * @internal exported for tests
+ */
+export async function clearIncompleteModelCache(message: string, cacheDir?: string): Promise<boolean> {
+	const match = /Model file not found at (.+?\.onnx)\b/i.exec(message);
+	if (!match) return false;
+	const modelFile = nodePath.resolve(match[1]);
+	const modelDir = nodePath.dirname(modelFile);
+	const cacheRoot = nodePath.resolve(cacheDir ?? getFastembedCacheDir());
+	// Only a direct child of the cache root: `<cacheRoot>/<model>`.
+	if (nodePath.dirname(modelDir) !== cacheRoot) return false;
+	try {
+		await fsp.rm(modelDir, { recursive: true, force: true });
+		await fsp.rm(`${modelDir}.tar.gz`, { force: true });
+		logger.warn("mnemopi: cleared incomplete local embedding model cache; re-downloading", { modelDir });
+	} catch {
+		// Concurrent heal or vanished dir: the single retry stays safe.
+	}
+	return true;
+}
+
 const SIDECAR_ERROR_RE =
 	/(?:Config file not found at .*config|Tokenizer file not found at .*tokenizer|Tokens map file not found at .*special_tokens_map)/u;
 
@@ -122,6 +157,9 @@ export async function defaultLocalModelInitializer(options: LocalModelInitOption
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
 		if (/Protobuf parsing failed/i.test(message) && (await quarantineCorruptModelFile(message, cacheDir))) {
+			return initWithSidecarHeal();
+		}
+		if (await clearIncompleteModelCache(message, cacheDir)) {
 			return initWithSidecarHeal();
 		}
 		throw error;

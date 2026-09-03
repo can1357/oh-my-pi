@@ -1,15 +1,19 @@
 /**
  * Single-source provider auth model. Every provider — model providers,
  * gateways, search/tool credentials, and login-only flows — is described by
- * one {@link ProviderDefinition}. The legacy scattered structures (the
+ * one {@link ProviderDefinition}, built by `./build.ts` from the compiled
+ * `rules/auth/<id>.kdl` policy in `@oh-my-pi/pi-catalog` plus optional
+ * TypeScript transport hooks. The legacy scattered structures (the
  * `OAuthProvider` union, `serviceProviderMap`, `builtInOAuthProviders`, the
  * refresh/login switches, and the CLI callback maps) are all *derived* from
- * the registry of these definitions. Adding a provider is one new file in
- * `./providers/` plus one line in `./registry.ts`. Model-catalog metadata
- * (default model, model-manager factory, catalog discovery) lives in
- * `@oh-my-pi/pi-catalog`'s descriptor table.
+ * the registry of these definitions. Adding a provider is one new
+ * `auth/<id>.kdl`. Model-catalog metadata (default model, model-manager
+ * factory, catalog discovery) lives in `@oh-my-pi/pi-catalog`'s descriptor
+ * table.
  */
-import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
+
+import type { Api, FetchImpl, Model, SimpleStreamOptions, StreamOptions } from "../types";
+import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
 /**
  * API-key environment fallback: either a single env var name (e.g.
@@ -17,6 +21,27 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
  * the host (Vertex ADC, Bedrock credential chains, …).
  */
 export type KeyResolver = string | (() => string | undefined);
+
+/** Credentials are resolved by the provider transport rather than used as a bearer string. */
+export const AUTHENTICATED_SENTINEL = "<authenticated>";
+
+export interface PreparedProviderRequest {
+	readonly model: Model<Api>;
+	readonly options: StreamOptions;
+}
+
+export type ProviderRequestPreparer = (model: Model<Api>, options: StreamOptions) => PreparedProviderRequest;
+export type ProviderModelPreparer = (model: Model<Api>) => Model<Api>;
+export type ProviderSimpleOptionsMapper = (options: SimpleStreamOptions) => Readonly<Record<string, unknown>>;
+
+export interface ProviderModelDiscoveryConfig {
+	readonly apiKey?: string;
+	readonly baseUrl?: string;
+	readonly fetch?: FetchImpl;
+	readonly authenticated?: boolean;
+}
+
+export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConfig) => ProviderModelDiscoveryConfig;
 
 /**
  * Declarative description of a single provider's auth/login wiring. All
@@ -30,8 +55,8 @@ export type KeyResolver = string | (() => string | undefined);
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
  *
- * Heavy OAuth flow modules MUST be reached through dynamic-import thunks in
- * `login`/`refreshToken` so they stay out of the eager startup graph.
+ * Heavy OAuth flow modules MUST be reached through the lazy hook tables in
+ * `./hooks` so they stay out of the eager startup graph.
  */
 export interface ProviderDefinition {
 	readonly id: string;
@@ -42,9 +67,21 @@ export interface ProviderDefinition {
 	readonly showInLoginList?: boolean;
 	// --- env-var fallback (the catalog table's `envVars` supplies plain names; set this only for computed resolvers) ---
 	readonly envKeys?: KeyResolver;
+	/** Provider transport can authenticate without a resolved API-key string. */
+	readonly allowsMissingApiKey?: boolean;
+	/** Provider-owned model normalization that must run before API-specific option mapping. */
+	readonly prepareModel?: ProviderModelPreparer;
+	/** Provider-owned request shaping applied before generic API dispatch. */
+	readonly prepareRequest?: ProviderRequestPreparer;
+	/** Provider-owned projection from the generic simple-stream option bag. */
+	readonly mapSimpleOptions?: ProviderSimpleOptionsMapper;
+	/** Provider-owned authentication and endpoint setup for model discovery. */
+	readonly prepareModelDiscovery?: ProviderModelDiscoveryPreparer;
 	// --- interactive login (OAuthProviderInterface-compatible) ---
-	readonly login?: (callbacks: OAuthLoginCallbacks) => Promise<OAuthCredentials | string>;
-	readonly refreshToken?: (credentials: OAuthCredentials) => Promise<OAuthCredentials>;
+	/** Interactive login; flows that need `onPrompt`/`onAuth` reject a bare controller at runtime. */
+	readonly login?: (callbacks: OAuthController) => Promise<OAuthCredentials | string>;
+	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
+	readonly refreshToken?: (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;

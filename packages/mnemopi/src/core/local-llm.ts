@@ -5,9 +5,11 @@ import {
 	completeSimple,
 	type FetchImpl,
 	type Model,
+	retryTransientCompletion,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { fetchWithRetry } from "@oh-my-pi/pi-utils";
 import { type CompleteOptions, callHostLlm, getHostLlmBackend } from "./llm-backends";
 import {
 	getMnemopiRuntimeOptions,
@@ -178,6 +180,7 @@ export async function callConfiguredCompletion(
 			timeout: opts.timeout,
 			provider: opts.provider,
 			model: opts.model,
+			task: opts.task,
 		});
 		return typeof raw === "string" ? raw : null;
 	}
@@ -186,16 +189,18 @@ export async function callConfiguredCompletion(
 		return null;
 	}
 	try {
-		const message = await completeSimple(
-			model,
-			{
-				messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-			},
-			{
-				apiKey: llmApiKey() || undefined,
-				maxTokens: opts.maxTokens ?? llmMaxTokens(),
-				temperature,
-			},
+		const message = await retryTransientCompletion(() =>
+			completeSimple(
+				model,
+				{
+					messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+				},
+				{
+					apiKey: llmApiKey() || undefined,
+					maxTokens: opts.maxTokens ?? llmMaxTokens(),
+					temperature,
+				},
+			),
 		);
 		return assistantText(message).trim() || null;
 	} catch {
@@ -254,6 +259,7 @@ export function cleanOutput(text: string): string {
 		.replaceAll("<|user|>", "")
 		.replaceAll("</s>", "")
 		.trim()
+		.replace(/^(?:\s*<think>[\s\S]*?<\/think>)+\s*/i, "")
 		.replace(/^(Summarize the following memories.*?[.!?:]\s*)/is, "")
 		.replace(/^(Preserve facts.*?[.!?:]\s*)/is, "")
 		.replace(/^Source:.*?\n/im, "")
@@ -349,11 +355,12 @@ export async function callRemoteLlm(
 			if (key !== "") {
 				headers.Authorization = `Bearer ${key}`;
 			}
-			const res = await fetchImpl(`${baseUrl}/chat/completions`, {
+			const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
 				method: "POST",
 				headers,
 				body,
 				signal: AbortSignal.timeout(60000),
+				fetch: fetchImpl,
 			});
 			if (res.status === 401) {
 				throw new ProviderHttpError("mnemopi remote LLM request unauthorized (401)", 401, { headers: res.headers });

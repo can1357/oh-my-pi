@@ -264,7 +264,7 @@ image  = "/opt/kata/share/kata-containers/kata-containers.img"
 machine_type = "q35"
 rootfs_type  = "ext4"
 cpu_features  = "pmu=off"
-kernel_params = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1"
+kernel_params = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 sysctl.fs.nr_open=8388608"
 
 default_vcpus    = 2
 default_maxvcpus = 0
@@ -275,7 +275,7 @@ memory_slots     = 10
 shared_fs        = "virtio-fs"
 virtio_fs_daemon = "/opt/kata/libexec/virtiofsd"
 virtio_fs_cache  = "auto"
-virtio_fs_extra_args = ["--thread-pool-size=4", "--announce-submounts"]
+virtio_fs_extra_args = ["--thread-pool-size=4", "--announce-submounts", "--rlimit-nofile=8388608"]
 
 disable_block_device_use = true
 block_device_driver = "virtio-scsi"
@@ -300,9 +300,21 @@ sandbox_cgroup_only = false
 `kata-agent` baked in as PID 1's manager). These three are the entire guest —
 none of them is the host kernel, which is the whole point. `machine_type =
 "q35"` is the modern PCIe QEMU machine (needed for PCIe hotplug);
-`cpu_features = "pmu=off"` disables the virtual perf-monitoring unit (avoids
-spurious PMU passthrough issues). `kernel_params` forces cgroup v2-only in the
-guest, matching a modern systemd userspace.
+`cpu_features = "pmu=off"` disables the virtual perf-monitoring unit and avoids
+spurious PMU passthrough issues. The first two `kernel_params` entries force
+cgroup v2-only in the guest, matching a modern systemd userspace.
+
+### Open-file ceilings — Bazel sandbox headroom
+
+Two limits protect each runner. `sysctl.fs.nr_open=8388608` raises the guest
+open-file ceiling from 1,048,576. New runner containers inherit this value for
+both soft and hard open-file resource limits (`RLIMIT_NOFILE`).
+
+`--rlimit-nofile=8388608` raises the host `virtiofsd` process ceiling.
+Virtiofsd otherwise caps itself at 1,000,000 descriptors. Cold Bazel builds
+index large Zig and xwin trees through this daemon. The daemon exhausted its old
+ceiling and returned `EMFILE` to Bazel. Linux grows descriptor tables on demand,
+so unused headroom has no fixed allocation.
 
 ### vCPU / memory sizing — hotplug from pod requests/limits
 

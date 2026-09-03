@@ -1,170 +1,120 @@
 # `/handoff` generation pipeline
 
-This document describes how the coding-agent implements `/handoff`: trigger path, oneshot generation, session switch, context reinjection, persistence, and UI behavior.
+This document describes how the coding-agent implements `/handoff`: trigger path, oneshot generation, in-session compaction commit, persistence, and UI behavior.
 
 ## Scope
 
 Covers:
 
 - Interactive `/handoff` command dispatch
-- `AgentSession.handoff()` lifecycle and state transitions
-- `generateHandoff(...)` request shape
-- How old/new sessions persist handoff data differently
+- `AgentSession.handoff()` → `SessionMaintenance.handoff()` lifecycle
+- `SessionHandoff.generateDocument(...)` and `generateHandoffFromContext(...)` request shape and compatibility retry
+- How the handoff document is committed as a compaction entry
 - UI behavior for success, cancel, and failure
 
 Does not cover:
 
 - Generic tree navigation/branch internals
-- Non-handoff session commands (`/new`, `/fork`, `/resume`)
+- Session commands (`/new`, `/fork`, `/resume`)
 
 ## Implementation files
 
-- [`../src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
-- [`../src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts)
-- [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
+- [`src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
+- [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts)
+- [`src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
+- [`src/session/session-handoff.ts`](../packages/coding-agent/src/session/session-handoff.ts)
+- [`src/session/session-maintenance.ts`](../packages/coding-agent/src/session/session-maintenance.ts)
+- [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`packages/agent/src/compaction/compaction.ts`](../packages/agent/src/compaction/compaction.ts)
-- [`../src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
-- [`../src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
+- [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
 
 ## Trigger path
 
-1. `/handoff` is declared in builtin slash command metadata (`slash-commands/builtin-registry.ts`) with optional inline hint: `[focus instructions]`.
-2. In interactive input handling (`InputController`), submit text matching `/handoff` or `/handoff ...` is intercepted before normal prompt submission.
-3. The editor is cleared and `handleHandoffCommand(customInstructions?)` is called.
-4. `CommandController.handleHandoffCommand` performs a preflight guard using current entries:
-   - Counts `type === "message"` entries.
-   - If `< 2`, it warns: `Nothing to hand off (no messages yet)` and returns.
+1. `/handoff` is declared in the builtin slash-command registry with optional inline hint `[focus instructions]`.
+2. The registry's TUI handler clears the editor and calls `handleHandoffCommand(customInstructions?)`.
+3. `CommandController.handleHandoffCommand` refuses while the current response is streaming, then counts `type === "message"` entries.
+4. If the count is `< 2`, it warns `Nothing to hand off (no messages yet)` and returns.
 
-The same minimum-content guard exists again inside `AgentSession.handoff()` and throws if violated. This duplicates safety at both UI and session layers.
+The same minimum-content guard exists inside `SessionMaintenance.handoff()` and throws if violated. RPC separately refuses a handoff while streaming. Direct SDK callers must avoid invoking the session method during an active response.
 
 ## End-to-end lifecycle
 
-### 1) Start handoff generation
+### 1) Prepare the commit
 
-`AgentSession.handoff(customInstructions?)`:
+`AgentSession.handoff()` delegates to `SessionMaintenance.handoff(customInstructions?, options?)`:
 
-- Reads current branch entries (`sessionManager.getBranch()`).
-- Validates minimum message count (`>= 2`).
-- Refuses if a response is still streaming (the TUI `/handoff` and RPC `handoff` command guard on `isStreaming` before calling this; the auto-handoff path runs only after the turn settles). Resetting the agent mid-stream would let the live turn keep emitting into the torn-down session.
-- Creates `#handoffAbortController` and links any caller-provided abort signal to it.
-- Resolves the current model API key through `ModelRegistry`.
-- Builds the handoff request through the **same pipeline a live turn uses** — the cache-preserving side-request path shared with `runEphemeralTurn` (`/btw`, `/omfg`):
-  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional `additionalFocus`, after obfuscating any focus instructions) and appends it as a trailing agent-attributed `user` message to a snapshot of `agent.state.messages`.
-  2. Converts the snapshot with `convertMessagesToLlm(...)` (applies the session `transformContext` — extension context + steering wrap — then `convertToLlm` + obfuscation), exactly as the loop does.
-  3. Builds the provider `Context` with `agent.buildSideRequestContext(llmMessages, #baseSystemPrompt)` — normalized tools and `transformProviderContext` (obfuscation + inline snapcompact) matching the loop. The **base** system prompt is pinned here, not a per-turn `before_agent_start` hook override, so the new session does not inherit prompt-specific hook state.
-  4. Builds stream options with `prepareSimpleStreamOptions(...)`: a stable `promptCacheKey` (= the live session id) so the oneshot reads the cache the turn populated, a unique side `sessionId` (`<sid>:side:<snowflake>`) so OpenAI/Codex append-only state never mixes with the live turn, `serviceTier`/payload hooks mirrored from the session, and `preferWebsockets: false`.
-- Calls `generateHandoffFromContext(context, model, { streamOptions, telemetry, thinkingLevel })`.
+- Throws `Compaction already in progress` while manual or automatic maintenance is active, and cancels any background speculative compaction.
+- Reads the current branch, validates at least two message entries, and runs `prepareCompaction(...)` with the handoff method settings to compute `firstKeptEntryId` and `tokensBefore`; an empty preparation (e.g. right after a compaction) throws `Nothing to hand off (already compacted)`.
 
-### 2) Generate and capture output
+### 2) Generate the document
 
-`generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It is the handoff request contract: it issues one `instrumentedCompleteSimple(...)` (the OTEL-instrumented `completeSimple` oneshot wrapper) against the caller-built `Context`, forcing `toolChoice: "none"` and `reasoning: resolveCompactionEffort(model, thinkingLevel)` over whatever the caller's `streamOptions` carried:
+`SessionHandoff.generateDocument(customInstructions?, options?)` owns generation and the abort controller (`isGeneratingHandoff`):
+
+- Requires a selected model and an API key/resolver for that model.
+- Builds the handoff request through the **same side-request pipeline a live turn uses**, shared with ephemeral turns:
+  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
+  2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext`, LLM conversion, and obfuscation).
+  3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
+  4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
+- Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.
+- Deobfuscates the returned handoff text.
+- For auto-triggered generations with `compaction.handoffSaveToDisk`, writes a timestamped `handoff-*.md` artifact under the session's artifacts directory.
+
+`generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It issues an OTEL-instrumented `completeSimple`-equivalent oneshot against the caller-built `Context`, overriding the supplied stream options with clamped compaction reasoning and `toolChoice: "none"`.
+
+If a provider rejects explicit `toolChoice: "none"` because it supports only automatic tool choice, the function retries once with `toolChoice: "auto"`. Tools remain present for cache-prefix compatibility, but returned tool-call blocks are ignored; only text blocks are joined.
 
 ```ts
-await instrumentedCompleteSimple(
-  model,
-  context, // system prompt + normalized tools + transformed history + trailing handoff prompt
-  {
-    ...streamOptions, // apiKey, signal, sessionId, promptCacheKey, serviceTier, hooks
-    reasoning: resolveCompactionEffort(model, options.thinkingLevel),
-    toolChoice: "none",
-  },
-  { telemetry, oneshotKind: "handoff" },
-);
+await generateHandoffFromContext(context, model, {
+  streamOptions,
+  completeImpl,
+  telemetry,
+  thinkingLevel,
+});
 ```
 
-(`generateHandoff(messages, …)` remains exported for downstream callers and now builds a basic `Context` from `systemPrompt`/`tools`/`convertToLlm` and delegates to `generateHandoffFromContext`. `AgentSession` no longer uses it because it cannot apply the host's transform pipeline or cache routing.)
+`generateHandoff(messages, …)` remains exported for downstream callers. It constructs a basic context from `systemPrompt`, `tools`, and `convertToLlm`, then delegates to `generateHandoffFromContext`; coding-agent uses the context-aware function so host transforms, obfuscation, side-stream routing, and cache keys match live turns.
 
 Important generation properties:
 
 - The request shares the live provider cache prefix because the `Context` is built by the identical transform + normalization pipeline the loop uses, and routed with the same `promptCacheKey` the turn used.
 - The handoff instruction is a trailing `user` message, not a developer message, so the cached prefix remains aligned with the prior turn (the trailing message is the only divergence point).
-- `toolChoice: "none"` prevents intentional tool dispatch.
-- The returned assistant content is filtered to text blocks and joined with `\n`; stray tool-call blocks are ignored if a provider does not honor `toolChoice: "none"`.
-- `stopReason === "error"` throws a generation error.
+- `toolChoice: "none"` prevents intentional tool dispatch on normal providers; the compatibility retry uses `"auto"` only after an explicit-tool-choice rejection.
+- Returned assistant content is filtered to text blocks and joined with `\n`; tool-call blocks are ignored.
+- `stopReason === "error"` after the compatibility retry throws a generation error.
 
-No agent-loop events are used for capture. The handoff path no longer waits for `agent_end` and no longer scans the latest assistant message.
+Capture is direct from the oneshot response; no agent-loop events or latest-assistant-message scan are involved.
 
 ### 3) Cancellation checks
 
-Cancellation throws `Error("Handoff cancelled")`; a completed generation with no text returns `undefined`.
+An explicit user cancellation throws `Error("Handoff cancelled")`. Harness-initiated aborts preserve a supplied reason, or surface `Handoff aborted by session` when none is supplied. A manual handoff whose generation is empty/whitespace-only throws `Handoff generation produced no content`; auto-handoff returns `undefined` so maintenance can advance to the next configured method.
 
-- caller signal aborts `#handoffAbortController`
+- caller signal aborts the handoff controller and forwards its reason
 - `completeSimple(...)` receives the abort signal
-- aborted handoff signal or provider `AbortError` is normalized to `Error("Handoff cancelled")`
-- empty generated text returns `undefined`
+- direct `abortHandoff()` or an unreasoned caller signal is normalized to `Error("Handoff cancelled")`
+- harness abort reasons and provider failures (including provider `AbortError`s) surface verbatim
 
-`AgentSession.handoff()` always clears `#handoffAbortController` in `finally`.
+`SessionHandoff.generateDocument()` always clears the abort controller in `finally`.
 
-### 4) New session creation
+### 4) Commit as a compaction entry
 
-If text was generated and not aborted:
+If text was generated and not aborted, `SessionMaintenance.handoff()` commits the document on the **current** session:
 
-1. Flush current session writer (`sessionManager.flush()`).
-2. Cancel session-owned async jobs.
-3. Start a brand-new session with `parentSession` pointing at the previous session file when one exists.
-4. Reset in-memory agent state (`agent.reset()`).
-5. Rebind `agent.sessionId` to the new session id.
-6. Rekey/reset Hindsight and Mnemopi memory session tracking for the new session.
-7. Clear the queued next-turn context array (`#pendingNextTurnMessages`) and the scheduled hidden next-turn generation (`#scheduledHiddenNextTurnGeneration`). The agent's steering and follow-up queues are already cleared by `agent.reset()` in step 4.
-8. Reset todo reminder counter.
+1. Wraps the document as a compaction summary: `upsertFileOperations(document, readFiles, modifiedFiles, …)` appends the cumulative `<files>` tag from the preparation's file operations; `{ readFiles, modifiedFiles }` becomes the entry `details`.
+2. Appends a regular `CompactionEntry` (`appendCompaction(summary, undefined, firstKeptEntryId, tokensBefore, details, false, undefined)`).
+3. Rebuilds the display context, replaces live agent messages, re-anchors stats (`rebaseAfterCompaction`), resets the plan reference, advisor runtimes (`"handoff"`), and todo phases, and closes provider sessions whose history was rewritten.
+4. Emits the `session_compact` extension hook with the saved entry.
+5. Returns `{ document, savedPath? }`.
 
-### 5) Handoff-context injection
+The session id, session file, transcript scrollback, and provider prompt-cache key are all unchanged. Recent history from `firstKeptEntryId` onward is kept verbatim, exactly like every other compaction method; only the summarized prefix is replaced by the document.
 
-The generated handoff document is wrapped by coding-agent session glue and appended to the new session as a `custom_message` entry:
+### Automatic handoff
 
-```text
-<handoff-context>
-...handoff text...
-</handoff-context>
+Manual `/handoff` works regardless of the context-maintenance method order. To use this pipeline automatically, include `handoff` in `compaction.methodOrder` (the default order is `remote`, `snapcompact`, `handoff`, `shake`, `soft`). Normal threshold-triggered handoffs defer document generation to a post-prompt task; pre-prompt, mid-turn, and `incomplete` recovery run inline. Input `overflow` skips handoff generation because the request would carry the same oversized input — but an already-armed speculative handoff result can still be applied during overflow recovery.
 
-The above is a handoff document from a previous session. Use this context to continue the work seamlessly.
-```
+Async compaction (`compaction.asyncEnabled`) may also generate the handoff document speculatively in the pre-threshold band and commit it instantly when the threshold is crossed; see `docs/compaction.md`.
 
-Insertion call:
-
-```ts
-this.sessionManager.appendCustomMessageEntry(
-  "handoff",
-  handoffContent,
-  true,
-  undefined,
-  "agent",
-);
-```
-
-Semantics:
-
-- `customType`: `"handoff"`
-- `display`: `true` (visible in TUI rebuild)
-- attribution: `"agent"`
-- Entry type: `custom_message` (participates in LLM context)
-
-### 6) Rebuild active agent context
-
-After injection:
-
-1. `buildDisplaySessionContext()` resolves message list for current leaf.
-2. `agent.replaceMessages(sessionContext.messages)` makes the injected handoff message active context.
-3. Todo phases are synchronized from the new branch.
-4. Method returns `{ document: handoffText, savedPath? }`.
-
-At this point, the active LLM context in the new session contains the injected handoff message, not the old transcript.
-
-## Persistence model: old session vs new session
-
-### Old session
-
-Handoff generation is a oneshot request, not a visible agent turn. The generated handoff text is not appended to the old session as an assistant message.
-
-Result: the original session keeps its prior transcript unchanged except for data already persisted before handoff began.
-
-### New session
-
-After session reset, handoff is persisted as `custom_message` with `customType: "handoff"`.
-
-`buildSessionContext()` converts this entry into a runtime custom/user-context message via `createCustomMessage(...)`, so it is included in future prompts from the new session.
-
-Auto-triggered handoffs can additionally write a timestamped `handoff-*.md` artifact under the session artifacts directory when `compaction.handoffSaveToDisk` is enabled. Manual `/handoff` does not write that artifact.
+If auto generation returns no document, maintenance advances to the next configured method. `compaction.handoffSaveToDisk` defaults to `false`; when enabled, only auto-triggered handoffs write the extra markdown artifact.
 
 ## Controller/UI behavior
 
@@ -175,16 +125,17 @@ Auto-triggered handoffs can additionally write a timestamped `handoff-*.md` arti
 - Calls `await session.handoff(customInstructions)`.
 - If result is `undefined`: `showError("Handoff cancelled")`.
 - On success:
-  - `rebuildChatFromMessages()` (loads new session context, including injected handoff)
-  - invalidates status line and editor top border
+  - clears transient session UI and re-renders the session, which now shows the handoff compaction divider
+  - invalidates status line and editor border
   - reloads todos
-  - appends success chat line: `New session started with handoff context`
+  - appends `Context handed off and compacted in place`
+  - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
 - On exception:
-  - if message is `"Handoff cancelled"` or error name is `AbortError`: `showError("Handoff cancelled")`
-  - otherwise: `showError("Handoff failed: <message>")`
+  - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
+  - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
 - Stops the loader, clears the status container, and requests render at end.
 
-Manual `/handoff` no longer streams the generated document into chat. A cancellable loader remains visible while the oneshot request runs, and the chat is rebuilt after generation completes.
+Manual `/handoff` does not stream the generated document into chat. A cancellable loader remains visible while the oneshot request runs, and the chat is rebuilt after the commit completes.
 
 ## Cancellation semantics
 
@@ -192,61 +143,53 @@ Manual `/handoff` no longer streams the generated document into chat. A cancella
 
 `AgentSession` exposes:
 
-- `abortHandoff()` → aborts `#handoffAbortController`
-- `isGeneratingHandoff` → true while controller exists
+- `abortHandoff()` → aborts the generation controller
+- `isGeneratingHandoff` → true while generation is in flight
 
-When this abort path is used, the abort signal is passed to `completeSimple(...)`; `handoff()` normalizes the cancellation to `Error("Handoff cancelled")`, and command controller maps it to cancellation UI.
+Direct `abortHandoff()` passes an unreasoned abort signal to `completeSimple(...)`; generation normalizes it to `Error("Handoff cancelled")`, and command controller maps it to cancellation UI. `AgentSession.abort(...)` instead aborts the handoff first with its harness reason (or `Handoff aborted by session`), so subsequent compaction cancellation cannot mask that failure as a user cancellation.
 
 ### Interactive `/handoff` path
 
-`InputController`'s global `editor.onEscape` handler dispatches on live session state instead of swapping handlers: while `isGeneratingHandoff` is true, pressing Escape calls `session.abortHandoff()`, which aborts the `completeSimple(...)` request through `#handoffAbortController`.
+`InputController`'s global `editor.onEscape` handler dispatches on live session state instead of swapping handlers: while `isGeneratingHandoff` is true, pressing Escape calls `session.abortHandoff()`, which aborts the `completeSimple(...)` request.
 
 ## Aborted vs failed handoff
 
 Current UI classification:
 
 - **Aborted/cancelled**
-  - `abortHandoff()` path triggers `"Handoff cancelled"`, or
-  - thrown `AbortError`
+  - direct `abortHandoff()` (interactive Esc) triggers `"Handoff cancelled"`
+  - an unreasoned caller signal also triggers `"Handoff cancelled"`
   - UI shows `Handoff cancelled`
 - **Failed**
-  - any other thrown error from `handoff()` / `generateHandoff()` / provider request path
-  - UI shows `Handoff failed: ...`
+  - a harness abort reason, an empty manual generation, or any thrown provider error
+  - UI logs the error and shows `Handoff failed: ...`
 
-Additional nuance: if generation completes but no text is returned, `handoff()` returns `undefined` and controller currently reports **cancelled**, not **failed**.
+Empty generation on the manual path throws; auto-handoff returns `undefined` only for its next-method fallback.
 
 ## Short-session and minimum-content guardrails
 
 Two guards prevent low-signal handoffs:
 
 - UI layer (`handleHandoffCommand`): warns and returns early for `< 2` message entries
-- Session layer (`handoff()`): throws the same condition as an error
-
-This avoids creating a new session with empty/near-empty handoff context.
+- Session layer (`SessionMaintenance.handoff()`): throws the same condition as an error
 
 ## State transition summary
 
 High-level state flow:
 
-1. Interactive slash command intercepted.
-2. Preflight message-count guard.
-3. `#handoffAbortController` created (`isGeneratingHandoff = true`).
-4. `generateHandoff(...)` issues one `instrumentedCompleteSimple(...)` request with live system prompt, tools, message history, current thinking level, and trailing handoff prompt.
-5. Assistant response text blocks are joined; tool-call blocks are discarded.
-6. If missing text → return `undefined`; if aborted → cancellation error path.
-7. If present:
-   - flush old session
-   - cancel async jobs
-   - create new empty session with previous session as parent
-   - reset runtime queues/counters
-   - append `custom_message(handoff)`
-   - optionally save an auto-triggered handoff document under the session artifacts directory when `compaction.handoffSaveToDisk` is enabled
+1. Interactive slash command dispatched by the builtin registry.
+2. Streaming and message-count preflight guards.
+3. `prepareCompaction(...)` computes the cut (`firstKeptEntryId`, `tokensBefore`).
+4. Generation controller created (`isGeneratingHandoff = true`); `generateHandoffFromContext(...)` sends one cache-aligned side request, with a one-time `"auto"` tool-choice compatibility retry when required.
+5. Assistant text blocks are joined; tool-call blocks are discarded; secret placeholders are restored locally.
+6. If missing text → manual throws / auto returns `undefined`; if aborted → cancellation error.
+7. If present: append the `CompactionEntry`, rebuild the agent context, reset plan/advisor/todo runtime state, close rewritten provider sessions, emit `session_compact`.
 8. Controller rebuilds chat UI and announces success.
-9. `#handoffAbortController` cleared (`isGeneratingHandoff = false`).
+9. The generation controller clears in `finally`.
 
 ## Known assumptions and limitations
 
 - No structural validation checks that generated markdown follows the requested section format.
-- Missing generated text is reported as cancellation in controller UX.
-- Manual handoff has no streaming visibility; a cancellable loader is shown until the UI updates after generation completes.
-- Auto-triggered handoffs can write a timestamped `handoff-*.md` artifact when `compaction.handoffSaveToDisk` is enabled; write failure is logged and does not fail the handoff.
+- Manual handoff has no streaming visibility; a cancellable loader is shown until the UI updates.
+- Auto-triggered artifact write failure is logged and does not fail the handoff.
+- Sessions created by older versions may still contain `custom_message` entries with `customType: "handoff"` from the previous new-session pipeline; they render and participate in context unchanged.

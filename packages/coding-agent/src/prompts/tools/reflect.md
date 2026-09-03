@@ -1,5 +1,5 @@
-Generate a synthesized answer by reasoning over long-term memory. Unlike `recall`, `reflect` blends relevant memories into a coherent response.
+`reflect`: synthesizes a coherent response from relevant long-term memories; unlike `recall`, blends them.
 
 Use for open-ended questions spanning many stored facts: "What do you know about this user?", "Summarize project decisions.", "What are my preferences for X?"
 
-Optional `context` parameter focuses the synthesis on a specific angle or sub-topic.
+`context` optional; focuses synthesis on a specific angle or sub-topic.

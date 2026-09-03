@@ -1,6 +1,5 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { formatBytes } from "../tools/render-utils";
+import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
 // =============================================================================
@@ -53,12 +52,17 @@ export interface OutputSummary {
 export interface OutputSinkOptions {
 	artifactPath?: string;
 	artifactId?: string;
-	/** Tail buffer budget (bytes). Default DEFAULT_MAX_BYTES. */
+	/**
+	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
+	 * window and rolling tail window share this budget, so a composed
+	 * `dump()` body never exceeds it (plus the elision marker).
+	 */
 	spillThreshold?: number;
 	/**
 	 * When > 0, the sink keeps the first `headBytes` of output in addition to
 	 * the rolling tail window. Output between the two windows is elided
-	 * (middle elision). Default 0 = tail-only behavior.
+	 * (middle elision). Clamped to `spillThreshold / 2` so the tail keeps at
+	 * least half the inline budget. Default 0 = tail-only behavior.
 	 */
 	headBytes?: number;
 	/**
@@ -99,6 +103,11 @@ export interface TruncationResult {
 	elidedBytes?: number;
 	/** Lines elided from the middle (truncateMiddle only). */
 	elidedLines?: number;
+	/** Exact source-line counts retained before/after the middle marker. */
+	headLines?: number;
+	tailLines?: number;
+	/** True when either retained side is a partial byte range of a source line. */
+	partialByteWindows?: boolean;
 	lastLinePartial?: boolean;
 	firstLineExceedsLimit?: boolean;
 }
@@ -263,7 +272,7 @@ export function truncateLine(
 	maxChars: number = DEFAULT_MAX_COLUMN,
 ): { text: string; wasTruncated: boolean } {
 	if (line.length <= maxChars) return { text: line, wasTruncated: false };
-	return { text: `${line.slice(0, maxChars)}…`, wasTruncated: true };
+	return { text: materializeString(`${line.slice(0, maxChars)}…`), wasTruncated: true };
 }
 
 // =============================================================================
@@ -371,7 +380,7 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
 	if (includedLines >= maxLines && bytesUsed <= maxBytes) truncatedBy = "lines";
 
 	return {
-		content: content.slice(0, cutIndex),
+		content: materializeString(content.slice(0, cutIndex)),
 		truncated: true,
 		truncatedBy,
 		totalLines,
@@ -477,7 +486,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 	if (includedLines >= maxLines && bytesUsed <= maxBytes) truncatedBy = "lines";
 
 	return {
-		content: content.slice(startIndex),
+		content: materializeString(content.slice(startIndex)),
 		truncated: true,
 		truncatedBy,
 		totalLines,
@@ -543,12 +552,50 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 	const headBytesKept = head.outputBytes ?? Buffer.byteLength(head.content, "utf-8");
 	const tailBytesKept = tail.outputBytes ?? Buffer.byteLength(tail.content, "utf-8");
 
-	// Head unusable (first line exceeds budget) → tail-only.
-	if (headLinesKept === 0 || head.firstLineExceedsLimit) return tail;
-	// Tail unusable → head-only.
-	if (tailLinesKept === 0) return head;
-	// Windows overlap → no meaningful elision; return content untruncated.
-	if (headLinesKept + tailLinesKept >= totalLines) {
+	// A giant first/last line cannot use one of the line-preserving windows. Use
+	// a byte window only for that side and retain the normal line cap on the other.
+	if (headLinesKept === 0 || head.firstLineExceedsLimit || tailLinesKept === 0) {
+		const useByteHead = headLinesKept === 0 || head.firstLineExceedsLimit;
+		const byteHead = useByteHead
+			? truncateHeadBytes(content, Math.min(headBytes, totalBytes))
+			: { text: head.content, bytes: headBytesKept };
+		const actualHeadLines = useByteHead ? 1 : headLinesKept;
+		const remainingBytes = Math.max(0, totalBytes - byteHead.bytes);
+		const useByteTail = tailLinesKept === 0;
+		const byteTail = useByteTail
+			? truncateTailBytes(content, Math.min(tailBytes, remainingBytes))
+			: (() => {
+					const limited = truncateTail(content, {
+						maxBytes: Math.min(tailBytes, remainingBytes),
+						maxLines: tailLines,
+					});
+					return { text: limited.content, bytes: limited.outputBytes ?? Buffer.byteLength(limited.content) };
+				})();
+		const actualTailLines = useByteTail ? 1 : Math.min(tailLinesKept, tailLines);
+		const elidedBytes = Math.max(0, totalBytes - byteHead.bytes - byteTail.bytes);
+		if (elidedBytes === 0) return noTruncResult(content, totalLines, totalBytes);
+		const marker = formatMiddleElisionMarker(0, elidedBytes);
+		const composed = `${byteHead.text}\n${marker}\n${byteTail.text}`;
+		return {
+			content: composed,
+			truncated: true,
+			truncatedBy: "middle",
+			totalLines,
+			totalBytes,
+			outputLines: actualHeadLines + actualTailLines + 1,
+			outputBytes: Buffer.byteLength(composed, "utf-8"),
+			elidedLines: Math.max(0, totalLines - actualHeadLines - actualTailLines),
+			headLines: actualHeadLines,
+			tailLines: actualTailLines,
+			partialByteWindows: useByteHead || useByteTail || tail.lastLinePartial === true,
+			elidedBytes,
+			lastLinePartial: true,
+			firstLineExceedsLimit: false,
+		};
+	}
+	// Fully retained line windows need no marker. A partial tail still omitted
+	// bytes from its source line even when the windows account for every line.
+	if (headLinesKept + tailLinesKept >= totalLines && !tail.lastLinePartial) {
 		return noTruncResult(content, totalLines, totalBytes);
 	}
 
@@ -570,6 +617,8 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 		outputBytes: headBytesKept + tailBytesKept + markerBytes + 2,
 		elidedLines,
 		elidedBytes,
+		headLines: headLinesKept,
+		tailLines: tailLinesKept,
 		lastLinePartial: tail.lastLinePartial,
 		firstLineExceedsLimit: false,
 	};
@@ -756,6 +805,10 @@ export class OutputSink {
 	// Queue of chunks waiting for the file sink to be created.
 	#pendingFileWrites?: string[];
 	#fileReady = false;
+	/** In-flight sink creation, awaited by finalize/dispose so a fd opened by a late chunk is still released. */
+	#fileCreation?: Promise<void>;
+	/** Set once the spill file has been closed; guards double-close and post-finalize resurrection. */
+	#finalized = false;
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
@@ -795,7 +848,7 @@ export class OutputSink {
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
 		this.#spillThreshold = spillThreshold;
-		this.#headLimit = Math.max(0, headBytes);
+		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
 		this.#onChunk = onChunk;
 		this.#chunkThrottleMs = chunkThrottleMs;
@@ -842,6 +895,7 @@ export class OutputSink {
 	 * synchronously. File sink writes are deferred and serialized internally.
 	 */
 	push(chunk: string): void {
+		if (this.#finalized) return;
 		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#normalizeCarriageReturns(text)));
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
@@ -964,16 +1018,23 @@ export class OutputSink {
 		return parts.join("");
 	}
 
+	// The rolling tail budget is whatever the head window has not consumed of
+	// the inline budget: `spillThreshold - #headBytes`. While the head window
+	// fills it shrinks toward `spillThreshold - headLimit`; after `replace()`
+	// (head cleared) it grows back to the full threshold. This keeps
+	// `head + tail <= spillThreshold`, so the composed dump body fits the
+	// inline byte cap by construction.
+
 	#willOverflow(dataBytes: number): boolean {
 		// Triggers file mirroring as soon as the next chunk would push us over
-		// the tail budget (head retention does not change spill-to-artifact).
-		return this.#bufferBytes + dataBytes > this.#spillThreshold;
+		// the tail budget — i.e. the first byte that could be lost from memory.
+		return this.#bufferBytes + dataBytes > this.#spillThreshold - this.#headBytes;
 	}
 
 	#pushTail(chunk: string, dataBytes: number): void {
 		if (dataBytes === 0) return;
 
-		const threshold = this.#spillThreshold;
+		const threshold = Math.max(0, this.#spillThreshold - this.#headBytes);
 		const willOverflow = this.#bufferBytes + dataBytes > threshold;
 
 		if (!willOverflow) {
@@ -1018,7 +1079,7 @@ export class OutputSink {
 		// resolves (typically <2). The cap is enforced on drain.
 		if (!this.#pendingFileWrites) {
 			this.#pendingFileWrites = [chunk];
-			void this.#createFileSink();
+			this.#fileCreation = this.#createFileSink();
 		} else {
 			this.#pendingFileWrites.push(chunk);
 		}
@@ -1255,10 +1316,7 @@ export class OutputSink {
 		this.#flushPendingChunk();
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
 
-		if (this.#file) {
-			this.#flushArtifactTailIfCapped();
-			await this.#file.sink.end();
-		}
+		await this.#finalizeFile();
 
 		// Compose the visible output. With head retention, splice head + marker
 		// + tail when content was elided. Otherwise return the rolling buffer.
@@ -1320,6 +1378,51 @@ export class OutputSink {
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
 			artifactId: this.#file?.artifactId,
 		};
+	}
+
+	/**
+	 * Flush any capped artifact tail and close the spill file descriptor,
+	 * awaiting an in-flight sink creation so a descriptor opened by a late
+	 * chunk is still released. Idempotent via {@link #finalized}: the artifact
+	 * is finalized exactly once whether the caller reached {@link dump} or
+	 * bailed through {@link dispose}. `#file` is left set so {@link dump} can
+	 * still read `artifactId` for its summary.
+	 */
+	async #finalizeFile(): Promise<void> {
+		if (this.#finalized) return;
+		this.#finalized = true;
+		if (this.#fileCreation) {
+			await this.#fileCreation.catch(() => undefined);
+		}
+		const file = this.#file;
+		if (!file) return;
+		// The tail/notice replay writes to the sink and can throw (e.g. a disk
+		// write error). Closing the descriptor MUST still happen — otherwise the
+		// fd leaks and the replay error masks the original tool error that put us
+		// on this path. Both failures are swallowed so dispose() never throws.
+		try {
+			this.#flushArtifactTailIfCapped();
+		} catch {
+			/* ignore */
+		} finally {
+			try {
+				await file.sink.end();
+			} catch {
+				/* ignore */
+			}
+		}
+	}
+
+	/**
+	 * Release the artifact spill descriptor on an exit path that skips
+	 * {@link dump} — a thrown error or abort. Idempotent and safe in a
+	 * `finally`: if {@link dump} already ran this is a no-op, otherwise it
+	 * flushes the capped tail and closes the sink so the descriptor is not
+	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
+	 */
+	async dispose(): Promise<void> {
+		this.#clearPendingChunkTimer();
+		await this.#finalizeFile();
 	}
 }
 

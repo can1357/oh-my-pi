@@ -46,10 +46,12 @@ describe("compaction prefers the current session model over modelRoles.default",
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] });
 		settings.setModelRole("default", `${defaultRoleModel.provider}/${defaultRoleModel.id}`);
 
+		const promptCacheKey = "inherited-parent-cache";
 		const agent = new Agent({
+			promptCacheKey,
 			initialState: {
 				model: currentModel,
 				systemPrompt: ["Test"],
@@ -98,6 +100,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(compactSpy).toHaveBeenCalled();
 		const [, firstCandidate] = compactSpy.mock.calls[0]!;
 		expect(`${firstCandidate.provider}/${firstCandidate.id}`).toBe(`${currentModel.provider}/${currentModel.id}`);
+		expect(compactSpy.mock.calls[0]?.[5]?.promptCacheKey).toBe(promptCacheKey);
 	});
 
 	it("falls back when the authenticated Bedrock candidate cannot resolve AWS credentials", async () => {
@@ -107,7 +110,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] });
 		settings.setModelRole("smol", `${fallbackModel.provider}/${fallbackModel.id}`);
 
 		const agent = new Agent({
@@ -199,7 +202,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" }),
+			settings: Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] }),
 			modelRegistry,
 		});
 		session.subscribe(() => {});

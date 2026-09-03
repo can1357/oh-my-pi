@@ -12,7 +12,7 @@
  *     the persisted message (in-place mutation) and the emitted display event
  *     (deobfuscated spread copy) carry the marker (A4).
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
@@ -55,16 +55,13 @@ function makeStoppedAssistantMessage(text = "done"): AssistantMessage {
 }
 
 interface SessionFixture {
-	tempDir: TempDir;
-	authStorage: AuthStorage;
 	session: AgentSession;
 }
 
-async function createSessionWithObfuscator(obfuscator?: SecretObfuscator): Promise<SessionFixture> {
-	const tempDir = TempDir.createSync("@pi-silent-abort-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-	authStorage.setRuntimeApiKey("anthropic", "test-key");
-	const modelRegistry = new ModelRegistry(authStorage);
+async function createSessionWithObfuscator(
+	modelRegistry: ModelRegistry,
+	obfuscator?: SecretObfuscator,
+): Promise<SessionFixture> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected built-in anthropic model to exist");
 
@@ -85,24 +82,36 @@ async function createSessionWithObfuscator(obfuscator?: SecretObfuscator): Promi
 		obfuscator,
 	});
 
-	return { tempDir, authStorage, session };
+	return { session };
 }
 
 describe("AgentSession silent-abort marker stamping", () => {
 	let fixture: SessionFixture | undefined;
+	let fixtureDir: TempDir;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 
+	beforeAll(async () => {
+		fixtureDir = TempDir.createSync("@pi-silent-abort-fixture-");
+		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
 	afterEach(async () => {
 		if (fixture) {
 			await fixture.session.dispose();
-			fixture.authStorage.close();
-			fixture.tempDir.removeSync();
 			fixture = undefined;
 		}
 		vi.restoreAllMocks();
 	});
 
+	afterAll(() => {
+		authStorage.close();
+		fixtureDir.removeSync();
+	});
+
 	it("A1: flag set + aborted assistant message_end stamps the marker and clears the flag", async () => {
-		fixture = await createSessionWithObfuscator();
+		fixture = await createSessionWithObfuscator(modelRegistry);
 		const { session } = fixture;
 		session.markPlanInternalAbortPending();
 		expect(session.isPlanInternalAbortPending).toBe(true);
@@ -121,7 +130,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 	});
 
 	it("A2: flag unset + aborted assistant message_end leaves errorMessage and flag alone", async () => {
-		fixture = await createSessionWithObfuscator();
+		fixture = await createSessionWithObfuscator(modelRegistry);
 		const { session } = fixture;
 		expect(session.isPlanInternalAbortPending).toBe(false);
 
@@ -135,7 +144,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 	});
 
 	it("A3: flag set + non-aborted message_end does NOT consume the flag", async () => {
-		fixture = await createSessionWithObfuscator();
+		fixture = await createSessionWithObfuscator(modelRegistry);
 		const { session } = fixture;
 		session.markPlanInternalAbortPending();
 
@@ -164,18 +173,12 @@ describe("AgentSession silent-abort marker stamping", () => {
 		// `displayEvent = { ...event, message: { ...message, content } }` spread copy
 		// in `#handleAgentEvent`. The marker must be stamped BEFORE that spread so
 		// `displayEvent.message.errorMessage` inherits via the spread.
-		const placeholder = "#AAAA#"; // shape produced by buildPlaceholder for index 0
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: "SECRET_VALUE" }]);
-		// Confirm our placeholder choice matches the obfuscator's deterministic output:
-		// the test asserts a real deobfuscation diff by checking the emitted content
-		// differs from the input ref, which is what we actually care about. The exact
-		// placeholder string doesn't matter as long as it's a known secret reference.
 		const obfuscatedText = obfuscator.obfuscate("hello SECRET_VALUE world");
 		// Sanity: obfuscation produced a placeholder embedded in the text.
 		expect(obfuscatedText).not.toBe("hello SECRET_VALUE world");
-		void placeholder;
 
-		fixture = await createSessionWithObfuscator(obfuscator);
+		fixture = await createSessionWithObfuscator(modelRegistry, obfuscator);
 		const { session } = fixture;
 
 		// Capture session-emitted events.

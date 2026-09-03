@@ -68,6 +68,45 @@ function createFakeRedis(): FakeRedis {
 			queue.push(error);
 			failures.set(method, queue);
 		},
+		async send(command, args) {
+			record("send", [command, args]);
+			checkFailure("send");
+			if (command !== "EVAL") throw new Error(`Unsupported Redis command: ${command}`);
+			const script = args[0] ?? "";
+			const keyCount = Number(args[1] ?? "0");
+			const keys = args.slice(2, 2 + keyCount);
+			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_WRITE_FULL")) {
+				checkFailure("set");
+				checkFailure("hset");
+				const [fileKey, metaKey, titleKey] = keys;
+				const [content, filePath, mtimeMs, hasTitle, title] = argv;
+				strings.set(fileKey, content);
+				getHash(metaKey).set(filePath, mtimeMs);
+				if (hasTitle === "1") getHash(titleKey).set(filePath, title);
+				else getHash(titleKey).delete(filePath);
+				return 1;
+			}
+			if (script.includes("OMP_APPEND")) {
+				checkFailure("append");
+				checkFailure("hset");
+				const [fileKey, metaKey] = keys;
+				const [line, filePath, mtimeMs] = argv;
+				const next = (strings.get(fileKey) ?? "") + line;
+				strings.set(fileKey, next);
+				getHash(metaKey).set(filePath, mtimeMs);
+				return Buffer.byteLength(next, "utf-8");
+			}
+			if (script.includes("OMP_UPDATE_TITLE")) {
+				checkFailure("hset");
+				const [metaKey, titleKey] = keys;
+				const [filePath, mtimeMs, title] = argv;
+				getHash(metaKey).set(filePath, mtimeMs);
+				getHash(titleKey).set(filePath, title);
+				return 1;
+			}
+			throw new Error("Unsupported Redis script");
+		},
 		async get(key) {
 			record("get", [key]);
 			checkFailure("get");
@@ -183,6 +222,21 @@ describe("RedisSessionStorage", () => {
 		const stat = storage.statSync("/sessions/p/a.jsonl");
 		expect(stat.size).toBe(12);
 		expect(typeof stat.mtimeMs).toBe("number");
+	});
+
+	it("commits file content and metadata through one atomic Redis script", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		const sessionPath = "/sessions/p/atomic.jsonl";
+		await storage.writeText(sessionPath, "old\n");
+		const oldMtime = redis.hashes.get("omp:sessions:meta")?.get(sessionPath);
+		redis.failNext("send", new Error("EVAL transport failed"));
+
+		await expect(storage.writeTextAtomic(sessionPath, "new\n")).rejects.toThrow("EVAL transport failed");
+
+		expect(redis.strings.get(`omp:sessions:file:${sessionPath}`)).toBe("old\n");
+		expect(redis.hashes.get("omp:sessions:meta")?.get(sessionPath)).toBe(oldMtime);
+		expect(storage.statSync(sessionPath).size).toBe(4);
+		expect(redis.calls.some(call => call.method === "send" && call.args[0] === "EVAL")).toBe(true);
 	});
 
 	it("create() warms the metadata index with STRLEN and never GETs full content", async () => {

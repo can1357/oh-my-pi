@@ -2,12 +2,12 @@ import { HookEditorComponent, HookInputComponent, HookSelectorComponent } from "
 
 // Core session management
 
+export * as zod from "@oh-my-pi/omptype/zod";
+export { z } from "@oh-my-pi/omptype/zod";
 // Re-export TUI components for custom tool rendering
 export { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 // Logging
 export { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
-export * as zod from "zod/v4";
-export { z } from "zod/v4";
 export * from "./config/keybindings";
 export * from "./config/model-registry";
 // Prompt templates
@@ -57,7 +57,7 @@ export * from "./task/executor";
 export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";
-export * from "./utils/git";
+export * from "./utils/github";
 // UI components for extensions
 export {
 	HookEditorComponent as ExtensionEditorComponent,

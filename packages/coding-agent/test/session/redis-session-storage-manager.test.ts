@@ -37,6 +37,38 @@ function createFakeRedis(): FakeRedis {
 	return {
 		strings,
 		hashes,
+		async send(command, args) {
+			if (command !== "EVAL") throw new Error(`Unsupported Redis command: ${command}`);
+			const script = args[0] ?? "";
+			const keyCount = Number(args[1] ?? "0");
+			const keys = args.slice(2, 2 + keyCount);
+			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_WRITE_FULL")) {
+				const [fileKey, metaKey, titleKey] = keys;
+				const [content, filePath, mtimeMs, hasTitle, title] = argv;
+				strings.set(fileKey, content);
+				getHash(metaKey).set(filePath, mtimeMs);
+				if (hasTitle === "1") getHash(titleKey).set(filePath, title);
+				else getHash(titleKey).delete(filePath);
+				return 1;
+			}
+			if (script.includes("OMP_APPEND")) {
+				const [fileKey, metaKey] = keys;
+				const [line, filePath, mtimeMs] = argv;
+				const next = (strings.get(fileKey) ?? "") + line;
+				strings.set(fileKey, next);
+				getHash(metaKey).set(filePath, mtimeMs);
+				return Buffer.byteLength(next, "utf-8");
+			}
+			if (script.includes("OMP_UPDATE_TITLE")) {
+				const [metaKey, titleKey] = keys;
+				const [filePath, mtimeMs, title] = argv;
+				getHash(metaKey).set(filePath, mtimeMs);
+				getHash(titleKey).set(filePath, title);
+				return 1;
+			}
+			throw new Error("Unsupported Redis script");
+		},
 		async get(key) {
 			return strings.has(key) ? (strings.get(key) as string) : null;
 		},

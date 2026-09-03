@@ -130,4 +130,39 @@ describe("serializeConversation — useless pairs", () => {
 
 		expect(out).toBe("");
 	});
+
+	test("strips assistant reasoning from Anthropic-dialect summary input but keeps text and tool calls", () => {
+		const reasoning = "PRIVATE chain of thought that must not be replayed to Claude";
+		const out = serializeConversation(
+			[
+				assistantMessage([
+					{ type: "thinking", thinking: reasoning },
+					{ type: "text", text: "The visible answer." },
+					{ type: "toolCall", id: "c1", name: "search", arguments: { pattern: "delta" } },
+				]),
+			],
+			"anthropic",
+		);
+
+		expect(out).not.toContain(reasoning);
+		expect(out).not.toContain("<thinking>");
+		expect(out).toContain("The visible answer.");
+		expect(out).toContain("<function_calls>");
+	});
+
+	test("keeps assistant reasoning for non-Anthropic dialects", () => {
+		const reasoning = "reasoning kept for the XML transcript";
+		const out = serializeConversation(
+			[
+				assistantMessage([
+					{ type: "thinking", thinking: reasoning },
+					{ type: "text", text: "answer" },
+				]),
+			],
+			"xml",
+		);
+
+		expect(out).toContain(reasoning);
+		expect(out).toContain("<thinking>");
+	});
 });

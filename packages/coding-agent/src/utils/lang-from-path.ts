@@ -102,6 +102,9 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	md: ["markdown", "markdown"],
 	markdown: ["markdown", "markdown"],
 	mdx: ["markdown", "markdown"],
+	mdc: ["markdown", "markdown"],
+	mkd: ["markdown", "markdown"],
+	mdown: ["markdown", "markdown"],
 	rst: ["restructuredtext", "restructuredtext"],
 	adoc: ["asciidoc", "asciidoc"],
 	tex: ["latex", "latex"],
@@ -215,6 +218,10 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 	if (pair) return pair[0];
 
 	return undefined;
+}
+
+export function isMarkdownPath(filePath: string): boolean {
+	return getLanguageFromPath(filePath) === "markdown";
 }
 
 /**

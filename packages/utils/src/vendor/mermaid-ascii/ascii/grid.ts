@@ -11,7 +11,14 @@ import type {
   GridCoord, DrawingCoord, Direction, AsciiGraph, AsciiNode, AsciiSubgraph,
 } from './types'
 import { gridKey } from './types'
-import { mkCanvas, setCanvasSizeToGrid, setRoleCanvasSizeToGrid } from './canvas'
+import {
+  getCanvasSize,
+  increaseRoleCanvasSize,
+  increaseSize,
+  mkCanvas,
+  setCanvasSizeToGrid,
+  setRoleCanvasSizeToGrid,
+} from './canvas'
 import { determinePath, determineLabelLine } from './edge-routing'
 import { analyzeEdgeBundles, processBundles } from './edge-bundling'
 import { drawBox } from './draw'
@@ -374,6 +381,14 @@ export function offsetDrawingForSubgraphs(graph: AsciiGraph): void {
       node.drawingCoord.y += offsetY
     }
   }
+
+  // The canvas was sized from the pre-shift grid extents, but every drawing
+  // coordinate — including edge path endpoints, which gridToDrawingCoord
+  // offsets on read — now sits `offset` cells further out. Grow it to match,
+  // or drawing the rightmost/bottom-most edges writes past the allocation.
+  const [maxX, maxY] = getCanvasSize(graph.canvas)
+  increaseSize(graph.canvas, maxX + offsetX, maxY + offsetY)
+  increaseRoleCanvasSize(graph.roleCanvas, maxX + offsetX, maxY + offsetY)
 }
 
 // ============================================================================

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { grep, GrepOutputMode } from "../native/index.js";
+import { GrepOutputMode, grep } from "../native/index.js";
 
 const ITERATIONS = Number(Bun.env.GREP_BENCH_ITERATIONS ?? "50");
 const CONCURRENCY = 2;
@@ -75,7 +75,12 @@ for (const c of cases) {
 	const caseIterations = c.iterations ?? ITERATIONS;
 	const concurrency = c.concurrency ?? CONCURRENCY;
 	const rgDefaultArgs = ["--hidden", "--no-ignore", "--no-ignore-vcs"];
-	const modeArg = c.mode === GrepOutputMode.FilesWithMatches ? ["--files-with-matches"] : c.mode === GrepOutputMode.Count ? ["--count"] : ["--json"];
+	const modeArg =
+		c.mode === GrepOutputMode.FilesWithMatches
+			? ["--files-with-matches"]
+			: c.mode === GrepOutputMode.Count
+				? ["--count"]
+				: ["--json"];
 	const globArg = c.glob ? ["-g", c.glob] : [];
 	const runNative = () => grep(grepArgs);
 
@@ -91,7 +96,7 @@ for (const c of cases) {
 	};
 
 	const countMatches = (result: string): number => {
-		const lines = result.split("\n").filter((line) => line.trim());
+		const lines = result.split("\n").filter(line => line.trim());
 		if (c.mode === GrepOutputMode.FilesWithMatches) {
 			return lines.length;
 		}
@@ -114,8 +119,9 @@ for (const c of cases) {
 		return matches;
 	};
 
-	const nativeMetric = (await runNative());
-	const nativeMatches = c.mode === GrepOutputMode.FilesWithMatches ? nativeMetric.filesWithMatches : nativeMetric.totalMatches;
+	const nativeMetric = await runNative();
+	const nativeMatches =
+		c.mode === GrepOutputMode.FilesWithMatches ? nativeMetric.filesWithMatches : nativeMetric.totalMatches;
 
 	const rgMatches = countMatches(await runRg());
 
@@ -140,9 +146,13 @@ for (const c of cases) {
 	const rgConcurrentMs = (Bun.nanoseconds() - start) / 1e6 / caseIterations;
 
 	console.log(`${c.name}:`);
-	console.log(`  Native grep:         ${nativeMs.toFixed(2)}ms (${nativeMatches} ${c.mode === GrepOutputMode.FilesWithMatches ? "files" : "matches"})`);
+	console.log(
+		`  Native grep:         ${nativeMs.toFixed(2)}ms (${nativeMatches} ${c.mode === GrepOutputMode.FilesWithMatches ? "files" : "matches"})`,
+	);
 	console.log(`  Native grep ${concurrency}x:      ${nativeConcurrentMs.toFixed(2)}ms`);
-	console.log(`  Subprocess rg:       ${rgMs.toFixed(2)}ms (${rgMatches} ${c.mode === GrepOutputMode.FilesWithMatches ? "files" : "matches"})`);
+	console.log(
+		`  Subprocess rg:       ${rgMs.toFixed(2)}ms (${rgMatches} ${c.mode === GrepOutputMode.FilesWithMatches ? "files" : "matches"})`,
+	);
 	console.log(`  Subprocess rg ${concurrency}x:    ${rgConcurrentMs.toFixed(2)}ms`);
 
 	const nativeVsRg = rgMs / nativeMs;

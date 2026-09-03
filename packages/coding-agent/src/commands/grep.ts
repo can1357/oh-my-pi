@@ -1,14 +1,15 @@
 /**
  * Test grep tool.
  */
+
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { grepHelp as commandHelp } from "../cli/command-help";
 import { type GrepCommandArgs, runGrepCommand } from "../cli/grep-cli";
 import { initTheme } from "../modes/theme/theme";
 
 export default class Grep extends Command {
-	static description = "Test grep tool";
-
+	static description = commandHelp.description;
 	static args = {
 		pattern: Args.string({ description: "Regex pattern to search for", required: false }),
 		path: Args.string({ description: "Directory or file to search", required: false }),

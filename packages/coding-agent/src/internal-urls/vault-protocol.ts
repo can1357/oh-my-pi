@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { $which, isEnoent } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
+import { isMarkdownPath } from "../utils/lang-from-path";
 import { parseInternalUrl } from "./parse";
 import { validateRelativePath } from "./skill-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, WriteContext } from "./types";
@@ -114,8 +115,8 @@ function toVaultValidationError(error: unknown): Error {
 }
 
 function getContentType(filePath: string): ContentType {
+	if (isMarkdownPath(filePath)) return "text/markdown";
 	const ext = path.extname(filePath).toLowerCase();
-	if (ext === ".md") return "text/markdown";
 	if (ext === ".json") return "application/json";
 	return "text/plain";
 }
@@ -786,7 +787,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		const cacheKey = parsed.ref.active ? "_" : (parsed.ref.vault ?? "_");
 		let cliInfo = cachedVaultInfo.get(cacheKey);
 		if (cliInfo === undefined) {
-			const result = await this.#spawn(["vault", "info", ...this.#vaultCliArg(parsed.ref)], context);
+			const result = await this.#spawn([...this.#vaultCliArg(parsed.ref), "vault", "info"], context);
 			assertCliSuccess("vault info", result);
 			cliInfo = result.stdout.trim();
 			cachedVaultInfo.set(cacheKey, cliInfo);
@@ -925,7 +926,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		context?: ResolveContext,
 	): Promise<InternalResource> {
 		const invocation = buildObsidianCliInvocation(parsed);
-		const args = [...invocation.args, ...this.#vaultCliArg(parsed.ref)];
+		const args = [...this.#vaultCliArg(parsed.ref), ...invocation.args];
 		const result = await this.#spawn(args, context);
 		assertCliSuccess(invocation.opLabel, result);
 		return {

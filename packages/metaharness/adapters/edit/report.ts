@@ -212,17 +212,19 @@ export function generateReport(result: BenchmarkResult): string {
 	lines.push("");
 
 	if (summary.hashlineEditSubtypes) {
-		const order = ["set", "set_range", "insert"] as const;
-		const total = order.reduce((sum, key) => sum + (summary.hashlineEditSubtypes?.[key] ?? 0), 0);
+		const rows = Object.entries(summary.hashlineEditSubtypes)
+			.filter(([, count]) => count > 0)
+			.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+		const total = rows.reduce((sum, [, count]) => sum + count, 0);
 		if (total > 0) {
-			lines.push("### Hashline Edit Subtypes");
+			lines.push("### Hashline Op Breakdown");
+			lines.push("");
+			lines.push("All attempted edit calls across all runs (retries and failed calls included).");
 			lines.push("");
 			lines.push("| Operation | Count | % |");
 			lines.push("|-----------|-------|---|");
-			for (const key of order) {
-				const count = summary.hashlineEditSubtypes[key] ?? 0;
-				const pct = formatPercent(count / total);
-				lines.push(`| ${key} | ${count} | ${pct} |`);
+			for (const [op, count] of rows) {
+				lines.push(`| \`${op}\` | ${count} | ${formatPercent(count / total)} |`);
 			}
 			lines.push(`| **Total** | **${total}** | 100% |`);
 			lines.push("");

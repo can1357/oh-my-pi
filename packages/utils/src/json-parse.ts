@@ -579,8 +579,8 @@ export function parseStreamingJson<T = Record<string, unknown>>(partialJson: str
 
 /**
  * Default minimum byte growth before `parseStreamingJsonThrottled` will
- * re-parse a streaming tool-call argument buffer. Bounds the mid-stream
- * partial-parse cost from quadratic to linear in N.
+ * re-parse a streaming tool-call argument buffer. Acts as the floor of the
+ * geometric gate — see {@link parseStreamingJsonThrottled}.
  */
 export const STREAMING_JSON_PARSE_MIN_GROWTH = 256;
 
@@ -589,14 +589,23 @@ export const STREAMING_JSON_PARSE_MIN_GROWTH = 256;
  *
  * Tool calls arrive as a long sequence of small deltas — calling
  * `parseStreamingJson(buffer)` on every delta re-parses the entire buffer
- * each time, giving O(N²) work in the total buffer length. Throttling skips
- * the re-parse until at least `minGrowthBytes` of new content has arrived
- * since the last successful parse, bounding mid-stream cost to O(N).
+ * each time, giving O(N²) work in the total buffer length. A fixed re-parse
+ * floor alone does NOT fix this: with `minGrowthBytes` constant, a buffer of
+ * length N is parsed N/minGrowthBytes times at an average cost of N/2, which
+ * is still O(N²) (the constant just shrinks). Long `write` payloads — where
+ * the buffer is the whole file — made this the dominant main-thread stall
+ * during streaming.
+ *
+ * Instead the gate scales geometrically: once the buffer is large, a re-parse
+ * requires growth proportional to the current length (`len / 32`, floored at
+ * `minGrowthBytes`). Parse points then form a geometric progression, so a
+ * buffer of length N is parsed O(log N) times for O(N log N) total work,
+ * while small buffers keep the snappy fixed-cadence updates.
  *
  * Each provider tracks the last parsed length on its tool-call block, so the
  * final `toolcall_end` parse (which providers already perform unconditionally)
  * is the authoritative full parse — the throttle only delays mid-stream UI
- * updates by at most `minGrowthBytes` of accumulated partial content.
+ * updates, by at most ~3% of the accumulated content for large buffers.
  *
  * @returns the parsed object plus the new `parsedLen` to persist; or `null`
  *          when the buffer has not grown enough to warrant a re-parse.
@@ -607,7 +616,9 @@ export function parseStreamingJsonThrottled<T = Record<string, unknown>>(
 	minGrowthBytes: number = STREAMING_JSON_PARSE_MIN_GROWTH,
 ): { value: T; parsedLen: number } | null {
 	const len = partialJson?.length ?? 0;
-	if (len === 0 || (lastParsedLen > 0 && len - lastParsedLen < minGrowthBytes)) return null;
+	if (len === 0) return null;
+	const growth = Math.max(minGrowthBytes, len >> 5);
+	if (lastParsedLen > 0 && len - lastParsedLen < growth) return null;
 	return { value: parseStreamingJson<T>(partialJson), parsedLen: len };
 }
 

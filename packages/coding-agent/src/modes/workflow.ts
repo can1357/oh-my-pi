@@ -23,8 +23,14 @@ const WORKFLOW_WORD = magicKeywordRegex("workflowz");
 export const WORKFLOW_NOTICE: string = renderWorkflowNotice({ taskBatch: true });
 
 /** renderWorkflowNotice renders the workflow notice for the active task schema. */
-export function renderWorkflowNotice({ taskBatch }: { taskBatch: boolean }): string {
-	return prompt.render(workflowNoticeTemplate, { taskBatch }).trim();
+export function renderWorkflowNotice({
+	taskBatch,
+	scoutAvailable,
+}: {
+	taskBatch: boolean;
+	scoutAvailable?: boolean;
+}): string {
+	return prompt.render(workflowNoticeTemplate, { taskBatch, scoutAvailable: scoutAvailable ?? true }).trim();
 }
 
 /**

@@ -228,7 +228,7 @@ describe("umans provider catalog", () => {
 		}
 	});
 
-	it("maps the models.dev Umans PAYG pricing to the Anthropic endpoint", () => {
+	it("maps the stencil.so Umans PAYG pricing to the Anthropic endpoint", () => {
 		const models = mapModelsDevToModels(
 			{
 				"umans-ai": {

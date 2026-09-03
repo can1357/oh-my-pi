@@ -6,10 +6,12 @@
  * lifecycle hook dispatch.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	type AgentTelemetryConfig,
 	type ChatUsageEvent,
+	classifyGatewayResponseCacheStatus,
 	detectGatewayFromHeaders,
 	GenAIAttr,
 	GenAIOperation,
@@ -22,7 +24,6 @@ import {
 } from "@oh-my-pi/pi-agent-core/telemetry";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
@@ -217,7 +218,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: {},
 		};
-		const alphaSchema = z.object({ value: z.string() });
+		const alphaSchema = type({ value: type("string") });
 		const alphaTool: AgentTool<typeof alphaSchema> = {
 			name: "alpha",
 			label: "Alpha",
@@ -262,7 +263,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: {},
 		};
-		const probeSchema = z.object({ value: z.string() });
+		const probeSchema = type({ value: type("string") });
 		const probeTool: AgentTool<typeof probeSchema> = {
 			name: "probe",
 			label: "Probe",
@@ -298,7 +299,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: {},
 		};
-		const failSchema = z.object({ value: z.string() });
+		const failSchema = type({ value: type("string") });
 		const failTool: AgentTool<typeof failSchema> = {
 			name: "fail",
 			label: "Fail",
@@ -693,7 +694,7 @@ describe("agent-loop OTEL instrumentation", () => {
 				onSpanEnd: ctx => ends.push(ctx),
 			},
 		};
-		const echoSchema = z.object({ value: z.string() });
+		const echoSchema = type({ value: type("string") });
 		const echoTool: AgentTool<typeof echoSchema> = {
 			name: "echo",
 			label: "Echo",
@@ -796,7 +797,7 @@ describe("agent-loop OTEL instrumentation", () => {
 			convertToLlm: identityConverter,
 			telemetry: cfg,
 		};
-		const echoSchema = z.object({ value: z.string() });
+		const echoSchema = type({ value: type("string") });
 		const tool: AgentTool<typeof echoSchema> = {
 			name: "echo",
 			label: "Echo",
@@ -885,6 +886,59 @@ describe("detectGatewayFromHeaders", () => {
 			"helicone-id": "he-1",
 		});
 		expect(detection?.name).toBe("litellm");
+	});
+
+	it("still identifies known gateways when Cloudflare response-cache headers are also present", () => {
+		expect(
+			detectGatewayFromHeaders({
+				"x-litellm-call-id": "ll-cf",
+				"cf-aig-cache-status": "HIT",
+			})?.name,
+		).toBe("litellm");
+		expect(
+			detectGatewayFromHeaders({
+				"helicone-id": "he-cf",
+				"cf-aig-cache-status": "MISS",
+			})?.name,
+		).toBe("helicone");
+		expect(
+			detectGatewayFromHeaders({
+				"x-portkey-trace-id": "pk-cf",
+				"cf-aig-cache-status": "BYPASS",
+			})?.name,
+		).toBe("portkey");
+		expect(
+			detectGatewayFromHeaders({
+				"x-generation-id": "gen-cf-1",
+				"cf-aig-cache-status": "HIT",
+			})?.name,
+		).toBe("openrouter");
+	});
+});
+
+describe("classifyGatewayResponseCacheStatus", () => {
+	it("case-normalizes HIT/MISS/BYPASS to bounded response-cache statuses", () => {
+		expect(classifyGatewayResponseCacheStatus({ "cf-aig-cache-status": "HIT" })).toBe("hit");
+		expect(classifyGatewayResponseCacheStatus({ "cf-aig-cache-status": " miss " })).toBe("miss");
+		expect(classifyGatewayResponseCacheStatus({ "cf-aig-cache-status": "ByPaSs" })).toBe("bypass");
+	});
+
+	it("maps unrecognized present values to unknown", () => {
+		expect(classifyGatewayResponseCacheStatus({ "cf-aig-cache-status": "EXPIRED" })).toBe("unknown");
+		expect(classifyGatewayResponseCacheStatus({ "cf-aig-cache-status": "" })).toBe("unknown");
+	});
+
+	it("ignores non-allow-listed Cloudflare headers and absent maps", () => {
+		expect(
+			classifyGatewayResponseCacheStatus({
+				"cf-aig-cache-ttl": "3600",
+				"cf-aig-skip-cache": "true",
+				"cf-aig-cache-key": "k1",
+				"cf-ray": "abc",
+			}),
+		).toBeUndefined();
+		expect(classifyGatewayResponseCacheStatus({})).toBeUndefined();
+		expect(classifyGatewayResponseCacheStatus(undefined)).toBeUndefined();
 	});
 });
 
@@ -1020,5 +1074,79 @@ describe("ChatUsageEvent.headers and pi.gen_ai.gateway.* span attributes", () =>
 		expect(seen[0]?.["x-litellm-call-id"]).toBe("ll-2");
 		const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
 		expect(chat?.attributes[PiGenAIAttr.GatewayName]).toBe("litellm");
+	});
+
+	it("stamps pi.gen_ai.gateway.response_cache.status from cf-aig-cache-status without prompt-cache attrs", async () => {
+		const mock = createMockModel({
+			...MOCK_IDENT,
+			responses: [
+				{
+					content: ["ok"],
+					usage: { input: 4, output: 2, totalTokens: 6 },
+					responseHeaders: {
+						"cf-aig-cache-status": "HIT",
+						"cf-aig-cache-ttl": "3600",
+						"cf-aig-cache-key": "secret-key",
+						"cf-ray": "ray-should-not-leak",
+						"x-custom-secret": "nope",
+					},
+				},
+			],
+		});
+		const events: ChatUsageEvent[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			telemetry: { onChatUsage: event => void events.push(event) },
+		};
+		const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+		await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
+
+		const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
+		expect(chat?.attributes[PiGenAIAttr.GatewayResponseCacheStatus]).toBe("hit");
+		// Response replay must not inflate or invent provider prompt-cache token counters.
+		// Mock usage defaults cacheRead/cacheWrite to 0; HIT must leave them at zero, not promote a hit.
+		expect(chat?.attributes[GenAIAttr.UsageCacheReadInputTokens]).toBe(0);
+		expect(chat?.attributes[GenAIAttr.UsageCacheCreationInputTokens]).toBe(0);
+		// Only allow-listed classification — raw Cloudflare/custom headers stay off the span.
+		expect(chat?.attributes["cf-aig-cache-status"]).toBeUndefined();
+		expect(chat?.attributes["cf-aig-cache-ttl"]).toBeUndefined();
+		expect(chat?.attributes["cf-aig-cache-key"]).toBeUndefined();
+		expect(chat?.attributes["cf-ray"]).toBeUndefined();
+		expect(chat?.attributes["x-custom-secret"]).toBeUndefined();
+		// ChatUsageEvent.headers still forwards the full captured map unchanged.
+		expect(events[0]?.headers?.["cf-aig-cache-status"]).toBe("HIT");
+		expect(events[0]?.headers?.["cf-aig-cache-key"]).toBe("secret-key");
+		expect(events[0]?.headers?.["x-custom-secret"]).toBe("nope");
+	});
+
+	it("classifies miss/bypass/unknown response-cache statuses on the chat span", async () => {
+		const cases = [
+			{ header: "MISS", expected: "miss" },
+			{ header: "bypass", expected: "bypass" },
+			{ header: "DYNAMIC", expected: "unknown" },
+		] as const;
+		for (const { header, expected } of cases) {
+			exporter.reset();
+			const mock = createMockModel({
+				...MOCK_IDENT,
+				responses: [
+					{
+						content: ["ok"],
+						usage: { input: 1, output: 1, totalTokens: 2 },
+						responseHeaders: { "cf-aig-cache-status": header },
+					},
+				],
+			});
+			const config: AgentLoopConfig = {
+				model: mock.model,
+				convertToLlm: identityConverter,
+				telemetry: {},
+			};
+			const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+			await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
+			const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
+			expect(chat?.attributes[PiGenAIAttr.GatewayResponseCacheStatus]).toBe(expected);
+		}
 	});
 });

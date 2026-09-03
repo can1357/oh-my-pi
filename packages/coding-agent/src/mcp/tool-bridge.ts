@@ -4,9 +4,9 @@
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { TSchema } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { SourceMeta } from "../capability/types";
 import type {
@@ -21,11 +21,19 @@ import type { OutputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
+import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
-import type { MCPContent, MCPServerConnection, MCPToolCallParams, MCPToolCallResult, MCPToolDefinition } from "./types";
+import type {
+	MCPAuthChallenge,
+	MCPContent,
+	MCPServerConnection,
+	MCPToolCallParams,
+	MCPToolCallResult,
+	MCPToolDefinition,
+} from "./types";
 
-/** Reconnect callback: tears down stale connection, returns new one or null. */
-export type MCPReconnect = () => Promise<MCPServerConnection | null>;
+/** Reconnect callback: tears down a stale connection, optionally authorizing first. */
+export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
 
 /**
  * Network-level and stale-session errors that warrant a reconnect + single retry.
@@ -43,9 +51,19 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
-
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (error instanceof MCPTransportError) {
+		if (
+			error.failure === "connect" ||
+			error.failure === "reset" ||
+			error.failure === "eof" ||
+			error.failure === "closed"
+		) {
+			return error.retryable;
+		}
+		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
 	if (/^http (404|502|503):/.test(msg)) return true;
@@ -174,6 +192,8 @@ export interface MCPToolDetails {
 	isError?: boolean;
 	/** Raw content from MCP response */
 	rawContent?: MCPContent[];
+	/** Structured metadata from the MCP response */
+	mcpMeta?: Record<string, unknown>;
 	/** Provider ID (e.g., "claude", "mcp-json") */
 	provider?: string;
 	/** Provider display name (e.g., "Claude Code", "MCP Config") */
@@ -182,30 +202,77 @@ export interface MCPToolDetails {
 	meta?: OutputMeta;
 }
 /**
- * Format MCP content for LLM consumption.
+ * Convert MCP content to agent content while retaining image payloads.
  */
-function formatMCPContent(content: MCPContent[]): string {
-	const parts: string[] = [];
+function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageContent> {
+	const blocks: Array<TextContent | ImageContent> = [];
+	let text = "";
+	const flushText = () => {
+		if (!text) return;
+		blocks.push({ type: "text", text });
+		text = "";
+	};
+	const appendText = (value: string) => {
+		text += text ? `\n\n${value}` : value;
+	};
 
 	for (const item of content) {
 		switch (item.type) {
 			case "text":
-				parts.push(item.text);
+				appendText(item.text);
 				break;
 			case "image":
-				parts.push(`[Image: ${item.mimeType}]`);
+				flushText();
+				blocks.push(item);
 				break;
 			case "resource":
-				if (item.resource.text) {
-					parts.push(`[Resource: ${item.resource.uri}]\n${item.resource.text}`);
-				} else {
-					parts.push(`[Resource: ${item.resource.uri}]`);
-				}
+				appendText(
+					item.resource.text
+						? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
+						: `[Resource: ${item.resource.uri}]`,
+				);
 				break;
 		}
 	}
+	flushText();
+	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+}
 
-	return parts.join("\n\n");
+/**
+ * Serialize an MCP result's structured payload as a fenced JSON block so it
+ * reaches the model through the standard content channel — and the eval
+ * `tool.*` and subagent proxy bridges that read the same result. Subject to the
+ * usual spill/byte-cap machinery like any other text block.
+ */
+function formatStructuredContent(structured: Record<string, unknown>): string {
+	let json: string;
+	try {
+		json = JSON.stringify(structured, null, 2);
+	} catch {
+		return "";
+	}
+	return `\`\`\`json\n${json}\n\`\`\``;
+}
+
+/**
+ * True when a text block already carries the structured payload verbatim. A
+ * spec-compliant server duplicates `structuredContent` into a TextContent block
+ * for back-compat; detecting that avoids emitting the JSON twice.
+ */
+function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+	for (const item of content) {
+		if (item.type !== "text") continue;
+		const trimmed = item.text.trim();
+		if (trimmed.length === 0) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		if (Bun.deepEquals(parsed, structured)) return true;
+	}
+	return false;
 }
 
 /** Build a CustomToolResult from a callTool response. */
@@ -216,17 +283,31 @@ function buildResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const text = formatMCPContent(result.content);
+	const content = formatMCPContent(result.content);
 	const details: MCPToolDetails = {
 		serverName,
 		mcpToolName,
 		isError: result.isError,
 		rawContent: result.content,
+		mcpMeta: result._meta,
 		provider,
 		providerName,
 	};
-	const contentText = result.isError ? `Error: ${text}` : text;
-	const toolResult: CustomToolResult<MCPToolDetails> = { content: [{ type: "text", text: contentText }], details };
+	if (result.isError) {
+		if (content[0]?.type === "text") {
+			content[0] = { type: "text", text: `Error: ${content[0].text}` };
+		} else {
+			content.unshift({ type: "text", text: "Error:" });
+		}
+	}
+	const structured = result.structuredContent;
+	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
+		const rendered = formatStructuredContent(structured);
+		if (rendered.length > 0) {
+			content.push({ type: "text", text: rendered });
+		}
+	}
+	const toolResult: CustomToolResult<MCPToolDetails> = { content, details };
 	if (result.isError) {
 		toolResult.isError = true;
 	}
@@ -241,12 +322,57 @@ function buildErrorResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const message = error instanceof Error ? error.message : String(error);
+	const message = formatMCPToolFailure(error, serverName, mcpToolName);
 	return {
-		content: [{ type: "text", text: `MCP error: ${message}` }],
+		content: [{ type: "text", text: message }],
 		details: { serverName, mcpToolName, isError: true, provider, providerName },
 		isError: true,
 	};
+}
+
+type MCPToolCallAttempt = {
+	connection: MCPServerConnection;
+	result?: MCPToolCallResult;
+	error?: unknown;
+};
+
+function getMcpAuthChallenge(result: MCPToolCallResult): MCPAuthChallenge | undefined {
+	if (!result.isError) return undefined;
+	const values = result._meta?.["mcp/www_authenticate"];
+	if (!Array.isArray(values)) return undefined;
+	const wwwAuthenticate = values.filter((value): value is string => typeof value === "string" && value.trim() !== "");
+	return wwwAuthenticate.length > 0 ? { wwwAuthenticate } : undefined;
+}
+
+async function callToolWithAuthRetry(
+	connection: MCPServerConnection,
+	toolName: string,
+	args: MCPToolArgs,
+	reconnect: MCPReconnect | undefined,
+	signal?: AbortSignal,
+): Promise<MCPToolCallAttempt> {
+	const result = await callTool(connection, toolName, args, { signal });
+	const authChallenge = getMcpAuthChallenge(result);
+	if (!authChallenge || !reconnect) return { connection, result };
+
+	let newConnection: MCPServerConnection | null;
+	try {
+		newConnection = await reconnectWithAbort(reconnect, signal, { authChallenge });
+	} catch (error) {
+		rethrowIfAborted(error, signal);
+		return { connection, error };
+	}
+	if (!newConnection) return { connection, result };
+
+	try {
+		return {
+			connection: newConnection,
+			result: await callTool(newConnection, toolName, args, { signal }),
+		};
+	} catch (error) {
+		rethrowIfAborted(error, signal);
+		return { connection: newConnection, error };
+	}
 }
 
 /** Re-throw abort-related errors so they bypass error-result handling. */
@@ -256,9 +382,13 @@ function rethrowIfAborted(error: unknown, signal?: AbortSignal): void {
 	if (signal?.aborted) throw new ToolAbortError();
 }
 
-async function reconnectWithAbort(reconnect: MCPReconnect, signal?: AbortSignal): Promise<MCPServerConnection | null> {
+async function reconnectWithAbort(
+	reconnect: MCPReconnect,
+	signal?: AbortSignal,
+	options?: { authChallenge?: MCPAuthChallenge },
+): Promise<MCPServerConnection | null> {
 	try {
-		return await untilAborted(signal, reconnect);
+		return await untilAborted(signal, () => reconnect(options));
 	} catch (error) {
 		rethrowIfAborted(error, signal);
 		return null;
@@ -283,6 +413,29 @@ function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	return sanitized.length > 0 ? sanitized : fallback;
 }
 
+/**
+ * Longest tool name strict validators accept. OpenAI Responses/Completions and
+ * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
+ * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
+ */
+const MAX_MCP_TOOL_NAME_LENGTH = 64;
+/** Length of the deterministic hash suffix appended when a minted name overflows. */
+const MCP_TOOL_NAME_HASH_LENGTH = 8;
+
+/**
+ * Cap a minted MCP tool name at {@link MAX_MCP_TOOL_NAME_LENGTH}. An overlong
+ * name keeps a readable prefix and gains a deterministic base-36 hash suffix of
+ * the full name, so distinct long names stay unique and the same name is stable
+ * across turns — the model must call the exact registry key, and the hash is
+ * seed-fixed so it never shifts between processes.
+ */
+function capMCPToolNameLength(name: string): string {
+	if (name.length <= MAX_MCP_TOOL_NAME_LENGTH) return name;
+	const hash = Bun.hash(name).toString(36).slice(0, MCP_TOOL_NAME_HASH_LENGTH);
+	const keep = MAX_MCP_TOOL_NAME_LENGTH - hash.length - 1;
+	return `${name.slice(0, keep)}_${hash}`;
+}
+
 export function createMCPToolName(serverName: string, toolName: string): string {
 	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
 	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
@@ -295,7 +448,67 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
 	}
 
-	return `mcp__${sanitizedServerName}_${normalizedToolName}`;
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+}
+
+export interface MCPToolOriginSource {
+	readonly name: string;
+	readonly mcpServerName?: unknown;
+	readonly mcpToolName?: unknown;
+}
+
+/** Stable identity for a tool's original MCP route, before its public name was normalized. */
+export function getMCPToolOriginKey(tool: MCPToolOriginSource): string | undefined {
+	if (typeof tool.mcpServerName !== "string" || typeof tool.mcpToolName !== "string") return undefined;
+	return `${tool.mcpServerName}\u0000${tool.mcpToolName}`;
+}
+
+/**
+ * Keeps one MCP tool per minted name and logs collisions between distinct MCP
+ * origins. The winner is chosen by a stable origin key (server name + original
+ * tool name), NOT array order: MCPManager re-appends a reconnecting server's
+ * tools, so insertion order is mutable across reconnects and first-wins would
+ * silently flip ownership of the minted name. Non-MCP tools pass through
+ * unchanged.
+ */
+export function deduplicateMCPToolsByName<T extends MCPToolOriginSource>(tools: readonly T[]): T[] {
+	const deduplicated: T[] = [];
+	const registered = new Map<string, { tool: T; originKey: string; index: number }>();
+
+	for (const tool of tools) {
+		const originKey = getMCPToolOriginKey(tool);
+		if (originKey === undefined) {
+			deduplicated.push(tool);
+			continue;
+		}
+		const existing = registered.get(tool.name);
+		if (!existing) {
+			registered.set(tool.name, { tool, originKey, index: deduplicated.length });
+			deduplicated.push(tool);
+			continue;
+		}
+
+		if (existing.originKey === originKey) continue;
+
+		// Deterministic winner regardless of encounter order across reconnects.
+		const keepExisting = existing.originKey < originKey;
+		const winner = keepExisting ? existing.tool : tool;
+		const loser = keepExisting ? tool : existing.tool;
+		if (!keepExisting) {
+			deduplicated[existing.index] = tool;
+			existing.tool = tool;
+			existing.originKey = originKey;
+		}
+		logger.warn("MCP tool name collision; keeping stable winner", {
+			name: tool.name,
+			keptServer: winner.mcpServerName,
+			keptTool: winner.mcpToolName,
+			ignoredServer: loser.mcpServerName,
+			ignoredTool: loser.mcpToolName,
+		});
+	}
+
+	return deduplicated;
 }
 
 /**
@@ -379,8 +592,27 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const providerName = this.connection._source?.providerName;
 
 		try {
-			const result = await callTool(this.connection, this.tool.name, args, { signal });
-			return buildResult(result, this.connection.name, this.tool.name, provider, providerName);
+			const attempt = await callToolWithAuthRetry(this.connection, this.tool.name, args, this.reconnect, signal);
+			if (attempt.error !== undefined) {
+				return buildErrorResult(attempt.error, this.connection.name, this.tool.name, provider, providerName);
+			}
+			if (!attempt.result) {
+				return buildErrorResult(
+					new Error("MCP tool call returned no result"),
+					this.connection.name,
+					this.tool.name,
+					provider,
+					providerName,
+				);
+			}
+			this.connection = attempt.connection;
+			return buildResult(
+				attempt.result,
+				attempt.connection.name,
+				this.tool.name,
+				attempt.connection._source?.provider ?? provider,
+				attempt.connection._source?.providerName ?? providerName,
+			);
 		} catch (error) {
 			rethrowIfAborted(error, signal);
 			if (this.reconnect && isRetriableConnectionError(error)) {
@@ -483,13 +715,31 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 			const connection = await untilAborted(signal, () => this.getConnection());
 			throwIfAborted(signal);
 			try {
-				const result = await callTool(connection, this.tool.name, args, { signal });
+				const attempt = await callToolWithAuthRetry(connection, this.tool.name, args, this.reconnect, signal);
+				if (attempt.error !== undefined) {
+					return buildErrorResult(
+						attempt.error,
+						this.serverName,
+						this.tool.name,
+						attempt.connection._source?.provider ?? provider,
+						attempt.connection._source?.providerName ?? providerName,
+					);
+				}
+				if (!attempt.result) {
+					return buildErrorResult(
+						new Error("MCP tool call returned no result"),
+						this.serverName,
+						this.tool.name,
+						provider,
+						providerName,
+					);
+				}
 				return buildResult(
-					result,
+					attempt.result,
 					this.serverName,
 					this.tool.name,
-					connection._source?.provider ?? provider,
-					connection._source?.providerName ?? providerName,
+					attempt.connection._source?.provider ?? provider,
+					attempt.connection._source?.providerName ?? providerName,
 				);
 			} catch (callError) {
 				rethrowIfAborted(callError, signal);

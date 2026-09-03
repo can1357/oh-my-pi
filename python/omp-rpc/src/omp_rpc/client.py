@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import queue
@@ -23,6 +25,7 @@ from .protocol import (
     AutoRetryEndEvent,
     AutoRetryStartEvent,
     BashResult,
+    FastModeResult,
     BranchMessage,
     BranchResult,
     CancellationResult,
@@ -34,6 +37,7 @@ from .protocol import (
     JsonObject,
     JsonValue,
     MessageEndEvent,
+    MessagesPage,
     MessageStartEvent,
     MessageUpdateEvent,
     ModelCycleResult,
@@ -64,6 +68,7 @@ from .protocol import (
     assistant_text,
     parse_agent_messages,
     parse_bash_result,
+    parse_fast_mode_result,
     parse_branch_messages,
     parse_branch_result,
     parse_cancellation_result,
@@ -111,6 +116,104 @@ THistoryItem = TypeVar("THistoryItem")
 _ASYNC_COMMANDS = frozenset({"prompt", "abort_and_prompt"})
 _DEFAULT_ERROR_HISTORY_LIMIT = 128
 _TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandoned"})
+_MAX_RPC_FRAME_BYTES = 1024 * 1024
+_MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024
+_RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
+_RPC_MESSAGES_PAGE_BUSY_ERROR = "Cannot page messages while the session is changing"
+_RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
+_RPC_MESSAGES_PAGE_FALLBACK_CODES = frozenset({"session_busy", "stale_cursor"})
+
+
+@dataclass(slots=True)
+class _PendingRpcChunks:
+    chunk_id: str
+    count: int
+    byte_length: int
+    next_index: int = 0
+    chunks: list[bytes] = field(default_factory=list)
+    received_bytes: int = 0
+
+
+class _RpcFrameDecoder:
+    def __init__(self) -> None:
+        self._pending: _PendingRpcChunks | None = None
+
+    def push(self, value: object) -> JsonObject | None:
+        if not isinstance(value, dict) or value.get("type") != "rpc_chunk":
+            if self._pending is not None:
+                raise RpcError("RPC chunk sequence was interrupted")
+            if not isinstance(value, dict):
+                raise RpcError("RPC frame must be a JSON object")
+            return cast(JsonObject, value)
+
+        chunk_id = value.get("chunkId")
+        index = value.get("index")
+        count = value.get("count")
+        byte_length = value.get("byteLength")
+        data = value.get("data")
+        max_chunk_count = (
+            _MAX_RPC_REASSEMBLED_BYTES + _RPC_CHUNK_PAYLOAD_BYTES - 1
+        ) // _RPC_CHUNK_PAYLOAD_BYTES
+        if (
+            not isinstance(chunk_id, str)
+            or not chunk_id
+            or len(chunk_id) > 128
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or not isinstance(byte_length, int)
+            or isinstance(byte_length, bool)
+            or index < 0
+            or count < 2
+            or count > max_chunk_count
+            or index >= count
+            or byte_length < _MAX_RPC_FRAME_BYTES
+            or byte_length > _MAX_RPC_REASSEMBLED_BYTES
+            or not isinstance(data, str)
+            or not data
+        ):
+            raise RpcError("Invalid RPC chunk metadata")
+        try:
+            chunk = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RpcError("Invalid RPC chunk data") from exc
+        if base64.b64encode(chunk).decode("ascii") != data:
+            raise RpcError("Invalid RPC chunk data")
+        if len(chunk) > _RPC_CHUNK_PAYLOAD_BYTES:
+            raise RpcError("RPC chunk payload exceeds the transport limit")
+
+        if self._pending is None:
+            if index != 0:
+                raise RpcError("RPC chunk sequence must start at index 0")
+            self._pending = _PendingRpcChunks(chunk_id, count, byte_length)
+        pending = self._pending
+        if (
+            pending.chunk_id != chunk_id
+            or pending.count != count
+            or pending.byte_length != byte_length
+            or pending.next_index != index
+        ):
+            raise RpcError("RPC chunk sequence mismatch")
+        pending.chunks.append(chunk)
+        pending.received_bytes += len(chunk)
+        pending.next_index += 1
+        if pending.received_bytes > pending.byte_length:
+            raise RpcError("RPC chunk sequence exceeds its declared length")
+        if pending.next_index < pending.count:
+            return None
+        if pending.received_bytes != pending.byte_length:
+            raise RpcError("RPC chunk sequence length mismatch")
+
+        self._pending = None
+        try:
+            decoded = b"".join(pending.chunks).decode("utf-8")
+            frame = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RpcError("Failed to decode reassembled RPC frame") from exc
+        if not isinstance(frame, dict):
+            raise RpcError("RPC frame must be a JSON object")
+        return cast(JsonObject, frame)
 
 
 def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
@@ -214,12 +317,16 @@ class RpcConcurrencyError(RpcError):
 
 
 class RpcCommandError(RpcError):
-    """Raised when the RPC server returns `success: false`."""
+    """Raised when the RPC server returns `success: false`.
 
-    def __init__(self, command: str, error: str):
+    `code` carries the server's machine-readable error code when present.
+    """
+
+    def __init__(self, command: str, error: str, code: str | None = None):
         super().__init__(f"{command}: {error}")
         self.command = command
         self.error = error
+        self.code = code
 
 
 class RpcProtocolError(RpcError):
@@ -403,6 +510,7 @@ class RpcClient:
         self._event_condition = threading.Condition()
         self._pending: dict[str, _PendingRequest] = {}
         self._pending_host_tool_calls: dict[str, _PendingHostToolCall] = {}
+        self._host_tool_dispatch_names: dict[str, str] = {}
         self._pending_host_uri_requests: dict[str, _PendingHostUriRequest] = {}
         self._request_id = 0
         self._events = _BoundedHistory[JsonObject](self._max_event_history)
@@ -417,6 +525,10 @@ class RpcClient:
         self._closed_error: BaseException | None = None
         self._stopping = False
         self._ready_received = False
+        self._ready_event: ReadyEvent | None = None
+        self._protocol_version = 1
+        self._protocol_v2_enabled = False
+        self._frame_decoder = _RpcFrameDecoder()
         self._protocol_errors = _BoundedHistory[RpcProtocolError](
             _DEFAULT_ERROR_HISTORY_LIMIT
         )
@@ -468,6 +580,10 @@ class RpcClient:
         self._stopping = False
         self._closed_error = None
         self._ready_received = False
+        self._ready_event = None
+        self._protocol_version = 1
+        self._protocol_v2_enabled = False
+        self._frame_decoder = _RpcFrameDecoder()
         self._events.clear()
         self._async_errors.clear()
         self._scheduled_agent_runs = 0
@@ -529,6 +645,24 @@ class RpcClient:
                 f"Timed out waiting for RPC ready signal. Stderr: {stderr}"
             )
 
+        ready_event = self._ready_event
+        if (
+            ready_event is not None
+            and ready_event.supported_protocol_versions is not None
+            and 2 in ready_event.supported_protocol_versions
+            and ready_event.max_frame_bytes == _MAX_RPC_FRAME_BYTES
+            and ready_event.max_reassembled_frame_bytes == _MAX_RPC_REASSEMBLED_BYTES
+        ):
+            try:
+                self._protocol_v2_enabled = True
+                negotiation = self._request("negotiate_protocol", protocolVersion=2)
+                if negotiation.get("protocolVersion") != 2:
+                    raise RpcError("RPC protocol v2 negotiation failed")
+                self._protocol_version = 2
+            except BaseException:
+                self.stop()
+                raise
+
         if self._custom_tools:
             self.set_custom_tools(self._custom_tools)
         if self._host_uris:
@@ -575,6 +709,7 @@ class RpcClient:
             # reader's exception path) returns early.
             self._mark_closed(RpcProcessExitError("RPC process stopped"))
             self._pending_host_tool_calls.clear()
+            self._host_tool_dispatch_names.clear()
             self._pending_host_uri_requests.clear()
             self._process = None
             self._pgid = None
@@ -783,6 +918,9 @@ class RpcClient:
         payload = self._request("get_state")
         return parse_session_state(payload)
 
+    def set_fast_mode(self, enabled: bool) -> FastModeResult:
+        return parse_fast_mode_result(self._request("set_fast_mode", enabled=enabled))
+
     def set_model(self, provider: str, model_id: str) -> ModelInfo:
         payload = self._request("set_model", provider=provider, modelId=model_id)
         model = parse_model_info(payload)
@@ -882,8 +1020,68 @@ class RpcClient:
         return self.set_todos(())
 
     def get_messages(self) -> tuple[AgentMessage, ...]:
+        if self._protocol_version == 2:
+            try:
+                messages: list[AgentMessage] = []
+                seen_cursors: set[str] = set()
+                total_messages: int | None = None
+                cursor: str | None = None
+                while True:
+                    page = self.get_messages_page(cursor=cursor, limit=256)
+                    if (
+                        total_messages is not None
+                        and page.total_messages != total_messages
+                    ):
+                        raise RpcError(
+                            "RPC message pagination returned an inconsistent total"
+                        )
+                    total_messages = page.total_messages
+                    messages.extend(page.messages)
+                    cursor = page.next_cursor
+                    if cursor is None:
+                        break
+                    if cursor in seen_cursors:
+                        raise RpcError("RPC message pagination repeated a cursor")
+                    seen_cursors.add(cursor)
+                if len(messages) != total_messages:
+                    raise RpcError(
+                        "RPC message pagination ended before the advertised total"
+                    )
+                return tuple(messages)
+            except RpcCommandError as error:
+                if error.command != "get_messages_page" or not (
+                    error.code in _RPC_MESSAGES_PAGE_FALLBACK_CODES
+                    or error.error
+                    in (
+                        _RPC_MESSAGES_PAGE_BUSY_ERROR,
+                        _RPC_MESSAGES_PAGE_STALE_ERROR,
+                    )
+                ):
+                    raise
         payload = self._request("get_messages")
         return parse_agent_messages(cast(JsonValue | None, payload.get("messages")))
+
+    def get_messages_page(
+        self, *, cursor: str | None = None, limit: int | None = None
+    ) -> MessagesPage:
+        payload = self._request("get_messages_page", cursor=cursor, limit=limit)
+        raw_total = payload.get("totalMessages")
+        if (
+            not isinstance(raw_total, int)
+            or isinstance(raw_total, bool)
+            or raw_total < 0
+        ):
+            raise RpcError("get_messages_page response has an invalid totalMessages")
+        raw_cursor = payload.get("nextCursor")
+        if raw_cursor is not None and not isinstance(raw_cursor, str):
+            raise RpcError("get_messages_page response has an invalid nextCursor")
+        return MessagesPage(
+            messages=parse_agent_messages(
+                cast(JsonValue | None, payload.get("messages"))
+            ),
+            total_messages=raw_total,
+            next_cursor=raw_cursor,
+        )
 
     def set_custom_tools(self, tools: Sequence[HostTool[Any, Any]]) -> tuple[str, ...]:
         self._custom_tools = tuple(tools)
@@ -1100,9 +1298,8 @@ class RpcClient:
     def _complete_agent_end_messages(
         events: tuple[RpcAgentEvent, ...], terminal: AgentEndEvent
     ) -> tuple[AgentMessage, ...]:
-        if (
-            terminal.message_count is None
-            or terminal.message_count <= len(terminal.messages)
+        if terminal.message_count is None or terminal.message_count <= len(
+            terminal.messages
         ):
             return terminal.messages
 
@@ -1156,7 +1353,9 @@ class RpcClient:
 
                 event_payloads = self._events.snapshot_from(start_index)
                 if any(
-                    payload.get("type") == "agent_end" for payload in event_payloads
+                    payload.get("type") == "agent_end"
+                    and payload.get("isTerminal") is not False
+                    for payload in event_payloads
                 ):
                     events = tuple(
                         cast(RpcAgentEvent, parse_notification(payload))
@@ -1205,9 +1404,11 @@ class RpcClient:
             raise response
 
         if not bool(response.get("success", False)):
+            raw_code = response.get("code")
             raise RpcCommandError(
                 command=str(response.get("command", command_type)),
                 error=str(response.get("error", "")),
+                code=raw_code if isinstance(raw_code, str) else None,
             )
 
         data = response.get("data")
@@ -1226,6 +1427,30 @@ class RpcClient:
             return cast(JsonObject, dict(result))
         raise RpcError("Host tool handlers must return a string or a result mapping")
 
+    def _normalize_host_tool_event(self, payload: JsonObject) -> None:
+        """Rename transport tool events for in-flight host-tool dispatches.
+
+        With `tools.xdev` enabled, omp mounts custom tools as `xd://` devices
+        and the agent invokes them through the `write` tool, so
+        `tool_execution_update`/`tool_execution_end` events report the
+        transport tool (`write`) rather than the host tool that actually ran.
+        The `host_tool_call` frame carries the outer call's `toolCallId` (the
+        device dispatch forwards it verbatim), which lets events for that call
+        be renamed to the executed host tool — consumers observe the same tool
+        names regardless of transport. A top-level call (xdev off) maps the
+        name onto itself. `tool_execution_start` precedes the `host_tool_call`
+        frame on the wire, so start events keep the transport name.
+        """
+        tool_call_id = payload.get("toolCallId")
+        if not isinstance(tool_call_id, str):
+            return
+        if payload.get("type") == "tool_execution_end":
+            tool_name = self._host_tool_dispatch_names.pop(tool_call_id, None)
+        else:
+            tool_name = self._host_tool_dispatch_names.get(tool_call_id)
+        if tool_name is not None:
+            payload["toolName"] = tool_name
+
     def _handle_host_tool_call(self, payload: JsonObject) -> None:
         request_id = payload.get("id")
         tool_name = payload.get("toolName")
@@ -1237,6 +1462,10 @@ class RpcClient:
             or not isinstance(tool_call_id, str)
         ):
             return
+        # Remember the dispatch so tool_execution_* events for this call id can
+        # be renamed from the transport tool to the host tool that ran; see
+        # _normalize_host_tool_event.
+        self._host_tool_dispatch_names[tool_call_id] = tool_name
         if not isinstance(raw_arguments, Mapping):
             self._send_notification(
                 {
@@ -1481,6 +1710,7 @@ class RpcClient:
                     "status": cast(JsonValue, seed.status),
                     "notes": seed.notes,
                     "details": seed.details,
+                    "blocker": seed.blocker,
                 }
 
             content = seed.get("content")
@@ -1491,6 +1721,7 @@ class RpcClient:
             raw_status = seed.get("status")
             raw_notes = seed.get("notes")
             raw_details = seed.get("details")
+            raw_blocker = seed.get("blocker")
             if isinstance(raw_status, str):
                 if raw_status not in _TODO_STATUS_VALUES:
                     raise RpcError(f"Unsupported todo status: {raw_status}")
@@ -1505,6 +1736,7 @@ class RpcClient:
                 "status": cast(JsonValue, status),
                 "notes": raw_notes if isinstance(raw_notes, str) else None,
                 "details": raw_details if isinstance(raw_details, str) else None,
+                "blocker": raw_blocker if isinstance(raw_blocker, str) else None,
             }
 
         def is_phase_seed(seed: TodoSeed | TodoPhaseSeed) -> bool:
@@ -1632,7 +1864,7 @@ class RpcClient:
                     continue
 
                 try:
-                    payload = cast(JsonObject, json.loads(stripped))
+                    raw_payload = json.loads(stripped)
                 except json.JSONDecodeError as exc:
                     snippet = stripped
                     if len(snippet) > 240:
@@ -1640,6 +1872,15 @@ class RpcClient:
                     raise RpcError(
                         f"Failed to decode RPC output on line {line_number}: {exc}. Frame: {snippet!r}"
                     ) from exc
+                if (
+                    isinstance(raw_payload, dict)
+                    and raw_payload.get("type") == "rpc_chunk"
+                    and not self._protocol_v2_enabled
+                ):
+                    raise RpcError("RPC chunk received before protocol negotiation")
+                payload = self._frame_decoder.push(raw_payload)
+                if payload is None:
+                    continue
                 if payload.get("type") == "response":
                     self._handle_response(payload)
                     continue
@@ -1656,23 +1897,42 @@ class RpcClient:
                     self._handle_host_uri_cancel(payload)
                     continue
 
-                notification = parse_notification(payload)
-                listener_notification = parse_notification(payload)
+                payload_type = payload.get("type")
+                if payload_type in ("tool_execution_update", "tool_execution_end"):
+                    self._normalize_host_tool_event(payload)
+                try:
+                    notification = parse_notification(payload)
+                except (TypeError, ValueError) as exc:
+                    # Protocol drift must not terminate the reader. This also
+                    # demotes parser defects to UnknownNotification; consumers
+                    # that need visibility should register an unknown listener.
+                    notification = UnknownNotification(
+                        _clone_json_object(payload), parse_error=str(exc)
+                    )
+                    if (
+                        payload_type == "agent_end"
+                        and payload.get("isTerminal") is not False
+                    ):
+                        self._append_async_error(
+                            RpcError(f"Failed to parse terminal agent_end: {exc}")
+                        )
+                        self._mark_agent_run_completed()
                 self._dispatch_listeners(
                     "notification",
-                    listener_notification.type,
+                    notification.type,
                     self._notification_listeners,
-                    listener_notification,
+                    notification,
                 )
 
                 if isinstance(notification, ReadyEvent):
+                    self._ready_event = notification
                     self._ready_received = True
                     self._ready.set()
                     self._dispatch_listeners(
                         "ready",
-                        listener_notification.type,
+                        notification.type,
                         self._ready_listeners,
-                        listener_notification,
+                        notification,
                     )
                     continue
 
@@ -1680,42 +1940,45 @@ class RpcClient:
                     self._ui_requests.put(notification)
                     self._dispatch_listeners(
                         "ui_request",
-                        listener_notification.type,
+                        notification.type,
                         self._ui_request_listeners,
-                        cast(ExtensionUiRequest, listener_notification),
+                        notification,
                     )
                     continue
 
                 if isinstance(notification, ExtensionError):
                     self._dispatch_listeners(
                         "extension_error",
-                        listener_notification.type,
+                        notification.type,
                         self._extension_error_listeners,
-                        cast(ExtensionError, listener_notification),
+                        notification,
                     )
                     continue
 
                 if isinstance(notification, UnknownNotification):
                     self._dispatch_listeners(
                         "unknown_notification",
-                        listener_notification.type,
+                        notification.type,
                         self._unknown_notification_listeners,
-                        cast(UnknownNotification, listener_notification),
+                        notification,
                     )
                     continue
 
-                listener_event = cast(RpcAgentEvent, listener_notification)
+                event = cast(RpcAgentEvent, notification)
                 self._append_event(payload)
-                if listener_event.type == "agent_end":
+                if (
+                    isinstance(event, AgentEndEvent)
+                    and event.is_terminal is not False
+                ):
                     self._mark_agent_run_completed()
                 self._dispatch_listeners(
-                    "event", listener_event.type, self._event_listeners, listener_event
+                    "event", event.type, self._event_listeners, event
                 )
                 self._dispatch_listeners(
                     "typed_event",
-                    listener_event.type,
-                    self._typed_event_listeners.get(listener_event.type, []),
-                    listener_event,
+                    event.type,
+                    self._typed_event_listeners.get(event.type, []),
+                    event,
                 )
         except Exception as exc:
             self._mark_closed(exc)

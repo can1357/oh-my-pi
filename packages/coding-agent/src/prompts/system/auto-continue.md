@@ -1,1 +1,1 @@
-Resume work on the user's most recent intent. Re-read the kept recent messages above the summary to confirm what the user asked for last. If their latest request supersedes earlier plans recorded in the summary, follow the latest request. If there is nothing left to do, say so briefly instead of inventing further work.
+Resume the user's latest intent. Re-read kept recent messages above the summary to confirm the latest request. If it supersedes earlier plans in the summary, follow it. If no work remains, say so briefly; do not invent work.

@@ -1,17 +1,17 @@
-You ended your turn with unpushed work in the worktree.
+Turn ended with unpushed work in worktree.
 
 Issue: {{repo.full_name}}#{{issue.number}} — {{issue.title}}
 Branch: `{{workspace.branch}}`
 
-Workspace state at end of your turn:
+End-of-turn workspace state:
 
 {{dirty.summary}}
 
-Either of these counts being non-zero means roboomp will discard your work when this session ends. Read the summary above and act on it:
+Any nonzero count → roboomp discards work when session ends. Act on this summary:
 
-- **Uncommitted changes** → stage and commit them (or `git restore` if they were unintentional). If the work is ready, run `bun run fix` before committing — formatter and lint gates reject pushes when `fix` exits non-zero.
-- **Unpushed commits** → call `gh_push_branch` once `bun run fix` succeeds. If the push still refuses for a different reason, fix that root cause; do not skip the gate.
+- **Uncommitted changes** → stage and commit; if unintentional, `git restore`. If work ready, run `bun run fix` before commit; formatter/lint gates reject pushes if `fix` exits non-zero.
+- **Unpushed commits** → after successful `bun run fix`, call `gh_push_branch`. If it refuses for another reason, fix root cause; do not skip gate.
 
-If your fix is genuinely complete and the gates pass, push and then comment back on the PR with a one-line summary of what changed since the previous push. Do not re-classify the issue, do not re-post the original preamble, and do not call `abort_task` — this is recoverable.
+If fix genuinely complete and gates pass, push, then comment on PR with one-line summary of changes since previous push. Do not re-classify issue, re-post original preamble, or call `abort_task`; recoverable.
 
-You MUST end this turn either with a successful `gh_push_branch`, or with a clean worktree (no uncommitted changes, no commits ahead of `origin`) and an explanation in a comment.
+MUST end turn with either successful `gh_push_branch`, or clean worktree (no uncommitted changes; no commits ahead of `origin`) and explanation in a comment.

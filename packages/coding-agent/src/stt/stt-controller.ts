@@ -1,22 +1,10 @@
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { AudioCapture } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec } from "./models";
-import {
-	detectRecorder,
-	ensureRecorder,
-	type RecordingHandle,
-	type StreamingRecordingHandle,
-	startRecording,
-	startStreamingRecording,
-	verifyRecordingFile,
-} from "./recorder";
 import { evaluateSubmitTrigger } from "./submit-trigger";
-import { transcribe } from "./transcriber";
 
 export type SttState = "idle" | "recording" | "transcribing";
 
@@ -38,25 +26,33 @@ interface Editor {
 	deleteBeforeCursor(count: number): void;
 }
 
+interface CaptureHandle {
+	stop(): void;
+}
+
+type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
+
+/** Coordinates native microphone capture with incremental local transcription. */
 export class STTController {
 	#state: SttState = "idle";
 	#resolvedModelKey: string | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
 	#disposed = false;
-
-	// Batch (single-shot) capture.
-	#recordingHandle: RecordingHandle | null = null;
-	#tempFile: string | null = null;
-	#transcriptionAbort: AbortController | null = null;
+	readonly #createCapture: CaptureFactory;
 
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
-	#streamRecorder: StreamingRecordingHandle | null = null;
+	#streamRecorder: CaptureHandle | null = null;
 	#streamEditor: Editor | null = null;
 	#streamCommitted = false;
 	#streamAbort: AbortController | null = null;
 	#streamUtterance = "";
+
+	/** Creates a controller; tests may replace the hardware capture boundary. */
+	constructor(createCapture: CaptureFactory = onAudio => new AudioCapture(16_000, onAudio)) {
+		this.#createCapture = createCapture;
+	}
 
 	get state(): SttState {
 		return this.#state;
@@ -79,7 +75,7 @@ export class STTController {
 					await this.#start(editor, options);
 					break;
 				case "recording":
-					await this.#stop(editor, options);
+					await this.#stop(options);
 					break;
 				case "transcribing":
 					options.showStatus("Transcription in progress...");
@@ -87,7 +83,7 @@ export class STTController {
 			}
 			if (this.#stopAfterStart && this.#state === "recording") {
 				this.#stopAfterStart = false;
-				await this.#stop(editor, options);
+				await this.#stop(options);
 			} else if (this.#state !== "recording") {
 				this.#stopAfterStart = false;
 			}
@@ -103,19 +99,13 @@ export class STTController {
 		// (with progress) instead of blocking silently at stop.
 		if (this.#resolvedModelKey === modelKey) return true;
 		try {
-			// Only clear the status line if we actually wrote to it: the cached
-			// fast path (recorder on PATH, model present) emits nothing, so an
-			// unconditional clear would be a stray write.
+			// Only clear the status line when preflight emitted progress; the
+			// cached-model fast path emits nothing.
 			let wroteStatus = false;
 			const status = (msg: string): void => {
 				wroteStatus = true;
 				options.showStatus(msg);
 			};
-			// A recorder is required to capture audio; startRecording /
-			// startStreamingRecording only *detect* a recorder and throw when none
-			// exists, so provision one here. Instant when sox/ffmpeg/arecord is on
-			// PATH — only a first-run static-ffmpeg download actually blocks.
-			await ensureRecorder(p => status(p.stage + (p.percent != null ? ` (${p.percent}%)` : "")));
 			// Loading the multi-hundred-MB speech model into the worker is what made
 			// the old "Checking STT dependencies…" step slow. Don't pay it before
 			// recording: when the weights are already cached, start now and warm the
@@ -157,29 +147,14 @@ export class STTController {
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
 		if (!(await this.#ensureDeps(options))) return;
-		// Live transcription needs a recorder that can pipe PCM; the Windows
-		// PowerShell mci fallback records to a file, so it stays single-shot.
-		if (this.#recorderCanStream()) {
-			await this.#startStreaming(editor, options);
-			return;
-		}
-		await this.#startBatchRecording(options);
+		await this.#startStreaming(editor, options);
 	}
 
-	async #stop(editor: Editor, options: ToggleOptions): Promise<void> {
-		if (this.#stream) {
-			await this.#stopStreaming(options);
-			return;
-		}
-		await this.#stopBatch(editor, options);
+	async #stop(options: ToggleOptions): Promise<void> {
+		await this.#stopStreaming(options);
 	}
 
 	// ── Live streaming ──────────────────────────────────────────────
-
-	#recorderCanStream(): boolean {
-		const recorder = detectRecorder();
-		return recorder !== null && recorder.tool !== "powershell";
-	}
 
 	/** Segment text gets a leading space once a prior segment is committed, so
 	 *  phrases join naturally; the first phrase is inserted at the cursor as-is. */
@@ -218,18 +193,38 @@ export class STTController {
 			},
 		});
 		this.#stream = stream;
-		let recorder: StreamingRecordingHandle | null = null;
+		let recorder: CaptureHandle;
 		try {
-			recorder = await startStreamingRecording(samples => stream.pushAudio(samples));
-		} catch (err) {
-			logger.warn("STT streaming recorder failed to start; falling back to batch recording", {
-				error: err instanceof Error ? err.message : String(err),
+			recorder = this.#createCapture((error, samples) => {
+				if (this.#disposed || this.#stream !== stream || this.#state !== "recording") return;
+				if (error) {
+					logger.error("Native microphone capture failed", { error: error.message });
+					const activeRecorder = this.#streamRecorder;
+					this.#streamRecorder = null;
+					try {
+						activeRecorder?.stop();
+					} catch (cause) {
+						logger.debug("stt: microphone cleanup failed", {
+							error: cause instanceof Error ? cause.message : String(cause),
+						});
+					}
+					this.#streamAbort?.abort(error);
+					stream.cancel();
+					this.#streamEditor?.clearVolatileText();
+					options.requestRender?.();
+					this.#cleanupStream();
+					this.#setState("idle", options);
+					options.showWarning(error.message);
+					return;
+				}
+				stream.pushAudio(samples);
 			});
-		}
-		if (!recorder) {
+		} catch (err) {
 			stream.cancel();
 			this.#cleanupStream();
-			await this.#startBatchRecording(options);
+			const msg = err instanceof Error ? err.message : "Failed to start microphone capture";
+			options.showWarning(msg);
+			logger.error("STT recording failed to start", { error: msg });
 			return;
 		}
 		this.#streamRecorder = recorder;
@@ -247,7 +242,7 @@ export class STTController {
 		this.#setState("transcribing", options);
 		// Stop the mic first so no further audio is fed, then flush the worker.
 		try {
-			await recorder?.stop();
+			recorder?.stop();
 		} catch (err) {
 			logger.debug("stt: streaming recorder stop failed", {
 				error: err instanceof Error ? err.message : String(err),
@@ -306,103 +301,19 @@ export class STTController {
 		this.#streamUtterance = "";
 	}
 
-	// ── Batch (single-shot) ─────────────────────────────────────────
-
-	async #startBatchRecording(options: ToggleOptions): Promise<void> {
-		const id = Snowflake.next();
-		this.#tempFile = path.join(os.tmpdir(), `omp-stt-${id}.wav`);
-		try {
-			this.#recordingHandle = await startRecording(this.#tempFile);
-			this.#setState("recording", options);
-			logger.debug("STT recording started", { tempFile: this.#tempFile });
-		} catch (err) {
-			this.#tempFile = null;
-			const msg = err instanceof Error ? err.message : "Failed to start recording";
-			options.showWarning(msg);
-			logger.error("STT recording failed to start", { error: msg });
-		}
-	}
-
-	async #stopBatch(editor: Editor, options: ToggleOptions): Promise<void> {
-		const handle = this.#recordingHandle;
-		const tempFile = this.#tempFile;
-		this.#recordingHandle = null;
-
-		if (!handle || !tempFile) {
-			this.#setState("idle", options);
-			return;
-		}
-
-		try {
-			await handle.stop();
-			// Validate the recording produced a usable file
-			await verifyRecordingFile(tempFile);
-			this.#setState("transcribing", options);
-
-			const sttSettings = {
-				modelName: settings.get("stt.modelName") as string | undefined,
-				language: settings.get("stt.language") as string | undefined,
-			};
-			this.#transcriptionAbort = new AbortController();
-			const text = await transcribe(tempFile, { ...sttSettings, signal: this.#transcriptionAbort.signal });
-			this.#transcriptionAbort = null;
-			if (this.#disposed) return;
-			if (text.length > 0) {
-				const trigger = settings.get("stt.submitTrigger");
-				const { submit, trimTrailing } = evaluateSubmitTrigger(text, trigger);
-				const textToInsert = trimTrailing > 0 ? text.slice(0, -trimTrailing) : text;
-				if (textToInsert.length > 0) {
-					editor.insertText(textToInsert);
-				}
-				options.showStatus("");
-				if (submit) {
-					editor.submit();
-				}
-			} else {
-				options.showStatus("No speech detected.");
-			}
-			if (!this.#disposed) this.#setState("idle", options);
-		} catch (err) {
-			if (this.#disposed) return;
-			if (err instanceof DOMException && err.name === "AbortError") {
-				this.#setState("idle", options);
-				return;
-			}
-			const msg = err instanceof Error ? err.message : "Transcription failed";
-			options.showWarning(msg);
-			logger.error("STT transcription failed", { error: msg });
-			this.#setState("idle", options);
-		} finally {
-			try {
-				await fs.rm(tempFile, { force: true });
-			} catch {
-				// best effort cleanup
-			}
-			this.#tempFile = null;
-		}
-	}
-
 	dispose(): void {
 		this.#disposed = true;
-		if (this.#transcriptionAbort) {
-			this.#transcriptionAbort.abort();
-			this.#transcriptionAbort = null;
-		}
 		if (this.#streamAbort) {
 			this.#streamAbort.abort();
 			this.#streamAbort = null;
 		}
 		this.#stream?.cancel();
-		this.#streamRecorder?.stop().catch(() => {});
+		try {
+			this.#streamRecorder?.stop();
+		} catch {
+			// best effort cleanup
+		}
 		this.#cleanupStream();
-		if (this.#recordingHandle) {
-			this.#recordingHandle.stop().catch(() => {});
-			this.#recordingHandle = null;
-		}
-		if (this.#tempFile) {
-			fs.rm(this.#tempFile, { force: true }).catch(() => {});
-			this.#tempFile = null;
-		}
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
 	}

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
+import { CATALOG_PROVIDERS, DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { buildXaiOAuthStaticSeed } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -16,6 +17,13 @@ describe("xai-oauth bundled catalog (regression)", () => {
 	const bundled =
 		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"openai-responses">>>)["xai-oauth"] ?? {};
 	const seed = buildXaiOAuthStaticSeed();
+
+	it("defaults SuperGrok selection to grok-4.6", () => {
+		const entry = CATALOG_PROVIDERS.find(provider => provider.id === "xai-oauth");
+		expect(entry?.defaultModel).toBe("grok-4.6");
+		expect(DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]).toBe("grok-4.6");
+		expect(bundled["grok-4.6"], "xai-oauth/grok-4.6 must be bundled for the default").toBeDefined();
+	});
 
 	it("bundles every curated id", () => {
 		const seededIds = seed.map(model => model.id).sort();
@@ -41,26 +49,25 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		});
 	}
 
-	// Absolute contract for the user-specified SuperGrok addition. The parity
-	// loop above can't catch a value typo (e.g. 2_000_000) or a flipped
-	// reasoning flag — both sides regenerate from the same seed together — so
-	// pin the literal attributes here.
-	it("exposes grok-composer-2.5-fast as a non-reasoning 200K text model", () => {
-		const composer = seed.find(model => model.id === "grok-composer-2.5-fast");
-		expect(composer, "grok-composer-2.5-fast must be in the SuperGrok curated seed").toBeDefined();
-		expect(composer!.reasoning).toBe(false);
-		expect(composer!.contextWindow).toBe(200_000);
-		expect(composer!.input).toEqual(["text"]);
-		// The bundled models.json entry is byte-identical to the generator's
-		// deterministic xai-oauth output: gen:models pushes
-		// buildXaiOAuthStaticSeed() (offline — xai-oauth has no upstream catalog
-		// source) and applyGeneratedModelPolicies(), so a regen reproduces these
-		// exact bytes; only unrelated other-provider network churn was excluded
-		// to keep the diff scoped. Pin its zero-cost invariant (overlay-stable
-		// for the SuperGrok subscription), which the parity loop above never
-		// compares. (maxTokens is pinned by the maxTokens-equals-contextWindow
-		// test below.)
-		expect(bundled["grok-composer-2.5-fast"]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	// SuperGrok's `grok-4.20-multi-agent-0309` mirrors the paid catalog's
+	// `grok-4.20-multi-agent-beta-latest` under a different ID; the price
+	// fallback must bridge the alias so the bundle carries its public rate card
+	// (including the inclusive 200K tier) instead of the subscription zero.
+	it("prices the multi-agent SuperGrok alias from its public xAI equivalent", () => {
+		expect(bundled["grok-4.20-multi-agent-0309"]?.cost).toEqual({
+			input: 2,
+			output: 6,
+			cacheRead: 0.2,
+			cacheWrite: 0,
+			longContext: {
+				inputThreshold: 200_000,
+				inputThresholdInclusive: true,
+				input: 4,
+				output: 12,
+				cacheRead: 0.4,
+				cacheWrite: 0,
+			},
+		});
 	});
 
 	// The OAuth surface's /v1/models reports no per-request output limit, so the

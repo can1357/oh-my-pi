@@ -10,7 +10,7 @@ import {
 	formatStatusIcon,
 	replaceTabs,
 } from "../tools/render-utils";
-import { renderOutputBlock } from "./output-block";
+import { outputBlockContentWidth, renderOutputBlock } from "./output-block";
 import type { State } from "./types";
 
 export interface CodeCellOptions {
@@ -230,9 +230,9 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 	const { title, meta } = formatHeader(codeOptions, theme);
 	const state = getState(options.status);
 
-	// Markdown component manages its own wrapping at the inner content width.
-	// `renderOutputBlock` adds a `│ ` prefix + `│` suffix → 3 visible columns.
-	const innerWidth = Math.max(20, width - 3);
+	// Markdown component manages its own wrapping at the same inner width as
+	// `renderOutputBlock`, so collapsed row caps are applied after final wrapping.
+	const innerWidth = Math.max(20, outputBlockContentWidth(width));
 	const allLines = content.trim() ? new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth) : [];
 	const maxContentLines = expanded ? allLines.length : Math.min(allLines.length, contentMaxLines);
 	const contentLines = allLines.slice(0, maxContentLines);

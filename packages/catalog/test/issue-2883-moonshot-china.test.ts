@@ -4,7 +4,7 @@ import { moonshotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-model
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $pickenv } from "@oh-my-pi/pi-utils";
 
-const MODELS_DEV_URL = "https://models.dev/api.json";
+const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
 
 const ORIGINAL_ENV: Record<string, string | undefined> = {
 	MOONSHOT_BASE_URL: Bun.env.MOONSHOT_BASE_URL,

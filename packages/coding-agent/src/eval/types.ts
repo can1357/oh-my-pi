@@ -45,4 +45,10 @@ export interface EvalToolDetails {
 	languages?: EvalLanguage[];
 	/** Optional human-readable notice (e.g. fallback explanation). */
 	notice?: string;
+	/** Present when the cell was auto-backgrounded as an async job. */
+	async?: {
+		state: "running" | "completed" | "failed";
+		jobId: string;
+		type: "eval";
+	};
 }

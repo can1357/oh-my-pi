@@ -27,17 +27,18 @@ Any of the following opens the same selector:
 
 - `/tree`
 - configured keybinding for the `app.session.tree` action
-- double-escape on empty editor when `doubleEscapeAction = "tree"` (default)
-- `/branch` when `doubleEscapeAction = "tree"` (routes to tree selector instead of user-only branch picker)
+
+Double-escape on an empty editor opens the fullscreen transcript rewind selector instead (see `doubleEscapeAction`): it replays the transcript, outlines the block the rewind would land on, and rewinds via `branch()` for user prompts or `navigateTree()` for anything else.
 
 ## Tree UI model
 
-The tree is rendered from session entry parent pointers (`id` / `parentId`).
+The tree is rendered from session-entry parent pointers (`id` / `parentId`).
 
-- Children are sorted by timestamp ascending (older first, newer lower)
-- Active branch (path from root to current leaf) is marked with a bullet
-- Labels (if present) render as `[label]` before node text
-- If multiple roots exist (orphaned/broken parent chains), they are shown under a virtual branching root
+- Children are sorted by timestamp ascending
+- The branch containing the active leaf is ordered first in the selector; other history remains reachable
+- Active branch (root-to-leaf path) is marked with a bullet
+- Labels render as `[label]` before node text
+- Missing parents, self-parent entries, and explicit null parents become roots; multiple roots share a virtual branching root
 
 ```text
 Example tree view (active path marked with •):
@@ -58,20 +59,23 @@ The selector recenters around current selection and shows up to:
 ## Keybindings inside tree selector
 
 - `Up` / `Down`: move selection (wraps)
-- `Left` / `Right`: page up / page down
+- `Alt+Up` / `Alt+Down`: jump to previous/next user or assistant turn
+- `Page Up` / `Page Down`, or `Left` / `Right`: page
+- `Home` / `End`: first/last visible item
 - `Enter`: select node
+- `Shift+Enter`: summarize and switch without opening the summary-choice prompt
 - `Esc`: clear search if active; otherwise close selector
 - `Ctrl+C`: close selector
 - `Type`: append to search query
 - `Backspace`: delete search character
-- `Shift+L`: edit/clear label on selected entry
+- `Shift+L`: edit/clear label when search is empty
 - `Ctrl+O`: cycle filter forward
 - `Shift+Ctrl+O`: cycle filter backward
-- `Alt+D/T/U/L/A`: jump directly to specific filter mode
+- `Alt+D/T/U/L/A`: jump directly to a filter
 
 ## Filters and search semantics
 
-Filter modes (`TreeList`):
+Initial mode comes from `treeFilterMode` (default `default`). Modes cycle in this order:
 
 1. `default`
 2. `no-tools`
@@ -88,7 +92,7 @@ Shows conversational nodes plus any entry types not explicitly suppressed. It hi
 - `model_change`
 - `thinking_level_change`
 
-Other internal entry types that are not rendered specially may appear as blank rows in current code.
+Other entry types without specialized rendering (for example service-tier, title, credential-pin, reset, and mode entries) may appear as blank rows in current code.
 
 ### `no-tools`
 
@@ -108,10 +112,10 @@ Everything in the session tree, including bookkeeping/custom entries.
 
 ### Tool-only assistant node behavior
 
-Assistant messages that contain **only tool calls** (no text) are hidden by default in all filtered views unless:
+Assistant messages that contain only tool calls (no canonical text) are hidden in every filter mode, including `all`, unless:
 
-- message is error/aborted (`stopReason` not `stop`/`toolUse`), or
-- it is the current leaf (always kept visible)
+- message is error/aborted (`stopReason` is neither `stop` nor `toolUse`), or
+- it is the current leaf
 
 ### Search behavior
 
@@ -126,33 +130,44 @@ Assistant messages that contain **only tool calls** (no text) are hidden by defa
 
 ### Selecting `user` message
 
-- New leaf becomes selected entry’s `parentId`
-- If parent is `null` (root user message), leaf resets to root (`resetLeaf()`)
-- Selected message text is copied to editor for editing/resubmit
+- New leaf becomes the selected entry’s `parentId`
+- Root user message resets leaf to root
+- Text and image attachments are reconstructed as an editable draft
+- The selector only writes that draft when the editor is currently empty
 
 ### Selecting `custom_message`
 
-- Same leaf rule as user messages (`parentId`)
-- Text content is extracted and copied to editor
+- Ordinary custom messages use the same parent-leaf rule and text prefill as user messages
+- `skill-prompt` custom messages are not editable; selecting one lands on that node like other non-user entries
 
-### Selecting non-user node (assistant/tool/summary/compaction/custom bookkeeping/etc.)
+### Selecting a past `ask` tool result
+
+- Interactive `/tree` reopens the original question UI instead of reusing the stale answer
+- Cancel leaves the tree unchanged
+- A new answer is appended as a sibling tool result, preserving the old answer branch, then the agent resumes from it
+- If legacy/corrupt data cannot recover the original questions, selection falls back to a plain leaf move
+
+### Selecting other nodes
 
 - New leaf becomes selected node id
 - Editor is not prefilled
 
 ### Selecting current leaf
 
-- No-op; selector closes with “Already at this point”
+- Normally closes with `Already at this point`
+- A current-leaf `ask` result still permits the re-answer flow
 
 ```text
 Selection decision (simplified):
 
 selected node
    │
-   ├─ is current leaf? ── yes ──> close selector (no-op)
+   ├─ current leaf (not ask result)? ──> close selector (no-op)
    │
-   ├─ is user/custom_message? ── yes ──> leaf := parentId (or resetLeaf for root)
-   │                                     + prefill editor text
+   ├─ ask tool result? ──> re-answer as a sibling branch when questions are recoverable
+   │
+   ├─ user or ordinary custom message? ──> leaf := parentId (or root)
+   │                                         + prefill only into an empty editor
    │
    └─ otherwise ──> leaf := selected node id
                     + no editor prefill
@@ -160,9 +175,9 @@ selected node
 
 ## Summary-on-switch flow
 
-Summary prompt is controlled by `branchSummary.enabled` (default: `false`).
+Summary prompting is controlled by `branchSummary.enabled` (default `false`). `Shift+Enter` requests summarization directly regardless of the prompt setting; a model and provider credential must be available.
 
-When enabled, after picking a node the UI asks:
+When prompting is enabled, ordinary Enter offers:
 
 - `No summary`
 - `Summarize`
@@ -171,23 +186,21 @@ When enabled, after picking a node the UI asks:
 Flow details:
 
 - Escape in summary prompt reopens tree selector
-- Custom prompt cancellation returns to summary choice loop
-- During summarization, UI shows loader and binds `Esc` to `abortBranchSummary()`
+- Custom prompt cancellation returns to summary choice
+- During summarization, UI shows a loader and binds Esc to `abortBranchSummary()`
 - If summarization aborts, tree selector reopens and no move is applied
 
 `navigateTree` internals:
 
-- Collects abandoned-branch entries from old leaf to common ancestor
-- Emits `session_before_tree` (extensions can cancel or inject summary)
-- Uses default summarizer only if requested and needed
-- Applies move with:
-  - `branchWithSummary(...)` when summary exists
-  - `branch(newLeafId)` for non-root move without summary
-  - `resetLeaf()` for root move without summary
-- Replaces agent conversation with rebuilt session context
-- Emits `session_tree`
+- flushes pending bash output and validates the target
+- collects abandoned-branch entries from old leaf to common ancestor
+- emits cancellable `session_before_tree`; an extension may supply the requested summary
+- runs the default summarizer only when requested, entries need summarizing, and no hook summary was supplied
+- applies `branchWithSummary(...)`, `branch(newLeafId)`, or `resetLeaf()` as appropriate
+- rebuilds model context, checkpoint/rewind state, advisor state, todos, and provider sessions affected by the history rewrite
+- emits `session_tree` and rebuilds again if handlers may have appended entries
 
-Note: if user requests summary but there is nothing to summarize, navigation proceeds without creating a summary entry.
+If summary is requested but there is nothing to summarize, navigation proceeds without a summary entry.
 
 ## Labels
 
@@ -203,7 +216,7 @@ Label edits in tree UI call `appendLabelChange(targetId, label)`.
 | Operation | Scope                                            | Result                                                                                                                                                   |
 | --------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/tree`   | Current session file                             | Moves leaf to selected point (same file)                                                                                                                 |
-| `/branch` | Usually current session file -> new session file | By default branches from selected **user** message into a new session file; if `doubleEscapeAction = "tree"`, `/branch` opens tree navigation UI instead |
+| `/branch` | Usually current session file -> new session file | Opens the transcript rewind selector; a **user** message target branches into a new session file, any other target repositions the leaf in place |
 | `/fork`   | Whole current session                            | Duplicates session into a new persisted session file                                                                                                     |
 | `/resume` | Session list                                     | Switches to another session file                                                                                                                         |
 

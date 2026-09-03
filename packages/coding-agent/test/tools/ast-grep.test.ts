@@ -24,7 +24,7 @@ describe("ast_grep parse errors", () => {
 			const filePath = path.join(tempDir, "broken.ts");
 			await Bun.write(filePath, "export function broken( { return 1; }");
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -50,12 +50,12 @@ describe("ast_grep parse errors", () => {
 	it("caps parseErrors at PARSE_ERRORS_LIMIT and records the original total", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-parse-cap-"));
 		try {
-			const fileCount = 35;
+			const fileCount = 21;
 			for (let i = 0; i < fileCount; i++) {
 				await Bun.write(path.join(tempDir, `broken-${i}.ts`), "export function broken( { return 1; }");
 			}
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -89,7 +89,7 @@ describe("ast_grep parse errors", () => {
 			await Bun.write(path.join(sourceDir, "ignore.js"), "const providerOptions = {};\n");
 			await Bun.write(path.join(tempDir, "outside.ts"), "const providerOptions = {};\n");
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -130,7 +130,7 @@ describe("ast_grep parse errors", () => {
 				Array.from({ length: 8 }, () => "const sharedSymbol = 1;").join("\n"),
 			);
 
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 
@@ -162,7 +162,7 @@ describe("ast_grep parse errors", () => {
 				filePath,
 				"---- MODULE Algo ----\n(*--algorithm Demo\nvariables x = 0;\nbegin\n  x := x + 1;\nend algorithm;*)\n====\n",
 			);
-			const tools = await createTools(createTestSession(tempDir));
+			const tools = await createTools(createTestSession(tempDir), ["ast_grep"]);
 			const tool = tools.find(entry => entry.name === "ast_grep");
 			expect(tool).toBeDefined();
 

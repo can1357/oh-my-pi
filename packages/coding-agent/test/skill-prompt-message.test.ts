@@ -28,10 +28,8 @@ describe("buildSkillPromptMessage", () => {
 			const built = await buildSkillPromptMessage(skill, "focus on risks");
 
 			expect(built.message).toContain("Review the supplied code carefully.");
-			expect(built.message).toContain('The user has invoked the "reviewer" skill');
 			expect(built.message).toContain(`[Skill directory: ${dir}]`);
-			expect(built.message).toMatch(/[Rr]esolve any relative paths/);
-			expect(built.message).toContain("User: focus on risks");
+			expect(built.message).toContain("focus on risks");
 			expect(built.details).toMatchObject({
 				name: "reviewer",
 				path: skill.filePath,

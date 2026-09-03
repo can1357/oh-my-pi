@@ -33,6 +33,7 @@ function makeJsonlSessionFile(dirPath: string, entries: object[]): string {
 function makeSubagentRegistry(sessions: ObservableSession[]) {
 	return {
 		getSessions: () => sessions,
+		getSession: (id: string) => sessions.find(session => session.id === id),
 		onChange: () => () => {},
 		setMainSession: () => {},
 		getActiveSubagentCount: () => sessions.filter(s => s.status === "active").length,

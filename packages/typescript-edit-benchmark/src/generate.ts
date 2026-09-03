@@ -12,20 +12,38 @@
  * - Dense code: Minimal whitespace makes context harder to read
  * - Deep nesting: Whitespace-sensitive edits at high indent levels
  *
- * Difficulty modes control both FILE SELECTION and PROMPT DETAIL:
- * - easy: Short files, unique lines, line number given
- * - medium: Medium files, function context given
+ * Difficulty modes control both FILE SELECTION and PROMPT DETAIL. Every prompt
+ * fully determines the byte-exact fix (before/after blocks, validated by
+ * re-solving them against the expected output); tiers vary how much locating
+ * the model must do:
+ * - easy: Short files, unique lines, exact line number given
+ * - medium: Medium files, containing function given
  * - hard: Long files with similar blocks, no location hint
- * - nightmare: Long files where target line repeats, minimal info
+ * - nightmare: Long files where nearly identical regions repeat, no location hint
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { diffLines } from "diff";
 import { formatContent } from "./formatter";
+import {
+	commonPrefixLength,
+	commonSuffixLength,
+	LANGUAGE_BY_EXTENSION,
+	mergeNearbyPlacements,
+	type Placement,
+	pickFence,
+	placementsFromDiff,
+	type RenderedHunk,
+	renderHunks,
+	solveRenderedHunks,
+} from "./hunks";
 import { ALL_MUTATIONS, CATEGORY_MAP, type Mutation, type MutationInfo } from "./mutations";
+import identifierTaskTemplate from "./prompts/identifier-task.md" with { type: "text" };
+import mutationTaskTemplate from "./prompts/mutation-task.md" with { type: "text" };
+import structuralTaskTemplate from "./prompts/structural-task.md" with { type: "text" };
 
 const SUPPORTED_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx"]);
 using DEFAULT_SOURCE_REPO_DIR = TempDir.createSync("@pi-mono-source");
@@ -64,6 +82,7 @@ interface CaseResult {
 	filePath: string;
 	formattedMutatedContent: string;
 	formattedOriginalContent: string;
+	prompt: string;
 	difficulty: Difficulty;
 	difficultyScore: number;
 }
@@ -71,7 +90,7 @@ interface CaseResult {
 interface Args {
 	typescriptDir: string;
 	output: string;
-	countPerType: number;
+	countScale: number;
 	seed: number;
 	categories: string | null;
 	difficulty: string;
@@ -84,7 +103,7 @@ function parseArguments(): Args {
 		options: {
 			"typescript-dir": { type: "string", default: DEFAULT_SOURCE_REPO_DIR.path() },
 			output: { type: "string", default: DEFAULT_OUTPUT },
-			"count-per-type": { type: "string", default: "20" },
+			"count-scale": { type: "string", default: "1" },
 			seed: { type: "string", default: "42" },
 			categories: { type: "string" },
 			difficulty: { type: "string", default: "easy,medium,hard,nightmare" },
@@ -96,7 +115,7 @@ function parseArguments(): Args {
 	return {
 		typescriptDir: values["typescript-dir"] ?? DEFAULT_SOURCE_REPO_DIR.path(),
 		output: values.output ?? DEFAULT_OUTPUT,
-		countPerType: parseInt(values["count-per-type"] ?? "20", 10),
+		countScale: Number.parseFloat(values["count-scale"] ?? "1"),
 		seed: parseInt(values.seed ?? "42", 10),
 		categories: values.categories ?? null,
 		difficulty: values.difficulty ?? "easy,medium,hard,nightmare",
@@ -104,6 +123,62 @@ function parseArguments(): Args {
 		dryRun: values["dry-run"] ?? false,
 	};
 }
+
+/** Target changed-line range for a generated case. */
+type SizeRange = [number, number];
+
+/** How many cases to generate for a mutation, and which changed-line bands to cycle through. */
+interface MutationPlan {
+	count: number;
+	sizes?: SizeRange[];
+}
+
+const BLOCK_SIZES: SizeRange[] = [
+	[6, 20],
+	[21, 60],
+	[61, 150],
+	[6, 20],
+	[21, 60],
+	[6, 20],
+	[61, 150],
+	[21, 60],
+];
+
+/**
+ * Per-mutation case counts and changed-line targets, calibrated against the
+ * per-tool-call edit-shape distribution measured from real agent sessions
+ * (`edit-shape-stats.ts`, calibration reference): 1 → 23%, 2-5 → 30%,
+ * 6-20 → 29%, 21-60 → 14%, 61+ → 5%. The request×file cumulative numbers form
+ * an upper bound; the suite deliberately sits at or slightly above the
+ * per-call sizes. Token-level mutations supply the 1-line mass; small
+ * structural and multi-site mutations the 2-5 band; block-level mutations
+ * cycle through the larger bands via `sizes`.
+ */
+const MUTATION_PLANS: Record<string, MutationPlan> = {
+	"swap-comparison": { count: 1 },
+	"swap-equality": { count: 1 },
+	"swap-logical": { count: 1 },
+	"remove-negation": { count: 1 },
+	"swap-increment-decrement": { count: 1 },
+	"swap-arithmetic": { count: 1 },
+	"flip-boolean": { count: 1 },
+	"remove-optional-chain": { count: 1 },
+	"swap-call-args": { count: 1 },
+	"swap-nullish": { count: 1 },
+	"swap-regex-quantifier": { count: 1 },
+	"unicode-hyphen": { count: 1 },
+	"off-by-one": { count: 1 },
+	"swap-adjacent-lines": { count: 6 },
+	"duplicate-line-flip": { count: 6 },
+	"identifier-multi-edit": { count: 10 },
+	"swap-if-else": { count: 8 },
+	"wrap-redundant-if": { count: 14, sizes: BLOCK_SIZES },
+	"swap-sibling-blocks": { count: 14, sizes: BLOCK_SIZES },
+	"duplicate-block": { count: 6, sizes: BLOCK_SIZES },
+	"move-distant-block": { count: 10, sizes: BLOCK_SIZES },
+	"remove-case-label": { count: 8 },
+	"composite-multi-edit": { count: 16 },
+};
 
 async function ensureSourceRepo(typescriptDir: string): Promise<void> {
 	if (fs.existsSync(typescriptDir)) {
@@ -378,69 +453,295 @@ function recordRegion(usedLines: Map<string, number[]>, filePath: string, lineNu
 	usedLines.set(filePath, used);
 }
 
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Where a bug sits for medium prompts: containing function, else file-third region. */
+function locateBug(
+	content: string,
+	lineNumber: number,
+	lineCount: number,
+): { functionName?: string; region?: "top" | "middle" | "end" } {
+	for (const [name, start, end] of findFunctionRanges(content)) {
+		if (lineNumber >= start && lineNumber <= end) return { functionName: name };
+	}
+	const ratio = lineCount > 0 ? lineNumber / lineCount : 0;
+	return { region: ratio < 0.33 ? "top" : ratio < 0.66 ? "middle" : "end" };
+}
+
+/**
+ * Rename-style prompt for identifier-multi-edit: names the misspelled and
+ * correct identifiers so "replace every occurrence" admits exactly one
+ * byte-exact answer. Returns null when a plain word-boundary rename does not
+ * reproduce the expected file (e.g. the misspelling collides with other text).
+ */
+function buildIdentifierPrompt(
+	filePath: string,
+	info: MutationInfo,
+	difficulty: Difficulty,
+	input: string,
+	expected: string,
+): string | null {
+	const pair = info.identifier;
+	if (!pair) return null;
+	const wordRe = new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(pair.misspelled)}(?![A-Za-z0-9_$])`, "g");
+	if (input.replace(wordRe, pair.correct) !== expected) return null;
+
+	const affectedLines: number[] = [];
+	input.split("\n").forEach((line, index) => {
+		if (wordRe.test(line)) affectedLines.push(index + 1);
+		wordRe.lastIndex = 0;
+	});
+	if (affectedLines.length === 0) return null;
+
+	return prompt.render(identifierTaskTemplate, {
+		filename: path.basename(filePath),
+		correct: pair.correct,
+		misspelled: pair.misspelled,
+		count: affectedLines.length,
+		affectedLines: difficulty === "easy" ? affectedLines : undefined,
+	});
+}
+
+/** Mutations whose fixtures read as natural instructions instead of raw before/after patches. */
+type StructuralKind =
+	| "case-label"
+	| "duplicate-block"
+	| "move-block"
+	| "wrap-if"
+	| "swap-blocks"
+	| "swap-lines"
+	| "swap-if-else";
+
+const STRUCTURAL_KINDS: Record<string, StructuralKind> = {
+	"remove-case-label": "case-label",
+	"duplicate-block": "duplicate-block",
+	"move-distant-block": "move-block",
+	"wrap-redundant-if": "wrap-if",
+	"swap-sibling-blocks": "swap-blocks",
+	"swap-adjacent-lines": "swap-lines",
+	"swap-if-else": "swap-if-else",
+};
+
+function countTrimmedLine(lines: string[], needle: string): number {
+	let count = 0;
+	for (const line of lines) {
+		if (line.trim() === needle) count++;
+	}
+	return count;
+}
+
+/** Whether a line is a usable prose anchor (contains an identifier, not just punctuation like `);`). */
+function isAnchorLine(line: string): boolean {
+	return /[A-Za-z_$]{2,}/.test(line);
+}
+
+function firstNonEmptyTrimmed(lines: string[]): string {
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed) return trimmed;
+	}
+	return "";
+}
+
+/** A placement reduced to its changed core (shared context trimmed away). */
+function trimPlacement(
+	inputLines: string[],
+	placement: Placement,
+): { start: number; oldCore: string[]; newCore: string[] } {
+	const old = inputLines.slice(placement.start, placement.start + placement.oldLen);
+	const fresh = placement.newLines;
+	const prefix = commonPrefixLength(old, fresh);
+	const suffix = commonSuffixLength(old, fresh, Math.min(old.length, fresh.length) - prefix);
+	return {
+		start: placement.start + prefix,
+		oldCore: old.slice(prefix, old.length - suffix),
+		newCore: fresh.slice(prefix, fresh.length - suffix),
+	};
+}
+
+/** Nearest non-blank line trimmed, scanning from `index` in `direction`. */
+function nearestVisibleLine(lines: string[], index: number, direction: 1 | -1): string {
+	for (let i = index; i >= 0 && i < lines.length; i += direction) {
+		const trimmed = lines[i].trim();
+		if (trimmed) return trimmed;
+	}
+	return "";
+}
+
+/**
+ * Derive instruction data for a structural mutation from its placements.
+ * Every referenced anchor line is validated to occur exactly the expected
+ * number of times, so the instruction identifies a unique edit; returns null
+ * when the instruction would be ambiguous (the caller then rejects the
+ * candidate and retries — structural kinds never ship raw-patch fallbacks).
+ */
+function structuralPromptData(
+	kind: StructuralKind,
+	inputLines: string[],
+	placements: Placement[],
+): Record<string, unknown> | null {
+	const cores = placements.map(placement => trimPlacement(inputLines, placement));
+	const visible = (lines: string[]): string[] => lines.filter(line => line.trim() !== "");
+
+	switch (kind) {
+		case "case-label": {
+			if (cores.length !== 1) return null;
+			const { start, oldCore, newCore } = cores[0];
+			const added = visible(newCore);
+			if (visible(oldCore).length !== 0 || added.length !== 1) return null;
+			const label = added[0].trim();
+			const before = nearestVisibleLine(inputLines, start + oldCore.length, 1);
+			if (!label.startsWith("case") || !(before.startsWith("case") || before.startsWith("default"))) return null;
+			if (countTrimmedLine(inputLines, before) !== 1) return null;
+			return { label, before };
+		}
+		case "duplicate-block": {
+			if (cores.length !== 1) return null;
+			const { oldCore, newCore } = cores[0];
+			if (visible(newCore).length !== 0 || visible(oldCore).length === 0) return null;
+			const head = firstNonEmptyTrimmed(oldCore);
+			if (!head || countTrimmedLine(inputLines, head) !== 2) return null;
+			return { head };
+		}
+		case "move-block": {
+			if (cores.length !== 2) return null;
+			const insert = cores.find(core => visible(core.oldCore).length === 0);
+			const remove = cores.find(core => visible(core.newCore).length === 0);
+			if (!insert || !remove || insert === remove) return null;
+			if (visible(remove.oldCore).join("\n") !== visible(insert.newCore).join("\n")) return null;
+			const head = firstNonEmptyTrimmed(remove.oldCore);
+			const destination = nearestVisibleLine(inputLines, insert.start + insert.oldCore.length, 1);
+			const currentPrev = nearestVisibleLine(inputLines, remove.start - 1, -1);
+			if (![head, destination, currentPrev].every(isAnchorLine)) return null;
+			for (const anchor of [head, destination, currentPrev]) {
+				if (countTrimmedLine(inputLines, anchor) !== 1) return null;
+			}
+			return { head, destination, currentPrev };
+		}
+		case "wrap-if": {
+			if (cores.length !== 1) return null;
+			const { start, oldCore } = cores[0];
+			const relative = oldCore.findIndex(line => line.trim() === "if (true) {");
+			if (relative < 0) return null;
+			return { wrapperLine: start + relative + 1 };
+		}
+		case "swap-blocks":
+		case "swap-lines": {
+			const merged = mergeNearbyPlacements(inputLines, placements, 2);
+			let firstHead = "";
+			let secondHead = "";
+			if (merged.length === 1) {
+				const { oldCore, newCore } = trimPlacement(inputLines, merged[0]);
+				firstHead = firstNonEmptyTrimmed(oldCore);
+				secondHead = firstNonEmptyTrimmed(newCore);
+			} else if (cores.length === 2) {
+				// jsdiff renders `A,B -> B,A` as insert-A-before-B plus delete-A-after-B,
+				// with all of B as unchanged context in between; match the moved body.
+				const insert = cores.find(core => visible(core.oldCore).length === 0);
+				const remove = cores.find(core => visible(core.newCore).length === 0);
+				if (!insert || !remove || insert === remove) return null;
+				if (visible(remove.oldCore).join("\n") !== visible(insert.newCore).join("\n")) return null;
+				secondHead = firstNonEmptyTrimmed(insert.newCore);
+				firstHead = nearestVisibleLine(inputLines, insert.start + insert.oldCore.length, 1);
+			} else {
+				return null;
+			}
+			if (!firstHead || !secondHead || firstHead === secondHead) return null;
+			if (!isAnchorLine(firstHead) || !isAnchorLine(secondHead)) return null;
+			if (countTrimmedLine(inputLines, firstHead) !== 1 || countTrimmedLine(inputLines, secondHead) !== 1)
+				return null;
+			return { firstHead, secondHead };
+		}
+		case "swap-if-else": {
+			if (cores.length > 2) return null;
+			const condition = nearestVisibleLine(inputLines, cores[0].start - 1, -1);
+			if (!condition.startsWith("if") && !condition.includes(" if ")) return null;
+			if (countTrimmedLine(inputLines, condition) !== 1) return null;
+			return { condition };
+		}
+	}
+}
+
+/**
+ * Build the task prompt for a mutation case, or null when no uniquely solvable
+ * prompt exists (the caller then retries with a different candidate).
+ *
+ * Structural mutations render as natural instructions ("move X back before Y")
+ * with the expected after-state as reference; identifier renames as a
+ * replace-every-occurrence instruction; everything else as explicit
+ * before/after blocks. All variants are validated by re-solving the hunks
+ * against the expected output, so every prompt admits exactly one byte-exact
+ * answer. Difficulty only controls location detail.
+ */
 function buildPrompt(
 	filePath: string,
 	mutation: Mutation,
 	info: MutationInfo,
 	difficulty: Difficulty,
-	entry: FileEntry,
-): string {
-	const header = `# Fix the bug in \`${path.basename(filePath)}\``;
-
-	const isStructural = mutation.category === "structural";
-	const isMultiEdit = mutation.name === "identifier-multi-edit";
-
-	if (difficulty === "easy") {
-		const detail = mutation.describe(info);
-		const location = isStructural
-			? `The issue starts around line ${info.lineNumber}.`
-			: `The issue is on line ${info.lineNumber}.`;
-		return [header, detail, location, mutation.fixHint].join("\n\n");
+	input: string,
+	expected: string,
+): string | null {
+	if (mutation.name === "identifier-multi-edit") {
+		return buildIdentifierPrompt(filePath, info, difficulty, input, expected);
 	}
 
-	if (difficulty === "medium") {
-		const detail = mutation.describe(info);
-		const funcName = findContainingFunction(entry, info.lineNumber);
-		let location: string;
-		if (funcName) {
-			location = `The issue is in the \`${funcName}\` function.`;
-		} else {
-			const ratio = entry.lineCount ? info.lineNumber / entry.lineCount : 0;
-			if (ratio < 0.33) location = "The issue is near the top of the file.";
-			else if (ratio < 0.66) location = "The issue is around the middle of the file.";
-			else location = "The issue is near the end of the file.";
-		}
-		if (isMultiEdit) {
-			location += " The same error appears in multiple places.";
-		}
-		return [header, detail, location, mutation.fixHint].join("\n\n");
+	const inputLines = input.replace(/\n$/, "").split("\n");
+	const placements = placementsFromDiff(input, expected);
+	if (placements.length === 0 || placements.length > 5) return null;
+	const hunks = renderHunks(inputLines, placements);
+	if (!hunks) return null;
+	const solved = solveRenderedHunks(inputLines, hunks);
+	if (!solved || ensureTrailingNewline(solved.join("\n")) !== expected) return null;
+
+	const language = LANGUAGE_BY_EXTENSION[path.extname(filePath).toLowerCase()] ?? "";
+	const fence = pickFence(hunks);
+	const hunkContext = (hunk: RenderedHunk): { startLine: number | undefined } => ({
+		startLine: !hunk.unique || difficulty === "easy" ? hunk.startLine : undefined,
+	});
+
+	const structuralKind = STRUCTURAL_KINDS[mutation.name];
+	if (structuralKind) {
+		// Structural tasks read as natural instructions; a candidate whose
+		// instruction would be ambiguous is rejected so the caller retries —
+		// never downgraded to a raw before/after patch.
+		const data = structuralPromptData(structuralKind, inputLines, placements);
+		if (!data) return null;
+		const rendered = prompt.render(structuralTaskTemplate, {
+			filename: path.basename(filePath),
+			kind: structuralKind,
+			...data,
+			fence,
+			language,
+			hunkCount: hunks.length,
+			hunks: hunks.map(hunk => ({
+				// After-state regions are only interpretable with a position.
+				startLine: hunk.startLine,
+				newCode: hunk.newBlock.join("\n"),
+			})),
+		});
+		return rendered.length <= 20_000 ? rendered : null;
 	}
 
-	if (difficulty === "hard") {
-		const detail = mutation.describe(info);
-		if (isMultiEdit) {
-			return [header, detail, "Find and fix all occurrences of this issue."].join("\n\n");
-		}
-		if (isStructural) {
-			return [header, detail, "The fix may involve multiple lines."].join("\n\n");
-		}
-		return [header, detail, "Find and fix this issue."].join("\n\n");
-	}
-
-	// nightmare
-	if (isStructural) {
-		return [header, "There is a structural bug in this file.", "Track it down and fix it with a minimal edit."].join(
-			"\n\n",
-		);
-	}
-	if (isMultiEdit) {
-		return [
-			header,
-			"An identifier is consistently misspelled throughout this file.",
-			"Find all occurrences and fix them.",
-		].join("\n\n");
-	}
-	return [header, "There is a subtle bug in this file.", "Track it down and fix it with a minimal edit."].join("\n\n");
+	const location = difficulty === "medium" ? locateBug(input, hunks[0].startLine, inputLines.length) : {};
+	const rendered = prompt.render(mutationTaskTemplate, {
+		filename: path.basename(filePath),
+		name: mutation.name,
+		functionName: location.functionName,
+		region: location.region,
+		nightmare: difficulty === "nightmare",
+		fence,
+		language,
+		hunkCount: hunks.length,
+		hunks: hunks.map(hunk => ({
+			...hunkContext(hunk),
+			isDelete: hunk.newBlock.length === 0,
+			oldCode: hunk.oldBlock.join("\n"),
+			newCode: hunk.newBlock.join("\n"),
+		})),
+	});
+	return rendered.length <= 20_000 ? rendered : null;
 }
 
 function createSeededRng(seed: number): () => number {
@@ -625,6 +926,7 @@ function resolveFormattedMutationInfo(
 		lineNumber,
 		originalSnippet: snippetFromChangedLines(chosen.removedLines, originalLines, Math.max(1, chosen.oldStart)),
 		mutatedSnippet: snippetFromChangedLines(chosen.addedLines, mutatedLines, lineNumber),
+		identifier: fallbackInfo.identifier,
 	};
 
 	if (resolved.originalSnippet && !originalContent.includes(resolved.originalSnippet)) return null;
@@ -640,6 +942,7 @@ async function generateCase(
 	usedLines: Map<string, number[]>,
 	difficulty: Difficulty,
 	minScore: number | null,
+	sizeRange: SizeRange | null,
 	attemptLimit = 100,
 ): Promise<CaseResult | null> {
 	let candidates = getCandidatesForDifficulty(files, difficulty);
@@ -676,12 +979,15 @@ async function generateCase(
 		const positionalHunks = countPositionalLineHunks(entry.content, mutatedContent);
 		const positionalChanges = countPositionalLineChanges(entry.content, mutatedContent);
 		const isStructural = mutation.category === "structural";
-		const isMultiEdit = mutation.name === "identifier-multi-edit";
+		const isMultiEdit = mutation.multiHunk === true;
 		if (!isStructural && !isMultiEdit) {
 			if (changedHunks !== 1) continue;
 			if (positionalHunks !== 1) continue;
 			if (changedLines > 30 || positionalChanges > 30) continue;
 		}
+		// Coarse pre-format lower bound: removed+added always >= the run-based
+		// metric, so anything below the minimum can be rejected before Prettier.
+		if (sizeRange && changedLines < sizeRange[0]) continue;
 
 		if (!regionAvailable(usedLines, entry.path, rawInfo.lineNumber)) continue;
 
@@ -707,6 +1013,26 @@ async function generateCase(
 		const finalInfo = resolveFormattedMutationInfo(normalizedOriginal, normalizedMutated, rawInfo);
 		if (!finalInfo) continue;
 
+		// Enforce the size target with the same metric edit-shape-stats.ts uses:
+		// sum of max(old, new) per change run, on the formatted input/expected.
+		if (sizeRange) {
+			const finalChanged = placementsFromDiff(normalizedMutated, normalizedOriginal).reduce(
+				(sum, placement) => sum + Math.max(placement.oldLen, placement.newLines.length),
+				0,
+			);
+			if (finalChanged < sizeRange[0] || finalChanged > sizeRange[1]) continue;
+		}
+
+		const taskPrompt = buildPrompt(
+			entry.path,
+			mutation,
+			finalInfo,
+			difficulty,
+			normalizedMutated,
+			normalizedOriginal,
+		);
+		if (!taskPrompt) continue;
+
 		recordRegion(usedLines, entry.path, rawInfo.lineNumber);
 		return {
 			caseId: "",
@@ -715,6 +1041,7 @@ async function generateCase(
 			filePath: entry.path,
 			formattedMutatedContent: normalizedMutated,
 			formattedOriginalContent: normalizedOriginal,
+			prompt: taskPrompt,
 			difficulty,
 			difficultyScore: diffScore,
 		};
@@ -760,7 +1087,6 @@ async function buildCaseEntries(result: CaseResult, typescriptDir: string): Prom
 	};
 
 	const isRepeated = entry.repeatedLines.has(lineContent);
-	const prompt = buildPrompt(result.filePath, result.mutation, result.finalInfo, result.difficulty, entry);
 
 	const metadata = {
 		mutation_type: result.mutation.name,
@@ -796,7 +1122,7 @@ async function buildCaseEntries(result: CaseResult, typescriptDir: string): Prom
 	return [
 		{ name: `${caseDir}/input/${filename}`, content: result.formattedMutatedContent },
 		{ name: `${caseDir}/expected/${filename}`, content: result.formattedOriginalContent },
-		{ name: `${caseDir}/prompt.md`, content: prompt },
+		{ name: `${caseDir}/prompt.md`, content: result.prompt },
 		{ name: `${caseDir}/metadata.json`, content: JSON.stringify(metadata, null, 2) },
 	];
 }
@@ -856,17 +1182,20 @@ async function main(): Promise<number> {
 	const fallbackOrder: Difficulty[] = ["hard", "medium", "easy"];
 
 	for (const mutation of mutations) {
-		const difficultiesForType = chooseDifficulties(difficulties, args.countPerType);
+		const plan = MUTATION_PLANS[mutation.name] ?? { count: 4 };
+		const count = Math.max(1, Math.round(plan.count * args.countScale));
+		const difficultiesForType = chooseDifficulties(difficulties, count);
 		let generated = 0;
 
-		for (let index = 0; index < args.countPerType; index++) {
+		for (let index = 0; index < count; index++) {
 			const difficulty = difficultiesForType[index];
-			let result = await generateCase(rng, mutation, files, usedLines, difficulty, args.minScore);
+			const sizeRange = plan.sizes ? plan.sizes[index % plan.sizes.length] : null;
+			let result = await generateCase(rng, mutation, files, usedLines, difficulty, args.minScore, sizeRange);
 
 			if (!result) {
 				for (const fallback of fallbackOrder) {
 					if (fallback === difficulty) continue;
-					result = await generateCase(rng, mutation, files, usedLines, fallback, 0);
+					result = await generateCase(rng, mutation, files, usedLines, fallback, 0, sizeRange);
 					if (result) {
 						console.log(`Note: ${mutation.name} case ${index + 1} fell back from ${difficulty} to ${fallback}`);
 						break;
@@ -889,8 +1218,8 @@ async function main(): Promise<number> {
 
 		if (generated === 0) {
 			console.log(`Warning: No cases generated for ${mutation.name} (mutation may be too rare)`);
-		} else if (generated < args.countPerType) {
-			console.log(`Note: Only ${generated}/${args.countPerType} cases generated for ${mutation.name}`);
+		} else if (generated < count) {
+			console.log(`Note: Only ${generated}/${count} cases generated for ${mutation.name}`);
 		}
 	}
 

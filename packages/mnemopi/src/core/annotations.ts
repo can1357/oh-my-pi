@@ -110,7 +110,7 @@ interface StatementRunResult {
 	readonly lastInsertRowid: number | bigint;
 }
 
-interface WritableStatement {
+interface WritableStatement extends Disposable {
 	run(...params: SqlValue[]): StatementRunResult;
 }
 
@@ -249,11 +249,10 @@ export class AnnotationStore {
 	}
 
 	add(memoryId: string, kind: string, value: string, source = "", confidence = 1.0): number {
-		const result = this.db
-			.prepare(
-				"INSERT OR IGNORE INTO annotations (memory_id, kind, value, source, confidence) VALUES (?, ?, ?, ?, ?)",
-			)
-			.run(memoryId, kind, value, source, confidence);
+		const result = this.db.run(
+			"INSERT OR IGNORE INTO annotations (memory_id, kind, value, source, confidence) VALUES (?, ?, ?, ?, ?)",
+			[memoryId, kind, value, source, confidence],
+		);
 		return Number(result.lastInsertRowid);
 	}
 
@@ -267,7 +266,7 @@ export class AnnotationStore {
 		if (!values || values.length === 0) return 0;
 		const rows = values.filter(value => value.length > 0 && value.trim().length > 0);
 		if (rows.length === 0) return 0;
-		const insert = this.db.prepare(
+		using insert = this.db.prepare(
 			"INSERT OR IGNORE INTO annotations (memory_id, kind, value, source, confidence) VALUES (?, ?, ?, ?, ?)",
 		);
 		transaction(this.db, () => {
@@ -280,10 +279,8 @@ export class AnnotationStore {
 			kind === null || kind === undefined
 				? "SELECT * FROM annotations WHERE memory_id = ? ORDER BY created_at ASC, id ASC"
 				: "SELECT * FROM annotations WHERE memory_id = ? AND kind = ? ORDER BY created_at ASC, id ASC";
-		const rows =
-			kind === null || kind === undefined
-				? this.db.prepare(sql).all(memoryId)
-				: this.db.prepare(sql).all(memoryId, kind);
+		using statement = this.db.prepare(sql);
+		const rows = kind === null || kind === undefined ? statement.all(memoryId) : statement.all(memoryId, kind);
 		return (rows as AnnotationRow[]).map(normalizeRow);
 	}
 	queryByKind(
@@ -307,23 +304,24 @@ export class AnnotationStore {
 			conditions.push("memory_id = ?");
 			params.push(memoryId);
 		}
-		const rows = this.db
-			.prepare(`SELECT * FROM annotations WHERE ${conditions.join(" AND ")} ORDER BY created_at ASC, id ASC`)
-			.all(...params) as AnnotationRow[];
+		using statement = this.db.prepare(
+			`SELECT * FROM annotations WHERE ${conditions.join(" AND ")} ORDER BY created_at ASC, id ASC`,
+		);
+		const rows = statement.all(...params) as AnnotationRow[];
 		const normalized = rows.map(normalizeRow);
 		const filterNoise = options.filter_noise ?? options.filterNoise ?? true;
 		return filterNoise && kind === "mentions" ? filterCleanMentions(normalized) : normalized;
 	}
 	getDistinctValues(kind: string): string[] {
-		const rows = this.db
-			.prepare("SELECT DISTINCT value FROM annotations WHERE kind = ? ORDER BY value")
-			.all(kind) as { value: string }[];
+		using statement = this.db.prepare("SELECT DISTINCT value FROM annotations WHERE kind = ? ORDER BY value");
+		const rows = statement.all(kind) as { value: string }[];
 		return rows.map(row => row.value);
 	}
 	exportAll(): AnnotationRow[] {
-		const rows = this.db
-			.prepare("SELECT id, memory_id, kind, value, source, confidence, created_at FROM annotations ORDER BY id")
-			.all() as AnnotationRow[];
+		using statement = this.db.prepare(
+			"SELECT id, memory_id, kind, value, source, confidence, created_at FROM annotations ORDER BY id",
+		);
+		const rows = statement.all() as AnnotationRow[];
 		return rows.map(normalizeRow);
 	}
 	importAll(annotations: readonly AnnotationInput[], force = false): AnnotationImportStats {
@@ -346,19 +344,20 @@ export class AnnotationStore {
 		}
 
 		transaction(this.db, () => {
-			const existingRows = this.db
-				.prepare("SELECT id, memory_id, kind, value, source, confidence, created_at FROM annotations")
-				.all() as AnnotationRow[];
+			using existingStatement = this.db.prepare(
+				"SELECT id, memory_id, kind, value, source, confidence, created_at FROM annotations",
+			);
+			const existingRows = existingStatement.all() as AnnotationRow[];
 			const existing = new Map<number, StoredAnnotationContent>();
 			for (const row of existingRows) existing.set(Number(row.id), normalizeRow(row));
 
-			const insertWithId = this.db.prepare(
+			using insertWithId = this.db.prepare(
 				"INSERT INTO annotations (id, memory_id, kind, value, source, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			) as WritableStatement;
-			const insertWithoutId = this.db.prepare(
+			using insertWithoutId = this.db.prepare(
 				"INSERT INTO annotations (memory_id, kind, value, source, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 			) as WritableStatement;
-			const deleteById = this.db.prepare("DELETE FROM annotations WHERE id = ?");
+			using deleteById = this.db.prepare("DELETE FROM annotations WHERE id = ?");
 
 			for (const item of annotations) {
 				const id = rowId(item.id);

@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
 
+    # Release sentinel
+    release_sentinel_enabled: bool = Field(False, alias="ROBOMP_RELEASE_SENTINEL_ENABLED")
+    release_commit_prefix: str = Field("chore: bump version to ", alias="ROBOMP_RELEASE_COMMIT_PREFIX")
+    release_max_rounds: int = Field(5, alias="ROBOMP_RELEASE_MAX_ROUNDS")
+    release_task_timeout_seconds: float = Field(3600.0, alias="ROBOMP_RELEASE_TASK_TIMEOUT_SECONDS")
+    release_model: str | None = Field(None, alias="ROBOMP_RELEASE_MODEL")
+
     # gh-proxy. Set BOTH to route GitHub through the proxy; leave both empty
     # to keep PAT-on-orchestrator behavior. Mixing the two (PAT + proxy) is
     # rejected to prevent silent fallback to direct GitHub access.
@@ -153,6 +160,15 @@ class Settings(BaseSettings):
     natives_cache_max_entries_per_repo: int = Field(8, alias="ROBOMP_NATIVES_CACHE_MAX_ENTRIES_PER_REPO")
     natives_cache_max_bytes: int = Field(4 * 1024**3, alias="ROBOMP_NATIVES_CACHE_MAX_BYTES")
     natives_cache_gc_interval_seconds: float = Field(3600.0, alias="ROBOMP_NATIVES_CACHE_GC_INTERVAL_SECONDS")
+
+    # Post-run workspace cache reclamation. Every task run reinstalls
+    # node_modules (`ensure_workspace_dependencies`), so between runs the
+    # checkout's node_modules and the workspace-private bun install cache are
+    # dead weight — multiple GB per issue that would otherwise persist until
+    # the issue closes and exhaust the disk. When enabled, the worker strips
+    # them after every event and WorkerPool.start() sweeps all workspaces once
+    # at boot. Costs a dependency re-download on the next run for that issue.
+    reclaim_workspace_caches: bool = Field(True, alias="ROBOMP_RECLAIM_WORKSPACE_CACHES")
 
     @field_validator("bot_login", mode="after")
     @classmethod
@@ -317,6 +333,18 @@ class Settings(BaseSettings):
     def pick_model(self) -> str:
         """Random selection from the pool (uniform). One-element pools return that one."""
         return random.choice(self.model_pool)
+
+    @property
+    def release_model_pool(self) -> tuple[str, ...]:
+        """Release-specific model pool, falling back to the general pool."""
+        items = [piece.strip() for piece in (self.release_model or "").split(",") if piece.strip()]
+        return tuple(items) or self.model_pool
+
+    def pick_release_model(self) -> str:
+        """Select a release model, falling back to the general selector."""
+        if not self.release_model or not self.release_model.strip():
+            return self.pick_model()
+        return random.choice(self.release_model_pool)
 
     @field_validator("event_retry_delays_raw", mode="before")
     @classmethod

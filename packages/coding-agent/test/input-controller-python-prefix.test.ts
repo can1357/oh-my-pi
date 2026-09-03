@@ -49,6 +49,7 @@ function createContext() {
 			isBashRunning: false,
 			isEvalRunning: false,
 			extensionRunner: undefined,
+			maybeStartTitleGeneration: vi.fn(),
 			prompt,
 			queuedMessageCount: 0,
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),

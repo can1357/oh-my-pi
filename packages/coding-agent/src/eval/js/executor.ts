@@ -19,6 +19,8 @@ export interface JsExecutorOptions {
 	onStatus?: (event: JsStatusEvent) => void;
 	signal?: AbortSignal;
 	sessionId: string;
+	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
+	kernelOwnerId?: string;
 	reset?: boolean;
 	sessionFile?: string;
 	artifactPath?: string;
@@ -100,6 +102,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		await executeInVmContext({
 			sessionKey: options.sessionId,
 			sessionId: options.sessionId,
+			ownerId: options.kernelOwnerId,
 			cwd: options.cwd ?? options.session.cwd,
 			session: options.session,
 			localRoots: options.localRoots,
@@ -169,5 +172,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			outputBytes: summary.outputBytes,
 			displayOutputs,
 		};
+	} finally {
+		await outputSink.dispose();
 	}
 }

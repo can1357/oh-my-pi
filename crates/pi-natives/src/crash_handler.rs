@@ -136,7 +136,7 @@ fn blocking_task_panic_scope_active() -> bool {
 }
 
 fn panic_disposition() -> PanicDisposition {
-	if blocking_task_panic_scope_active() || pi_uutils_ctx::is_active() {
+	if blocking_task_panic_scope_active() || pi_shell::panic_scope_active() {
 		PanicDisposition::LoggedRecoverable
 	} else {
 		PanicDisposition::Fatal

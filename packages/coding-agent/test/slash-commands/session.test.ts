@@ -5,6 +5,7 @@ import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-comm
 function createRuntimeHarness(options?: {
 	handleSessionCommand?: InteractiveModeContext["handleSessionCommand"];
 	handleSessionDeleteCommand?: InteractiveModeContext["handleSessionDeleteCommand"];
+	showSessionPinSelector?: InteractiveModeContext["showSessionPinSelector"];
 }) {
 	const setText = vi.fn();
 	const handleSessionCommand =
@@ -17,16 +18,23 @@ function createRuntimeHarness(options?: {
 		vi.fn(async () => {
 			return;
 		});
+	const showSessionPinSelector =
+		options?.showSessionPinSelector ??
+		vi.fn(async () => {
+			return;
+		});
 
 	return {
 		setText,
 		handleSessionCommand,
 		handleSessionDeleteCommand,
+		showSessionPinSelector,
 		runtime: {
 			ctx: {
 				editor: { setText } as unknown as InteractiveModeContext["editor"],
 				handleSessionCommand,
 				handleSessionDeleteCommand,
+				showSessionPinSelector,
 			} as InteractiveModeContext,
 		},
 	};
@@ -55,6 +63,26 @@ describe("/session slash command", () => {
 
 		expect(await execution).toBe(true);
 		expect(settled).toBe(true);
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("awaits the session account picker", async () => {
+		const deferred = Promise.withResolvers<void>();
+		const showSessionPinSelector = vi.fn(() => deferred.promise);
+		const harness = createRuntimeHarness({ showSessionPinSelector });
+		let settled = false;
+		const execution = executeBuiltinSlashCommand("/session pin", harness.runtime).then(result => {
+			settled = true;
+			return result;
+		});
+
+		await Promise.resolve();
+		expect(showSessionPinSelector).toHaveBeenCalledTimes(1);
+		expect(harness.setText).not.toHaveBeenCalled();
+		expect(settled).toBe(false);
+
+		deferred.resolve();
+		expect(await execution).toBe(true);
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 

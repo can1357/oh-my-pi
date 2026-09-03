@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as dapModule from "@oh-my-pi/pi-coding-agent/dap";
-import { DapClient, waitForTcpServerListening } from "@oh-my-pi/pi-coding-agent/dap/client";
+import { connectSocket, DapClient, waitForTcpServerListening } from "@oh-my-pi/pi-coding-agent/dap/client";
 import { DapSessionManager } from "@oh-my-pi/pi-coding-agent/dap/session";
 import type {
 	DapCapabilities,
@@ -74,6 +74,8 @@ class FakeDapClient {
 			attachError?: string;
 			attachErrorDelayMs?: number;
 			configurationDoneError?: string;
+			supportsConfigurationDone?: boolean;
+			deferInitialized?: boolean;
 			rejectStopWaiters?: boolean;
 			stopAfterLaunch?: boolean;
 		},
@@ -94,8 +96,14 @@ class FakeDapClient {
 	}
 
 	async initialize(): Promise<DapCapabilities> {
-		queueMicrotask(() => this.#emit("initialized", {}));
-		return { supportsConfigurationDoneRequest: true };
+		if (!this.options.deferInitialized) {
+			queueMicrotask(() => this.#emit("initialized", {}));
+		}
+		return { supportsConfigurationDoneRequest: this.options.supportsConfigurationDone ?? true };
+	}
+
+	emitInitialized(): void {
+		this.#emit("initialized", {});
 	}
 
 	async sendRequest(command: string, args?: unknown): Promise<unknown> {
@@ -218,6 +226,27 @@ describe("DAP launch failure handling", () => {
 
 		expect(message).toContain("attach: target process exited");
 		expect(message).toContain("configurationDone: Expected process to be stopped.");
+	});
+
+	it("completes configuration without sending attach for preattached adapters", async () => {
+		const adapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			attachDefaults: { request: "attach", skipAttachRequest: true },
+		};
+		const manager = new DapSessionManager();
+		const fake = new FakeDapClient(adapter, process.cwd(), {
+			supportsConfigurationDone: false,
+			deferInitialized: true,
+		});
+		spyOn(DapClient, "spawn").mockResolvedValue(fake as unknown as DapClient);
+
+		const summary = await manager.attach({ adapter, cwd: process.cwd() });
+
+		expect(fake.requests.map(request => request.command)).toEqual([]);
+		expect(summary.status).toBe("running");
+		expect(summary.needsConfigurationDone).toBe(false);
+		fake.emitInitialized();
+		expect(manager.getActiveSession()?.status).toBe("running");
 	});
 
 	it("does not emit an unhandled rejection when launch fails before initial stop watchers settle", async () => {
@@ -487,6 +516,23 @@ describe("DAP launch failure handling", () => {
 	});
 });
 
+describe("connectSocket unix transport", () => {
+	it("rejects instead of hanging when the unix socket cannot be connected", async () => {
+		// A path that stat would report as a socket but that no one listens on
+		// yields ECONNREFUSED/ENOENT from Bun.connect. Before the fix the error
+		// handler only errored the stream and the returned promise never settled,
+		// so `await connectSocket(...)` hung the launch forever.
+		const deadSocket = path.join(
+			os.tmpdir(),
+			`omp-dap-dead-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`,
+		);
+		const start = Date.now();
+		await expect(connectSocket({ unix: deadSocket }, 5_000)).rejects.toThrow();
+		// Must settle on the connect error, not linger until the timeout bound.
+		expect(Date.now() - start).toBeLessThan(2_000);
+	});
+});
+
 describe("DAP TCP transport resilience", () => {
 	const TCP_ADAPTER_BASE: DapResolvedAdapter = {
 		...TEST_ADAPTER,
@@ -517,7 +563,7 @@ await Bun.sleep(60_000);
 		await fs.writeFile(adapterPath, source);
 		const adapter: DapResolvedAdapter = {
 			...TCP_ADAPTER_BASE,
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: literal DAP `${port}` placeholder substituted by the adapter launcher
+			// oxlint-disable-next-line no-template-curly-in-string -- literal DAP `${port}` placeholder substituted by the adapter launcher
 			args: [adapterPath, "${port}", "127.0.0.1"],
 		};
 		try {
@@ -790,6 +836,57 @@ describe("DebugTool launch validation", () => {
 		}
 	});
 
+	it("validates missing attach targets before adapter discovery", async () => {
+		const selectAttachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(null);
+		const session: ToolSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ "debug.enabled": true }),
+		};
+		const tool = new DebugTool(session);
+
+		await expect(tool.execute("call", { action: "attach" })).rejects.toThrow("attach requires pid or port");
+		expect(selectAttachSpy).not.toHaveBeenCalled();
+	});
+
+	it("allows explicit adapters with target attach defaults to attach without pid or port", async () => {
+		const adapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "pico-openocd",
+			attachDefaults: { target: ":3334" },
+		};
+		const selectAttachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(adapter);
+		const sessionAttachSpy = spyOn(dapModule.dapSessionManager, "attach").mockImplementation(async opts => {
+			throw Object.assign(new Error("captured attach"), { capturedOptions: opts });
+		});
+		try {
+			const session: ToolSession = {
+				cwd: process.cwd(),
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({ "debug.enabled": true }),
+			};
+			const tool = new DebugTool(session);
+
+			await expect(tool.execute("call", { action: "attach", adapter: "pico-openocd" })).rejects.toThrow(
+				/captured attach/,
+			);
+			expect(selectAttachSpy).toHaveBeenCalledWith(process.cwd(), "pico-openocd", undefined);
+			expect(sessionAttachSpy).toHaveBeenCalledTimes(1);
+			const [opts] = sessionAttachSpy.mock.calls[0]!;
+			expect(opts.adapter).toBe(adapter);
+			expect(opts.adapter.attachDefaults.target).toBe(":3334");
+			expect(opts.pid).toBeUndefined();
+			expect(opts.port).toBeUndefined();
+		} finally {
+			sessionAttachSpy.mockRestore();
+			selectAttachSpy.mockRestore();
+		}
+	});
+
 	it("throws targeted 'python not found in PATH' when adapter:'debugpy' is unresolvable for attach", async () => {
 		const attachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(null);
 		try {
@@ -836,6 +933,36 @@ describe("DebugTool launch validation", () => {
 
 				await expect(tool.execute("call", { action: "launch", program: "main.go" })).rejects.toThrow(
 					/go install github\.com\/go-delve\/delve\/cmd\/dlv@latest/,
+				);
+			} finally {
+				await removeWithRetries(cwd);
+			}
+		} finally {
+			launchSpy.mockRestore();
+		}
+	});
+
+	it("shows supported install options when the JavaScript debug adapter is unavailable", async () => {
+		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
+			kind: "unavailable",
+			adapterName: "js-debug-adapter",
+			command: "js-debug-adapter",
+		});
+		try {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-js-debug-hint-"));
+			try {
+				await fs.writeFile(path.join(cwd, "main.js"), "console.log('hi');\n");
+				const session: ToolSession = {
+					cwd,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated({ "debug.enabled": true }),
+				};
+				const tool = new DebugTool(session);
+
+				await expect(tool.execute("call", { action: "launch", program: "main.js" })).rejects.toThrow(
+					/download.*github\.com\/microsoft\/vscode-js-debug/,
 				);
 			} finally {
 				await removeWithRetries(cwd);

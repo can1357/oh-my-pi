@@ -46,7 +46,7 @@ pub struct MinimizerOutput {
 	/// Label for the dispatch path that produced this output (e.g. `"git"`,
 	/// `"pipeline:gradle"`, or `"passthrough"`). For non-rewrite misses, this
 	/// carries the reason label (e.g. `"compound"`, `"piped"`, `"parse-error"`,
-	/// `"too-large"`, `"disabled"`, `"unknown"`, `"unsupported"`,
+	/// `"too-short"`, `"too-large"`, `"disabled"`, `"unknown"`, `"unsupported"`,
 	/// `"pipeline-noop"`).
 	pub filter:        &'static str,
 	/// Original (un-minimized) capture, surfaced only when the filter

@@ -12,10 +12,6 @@ interface XAICredentials {
 	baseURL: string;
 }
 
-export function ohMyPiXAIUserAgent(): string {
-	return "oh-my-pi/xai";
-}
-
 /** xAI provider ids supported by shared HTTP tool transport resolution. */
 export type XAIHttpProvider = "xai-oauth" | "xai";
 

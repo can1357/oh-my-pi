@@ -48,6 +48,7 @@ import signal
 import stat
 import subprocess
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,6 +73,9 @@ from robomp.git_ops import (
 from robomp.git_ops import (
     push as git_push,
 )
+from robomp.git_ops import (
+    push_release as git_push_release,
+)
 from robomp.natives_cache import CacheHit, NativesCache
 from robomp.natives_cache import compute_key as natives_compute_key
 
@@ -89,7 +93,7 @@ class Workspace:
     artifacts_dir: Path
     branch: str
     repo_full_name: str
-    issue_number: int
+    issue_number: int | str
 
     @property
     def repro_dir(self) -> Path:
@@ -113,7 +117,7 @@ def _short_hex(seed: str | None = None) -> str:
     return secrets.token_hex(4)
 
 
-def workspace_key(repo: str, number: int) -> str:
+def workspace_key(repo: str, number: int | str) -> str:
     return f"{repo.replace('/', '__')}__{number}"
 
 
@@ -252,6 +256,20 @@ class GitTransport(Protocol):
         """Push `branch` to origin. MUST refuse if HEAD has drifted from `expected_head`."""
         ...
 
+    def push_release(
+        self,
+        *,
+        repo: str,
+        workspace_key: str,
+        repo_dir: Path,
+        branch: str,
+        tag: str,
+        expected_head: str,
+        slot_uid: int | None = None,
+    ) -> PushResult:
+        """Atomically push a release branch and move its tag."""
+        ...
+
 
 class LocalGitTransport:
     """Default GitTransport: run git in-process with ephemeral PAT injection.
@@ -294,6 +312,27 @@ class LocalGitTransport:
     ) -> PushResult:
         del repo, workspace_key
         return git_push(repo_dir, branch=branch, expected_head=expected_head, token=self._token, slot_uid=slot_uid)
+
+    def push_release(
+        self,
+        *,
+        repo: str,
+        workspace_key: str,
+        repo_dir: Path,
+        branch: str,
+        tag: str,
+        expected_head: str,
+        slot_uid: int | None = None,
+    ) -> PushResult:
+        del repo, workspace_key
+        return git_push_release(
+            repo_dir,
+            branch=branch,
+            tag=tag,
+            expected_head=expected_head,
+            token=self._token,
+            slot_uid=slot_uid,
+        )
 
 
 # ---------- low-level helpers retained for callers expecting old shape ----------
@@ -668,6 +707,83 @@ def _chown_workspace(ws_root: Path, slot_uid: int | None) -> None:
     )
 
 
+# ---------- workspace cache reclamation ----------
+
+
+_TRASH_PREFIX = ".trash-"
+# ws/repo/node_modules is depth 2 from ws_root's repo dir; nested workspace
+# installs (packages/x/node_modules, python/x/web/node_modules) sit at 3-4.
+_NODE_MODULES_SCAN_DEPTH = 4
+
+
+def _find_node_modules(repo_dir: Path, *, max_depth: int = _NODE_MODULES_SCAN_DEPTH) -> list[Path]:
+    """Locate `node_modules` dirs in a checkout without descending into them.
+
+    Depth-limited (bun's hoisted linker keeps everything at the root; nested
+    workspace installs sit a couple of levels down) and prunes `.git` plus the
+    matches themselves, so the walk stays cheap on a large tree.
+    """
+    found: list[Path] = []
+    if not repo_dir.is_dir():
+        return found
+    base_depth = len(repo_dir.parts)
+    for current, dirnames, _files in os.walk(repo_dir):
+        current_path = Path(current)
+        if "node_modules" in dirnames:
+            found.append(current_path / "node_modules")
+        if len(current_path.parts) - base_depth + 1 >= max_depth:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
+    return found
+
+
+def _stage_workspace_trash(ws_root: Path) -> tuple[Path, ...]:
+    """Rename reclaimable cache dirs into `.trash-*` staging dirs.
+
+    Rename is atomic and near-free on the same filesystem, so a caller can
+    hold a lock across this and defer the slow ``rmtree`` to after the lock
+    is dropped. Targets: every ``node_modules`` in the checkout, the
+    workspace-private XDG cache (bun install cache lives there) and the
+    tmpdir — all re-created by ``ensure_workspace`` +
+    ``ensure_workspace_dependencies`` on the next run. Session transcripts,
+    context, artifacts and the git worktree are never touched.
+
+    Returns every staged trash dir, including leftovers from a previous
+    interrupted reclaim.
+    """
+    if not ws_root.is_dir():
+        return ()
+    staged = [p for p in ws_root.iterdir() if p.name.startswith(_TRASH_PREFIX)]
+    candidates = [
+        ws_root / ".omp-xdg" / "cache",
+        ws_root / ".omp-tmp",
+        *_find_node_modules(ws_root / "repo"),
+    ]
+    trash_root: Path | None = None
+    for index, victim in enumerate(candidates):
+        try:
+            st = victim.lstat()
+        except FileNotFoundError:
+            continue
+        if not (stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode)):
+            continue
+        if trash_root is None:
+            trash_root = ws_root / f"{_TRASH_PREFIX}{secrets.token_hex(4)}"
+            trash_root.mkdir(mode=0o700)
+            staged.append(trash_root)
+        try:
+            victim.rename(trash_root / f"{index}-{victim.name}")
+        except OSError as exc:
+            log.warning("cache reclaim rename failed", extra={"path": str(victim), "err": str(exc)})
+    return tuple(staged)
+
+
+def _purge_trash(staged: Iterable[Path]) -> None:
+    for path in staged:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 # ---------- SandboxManager ----------
 
 
@@ -706,20 +822,24 @@ class SandboxManager:
     def pool_path(self, repo: str) -> Path:
         return self.pool / repo.replace("/", "__")
 
-    def ensure_clone(self, *, repo: str, clone_url: str, default_branch: str) -> Path:
-        """Idempotent shared clone for `repo`.
+    def ensure_clone(
+        self,
+        *,
+        repo: str,
+        clone_url: str,
+        default_branch: str,
+        refresh: bool = True,
+    ) -> Path:
+        """Create or refresh the shared clone for `repo`.
 
         `clone_url` MUST be a plain `https://github.com/<owner>/<repo>.git`
         (no embedded credentials). Auth is supplied per-call by the transport.
         """
         target = self.pool_path(repo)
         if (target / ".git").exists() or (target / "HEAD").exists():
-            # Idempotent refresh. An older deploy may have baked a
-            # credentialed `https://user:pass@github.com/...` into
-            # `.git/config`; rewrite to the credential-free URL we now own
-            # before fetching so the PAT never persists on disk.
             self._reset_origin_url(target, clone_url)
-            self.transport.fetch_pool(repo=repo, pool_dir=target)
+            if refresh:
+                self.transport.fetch_pool(repo=repo, pool_dir=target)
             return target
         target.mkdir(parents=True, exist_ok=True)
         self.transport.clone_pool(
@@ -752,7 +872,7 @@ class SandboxManager:
         _safe_run(["git", "remote", "set-url", "origin", clone_url], cwd=repo_dir)
 
     # ---- per-issue workspace ----
-    def workspace_root(self, repo: str, number: int) -> Path:
+    def workspace_root(self, repo: str, number: int | str) -> Path:
         return self.root / workspace_key(repo, number)
 
     def ensure_workspace(
@@ -902,6 +1022,84 @@ class SandboxManager:
             self._populate_natives_cache(workspace, slot_uid=slot_uid)
             return workspace
 
+    def ensure_release_workspace(
+        self,
+        *,
+        repo: str,
+        clone_url: str,
+        default_branch: str,
+        tag: str,
+        author_name: str,
+        author_email: str,
+        slot_uid: int | None = None,
+    ) -> Workspace:
+        """Create or reset the repository's reusable main-branch release worktree."""
+        with self._repo_lock(repo):
+            pool = self.ensure_clone(
+                repo=repo,
+                clone_url=clone_url,
+                default_branch=default_branch,
+                refresh=False,
+            )
+            self.transport.fetch_pool(repo=repo, pool_dir=pool)
+            ws_root = self.workspace_root(repo, "release")
+            repo_dir = ws_root / "repo"
+            session_dir = ws_root / f".omp-session-{tag}"
+            context_dir = ws_root / "context"
+            artifacts_dir = ws_root / "artifacts"
+            for path in (ws_root, session_dir, context_dir, context_dir / "repro", artifacts_dir):
+                path.mkdir(parents=True, exist_ok=True)
+
+            detach = ["git", "checkout", "--detach"]
+            detached = _safe_run(detach, cwd=pool)
+            if detached.returncode != 0:
+                raise GitCommandError(detach, detached.returncode, detached.stdout, detached.stderr)
+
+            if not (repo_dir / ".git").exists():
+                _worktree_add(
+                    [
+                        "git",
+                        "worktree",
+                        "add",
+                        "-B",
+                        default_branch,
+                        str(repo_dir),
+                        f"origin/{default_branch}",
+                    ],
+                    pool=pool,
+                    repo_dir=repo_dir,
+                )
+
+            _share_git_metadata_with_slots(repo_dir, slot_uid)
+            _provision_runtime_dirs(ws_root)
+            _chown_workspace(ws_root, slot_uid)
+            slot_git_kwargs = _slot_subprocess_kwargs(slot_uid)
+            slot_git_env = _git_env_for_repo(repo_dir)
+            commands = (
+                ["git", "checkout", "-B", default_branch, f"origin/{default_branch}"],
+                ["git", "reset", "--hard", f"origin/{default_branch}"],
+                ["git", "clean", "-fd"],
+                ["git", "config", "user.email", author_email],
+                ["git", "config", "user.name", author_name],
+            )
+            for command in commands:
+                proc = _safe_run(command, cwd=repo_dir, env=slot_git_env, **slot_git_kwargs)
+                if proc.returncode != 0:
+                    raise GitCommandError(command, proc.returncode, proc.stdout, proc.stderr)
+            _share_git_metadata_with_slots(repo_dir, slot_uid)
+            workspace = Workspace(
+                root=ws_root,
+                repo_dir=repo_dir,
+                session_dir=session_dir,
+                context_dir=context_dir,
+                artifacts_dir=artifacts_dir,
+                branch=default_branch,
+                repo_full_name=repo,
+                issue_number="release",
+            )
+            self._populate_natives_cache(workspace, slot_uid=slot_uid)
+            return workspace
+
     def _populate_natives_cache(self, workspace: Workspace, *, slot_uid: int | None = None) -> None:
         """Try to hardlink cached pi-natives artifacts into the worktree.
 
@@ -984,7 +1182,7 @@ class SandboxManager:
                     extra={"file": str(child), "err": str(exc)},
                 )
 
-    def remove_workspace(self, *, repo: str, number: int) -> None:
+    def remove_workspace(self, *, repo: str, number: int | str) -> None:
         with self._repo_lock(repo):
             ws_root = self.workspace_root(repo, number)
             repo_dir = ws_root / "repo"
@@ -1022,6 +1220,46 @@ class SandboxManager:
                         )
             if ws_root.exists():
                 shutil.rmtree(ws_root, ignore_errors=True)
+
+    def reclaim_workspace_caches(self, *, repo: str, number: int | str) -> bool:
+        """Strip re-creatable dependency caches from an idle workspace.
+
+        Every task run reinstalls ``node_modules`` (see
+        ``host_tools.ensure_workspace_dependencies``), so between runs the
+        checkout's ``node_modules`` and the workspace-private bun install
+        cache are dead weight — multiple GB per issue that would otherwise
+        persist until the issue closes, which is exactly how the host runs
+        out of disk. ``--continue`` resumes are unaffected: session
+        transcripts, context, artifacts and the worktree survive.
+
+        The rename pass runs under the per-repo lock (serialized against
+        ``ensure_workspace``); the slow deletes happen after the lock is
+        dropped. Returns True when anything was reclaimed.
+        """
+        with self._repo_lock(repo):
+            staged = _stage_workspace_trash(self.workspace_root(repo, number))
+        _purge_trash(staged)
+        return bool(staged)
+
+    def reclaim_all_caches(self) -> int:
+        """Sweep dependency caches from every workspace under ``root``.
+
+        Crash-leftover recovery: called from ``WorkerPool.start()`` before
+        the dispatch loop comes online, so no task can be touching a
+        workspace and the per-repo locks are deliberately skipped. Returns
+        the number of workspaces that had something to reclaim.
+        """
+        if not self.root.is_dir():
+            return 0
+        count = 0
+        for entry in sorted(self.root.iterdir()):
+            if entry.name == "_pool" or entry.name.startswith(".") or not entry.is_dir():
+                continue
+            staged = _stage_workspace_trash(entry)
+            if staged:
+                _purge_trash(staged)
+                count += 1
+        return count
 
 
 __all__ = [

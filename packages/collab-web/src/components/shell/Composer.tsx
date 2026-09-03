@@ -117,7 +117,7 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 	const readOnly = snapshot.readOnly;
 	const uiRequest = snapshot.uiRequest;
 	const canPrompt = live && !readOnly;
-	const busy = snapshot.working || (snapshot.state?.isStreaming ?? false);
+	const busy = snapshot.working;
 	const queued = snapshot.state?.queuedMessageCount ?? 0;
 	const canSend = canPrompt && text.trim().length > 0;
 

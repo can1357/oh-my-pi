@@ -44,7 +44,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		// rewrote. Replaying onto current would overwrite "L5-CHANGED" with
 		// payload the model authored against the stale "L5". That is
 		// corruption, not recovery.
-		const { edits } = parsePatch("SWAP 5.=5:\n|L5-MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n|L5-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -61,7 +61,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		// Edit anchored at line 3 — unchanged between v0 and v1. Recovery
 		// proves that the target and its surrounding context still map to the
 		// same live lines before replaying the edit.
-		const { edits } = parsePatch("SWAP 3.=3:\n|L3-MODEL");
+		const { edits } = parsePatch("PUT 3-3:\n|L3-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -87,7 +87,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("L1", "L2", "INSERTED", "L3", "L4", "L5", "L6");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 5.=5:\n+L5-MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n+L5-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -107,7 +107,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("L1", "L3", "L4", "L5", "L6");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 5.=5:\n+L5-MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n+L5-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -127,7 +127,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("start", "mid", "DUP", "CHANGED", "tail");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 4.=4:\n+MODEL");
+		const { edits } = parsePatch("PUT 4-4:\n+MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -145,7 +145,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const v0Text = lines(...block, "middle", ...block, "tail");
 		const hash = store.record(PATH, v0Text);
 		const currentText = lines("head", "CHANGED_A", "CHANGED_B", "ctx1", "ctx2", "ctx3", "middle", ...block, "tail");
-		const { edits } = parsePatch("SWAP 2.=3:\n+MODEL_A\n+MODEL_B");
+		const { edits } = parsePatch("PUT 2-3:\n+MODEL_A\n+MODEL_B");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -164,7 +164,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("X", "L1", "L2", "L3", "L4", "BEFORE", "T", "AFTER", "L6");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 5.=5:\n+MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n+MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -186,7 +186,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("alpha", "INSERTED", "DUP", "beta", "DUP", "omega");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 3.=4:\n+B-MODEL\n+MODEL");
+		const { edits } = parsePatch("PUT 3-4:\n+B-MODEL\n+MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -238,7 +238,7 @@ describe("Recovery — colliding snapshot tags", () => {
 			path: PATH,
 			currentText,
 			fileHash: tag,
-			edits: parsePatch("SWAP 2.=2:\n+model payload").edits,
+			edits: parsePatch("PUT 2-2:\n+model payload").edits,
 		});
 
 		expect(recovered?.text).toBe(lines("shared head", "model payload", "shared tail", "drifted trailer"));
@@ -255,7 +255,7 @@ describe("Recovery — colliding snapshot tags", () => {
 			path: PATH,
 			currentText,
 			fileHash: tag,
-			edits: parsePatch("SWAP 2.=2:\n+model payload").edits,
+			edits: parsePatch("PUT 2-2:\n+model payload").edits,
 		});
 
 		expect(recovered).not.toBeNull();
@@ -277,7 +277,7 @@ describe("Recovery — ill-formed UTF-16 content", () => {
 			path: PATH,
 			currentText,
 			fileHash: hash,
-			edits: parsePatch("SWAP 3.=3:\n+model payload").edits,
+			edits: parsePatch("PUT 3-3:\n+model payload").edits,
 		});
 
 		expect(recovered).not.toBeNull();

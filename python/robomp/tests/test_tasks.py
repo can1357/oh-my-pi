@@ -167,3 +167,71 @@ async def test_run_workspace_op_logs_worker_exception_on_concurrent_cancel(caplo
     assert any(r.exc_info and r.exc_info[1] is boom for r in warnings), (
         "the worker's exception was not attached to the warning"
     )
+
+
+async def test_triage_issue_reopen_tears_down_finalized_workspace(db, settings, monkeypatch, tmp_path):
+    """Re-triage of a finalized (reopened) issue must clear the stale workspace first.
+
+    The prior branch was merged/deleted when the issue finalized, so a reopen has
+    to branch afresh — mirroring the maintainer directive-reopen teardown.
+    """
+
+    async def _resolve_repo_and_issue(_github, _payload):
+        repo = RepoInfo(
+            full_name="octo/widget",
+            default_branch="main",
+            clone_url="https://x/octo/widget.git",
+            private=False,
+        )
+        issue = IssueInfo(
+            repo="octo/widget",
+            number=1,
+            title="bug",
+            body="b",
+            state="open",
+            author="alice",
+            labels=(),
+            is_pull_request=False,
+        )
+        return repo, issue
+
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve_repo_and_issue)
+
+    # The bot previously finalized this issue: a stale row + workspace exist.
+    db.upsert_issue(key="octo/widget#1", repo="octo/widget", number=1, state="closed")
+
+    calls: list[str] = []
+
+    def _remove(**_kwargs):
+        calls.append("remove")
+
+    def _ensure(**_kwargs):
+        calls.append("ensure")
+        return SimpleNamespace(branch="farm/x/y", session_dir=str(tmp_path / "sess"))
+
+    async def _fail_closing(*_a, **_k):
+        raise AssertionError("closing-PR guard must not run when a DB row already exists")
+
+    github = SimpleNamespace(list_closing_pull_requests=_fail_closing)
+    sandbox = SimpleNamespace(natives_cache=None, ensure_workspace=_ensure, remove_workspace=_remove)
+
+    async def _noop_run_task(**_kwargs):
+        return None
+
+    monkeypatch.setattr(tasks, "run_task", _noop_run_task)
+
+    await tasks.triage_issue(
+        settings=settings,
+        db=db,
+        github=github,
+        sandbox=sandbox,
+        git_transport=SimpleNamespace(),
+        payload={},
+        delivery_id="d1",
+    )
+
+    # Teardown must precede re-provisioning, and the row resets to a live state.
+    assert calls == ["remove", "ensure"]
+    row = db.get_issue("octo/widget#1")
+    assert row is not None
+    assert row.state == "reproducing"

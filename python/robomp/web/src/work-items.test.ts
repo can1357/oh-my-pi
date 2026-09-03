@@ -38,6 +38,7 @@ function status(overrides: Partial<StatusResponse> = {}): StatusResponse {
     running_events: [],
     inflight: [],
     issues: [],
+    releases: [],
     recent_events: [],
     ...overrides,
   };

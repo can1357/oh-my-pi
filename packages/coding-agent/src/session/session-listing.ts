@@ -1,9 +1,11 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { computeDefaultSessionDir } from "./session-paths";
-import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import { lookupSessionTitle, recordSessionTitle } from "./title-index";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -64,6 +66,44 @@ const SESSION_LIST_PREFIX_BYTES = 4096;
 const SESSION_LIST_SUFFIX_BYTES = 32_768;
 const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
+
+/**
+ * Memoizes {@link scanSessionFile} results keyed by stat identity so listing
+ * refreshes (resume picker opens, startup recent-sessions, cross-project
+ * scans) skip the open+read+parse for unchanged files. The `statSync` still
+ * runs on every scan — it IS the invalidation check: a hit requires both
+ * `mtimeMs` and `size` to match. This covers the two mutation paths:
+ * - streaming appends grow `size` (and bump `mtimeMs`);
+ * - `updateSessionTitle` rewrites the fixed-width title slot in place via
+ *   `writeSync`, which leaves `size` unchanged but updates `mtimeMs`.
+ * Negative results (unparseable files) are cached too, as `undefined` info.
+ * Entries are small header objects, so a generous cap is cheap.
+ */
+const SESSION_SCAN_CACHE_MAX = 4096;
+
+interface SessionScanCacheEntry {
+	mtimeMs: number;
+	size: number;
+	info: SessionInfo | undefined;
+}
+
+type SessionScanCache = LRUCache<string, SessionScanCacheEntry>;
+
+/** All {@link FileSessionStorage} instances view the same real filesystem, so they share one cache. */
+const fileSessionScanCache: SessionScanCache = new LRUCache({ max: SESSION_SCAN_CACHE_MAX });
+/** Other storages (in-memory test doubles) each carry their own cache to avoid cross-instance path collisions. */
+const kScanCache = Symbol("session-listing.scanCache");
+
+interface StorageWithScanCache extends SessionStorage {
+	[kScanCache]?: SessionScanCache;
+}
+
+function getSessionScanCache(storage: SessionStorage): SessionScanCache {
+	if (storage instanceof FileSessionStorage) return fileSessionScanCache;
+	const holder = storage as StorageWithScanCache;
+	if (!holder[kScanCache]) holder[kScanCache] = new LRUCache({ max: SESSION_SCAN_CACHE_MAX });
+	return holder[kScanCache];
+}
 
 function sanitizeSessionName(value: string | undefined): string | undefined {
 	if (!value) return undefined;
@@ -355,8 +395,22 @@ async function scanSessionFile(
 	storage: SessionStorage,
 	withStatus: boolean,
 ): Promise<SessionInfo | undefined> {
+	let stat: SessionStorageStat;
 	try {
-		const stat = storage.statSync(file);
+		stat = storage.statSync(file);
+	} catch {
+		// Missing/unstatable file: no stat identity to cache under.
+		return undefined;
+	}
+	const cache = getSessionScanCache(storage);
+	// `withStatus` changes what a scan reads (tail window) and returns, so the
+	// two variants are cached under distinct keys.
+	const cacheKey = withStatus ? `s\0${file}` : `h\0${file}`;
+	const cached = cache.get(cacheKey);
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+		return cached.info ? { ...cached.info } : undefined;
+	}
+	try {
 		const [content, suffix] = await storage.readTextSlices(
 			file,
 			SESSION_LIST_PREFIX_BYTES,
@@ -365,7 +419,12 @@ async function scanSessionFile(
 		const { size, mtime } = stat;
 		const entries = parseJsonlLenient<Record<string, unknown>>(content);
 		const header = parseSessionListHeader(content, entries);
-		if (!header) return undefined;
+		if (!header) {
+			// Cache the negative result too: an unparseable file stays unparseable
+			// until its stat identity changes.
+			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
+			return undefined;
+		}
 
 		let parsedMessageCount = 0;
 		let firstMessage = "";
@@ -398,7 +457,7 @@ async function scanSessionFile(
 
 		firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
 		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
-		return {
+		const info: SessionInfo = {
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
@@ -412,6 +471,10 @@ async function scanSessionFile(
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
 			status: withStatus ? deriveSessionStatus(suffix) : undefined,
 		};
+		// The cache keeps its own shallow copy; hits also hand out copies, so
+		// callers can never mutate the shared cached object.
+		cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: { ...info } });
+		return info;
 	} catch {
 		return undefined;
 	}
@@ -556,8 +619,10 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 }
 
 /** List all sessions across all project directories (newest first). */
-export async function listAllSessions(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
-	const sessionsRoot = path.join(getDefaultAgentDir(), "sessions");
+export async function listAllSessions(
+	storage: SessionStorage = new FileSessionStorage(),
+	sessionsRoot: string = getSessionsDir(),
+): Promise<SessionInfo[]> {
 	try {
 		const files = await Array.fromAsync(new Bun.Glob("*/*.jsonl").scan(sessionsRoot), name =>
 			path.join(sessionsRoot, name),
@@ -577,17 +642,63 @@ export async function findMostRecentSession(
 	return sessions[0]?.path ?? null;
 }
 
-/** Get recent sessions for display in the welcome screen. */
+/** Session id embedded in a `<file-safe-timestamp>_<id>.jsonl` filename, if present. */
+function sessionIdFromSessionPath(file: string): string | undefined {
+	const base = path.basename(file);
+	if (!base.endsWith(".jsonl")) return undefined;
+	const sep = base.lastIndexOf("_");
+	if (sep <= 0) return undefined;
+	return base.slice(sep + 1, -".jsonl".length) || undefined;
+}
+
+/**
+ * Get recent sessions for display in the welcome screen.
+ *
+ * Deliberately avoids {@link scanSessionDir}'s full-directory content scan
+ * (multi-hundred-ms with thousands of sessions): lists files, sorts by mtime,
+ * and resolves names for the newest `limit` files from the history.db title
+ * index. Files without an indexed title (legacy sessions, branch/fork copies)
+ * fall back to a per-file header scan whose title — when present — is
+ * backfilled into the index so the next launch skips the read.
+ */
 export async function getRecentSessions(
 	sessionDir: string,
 	limit = 4,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
-	const sessions = await scanSessionDir(sessionDir, storage, false);
+	let files: string[];
+	try {
+		files = storage.listFilesSync(sessionDir, "*.jsonl");
+	} catch {
+		return [];
+	}
+	const byMtime: Array<{ file: string; stat: SessionStorageStat }> = [];
+	for (const file of files) {
+		try {
+			byMtime.push({ file, stat: storage.statSync(file) });
+		} catch {
+			// Vanished between glob and stat; skip.
+		}
+	}
+	byMtime.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+
+	// The index is keyed by real session ids; in-memory test storages must not
+	// touch the process-wide history.db.
+	const useIndex = storage instanceof FileSessionStorage;
 	const recent: RecentSessionInfo[] = [];
-	for (let i = 0; i < sessions.length && i < limit; i++) {
-		const info = sessions[i];
-		recent.push({ path: info.path, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
+	for (const { file, stat } of byMtime) {
+		if (recent.length >= limit) break;
+		const id = useIndex ? sessionIdFromSessionPath(file) : undefined;
+		const indexed = id ? lookupSessionTitle(id) : undefined;
+		if (indexed) {
+			recent.push({ path: file, name: indexed, timeAgo: formatTimeAgo(stat.mtime) });
+			continue;
+		}
+		const info = await scanSessionFile(file, storage, false);
+		if (!info) continue;
+		const title = sanitizeSessionName(info.title);
+		if (useIndex && title && info.id) recordSessionTitle(info.id, title);
+		recent.push({ path: file, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
 	}
 	return recent;
 }

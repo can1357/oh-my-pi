@@ -14,14 +14,29 @@ export interface SessionStorageStat {
 
 export interface SessionStorageWriter {
 	/**
-	 * Append one newline-terminated line. File and memory storage perform the
-	 * write synchronously in-body; indexed backends queue in call order.
+	 * Append one newline-terminated line.
+	 *
+	 * File and memory storage apply the line synchronously before the returned
+	 * promise settles, so a software crash after `append` returns (or after a
+	 * fire-and-forget call begins) still sees the entry on disk / in body. No
+	 * `fsync` — power loss may still drop the last page. Indexed backends update
+	 * the local index immediately and queue the remote publish in call order.
 	 *
 	 * `line` MUST include the trailing newline.
 	 */
 	append(line: string): Promise<void>;
+	/**
+	 * Synchronous append when the backend can apply the line before return.
+	 * File and memory implement this so {@link SessionManager} can latch the
+	 * first write failure before the appending call returns (surfaced by a later
+	 * flushSync/close/next append — the turn loop does not throw from append).
+	 * Indexed backends update the local index immediately and queue remote I/O.
+	 */
+	appendSync?(line: string): void;
 	/** Resolve once all queued appends complete. No fsync. */
 	flush(): Promise<void>;
+	/** Drain synchronously flushable queued work when the backend supports it. No fsync. */
+	flushSync?(): void;
 	/** False once close() has begun/finished. */
 	isOpen(): boolean;
 	close(): Promise<void>;
@@ -112,12 +127,11 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		return error;
 	}
 
-	async append(line: string): Promise<void> {
-		if (this.#closed) throw new Error("Writer closed");
-		if (this.#error) throw this.#error;
+	#writeNow(line: string): void {
+		const originalSize = fs.fstatSync(this.#fd).size;
+		const buf = Buffer.from(line, "utf-8");
+		let offset = 0;
 		try {
-			const buf = Buffer.from(line, "utf-8");
-			let offset = 0;
 			while (offset < buf.length) {
 				const written = fs.writeSync(this.#fd, buf, offset, buf.length - offset);
 				if (written === 0) {
@@ -125,12 +139,42 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 				}
 				offset += written;
 			}
+		} catch (writeError) {
+			try {
+				fs.ftruncateSync(this.#fd, originalSize);
+			} catch (rollbackError) {
+				throw new AggregateError(
+					[toError(writeError), toError(rollbackError)],
+					"Session append failed and its partial bytes could not be rolled back",
+				);
+			}
+			throw writeError;
+		}
+	}
+
+	appendSync(line: string): void {
+		if (this.#closed) throw new Error("Writer closed");
+		if (this.#error) throw this.#error;
+		// Write in-body so software crash after the call still sees the entry.
+		// Microtask batching used to leave completed transcript lines only in
+		// memory until the next event-loop turn; process crash then lost every
+		// post-checkpoint event. flush/flushSync remain no-op drains (no fsync).
+		try {
+			this.#writeNow(line);
 		} catch (err) {
 			throw this.#recordError(err);
 		}
 	}
 
+	async append(line: string): Promise<void> {
+		this.appendSync(line);
+	}
+
 	async flush(): Promise<void> {
+		if (this.#error) throw this.#error;
+	}
+
+	flushSync(): void {
 		if (this.#error) throw this.#error;
 	}
 
@@ -148,6 +192,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		} catch {
 			// Ignore close errors
 		}
+		if (this.#error) throw this.#error;
 	}
 
 	getError(): Error | undefined {
@@ -459,7 +504,7 @@ class MemorySessionStorageWriter implements SessionStorageWriter {
 		return error;
 	}
 
-	async append(line: string): Promise<void> {
+	appendSync(line: string): void {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
 		try {
@@ -470,7 +515,15 @@ class MemorySessionStorageWriter implements SessionStorageWriter {
 		}
 	}
 
+	async append(line: string): Promise<void> {
+		this.appendSync(line);
+	}
+
 	async flush(): Promise<void> {
+		if (this.#error) throw this.#error;
+	}
+
+	flushSync(): void {
 		if (this.#error) throw this.#error;
 	}
 

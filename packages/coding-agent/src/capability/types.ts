@@ -6,6 +6,26 @@
  * a unified array of MCP servers.
  */
 
+/** Extension sub-discovery mode; `explicit-only` suppresses ambient sources. */
+export type ExtensionRootMode = "merge" | "explicit-only";
+
+/**
+ * Session-local extension-root inputs for sub-discovery, threaded as one value
+ * so no dimension is lost between the construction-time invocation scope and
+ * post-startup reloads. `explicit` are the SDK `additionalExtensionPaths` / CLI
+ * `--extension` roots (always active, user-level); `configured` is the live
+ * `extensions:` setting (ambient, only in `merge` mode); `configuredLevel` is
+ * its provenance as resolved by `Settings` (the authority — includes foreign
+ * project providers like `.claude/settings.json`, never re-derived from `.omp`
+ * on disk); `mode` gates the ambient/installed sources.
+ */
+export interface EffectiveExtensionRoots {
+	explicit: readonly string[];
+	mode: ExtensionRootMode;
+	configured: readonly string[];
+	configuredLevel: "user" | "project";
+}
+
 /**
  * Context passed to every provider loader.
  */
@@ -16,6 +36,22 @@ export interface LoadContext {
 	home: string;
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
+	/**
+	 * Session-local extension roots for sub-discovery. When set, extension
+	 * discovery uses these lanes instead of the invocation-scoped snapshot or
+	 * the process defaults, so post-startup reloads stay byte-identical to the
+	 * construction-time scoped load. Left unset by {@link loadCapability}; SDK
+	 * sessions carry their value explicitly (or via the invocation scope).
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
+	/** Provider IDs explicitly requested by caller in LoadOptions */
+	explicitProviders?: Set<string>;
+	/**
+	 * Scan foreign `~/` sources even when not opted in. Set for
+	 * `includeDisabled` (dashboard) loads so opted-out items are listed
+	 * and can be switched on.
+	 */
+	includeOptOutUserSources?: boolean;
 }
 
 /**
@@ -59,7 +95,7 @@ export interface Provider<T> {
 /**
  * Options for loading a capability.
  */
-export interface LoadOptions {
+export interface LoadOptions<T = unknown> {
 	/** Only use these providers (by ID). Default: all registered */
 	providers?: string[];
 	/** Exclude these providers (by ID). Default: none */
@@ -72,6 +108,29 @@ export interface LoadOptions {
 	includeDisabled?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
+	/**
+	 * Session-local extension roots for this load, forwarded to
+	 * {@link LoadContext.extensionRoots}. Post-startup reloads MUST pass their
+	 * live session value so explicit roots, discovery mode, and configured
+	 * extensions all survive outside the construction-time invocation scope.
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
+	/**
+	 * Drop items before deduplication as if they never existed (e.g. scope
+	 * exclusions). A dropped item neither survives nor claims its dedupe key,
+	 * so it cannot shadow anything. Receives the item with its attached
+	 * `_source`.
+	 */
+	filter?(item: T & { _source: SourceMeta }): boolean;
+	/**
+	 * Exclude items from the results while letting them claim their dedupe key.
+	 * A suppressed higher-priority item still shadows same-key lower-priority
+	 * items (a disabled project server keeps the same-named user server off),
+	 * but never equivalence-shadows a differently-keyed survivor — so a
+	 * suppressed alias cannot starve an enabled equivalent connection.
+	 * Return `true` to suppress. Receives the item with its attached `_source`.
+	 */
+	suppress?(item: T & { _source: SourceMeta }): boolean;
 }
 
 /**
@@ -121,6 +180,9 @@ export interface Capability<T> {
 	 * Return undefined to never deduplicate (all items kept).
 	 */
 	key(item: T): string | undefined;
+
+	/** Treat items with different keys as aliases; the first equivalent item wins. */
+	equivalent?(left: T, right: T): boolean;
 
 	/**
 	 * Optional validation. Return error message if invalid, undefined if valid.

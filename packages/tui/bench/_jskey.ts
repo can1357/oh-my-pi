@@ -28,14 +28,14 @@ let kittyProtocolActive = false;
  * Set the global Kitty keyboard protocol state.
  * Called by ProcessTerminal after detecting protocol support.
  */
-function setKittyProtocolActive(active: boolean): void {
+export function setKittyProtocolActive(active: boolean): void {
 	kittyProtocolActive = active;
 }
 
 /**
  * Query whether Kitty keyboard protocol is currently active.
  */
-function isKittyProtocolActive(): boolean {
+export function isKittyProtocolActive(): boolean {
 	return kittyProtocolActive;
 }
 
@@ -169,7 +169,7 @@ export type KeyId =
  * - Key.ctrl("c"), Key.alt("x") for single modifier
  * - Key.ctrlShift("p"), Key.ctrlAlt("x") for combined modifiers
  */
-const Key = {
+export const Key = {
 	// Special keys
 	escape: "escape" as const,
 	esc: "esc" as const,
@@ -487,14 +487,11 @@ interface ParsedKittySequence {
 	eventType: KeyEventType;
 }
 
-// Store the last parsed event type for isKeyRelease() to query
-let lastEventType: KeyEventType = "press";
-
 /**
  * Check if the last parsed key event was a key release.
  * Only meaningful when Kitty keyboard protocol with flag 2 is active.
  */
-function isKeyRelease(data: string): boolean {
+export function isKeyRelease(data: string): boolean {
 	// Don't treat bracketed paste content as key release, even if it contains
 	// patterns like ":3F" (e.g., bluetooth MAC addresses like "90:62:3F:A5").
 	// Terminal.ts re-wraps paste content with bracketed paste markers before
@@ -524,7 +521,7 @@ function isKeyRelease(data: string): boolean {
  * Check if the last parsed key event was a key repeat.
  * Only meaningful when Kitty keyboard protocol with flag 2 is active.
  */
-function isKeyRepeat(data: string): boolean {
+export function isKeyRepeat(data: string): boolean {
 	// Don't treat bracketed paste content as key repeat, even if it contains
 	// patterns like ":2F". See isKeyRelease() for details.
 	if (data.includes("\x1b[200~")) {
@@ -572,7 +569,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		const baseLayoutKey = csiUMatch[3] ? parseInt(csiUMatch[3], 10) : undefined;
 		const modValue = csiUMatch[4] ? parseInt(csiUMatch[4], 10) : 1;
 		const eventType = parseEventType(csiUMatch[5]);
-		lastEventType = eventType;
 		return { codepoint, shiftedKey, baseLayoutKey, modifier: modValue - 1, eventType };
 	}
 
@@ -582,7 +578,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		const modValue = parseInt(arrowMatch[1]!, 10);
 		const eventType = parseEventType(arrowMatch[2]);
 		const arrowCodes: Record<string, number> = { A: -1, B: -2, C: -3, D: -4 };
-		lastEventType = eventType;
 		return { codepoint: arrowCodes[arrowMatch[3]!]!, modifier: modValue - 1, eventType };
 	}
 
@@ -602,7 +597,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		};
 		const codepoint = funcCodes[keyNum];
 		if (codepoint !== undefined) {
-			lastEventType = eventType;
 			return { codepoint, modifier: modValue - 1, eventType };
 		}
 	}
@@ -613,7 +607,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		const modValue = parseInt(homeEndMatch[1]!, 10);
 		const eventType = parseEventType(homeEndMatch[2]);
 		const codepoint = homeEndMatch[3] === "H" ? FUNCTIONAL_CODEPOINTS.home : FUNCTIONAL_CODEPOINTS.end;
-		lastEventType = eventType;
 		return { codepoint, modifier: modValue - 1, eventType };
 	}
 
@@ -702,7 +695,7 @@ function parseKeyId(keyId: string): ParsedKeyId | null {
  * @param data - Raw input data from terminal
  * @param keyId - Key identifier (e.g., "ctrl+c", "escape", Key.ctrl("c"))
  */
-function matchesKey(data: string, keyId: KeyId): boolean {
+export function matchesKey(data: string, keyId: KeyId): boolean {
 	const parsed = parseKeyId(keyId);
 	if (!parsed) return false;
 
@@ -1048,7 +1041,7 @@ function matchesKey(data: string, keyId: KeyId): boolean {
  * @param data - Raw input data from terminal
  * @returns Key identifier string (e.g., "ctrl+c") or undefined
  */
-function parseKey(data: string): string | undefined {
+export function parseKey(data: string): string | undefined {
 	const kitty = parseKittySequence(data);
 	if (kitty) {
 		const { codepoint, baseLayoutKey, modifier } = kitty;

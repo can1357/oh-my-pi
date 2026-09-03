@@ -1,13 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { buildCoordinationAdvisory, composeSpawnAdvisory } from "@oh-my-pi/pi-coding-agent/task";
 import type { TaskItem } from "@oh-my-pi/pi-coding-agent/task/types";
-import { prompt } from "@oh-my-pi/pi-utils";
-import subagentSystemPromptTemplate from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 
 // Contract: a multi-sibling spawn with spawn capacity and IRC available draws
-// a proactive coordinate-via-irc suggestion, and the subagent COOP prompt
-// actively tells peers to coordinate before overlapping edits.
-
+// a proactive coordinate-via-irc suggestion.
 const item = (): TaskItem => ({ task: "do the thing" });
 
 describe("buildCoordinationAdvisory", () => {
@@ -30,18 +26,6 @@ describe("buildCoordinationAdvisory", () => {
 	});
 });
 
-describe("subagent COOP irc guidance", () => {
-	it("prompts coordination before overlapping edits when peers are present", () => {
-		const out = prompt.render(subagentSystemPromptTemplate, {
-			agent: "Base worker.",
-			ircPeers: "- `Sib` — task (sub, running)",
-			ircSelfId: "Self",
-		});
-		expect(out).toContain("before you edit");
-		expect(out).toMatch(/overlapping edits collide/i);
-	});
-});
-
 // Contract: TaskTool.execute composes the specialization nudge with the
 // coordination suggestion, gating the latter to the async path (sync siblings
 // have already finished). composeSpawnAdvisory is the seam that decision flows
@@ -59,6 +43,20 @@ describe("composeSpawnAdvisory", () => {
 		});
 		expect(advisory).toContain("generic");
 		expect(advisory).toContain('`agent: "scout"`');
+		expect(advisory).toContain("Coordinate:");
+	});
+
+	it("drops the scout example from the specialization tip when scout is unavailable", () => {
+		const advisory = composeSpawnAdvisory({
+			agents: ["task", "task"],
+			items: [worker(), worker()],
+			depthCapacity: true,
+			ircEnabled: true,
+			willRunAsync: true,
+			scoutAvailable: false,
+		});
+		expect(advisory).toContain("generic");
+		expect(advisory).not.toContain("scout");
 		expect(advisory).toContain("Coordinate:");
 	});
 

@@ -3,13 +3,19 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { resolveXAIHttpTransport, type XAIHttpProvider, type XAIHttpTransport } from "../../../lib/xai-http";
 import type { SearchCitation, SearchResponse, SearchSource, SearchUsage } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const XAI_DEFAULT_BASE_URL = "https://api.x.ai/v1";
-const XAI_WEB_SEARCH_MODEL = "grok-4.3";
+const XAI_WEB_SEARCH_MODEL = "grok-4.5";
+// grok-4.5 defaults reasoning.effort to "high"; xAI documents "low" for
+// latency-sensitive agentic use and simple tool calling
+// (docs.x.ai/developers/model-capabilities/text/reasoning). Web search is
+// latency-sensitive, so pin these calls low regardless of their configured timeout.
+const XAI_WEB_SEARCH_REASONING_EFFORT = "low";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 30;
 
@@ -19,6 +25,8 @@ interface XAIUrlCitationAnnotation {
 	title?: string | null;
 	text?: string | null;
 	cited_text?: string | null;
+	start_index?: number | null;
+	end_index?: number | null;
 }
 
 interface XAIResponseContentPart {
@@ -28,9 +36,20 @@ interface XAIResponseContentPart {
 	annotations?: XAIUrlCitationAnnotation[] | null;
 }
 
+interface XAIWebSearchSource {
+	url?: string | null;
+	source_website_url?: string | null;
+	title?: string | null;
+	caption?: string | null;
+}
+
 interface XAIResponseOutputItem {
+	type?: string;
 	content?: XAIResponseContentPart[] | null;
 	annotations?: XAIUrlCitationAnnotation[] | null;
+	action?: { sources?: XAIWebSearchSource[] | null } | null;
+	sources?: XAIWebSearchSource[] | null;
+	results?: XAIWebSearchSource[] | null;
 }
 
 interface XAIResponsesUsage {
@@ -52,14 +71,61 @@ interface XAIResponsesResponse {
 	usage?: XAIResponsesUsage | null;
 }
 
+/**
+ * Query syntax re-emitted for the Grok search agent. `site:`/`-site:` are
+ * stripped because hosts map natively onto the web_search domain filters;
+ * `before:`/`after:` stay in the query text — the Responses web_search tool
+ * has no date parameters (`from_date`/`to_date` exist only on `x_search` and
+ * the deprecated Live Search `search_parameters`, which now returns 410) and
+ * the agent honors the tokens as natural-language hints.
+ */
+const XAI_QUERY_SYNTAX: QuerySyntax = {
+	phrases: true,
+	negation: true,
+	or: true,
+	inUrl: true,
+	inTitle: true,
+	filetype: true,
+	dateRange: true,
+};
+
+/** xAI web_search accepts at most 5 allowed or excluded domains per request. */
+const MAX_DOMAIN_FILTERS = 5;
+
+/** Bare hosts of `site:` values (`github.com/anthropics` → `github.com`), deduped, capped at 5; path parts are enforced by the central constraint filter. */
+function domainFilterList(sites: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const site of sites) {
+		const slash = site.indexOf("/");
+		hosts.add(slash === -1 ? site : site.slice(0, slash));
+		if (hosts.size === MAX_DOMAIN_FILTERS) break;
+	}
+	return [...hosts];
+}
+
 function buildRequestBody(params: SearchParams): Record<string, unknown> {
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const webSearchTool: Record<string, unknown> = { type: "web_search" };
+	let query = params.query;
+	if (parsed.hasDirectives) {
+		query = formatQuery(parsed, XAI_QUERY_SYNTAX);
+		// allowed_domains and excluded_domains are mutually exclusive per
+		// request; prefer the allow list, the central filter enforces exclusions.
+		if (parsed.sites.length > 0) {
+			webSearchTool.filters = { allowed_domains: domainFilterList(parsed.sites) };
+		} else if (parsed.excludedSites.length > 0) {
+			webSearchTool.filters = { excluded_domains: domainFilterList(parsed.excludedSites) };
+		}
+	}
+
 	const body: Record<string, unknown> = {
 		model: XAI_WEB_SEARCH_MODEL,
 		input: [
 			{ role: "system", content: params.systemPrompt },
-			{ role: "user", content: params.query },
+			{ role: "user", content: query },
 		],
-		tools: [{ type: "web_search" }],
+		tools: [webSearchTool],
+		reasoning: { effort: XAI_WEB_SEARCH_REASONING_EFFORT },
 	};
 
 	if (params.maxOutputTokens !== undefined) {
@@ -86,7 +152,7 @@ async function postXAIResponses(
 			Authorization: `Bearer ${apiKey}`,
 		},
 		body: JSON.stringify(body),
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
 	});
 }
 
@@ -108,7 +174,12 @@ async function callXAIResponses(
 		throwXAIResponsesError(response.status, await response.text());
 	}
 
-	return (await response.json()) as XAIResponsesResponse;
+	try {
+		return (await response.json()) as XAIResponsesResponse;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new SearchProviderError("xai", `xAI Responses API returned invalid JSON: ${message}`, response.status);
+	}
 }
 
 function addCitationSource(
@@ -136,24 +207,61 @@ function addCitationSource(
 		citedText: sourceSnippet,
 	});
 }
+function extractSnippetAround(
+	text: string | null | undefined,
+	start: number | null | undefined,
+	end: number | null | undefined,
+): string | undefined {
+	if (!text || typeof start !== "number" || typeof end !== "number") return undefined;
+	const before = Math.max(0, start - 100);
+	const after = Math.min(text.length, end + 100);
+	const snippet = text
+		.slice(before, after)
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+		.trim();
+	if (!snippet) return undefined;
+	return snippet.length > 300 ? `${snippet.slice(0, 297)}...` : snippet;
+}
 
 function collectAnnotationSources(
 	annotations: readonly XAIUrlCitationAnnotation[] | null | undefined,
 	sources: SearchSource[],
 	citations: SearchCitation[],
 	seenUrls: Set<string>,
+	contentText?: string | null,
 ): void {
-	if (!annotations) return;
+	if (!Array.isArray(annotations)) return;
 	for (const annotation of annotations) {
-		if (annotation.type !== "url_citation" || !annotation.url) continue;
+		if (!annotation || typeof annotation !== "object") continue;
+		if (annotation.type !== "url_citation" || typeof annotation.url !== "string") continue;
 		addCitationSource(
 			sources,
 			citations,
 			seenUrls,
 			annotation.url,
 			annotation.title,
-			annotation.cited_text ?? annotation.text,
+			annotation.cited_text ??
+				annotation.text ??
+				extractSnippetAround(contentText, annotation.start_index, annotation.end_index),
 		);
+	}
+}
+
+function collectWebSearchSources(
+	item: XAIResponseOutputItem,
+	sources: SearchSource[],
+	citations: SearchCitation[],
+	seenUrls: Set<string>,
+): void {
+	if (item.type !== "web_search_call") return;
+	for (const group of [item.action?.sources, item.sources, item.results]) {
+		if (!Array.isArray(group)) continue;
+		for (const source of group) {
+			if (!source || typeof source !== "object") continue;
+			const url = source.url ?? source.source_website_url;
+			if (typeof url !== "string") continue;
+			addCitationSource(sources, citations, seenUrls, url, source.title ?? source.caption);
+		}
 	}
 }
 
@@ -162,12 +270,14 @@ function parseAnswer(response: XAIResponsesResponse): string | undefined {
 	if (topLevelText) return topLevelText;
 
 	const answerParts: string[] = [];
-	for (const item of response.output ?? []) {
-		for (const part of item.content ?? []) {
+	const output = Array.isArray(response.output) ? response.output : [];
+	for (const item of output) {
+		if (!item || typeof item !== "object") continue;
+		const content = Array.isArray(item.content) ? item.content : [];
+		for (const part of content) {
+			if (!part || typeof part !== "object") continue;
 			const text = part.output_text ?? part.text;
-			if ((part.type === "output_text" || part.type === "text") && text?.trim()) {
-				answerParts.push(text.trim());
-			}
+			if (text?.trim()) answerParts.push(text.trim());
 		}
 	}
 
@@ -206,13 +316,23 @@ function parseResponse(response: XAIResponsesResponse, resultCap: number): Searc
 	const seenUrls = new Set<string>();
 
 	collectAnnotationSources(response.annotations, sources, citations, seenUrls);
-	for (const item of response.output ?? []) {
+	const output = Array.isArray(response.output) ? response.output : [];
+	for (const item of output) {
+		if (!item || typeof item !== "object") continue;
 		collectAnnotationSources(item.annotations, sources, citations, seenUrls);
-		for (const part of item.content ?? []) {
-			collectAnnotationSources(part.annotations, sources, citations, seenUrls);
+		const content = Array.isArray(item.content) ? item.content : [];
+		for (const part of content) {
+			if (!part || typeof part !== "object") continue;
+			collectAnnotationSources(part.annotations, sources, citations, seenUrls, part.output_text ?? part.text);
 		}
 	}
-	for (const url of response.citations ?? []) {
+	for (const item of output) {
+		if (!item || typeof item !== "object") continue;
+		collectWebSearchSources(item, sources, citations, seenUrls);
+	}
+	const topLevelCitations = Array.isArray(response.citations) ? response.citations : [];
+	for (const url of topLevelCitations) {
+		if (typeof url !== "string") continue;
 		addCitationSource(sources, citations, seenUrls, url);
 	}
 	const limited = applyResultCap(sources, citations, resultCap);
@@ -301,7 +421,11 @@ export async function searchXAI(params: SearchParams): Promise<SearchResponse> {
 		signal: params.signal,
 		missingKeyMessage: 'xAI credentials not found. Set XAI_API_KEY or configure an API key for provider "xai".',
 	});
-	return parseResponse(response, resultCap);
+	const parsed = parseResponse(response, resultCap);
+	if (!parsed.answer && parsed.sources.length === 0) {
+		throw new SearchProviderError("xai", "xAI web_search returned no answer or sources", 502);
+	}
+	return parsed;
 }
 
 /** Search provider for xAI web search. */

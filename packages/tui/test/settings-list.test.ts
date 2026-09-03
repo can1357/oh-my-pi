@@ -71,6 +71,43 @@ describe("SettingsList", () => {
 		expect(output).not.toContain("[changed-label]Default");
 	});
 
+	it("marks a warned row with the glyph and leads the note area with the risk note", () => {
+		const themed: SettingsListTheme = {
+			...testTheme,
+			warning: (text: string) => `[warn]${text}`,
+			warningMark: "!",
+		};
+		const list = new SettingsList(
+			[
+				{ id: "safe", label: "Safe", currentValue: "off", values: ["off", "on"] },
+				{
+					id: "risky",
+					label: "Risky",
+					description: "x".repeat(400),
+					warning: "may get you banned",
+					currentValue: "off",
+					values: ["off", "on"],
+				},
+			],
+			5,
+			themed,
+			() => {},
+			() => {},
+		);
+		// Marker rides the row itself, so the risk is visible before selecting it.
+		const unselected = list.render(80).join("\n");
+		expect(unselected).toContain("Risky[warn] !");
+		expect(unselected).not.toContain("Safe[warn] !");
+		expect(unselected).not.toContain("may get you banned");
+
+		list.selectItem("risky");
+		const selected = list.render(80).join("\n");
+
+		// The note leads the 3-row note area, so a long description cannot clamp it away.
+		expect(selected).toContain("[warn]  ! may get you banned");
+		expect(selected).toContain("x".repeat(10));
+	});
+
 	it("renders long settings tabs through a scrollbar viewport", () => {
 		const list = new SettingsList(
 			Array.from({ length: 6 }, (_, i) => ({

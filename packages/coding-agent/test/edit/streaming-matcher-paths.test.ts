@@ -31,20 +31,20 @@ describe("EDIT_MODE_STRATEGIES.matcherPaths", () => {
 
 	describe("hashline (section-header path)", () => {
 		it("extracts the path from a single section header", () => {
-			const input = "[demo.ts#ABCD]\nSWAP 1.=1:\n+const x = 1;\n";
+			const input = "[demo.ts#ABCD]\nPUT 1-1:\n+const x = 1;\n";
 			expect(EDIT_MODE_STRATEGIES.hashline.matcherPaths({ input })).toEqual(["demo.ts"]);
 		});
 
 		it("extracts paths from multiple section headers in order, deduped", () => {
 			const input = [
 				"[src/a.ts#ABCD]",
-				"SWAP 1.=1:",
+				"PUT 1-1:",
 				"+const a = 1;",
 				"[src/b.ts#EF01]",
-				"SWAP 1.=1:",
+				"PUT 1-1:",
 				"+const b = 2;",
 				"[src/a.ts#1234]",
-				"SWAP 2.=2:",
+				"PUT 2-2:",
 				"+const c = 3;",
 				"",
 			].join("\n");
@@ -61,10 +61,10 @@ describe("EDIT_MODE_STRATEGIES.matcherPaths", () => {
 		it("handles paths with spaces and recovers apply_patch-style header noise", () => {
 			const input = [
 				"[dir with spaces/file.ts#1A2B]",
-				"SWAP 1.=1:",
+				"PUT 1-1:",
 				"+after",
 				"[*** Update File: src/recovered.ts#1A2B]",
-				"SWAP 1.=1:",
+				"PUT 1-1:",
 				"+after",
 				"",
 			].join("\n");
@@ -76,7 +76,7 @@ describe("EDIT_MODE_STRATEGIES.matcherPaths", () => {
 
 		it("returns undefined when input has no section header", () => {
 			expect(EDIT_MODE_STRATEGIES.hashline.matcherPaths({ input: "" })).toBeUndefined();
-			expect(EDIT_MODE_STRATEGIES.hashline.matcherPaths({ input: "SWAP 1.=1:\n+x" })).toBeUndefined();
+			expect(EDIT_MODE_STRATEGIES.hashline.matcherPaths({ input: "PUT 1-1:\n+x" })).toBeUndefined();
 		});
 	});
 
@@ -111,9 +111,9 @@ describe("EDIT_MODE_STRATEGIES.matcherPaths", () => {
 
 describe("EDIT_MODE_STRATEGIES.matcherEntries", () => {
 	it("replace + patch return one (path, digest) entry from the top-level path", () => {
-		expect(
-			EDIT_MODE_STRATEGIES.replace.matcherEntries({ path: "src/foo.ts", edits: [{ new_text: "x = 1" }] }),
-		).toEqual([{ path: "src/foo.ts", digest: "x = 1" }]);
+		expect(EDIT_MODE_STRATEGIES.replace.matcherEntries({ path: "src/foo.ts", new_string: "x = 1" })).toEqual([
+			{ path: "src/foo.ts", digest: "x = 1" },
+		]);
 		expect(
 			EDIT_MODE_STRATEGIES.patch.matcherEntries({ path: "src/bar.ts", edits: [{ op: "update", diff: "@@\n+y" }] }),
 		).toEqual([{ path: "src/bar.ts", digest: "y" }]);
@@ -122,13 +122,13 @@ describe("EDIT_MODE_STRATEGIES.matcherEntries", () => {
 	it("hashline splits multi-section payloads into one entry per file", () => {
 		const input = [
 			"[src/a.ts#ABCD]",
-			"SWAP 1.=1:",
+			"PUT 1-1:",
 			"+const a = 1;",
 			"[README.md#EF01]",
-			"SWAP 1.=1:",
+			"PUT 1-1:",
 			"+# Heading",
 			"[src/a.ts#1234]",
-			"SWAP 2.=2:",
+			"PUT 2-2:",
 			"+const c = 3;",
 			"",
 		].join("\n");
@@ -198,7 +198,7 @@ describe("hashline edit + path-scoped TTSR (regression: #3646)", () => {
 	const ANY = "any";
 	// Snippet rendered at runtime to avoid tripping the rule on this test file itself.
 	const VIOLATING_LINE = `export const value: ${ANY} = 1;`;
-	const HASHLINE_PAYLOAD = `[demo.ts#ABCD]\nSWAP 1.=1:\n+${VIOLATING_LINE}\n`;
+	const HASHLINE_PAYLOAD = `[demo.ts#ABCD]\nPUT 1-1:\n+${VIOLATING_LINE}\n`;
 
 	async function makeManager(): Promise<TtsrManager> {
 		const manager = new TtsrManager({
@@ -250,10 +250,10 @@ describe("hashline edit + path-scoped TTSR (regression: #3646)", () => {
 		const manager = await makeManager();
 		const input = [
 			"[README.md#ABCD]",
-			"SWAP 1.=1:",
+			"PUT 1-1:",
 			`+${VIOLATING_LINE}`,
 			"[src/ok.ts#EF01]",
-			"SWAP 1.=1:",
+			"PUT 1-1:",
 			"+export const ok = 1;",
 			"",
 		].join("\n");
@@ -278,10 +278,10 @@ describe("hashline edit + path-scoped TTSR (regression: #3646)", () => {
 		const manager = await makeManager();
 		const input = [
 			"[README.md#ABCD]",
-			"SWAP 1.=1:",
+			"PUT 1-1:",
 			"+# Heading",
 			"[src/bad.ts#EF01]",
-			"SWAP 1.=1:",
+			"PUT 1-1:",
 			`+${VIOLATING_LINE}`,
 			"",
 		].join("\n");

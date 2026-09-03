@@ -1,28 +1,13 @@
-import { HeaderGenerator } from "header-generator";
+import { HeaderGenerator } from "@oh-my-pi/pi-utils/headers";
 
-// Lazily instantiate the singleton header generator. Bun single-file binaries do not
-// bundle header-generator's fs-loaded data_files, so construction may throw when the
-// original build-time node_modules path is absent.
-let generator: HeaderGenerator | undefined;
-let generatorUnavailable = false;
-
-function getHeaderGenerator(): HeaderGenerator | undefined {
-	if (generatorUnavailable) return undefined;
-	try {
-		generator ??= new HeaderGenerator({
-			browserListQuery: "last 3 versions",
-			devices: ["desktop"],
-			operatingSystems: ["windows", "macos", "linux"],
-			locales: ["en-US", "en"],
-			httpVersion: "2",
-			strict: false,
-		});
-		return generator;
-	} catch {
-		generatorUnavailable = true;
-		return undefined;
-	}
-}
+const generator = new HeaderGenerator({
+	browserListQuery: "last 3 versions",
+	devices: ["desktop"],
+	operatingSystems: ["windows", "macos", "linux"],
+	locales: ["en-US", "en"],
+	httpVersion: "2",
+	strict: false,
+});
 
 // A fallback desktop Mac Chrome navigation fingerprint matching
 // the previous static default setup for deterministic or non-randomized calls.
@@ -84,9 +69,8 @@ function canonicalizeHeaderNames(headers: Record<string, string>): Record<string
 
 /**
  * Build a fresh, internally consistent desktop navigation fingerprint for one HTTP request.
- * By default, this randomizes across valid modern versions of Chrome, Firefox, Edge, and Safari
- * using real-world traffic data. Set `randomized` to `false` when a fetch must preserve a
- * stable Mac Chrome identity.
+ * By default, this randomizes across coherent modern Chrome, Firefox, and Safari profiles.
+ * Set `randomized` to `false` when a fetch must preserve a stable Mac Chrome identity.
  */
 export function buildBrowserNavigationHeaders(options?: { randomized?: boolean }): Record<string, string> {
 	const randomized = options?.randomized !== false;
@@ -94,16 +78,5 @@ export function buildBrowserNavigationHeaders(options?: { randomized?: boolean }
 		return { ...CHROME_FALLBACK_HEADERS };
 	}
 
-	const generator = getHeaderGenerator();
-	if (!generator) {
-		return { ...CHROME_FALLBACK_HEADERS };
-	}
-
-	try {
-		// Generate realistic, consistent headers with the Bayesian generator
-		return canonicalizeHeaderNames(generator.getHeaders());
-	} catch {
-		// Gracefully recover to the robust default profile on unexpected generator errors
-		return { ...CHROME_FALLBACK_HEADERS };
-	}
+	return canonicalizeHeaderNames(generator.getHeaders());
 }

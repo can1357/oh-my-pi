@@ -26,14 +26,23 @@ afterAll(() => {
 });
 
 /** Minimal SegmentContext factory — only path/git fields matter for these tests. */
-function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null }): SegmentContext {
+function createCtx(overrides?: {
+	pathMaxLength?: number;
+	branch?: string | null;
+	sessionName?: string;
+	sessionAccent?: boolean;
+	previewTitle?: string;
+}): SegmentContext {
+	const hasName = overrides?.sessionName !== undefined;
 	return {
 		session: {
 			state: {},
 			isFastModeEnabled: () => false,
 			modelRegistry: { isUsingOAuth: () => false },
-			sessionManager: undefined,
+			sessionManager: hasName ? { getSessionName: () => overrides.sessionName } : undefined,
 		} as unknown as SegmentContext["session"],
+		sessionAccent: overrides?.sessionAccent,
+		previewTitle: overrides?.previewTitle,
 		width: 120,
 		compactThinkingLevel: false,
 		options: {
@@ -66,8 +75,11 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
+		compactionSpeculation: "idle",
+		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs: 0,
+		turnElapsedMs: null,
 		activeRepo: null,
 		worktree: null,
 		git: {
@@ -137,10 +149,11 @@ describe("status line session accent", () => {
 	}
 
 	// Computed lazily: `theme` is assigned by initTheme() in beforeAll, after module evaluation.
-	const accentAnsi = () =>
-		getSessionAccentAnsi(
-			getSessionAccentHex("Named session", theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance),
-		);
+	const accentAnsi = (): string => {
+		const ansi = getSessionAccentAnsi(getSessionAccentHex("Named session", theme.sessionAccentInputs));
+		if (!ansi) throw new Error("expected a session accent ANSI sequence for the test theme");
+		return ansi;
+	};
 
 	it("paints the gap with the session accent when enabled", () => {
 		const ansi = accentAnsi();
@@ -155,10 +168,80 @@ describe("status line session accent", () => {
 		const border = buildComponent(false).getTopBorder(80).content;
 		// Positive: gap is rendered with the theme border color.
 		expect(border).toContain(`${theme.getFgAnsi("border")}${theme.boxRound.horizontal}`);
-		// Negative: the gap-painting pattern (accent ANSI directly followed by a horizontal
-		// glyph) must not appear. The session_name segment may still emit the accent ANSI
-		// for its own text — we only care that the gap is not accent-painted.
-		expect(border).not.toContain(`${ansi}${theme.boxRound.horizontal}`);
+		// Negative: neither the gap nor the session-name segment may emit the
+		// hash-derived session accent when the effective setting is disabled.
+		expect(border).not.toContain(ansi);
+	});
+
+	it("renders the session name with the theme accent color when the accent is disabled", () => {
+		const ansi = accentAnsi();
+		expect(ansi).toBeDefined();
+		const disabled = renderSegment("session_name", createCtx({ sessionName: "Named session", sessionAccent: false }));
+		expect(disabled.visible).toBe(true);
+		// Positive: the name uses the theme accent color, not the hash-derived session ANSI.
+		expect(disabled.content).toContain(theme.getFgAnsi("accent"));
+		// Negative: the hash-derived session ANSI must not appear for the name text.
+		expect(disabled.content).not.toContain(ansi);
+	});
+
+	it("still renders the session name with the hash-derived accent when enabled", () => {
+		const ansi = accentAnsi();
+		expect(ansi).toBeDefined();
+		const enabled = renderSegment("session_name", createCtx({ sessionName: "Named session", sessionAccent: true }));
+		expect(enabled.visible).toBe(true);
+		expect(enabled.content).toContain(ansi);
+	});
+});
+
+describe("session_name preview-title fallback", () => {
+	it("renders the stand-in title when the session is unnamed", () => {
+		const seg = renderSegment("session_name", createCtx({ previewTitle: "omp" }));
+		expect(seg.visible).toBe(true);
+		expect(stripAnsi(seg.content)).toBe("omp");
+	});
+
+	it("prefers the real session name over the stand-in", () => {
+		const seg = renderSegment("session_name", createCtx({ sessionName: "Named session", previewTitle: "omp" }));
+		expect(stripAnsi(seg.content)).toBe("Named session");
+	});
+
+	it("right-aligns the stand-in title through the box border pipeline", () => {
+		const component = new StatusLineComponent(createStatusLineSession(""));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+		});
+		const withTitle = component.getTopBorder(80, "omp");
+		// The gauge fill pads the group gap, so the title chip lands flush right.
+		expect(withTitle.width).toBe(80);
+		expect(stripAnsi(withTitle.content).trimEnd().endsWith("omp")).toBe(true);
+		// Live render path passes no preview title: unnamed sessions show none.
+		expect(stripAnsi(component.getTopBorder(80).content)).not.toContain("omp");
+	});
+});
+
+describe("status line focused-agent dimming", () => {
+	it("keeps powerline end caps at full intensity while text stays dimmed", () => {
+		const component = new StatusLineComponent(createStatusLineSession("Focused session"));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+		});
+		component.setSession(createStatusLineSession("Focused session"), "agent-1");
+
+		const border = component.getTopBorder(80).content;
+
+		expect(border).toStartWith("\x1b[2m");
+		expect(border).toContain(`\x1b[22m${theme.sep.powerlineLeft}\x1b[0m\x1b[2m`);
+		expect(border).toContain(`\x1b[22m${theme.sep.powerlineRight}\x1b[0m\x1b[2m`);
+		expect(border).toContain("\x1b[0m\x1b[2m");
+		expect(border).toEndWith("\x1b[22m");
 	});
 });
 

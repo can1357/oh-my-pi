@@ -4,12 +4,14 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
-import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
-import { isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
+import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { $env } from "@oh-my-pi/pi-utils/env";
+import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
 
 export interface BashExecutorOptions {
@@ -25,6 +27,8 @@ export interface BashExecutorOptions {
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of brush parsing directly. */
 	useUserShell?: boolean;
+	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
+	pty?: BashPtyOptions;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -41,6 +45,14 @@ export interface BashExecutorOptions {
 	) => Promise<string | undefined>;
 }
 
+/** Viewport + raw-output callback enabling the user-shell PTY path (`!` hotkey). */
+export interface BashPtyOptions {
+	cols: number;
+	rows: number;
+	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
+	onChunk: (chunk: string) => void;
+}
+
 export interface BashResult {
 	output: string;
 	exitCode: number | undefined;
@@ -54,6 +66,78 @@ export interface BashResult {
 	outputBytes: number;
 	artifactId?: string;
 	workingDir?: string;
+}
+
+/** POSIX-safe variable name — gates which direnv unsets we inject into the
+ *  command line, so a hostile `.envrc` can't smuggle shell syntax through
+ *  `unset`. `.envrc` never produces non-identifier names in practice. */
+const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export interface DirenvPreflightOptions {
+	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
+	callerEnv?: Record<string, string>;
+	signal?: AbortSignal;
+	/** Full direnv-load budget (`bash.direnvLoadTimeoutMs`). A positive
+	 *  `callerTimeoutMs` clamps the effective load below this; `0`/undefined
+	 *  leaves the full budget. */
+	timeoutMs?: number;
+	/** The caller's command deadline (ms). A positive value clamps the direnv
+	 *  load so a cold `.envrc` can't outlast a short-timeout command; `0` or
+	 *  undefined means "no caller clamp" — the load keeps its full `timeoutMs`
+	 *  budget (a disabled command deadline is NOT a 0 ms load). Centralizing the
+	 *  clamp here keeps every backend (executeBash, ACP terminal, PTY) on one
+	 *  contract instead of each re-deriving it. */
+	callerTimeoutMs?: number;
+	/** `bash.direnv` setting — `"off"` skips the load entirely. */
+	direnvSetting: "auto" | "off";
+	/** Shell wrapper prefix (profiler/strace) to place *after* the unset prefix,
+	 *  matching `executeBash`'s ordering. Backends that apply their own shell
+	 *  wrapping (ACP `wrapShellLineForClientTerminal`) omit this. */
+	commandPrefix?: string | undefined;
+}
+
+/**
+ * Load the repo's direnv/devenv env and fold it into a `(command, env)` pair so
+ * every bash backend (one-shot `executeBash`, ACP client terminal, PTY) exposes
+ * the same devenv tools. Encapsulates: load the diff, merge `set` under the
+ * caller's overlay (caller wins), and prepend a regex-gated `unset -v` for
+ * variables the `.envrc` removes (skipping any the caller re-supplied).
+ *
+ * Returns the possibly-prefixed command plus the merged env, or the inputs
+ * unchanged (`env` = `callerEnv`) when direnv is off, absent, or has no `.envrc`.
+ * Pure transform: does NOT layer non-interactive env defaults — that stays the
+ * caller's job (so interactive PTY/ACP paths keep their own env shape).
+ */
+export async function applyDirenvPreflight(
+	command: string,
+	cwd: string,
+	opts: DirenvPreflightOptions,
+): Promise<{ command: string; env: Record<string, string> | undefined }> {
+	const withPrefix = (line: string): string => (opts.commandPrefix ? `${opts.commandPrefix} ${line}` : line);
+	// A positive caller deadline clamps the direnv load below its full budget so
+	// a cold `.envrc` can't outlast a short-timeout command; `0`/undefined means
+	// "no caller clamp" (a disabled command deadline is not a 0 ms load). Every
+	// backend routes through here, so the clamp lives in one place.
+	const loadTimeoutMs =
+		opts.callerTimeoutMs !== undefined && opts.callerTimeoutMs > 0
+			? Math.min(opts.timeoutMs ?? opts.callerTimeoutMs, opts.callerTimeoutMs)
+			: opts.timeoutMs;
+	const direnvDiff =
+		opts.direnvSetting === "off" ? null : await loadDirenvEnv(cwd, { timeoutMs: loadTimeoutMs, signal: opts.signal });
+	if (!direnvDiff) {
+		return { command: withPrefix(command), env: opts.callerEnv };
+	}
+	// The caller's explicit env still wins over direnv-provided values.
+	const mergedEnv = { ...direnvDiff.set, ...opts.callerEnv };
+	// direnv can also *remove* inherited variables (a `.envrc` doing
+	// `unset AWS_PROFILE`). An env overlay can only add/override, so prepend a
+	// real `unset` for those — unless the caller re-supplied the same var
+	// explicitly, in which case the caller wins.
+	const direnvUnsets = direnvDiff.unset.filter(
+		name => !(opts.callerEnv && name in opts.callerEnv) && SAFE_ENV_NAME.test(name),
+	);
+	const unsetPrefix = direnvUnsets.length > 0 ? `unset -v ${direnvUnsets.join(" ")}; ` : "";
+	return { command: `${unsetPrefix}${withPrefix(command)}`, env: mergedEnv };
 }
 
 const shellSessions = new Map<string, Shell>();
@@ -75,6 +159,13 @@ const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
 const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
+// Upper bound on how long a quarantined session's cleanup may pend before the
+// record is force-released. Native cancellation normally settles `runPromise`
+// in ~2s, but a wedged native run (e.g. a grandchild holding the stdout pipe)
+// could otherwise leave the run promise pending for the life of the process,
+// leaking the session key in `brokenShellSessions`/`shellSessionQuarantines`
+// (#10308). The backing timer is unref'd so it never keeps the process alive.
+const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
 
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
@@ -101,15 +192,30 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	interval.unref?.();
 }
 
+/**
+ * A timer promise that resolves after {@link QUARANTINE_CLEANUP_TIMEOUT_MS}.
+ * Used to bound quarantine cleanup; the timer is unref'd so it never keeps the
+ * process alive on its own.
+ */
+function quarantineCleanupDeadline(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, QUARANTINE_CLEANUP_TIMEOUT_MS);
+	timer.unref?.();
+	return promise;
+}
+
 function quarantineShellSession(
 	sessionKey: string,
 	runPromise: Promise<ShellRunResult>,
 	abortCleanupPromise: Promise<void> | undefined,
 ): void {
 	brokenShellSessions.add(sessionKey);
-	const cleanup = abortCleanupPromise
+	const settled = abortCleanupPromise
 		? Promise.allSettled([runPromise, abortCleanupPromise])
 		: Promise.allSettled([runPromise]);
+	// Defensive bound: a never-settling `runPromise` must not pin the quarantine
+	// record for the life of the process (#10308).
+	const cleanup = Promise.race([settled, quarantineCleanupDeadline()]);
 	shellSessionQuarantines.set(sessionKey, cleanup);
 	void cleanup
 		.finally(() => {
@@ -267,6 +373,84 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 	};
 }
 
+/**
+ * Env for the user-shell PTY path: keep the non-interactive guards (pagers,
+ * editors, credential prompts) but restore color — the PTY makes stdout a
+ * TTY, so TERM/NO_COLOR/CI are all that keep tools monochrome.
+ */
+function buildUserShellPtyEnv(
+	shellEnv: Record<string, string>,
+	commandEnv: Record<string, string>,
+): Record<string, string> {
+	const env: Record<string, string> = { ...shellEnv, ...commandEnv, TERM: "xterm-256color" };
+	delete env.NO_COLOR;
+	delete env.CI;
+	return env;
+}
+
+/**
+ * Run a user-shell command on a headless PTY. Interactive zsh/fish startup
+ * (zle, job control, gitstatus) requires a real TTY — piping through the
+ * embedded shell produces `can't change option: zle` noise and colorless
+ * output. Raw bytes stream to `pty.onChunk` for virtual-terminal rendering;
+ * the sink keeps the sanitized capture for the transcript and the model.
+ */
+async function executeUserShellPty(run: {
+	shell: string;
+	args: string[];
+	command: string;
+	cwd: string | undefined;
+	env: Record<string, string>;
+	pty: BashPtyOptions;
+	timeoutMs: number | undefined;
+	signal: AbortSignal | undefined;
+	sink: OutputSink;
+}): Promise<BashResult> {
+	const session = new PtySession();
+	const result = await session.startArgv(
+		{
+			application: run.shell,
+			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
+			cwd: run.cwd,
+			env: run.env,
+			timeoutMs: run.timeoutMs,
+			signal: run.signal,
+			cols: run.pty.cols,
+			rows: run.pty.rows,
+		},
+		(err, chunk) => {
+			if (err || !chunk) return;
+			run.pty.onChunk(chunk);
+			// CRLF → LF for the capture; the sink strips ANSI itself.
+			run.sink.push(chunk.replace(/\r\n?/gu, "\n"));
+		},
+	);
+	if (result.timedOut) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			timedOut: true,
+			...(await run.sink.dump(
+				run.timeoutMs !== undefined
+					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
+					: "Command timed out",
+			)),
+		};
+	}
+	if (result.cancelled) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			...(await run.sink.dump("Command cancelled")),
+		};
+	}
+	return {
+		exitCode: result.exitCode,
+		cancelled: false,
+		...(await run.sink.dump()),
+	};
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
@@ -274,29 +458,53 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
 	const { shell, args, env: shellEnv, prefix } = shellConfig;
 	const bashShell = isBashShell(shell);
+	// `!` hotkey commands on zsh/fish run in a real PTY: interactive shell
+	// startup (zle, job control, gitstatus) needs a TTY, and tools only emit
+	// color when stdout is one. bash keeps the snapshot + embedded-shell path;
+	// `cd` keeps the persistent shell so the session cwd can follow it.
+	const ptyRequest = options?.pty;
+	const usePty =
+		ptyRequest !== undefined &&
+		options?.useUserShell === true &&
+		!bashShell &&
+		supportsAutoUserShell(shell) &&
+		$env.PI_NO_PTY !== "1" &&
+		!isPersistentShellCdCommand(command);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
-	const commandEnv = buildNonInteractiveEnv(options?.env);
-
-	// Apply command prefix if configured
-	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
+	// Fold the repo's direnv/devenv env into the command + env so devenv tools
+	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
+	// signal + timeout so an aborted / short-timeout call can't hang on a cold
+	// `.envrc` load before the abort listener is installed. The helper applies
+	// the configured shell `prefix` after any `unset -v` it prepends.
+	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
+		callerEnv: options?.env,
+		signal: options?.signal,
+		timeoutMs: settings.get("bash.direnvLoadTimeoutMs"),
+		callerTimeoutMs: options?.timeout,
+		direnvSetting: settings.get("bash.direnv"),
+		commandPrefix: prefix,
+	});
+	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
+	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
+	// paths, and the embedded brush shell runs the POSIX line better directly.
 	const finalCommand =
-		options?.useUserShell === true && !bashShell && !runCdInPersistentShell
-			? buildUserShellCommand(shell, args, prefixedCommand)
-			: prefixedCommand;
+		options?.useUserShell === true && !bashShell && !isCmdShell(shell) && !runCdInPersistentShell
+			? buildUserShellCommand(shell, args, preflight.command)
+			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
-		onChunk: options?.onChunk,
+		onChunk: usePty ? undefined : options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
-		chunkThrottleMs: options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
+		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
 	});
 
 	// sink.push() is synchronous — buffer management, counters, and onChunk
@@ -313,6 +521,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			cancelled: true,
 			...(await sink.dump("Command cancelled")),
 		};
+	}
+
+	if (usePty && ptyRequest) {
+		const requestedMs = options?.timeout;
+		try {
+			return await executeUserShellPty({
+				shell,
+				args,
+				command: preflight.command,
+				cwd: commandCwd,
+				env: buildUserShellPtyEnv(shellEnv, commandEnv),
+				pty: ptyRequest,
+				timeoutMs: requestedMs === 0 ? undefined : Math.max(1_000, requestedMs ?? 300_000),
+				signal: options?.signal,
+				sink,
+			});
+		} finally {
+			await sink.dispose();
+		}
 	}
 
 	const shellOptions = {
@@ -421,15 +648,22 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
+			let notice = "Command cancelled";
+			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
+				const seconds = Math.round(deadlineTimeoutMs / 1000);
+				// With an explicit timeout the native shell owns enforcement and
+				// this JS timer is only a backstop. If it still wins, the native
+				// run never returned — any output is stuck in the undrained pipe,
+				// so this is not a confirmed empty run (#10308).
+				notice = nativeOwnsTimeout
+					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
+					: `Command timed out after ${seconds} seconds`;
+			}
 			return {
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
-				...(await sink.dump(
-					winner.kind === "timeout" && deadlineTimeoutMs !== undefined
-						? `Command timed out after ${Math.round(deadlineTimeoutMs / 1000)} seconds`
-						: "Command cancelled",
-				)),
+				...(await sink.dump(notice)),
 			};
 		}
 		if (timeoutTimer) {
@@ -498,6 +732,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		resetSession = true;
 		throw err;
 	} finally {
+		await sink.dispose();
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);
 		}

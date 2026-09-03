@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
 const cachedSnapshotPaths = new Map<string, string>();
@@ -208,10 +208,14 @@ fi
 /**
  * Create a shell snapshot, caching the result.
  * Returns the path to the snapshot file, or null if creation failed.
+ *
+ * `timeoutMs` is configurable so callers exercising failure handling do not
+ * have to wait out the production startup budget.
  */
 export async function getOrCreateSnapshot(
 	shell: string,
 	env: Record<string, string | undefined>,
+	timeoutMs = SNAPSHOT_TIMEOUT_MS,
 ): Promise<string | null> {
 	const cacheKey = shell;
 	// Return cached snapshot if valid
@@ -230,32 +234,42 @@ export async function getOrCreateSnapshot(
 
 	const rcFile = getShellConfigFile(shell, env);
 
-	// Create snapshot directory with owner-only perms — the script may inline
-	// env vars referenced by captured functions (#3470) and `os.tmpdir()` is
-	// shared on Linux. `mode: 0o700` applies to a fresh mkdir; an existing dir
-	// keeps its mode, so chmod it defensively. Ignore EPERM (dir owned by
-	// another user on a shared box).
-	const snapshotDir = path.join(os.tmpdir(), "omp-shell-snapshots");
-	fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
-	try {
-		fs.chmodSync(snapshotDir, 0o700);
-	} catch {
-		// best-effort
-	}
+	// Snapshot dir is per-uid. `os.tmpdir()` is shared between accounts on Linux and
+	// this dir is 0700 because the script may inline env-var values referenced by
+	// captured functions (#3470), so a single shared name hands the first account an
+	// exclusive dir and every other account's pre-create write below fails with
+	// EACCES — which used to escape into `executeBash` and break every bash call.
+	const uid = process.getuid?.();
+	const snapshotDir = path.join(os.tmpdir(), uid === undefined ? "omp-shell-snapshots" : `omp-shell-snapshots-${uid}`);
 
 	// Generate unique snapshot path
 	const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : "sh";
 	const snapshotPath = path.join(snapshotDir, `snapshot-${shellName}-${crypto.randomUUID()}.sh`);
 
-	// Pre-create the snapshot file at 0600 so the shell's `>|` (truncate) and
-	// `>>` (append) redirections inside `generateSnapshotScript` operate on an
-	// existing inode and preserve the private mode, regardless of the umask
-	// state inside the spawned shell. Without this, a `.bashrc` that sets
-	// `umask 022` (the typical interactive default) before the script's first
-	// redirection would create the file world-readable; the JS-side post-spawn
-	// chmod would tighten it, but only after the shell finished writing every
-	// captured env value to disk.
-	fs.writeFileSync(snapshotPath, "", { mode: 0o600 });
+	try {
+		fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+		// `mode` only applies to a fresh mkdir; an existing dir keeps its mode, so
+		// chmod it defensively. Ignore EPERM (dir owned by another account).
+		try {
+			fs.chmodSync(snapshotDir, 0o700);
+		} catch {
+			// best-effort
+		}
+		// Pre-create the snapshot file at 0600 so the shell's `>|` (truncate) and
+		// `>>` (append) redirections inside `generateSnapshotScript` operate on an
+		// existing inode and preserve the private mode, regardless of the umask
+		// state inside the spawned shell. Without this, a `.bashrc` that sets
+		// `umask 022` (the typical interactive default) before the script's first
+		// redirection would create the file world-readable; the JS-side post-spawn
+		// chmod would tighten it, but only after the shell finished writing every
+		// captured env value to disk.
+		fs.writeFileSync(snapshotPath, "", { mode: 0o600 });
+	} catch (err) {
+		// Unusable snapshot dir (foreign owner, read-only or full /tmp): run without
+		// a snapshot instead of failing the caller's command.
+		logger.debug("shell-snapshot: snapshot dir unusable", { dir: snapshotDir, err: String(err) });
+		return null;
+	}
 
 	// Generate and execute snapshot script
 	const script = generateSnapshotScript(shell, snapshotPath, rcFile);
@@ -270,11 +284,12 @@ export async function getOrCreateSnapshot(
 			}
 		}
 		const child = Bun.spawn([shell, "-c", script], {
+			cwd: getSafeProjectCwd(),
 			env: spawnEnv,
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",
-			timeout: SNAPSHOT_TIMEOUT_MS,
+			timeout: timeoutMs,
 			killSignal: "SIGKILL",
 		});
 

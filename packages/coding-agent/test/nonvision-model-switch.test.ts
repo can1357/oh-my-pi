@@ -40,6 +40,10 @@ describe("model switch from vision to text-only", () => {
 				rules: [],
 				contextFiles: [],
 			});
+			const notices: string[] = [];
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "notice") notices.push(`${event.source}:${event.message}`);
+			});
 			try {
 				await session.prompt("see image", { images: [{ type: "image", data: "aaaa", mimeType: "image/png" }] });
 				await session.setModel(text);
@@ -49,7 +53,12 @@ describe("model switch from vision to text-only", () => {
 				expect(
 					messages.flatMap<unknown>(message => (Array.isArray(message.content) ? message.content : [])),
 				).not.toContainEqual(expect.objectContaining({ type: "image" }));
+
+				await session.setModel(vision);
+				expect(notices.at(-1)).toContain("vision:inspect_image is now hidden:");
+				expect(notices.at(-1)).toContain("supports image input natively. Override with /vision on.");
 			} finally {
+				unsubscribe();
 				await session.dispose();
 			}
 		} finally {

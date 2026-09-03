@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
 import { isArkSchema, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { type } from "arktype";
-import { z } from "zod/v4";
 
 // ---------------------------------------------------------------------------
 // Phase-1 parity gate: ArkType schemas must flow through the same wire-emission
@@ -36,8 +35,7 @@ describe("isArkSchema", () => {
 		expect(isArkSchema(type("string"))).toBe(true);
 	});
 
-	it("rejects Zod schemas, JSON Schema objects, and non-objects", () => {
-		expect(isArkSchema(z.object({ a: z.string() }))).toBe(false);
+	it("rejects JSON Schema objects and non-objects", () => {
 		expect(isArkSchema({ type: "object", properties: {} })).toBe(false);
 		expect(isArkSchema(null)).toBe(false);
 		expect(isArkSchema(undefined)).toBe(false);
@@ -75,10 +73,10 @@ describe("arkToWireSchema — emission", () => {
 		const zodTwin: Tool = {
 			name: "zod-plain",
 			description: "",
-			parameters: z.object({
-				name: z.string().describe("the display name"),
-				count: z.number().describe("how many items"),
-				nested: z.object({ inner: z.string().describe("inner value") }).describe("a nested object"),
+			parameters: type({
+				name: type("string").describe("the display name"),
+				count: type("number").describe("how many items"),
+				nested: type({ inner: type("string").describe("inner value") }).describe("a nested object"),
 			}),
 		};
 		// Normalize key + array ordering (semantically irrelevant to JSON Schema).
@@ -160,10 +158,10 @@ describe("validateToolArguments — ArkType contracts", () => {
 		const zodTwin: Tool = {
 			name: "zod-plain",
 			description: "",
-			parameters: z.object({
-				name: z.string(),
-				count: z.number(),
-				nested: z.object({ inner: z.string() }),
+			parameters: type({
+				name: type("string"),
+				count: type("number"),
+				nested: type({ inner: type("string") }),
 			}),
 		};
 		const zodResult = validateToolArguments(zodTwin, {

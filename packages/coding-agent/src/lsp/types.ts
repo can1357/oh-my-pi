@@ -1,5 +1,4 @@
-import type { ptree } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 
 // =============================================================================
@@ -98,6 +97,7 @@ export interface PublishDiagnosticsParams {
 export interface TextEdit {
 	range: Range;
 	newText: string;
+	insertTextFormat?: 1 | 2;
 }
 
 export interface AnnotatedTextEdit extends TextEdit {
@@ -315,7 +315,7 @@ export interface LinterClient {
 	format(filePath: string, content: string): Promise<string>;
 
 	/** Get diagnostics for a file. Content should already be written to disk. */
-	lint(filePath: string): Promise<Diagnostic[]>;
+	lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]>;
 
 	/** Dispose of any resources (e.g., LSP connection) */
 	dispose?(): void;
@@ -340,6 +340,8 @@ export interface ServerConfig {
 	command: string;
 	args?: string[];
 	fileTypes: string[];
+	/** LSP language identifier sent in didOpen; inferred from the file path when omitted. */
+	languageId?: string;
 	rootMarkers: string[];
 	initOptions?: Record<string, unknown>;
 	settings?: Record<string, unknown>;
@@ -366,6 +368,33 @@ export interface ServerConfig {
 	 * The client handles format/lint operations. Useful for tools with buggy LSP implementations.
 	 */
 	createClient?: LinterClientFactory;
+}
+
+// =============================================================================
+// Transport
+// =============================================================================
+
+/** Minimal write sink for the server-bound byte stream (satisfied by `Bun.FileSink` and the mux socket adapter). */
+export interface LspWriteSink {
+	write(data: string | Uint8Array): number | Promise<number>;
+	flush(): number | void | Promise<number | void>;
+}
+
+/**
+ * Byte transport carrying one LSP JSON-RPC link. Structurally satisfied by
+ * `ptree.ChildProcess<"pipe">` (local server spawn) and by the socket adapter
+ * in `mux/daemon.ts` (broker-shared server). `exited` may reject (ptree kill).
+ */
+export interface LspTransport {
+	readonly stdin: LspWriteSink;
+	readonly stdout: ReadableStream<Uint8Array>;
+	readonly exited: Promise<number>;
+	readonly exitCode: number | null;
+	readonly pid?: number;
+	/** Present and true on broker-shared mux links; `lsp reload` uses it to request a shared-server restart. */
+	readonly sharedMux?: boolean;
+	kill(): void;
+	peekStderr(): string;
 }
 
 // =============================================================================
@@ -399,7 +428,7 @@ export interface LspClient {
 	name: string;
 	cwd: string;
 	config: ServerConfig;
-	proc: ptree.ChildProcess<"pipe">;
+	proc: LspTransport;
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;

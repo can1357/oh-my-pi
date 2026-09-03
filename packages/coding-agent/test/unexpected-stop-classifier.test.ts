@@ -76,6 +76,30 @@ describe("isUnexpectedStopCandidate", () => {
 		});
 		expect(isUnexpectedStopCandidate(message)).toBe(false);
 	});
+
+	it("returns true for a signed thinking-only stop", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: " 响应", thinkingSignature: "reasoning_content" }],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(true);
+	});
+
+	it("returns false for an unsigned thinking-only stop (empty-stop path owns it)", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: "responseAll four reviewers complete." }],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(false);
+	});
+
+	it("returns false when the thinking block is only whitespace", () => {
+		const message = makeAssistantMessage({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: "   \n\t  ", thinkingSignature: "reasoning_content" }],
+		});
+		expect(isUnexpectedStopCandidate(message)).toBe(false);
+	});
 });
 
 describe("classifyUnexpectedStop", () => {
@@ -115,7 +139,12 @@ describe("classifyUnexpectedStop", () => {
 			| undefined;
 
 		expect(result).toBe(true);
-		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1024 });
+		// Must exceed Anthropic's 1024-token minimum thinking budget so a LiteLLM/Vertex
+		// Anthropic route (which downgrades the disabled request to the lowest reasoning
+		// effort) still satisfies `max_tokens > thinking.budget_tokens` (issue #8610).
+		expect(options?.disableReasoning).toBe(true);
+		expect(options?.maxTokens).toBe(4096);
+		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 });
 

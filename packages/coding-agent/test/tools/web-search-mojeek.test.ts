@@ -91,6 +91,19 @@ describe("Mojeek web search provider", () => {
 		expect(url.searchParams.get("since")).toBeNull();
 	});
 
+	it("re-emits supported operators (phrases, -, site:) and strips unsupported date bounds from the query", async () => {
+		let capturedUrl = "";
+		const fetchMock: FetchImpl = input => {
+			capturedUrl = typeof input === "string" ? input : input.toString();
+			return Promise.resolve(new Response(resultsPage(""), { status: 200 }));
+		};
+
+		await searchMojeek(makeParams("independent index site:mojeek.com after:2024", fetchMock));
+
+		const url = new URL(capturedUrl);
+		expect(url.searchParams.get("q")).toBe("independent index site:mojeek.com");
+	});
+
 	it("parses result rows, deduplicates targets, and skips junk and intra-Mojeek rows", async () => {
 		const html = resultsPage(
 			[

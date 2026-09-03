@@ -24,9 +24,10 @@ The critical distinction: **notebook support is file conversion/editing, not not
   - `# %% [markdown] cell:N`
   - `# %% [raw] cell:N`
 - Line selectors and multi-range selectors operate on that virtual text.
-- Edit/write paths round-trip virtual text back to notebook JSON through `serializeEditedNotebookText(...)`.
-- Existing notebook metadata is preserved when a marker references an existing `cell:N`; new cells get fresh empty metadata.
-- Missing notebooks edited through this path start from an empty nbformat 4.5 notebook.
+- The edit pipeline round-trips virtual text back to notebook JSON through `serializeEditedNotebookText(...)`.
+- Existing notebook metadata is preserved when a marker references an existing unused `cell:N`; new cells get fresh empty metadata.
+- A missing notebook passed to the serializer starts from an empty nbformat 4.5 notebook.
+- The standalone `write` tool is not notebook-aware: it replaces the file with the supplied bytes. Use it only with valid notebook JSON, not the virtual marker representation.
 
 No kernel lifecycle exists in this path:
 
@@ -38,7 +39,7 @@ No kernel lifecycle exists in this path:
 
 ## Kernel-backed execution path (`src/tools/eval.ts` + `src/eval/py/*`)
 
-When the agent needs to run cell-style Python code (sequential cells, persistent state, rich displays), that goes through the **`eval` tool** with per-cell `language: "py"`, not through notebook file handling.
+When the agent needs to run cell-style Python code with persistent state and rich displays, that goes through one **`eval` tool** call per cell with `language: "py"`, not through notebook file handling.
 
 That path is where Python subprocess lifecycle, reset/cancel behavior, chunk streaming, rich displays, and output artifact truncation live.
 
@@ -54,14 +55,19 @@ Notebook JSON `source` is converted to virtual text by joining source arrays. Wh
 
 This mirrors notebook JSON conventions and avoids accidental line concatenation on later edits.
 
+### Marker-like source escaping
+
+A source line that itself looks like a cell marker is escaped on render by adding one `%` (`# %% ...` becomes `# %%% ...`) and unescaped on parse. Already escaped marker-like lines gain and lose one additional `%` the same way. This prevents literal marker text inside a cell from being misparsed as a new cell during round-trip editing.
+
 ## Marker parsing and cell preservation
 
-- The first representation line must be a marker; text before the first marker, including a blank line, is rejected.
+- A non-empty representation must start with a marker; text before the first marker, including a blank line, is rejected. Empty text serializes to a notebook with no cells.
 - Markers must match `# %% [code|markdown|raw]` with optional `cell:N`.
-- If `cell:N` points at an unused existing cell, that cell is cloned, its `cell_type` and `source` are updated, and unrelated metadata is preserved.
-- If no valid unused original index is present, a new cell is created.
-- Code cells ensure `execution_count` exists and `outputs` exists.
+- If `cell:N` points at an unused existing cell, that cell is cloned, its `cell_type` and `source` are updated, and unrelated fields are preserved.
+- Existing code-cell `execution_count` and `outputs` are preserved rather than cleared; missing fields are initialized to `null` and `[]`.
 - Markdown/raw cells remove `execution_count` and `outputs`.
+- If no valid unused original index is present, a new cell with empty metadata is created.
+- Notebook-level metadata, format fields, and unrelated top-level fields survive because serialization clones the original document and replaces only `cells`.
 
 ## Error surfaces
 
@@ -73,7 +79,7 @@ Hard failures are thrown for:
 - invalid cell objects or cell types
 - invalid editable representation (for example, text before the first cell marker)
 
-These surface through the caller (`read`, edit, or `write`) as normal tool errors.
+These surface through notebook-aware callers such as `read` and the edit pipeline as normal tool errors. The standalone `write` path does not parse notebook JSON.
 
 ## 3) Kernel session semantics (where they actually exist)
 
@@ -95,7 +101,7 @@ Kernel semantics are implemented in `executePython` / `PythonKernel` and apply t
 
 ## Reset behavior
 
-Each eval cell has its own optional `reset` flag. `reset: true` resets the selected Python session before that cell executes; it is not a top-level tool parameter.
+Each eval call has an optional `reset` flag. `reset: true` resets the selected Python session before that call executes; it does not reset other enabled language runtimes.
 
 ## Kernel death / restart / retry
 
@@ -180,8 +186,9 @@ This renderer behavior is unrelated to notebook JSON editing except that both re
 
 If a workflow needs both notebook mutation and execution:
 
-1. read or edit the `.ipynb` file through the normal file tools
-2. copy the desired cell source into `eval` cells with `language: "py"` to execute it
-3. write resulting source changes back to the notebook if needed
+1. read the `.ipynb` file in its default editable view and mutate that view with the edit pipeline
+2. copy one desired cell source into an `eval` call with `language: "py"`
+3. repeat for later cells; session-mode Python state persists across calls
+4. apply later source changes through the edit pipeline; a whole-file `write` must contain notebook JSON
 
 Current implementation does not provide a single tool that both mutates `.ipynb` and executes notebook cells through kernel context.

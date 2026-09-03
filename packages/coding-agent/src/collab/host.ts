@@ -59,6 +59,8 @@ const STATE_TRIGGER_EVENTS: Record<string, true> = {
 	message_end: true,
 	tool_execution_end: true,
 	thinking_level_changed: true,
+	model_changed: true,
+	advisor_cost_changed: true,
 	auto_compaction_end: true,
 };
 
@@ -290,10 +292,16 @@ export class CollabHost {
 			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
 			this.#onEventForState(event);
 		});
-		const bus = this.#ctx.eventBus;
-		if (bus) {
+		// Subagent frames publish on the session tree's observability bus at
+		// any spawn depth; mirroring from it is what lets nested agents reach
+		// guests at all. Embedders on the previous constructor signature only
+		// wire a session bus — fall back to it so depth-1 frames keep flowing.
+		const observabilityBus = this.#ctx.subagentEventBus ?? this.#ctx.eventBus;
+		if (observabilityBus) {
 			for (const channel of COLLAB_BUS_CHANNELS) {
-				this.#busUnsubscribers.push(bus.on(channel, data => this.#broadcast({ t: "bus", channel, data })));
+				this.#busUnsubscribers.push(
+					observabilityBus.on(channel, data => this.#broadcast({ t: "bus", channel, data })),
+				);
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
@@ -666,10 +674,11 @@ export class CollabHost {
 			case "kill": {
 				const kill = async () => {
 					const ref = AgentRegistry.global().get(agentId);
-					if (ref && ref.status === "running" && ref.session) {
+					if (!ref) return;
+					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
-					await AgentLifecycleManager.global().release(agentId);
+					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
 				};
 				kill().catch(fail);
 				break;

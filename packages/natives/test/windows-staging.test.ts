@@ -26,6 +26,8 @@ import * as path from "node:path";
 import {
 	cleanupStaleNativeVersions,
 	getAddonFilenames,
+	initLoaderContext,
+	prepareNativeVersionDir,
 	resolveLoaderCandidates,
 	shouldStageNodeModulesAddon,
 } from "../native/loader-state.js";
@@ -114,6 +116,62 @@ describe("windows native addon staging", () => {
 		expect(candidates).not.toContain(userDataBaseline);
 	});
 
+	it("classifies only Windows node_modules paths case-insensitively", () => {
+		const leafPackageDir = "/tmp/node_modules/@oh-my-pi/pi-natives-darwin-arm64";
+		const uppercaseNodeModulesNativeDir = "/tmp/NODE_MODULES/@oh-my-pi/pi-natives/native";
+		const variantCacheKey = "__PI_NATIVE_VARIANT_CACHE";
+		const previousVariantCache = process.env[variantCacheKey];
+		try {
+			const workspace = initLoaderContext({
+				platform: "linux",
+				isCompiledBinary: false,
+				nativeDir: "/tmp/oh-my-pi/packages/natives/native",
+				leafPackageDir,
+			});
+			const installed = initLoaderContext({
+				platform: "linux",
+				isCompiledBinary: false,
+				nativeDir: "/tmp/node_modules/@oh-my-pi/pi-natives/native",
+				leafPackageDir,
+			});
+			const uppercaseWorkspace = initLoaderContext({
+				platform: "linux",
+				isCompiledBinary: false,
+				nativeDir: uppercaseNodeModulesNativeDir,
+				leafPackageDir,
+			});
+			const uppercaseWindowsInstall = initLoaderContext({
+				platform: "win32",
+				isCompiledBinary: false,
+				nativeDir: uppercaseNodeModulesNativeDir,
+				leafPackageDir,
+			});
+			const leafCandidate = path.join(leafPackageDir, installed.addonFilenames[0]);
+			const windowsLeafCandidate = path.join(leafPackageDir, uppercaseWindowsInstall.addonFilenames[0]);
+			const workspaceCandidate = path.join(uppercaseNodeModulesNativeDir, uppercaseWorkspace.addonFilenames[0]);
+
+			expect(workspace.isWorkspaceLoad).toBe(true);
+			expect(workspace.leafPackageDir).toBeNull();
+			expect(workspace.candidates).not.toContain(leafCandidate);
+			expect(installed.isWorkspaceLoad).toBe(false);
+			expect(installed.leafPackageDir).toBe(leafPackageDir);
+			expect(installed.candidates).toContain(leafCandidate);
+			expect(installed.candidates[0]).toBe(leafCandidate);
+
+			expect(uppercaseWorkspace.isWorkspaceLoad).toBe(true);
+			expect(uppercaseWorkspace.leafPackageDir).toBeNull();
+			expect(uppercaseWorkspace.candidates[0]).toBe(workspaceCandidate);
+
+			expect(uppercaseWindowsInstall.isWorkspaceLoad).toBe(false);
+			expect(uppercaseWindowsInstall.leafPackageDir).toBe(leafPackageDir);
+			expect(uppercaseWindowsInstall.stageFromNodeModules).toBe(true);
+			expect(uppercaseWindowsInstall.candidates).toContain(windowsLeafCandidate);
+		} finally {
+			if (previousVariantCache === undefined) delete process.env[variantCacheKey];
+			else process.env[variantCacheKey] = previousVariantCache;
+		}
+	});
+
 	it("falls back to the node_modules-only candidate list when staging is off", () => {
 		// Mirrors the non-Windows / workspace-dev path: same behavior as before
 		// the staging feature was introduced.
@@ -134,17 +192,29 @@ describe("windows native addon staging", () => {
 		expect(candidates).toContain(nodeModulesBaseline);
 	});
 
-	it("removes stale version directories after the current native version loads", async () => {
+	it("removes only older version directories after the current native version loads", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
+		const currentMajor = Number.parseInt(packageJson.version, 10);
+		const futureVersion = `${currentMajor + 1}.0.0`;
+		const staleVersion = "15.10.11";
+		const freshVersion = "15.10.12";
 		try {
-			await fs.mkdir(path.join(nativesDir, "15.10.11"));
+			await fs.mkdir(path.join(nativesDir, staleVersion));
+			await fs.mkdir(path.join(nativesDir, freshVersion));
 			await fs.mkdir(path.join(nativesDir, packageJson.version));
+			await fs.mkdir(path.join(nativesDir, futureVersion));
+			await fs.mkdir(path.join(nativesDir, "not-a-version"));
 			await Bun.write(path.join(nativesDir, "README.txt"), "not a version directory");
+			await fs.utimes(path.join(nativesDir, staleVersion), new Date(0), new Date(0));
+			await fs.utimes(path.join(nativesDir, freshVersion), new Date(0), new Date(0));
+			prepareNativeVersionDir(path.join(nativesDir, freshVersion));
 
 			const removed = cleanupStaleNativeVersions({ nativesDir, currentVersion: packageJson.version });
 
-			expect(removed.map(filePath => path.basename(filePath))).toEqual(["15.10.11"]);
-			expect((await fs.readdir(nativesDir)).sort()).toEqual(["README.txt", packageJson.version].sort());
+			expect(removed.map(filePath => path.basename(filePath))).toEqual([staleVersion]);
+			expect((await fs.readdir(nativesDir)).sort()).toEqual(
+				["README.txt", freshVersion, packageJson.version, futureVersion, "not-a-version"].sort(),
+			);
 		} finally {
 			await fs.rm(nativesDir, { recursive: true, force: true });
 		}

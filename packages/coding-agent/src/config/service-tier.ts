@@ -1,4 +1,4 @@
-import type { ServiceTier, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import type { ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
 import type { SubmenuOption } from "./settings-schema";
 
 /**
@@ -15,6 +15,36 @@ export const SERVICE_TIER_GOOGLE_VALUES = ["none", "flex", "priority"] as const;
 export type ServiceTierOpenAISettingValue = (typeof SERVICE_TIER_OPENAI_VALUES)[number];
 export type ServiceTierAnthropicSettingValue = (typeof SERVICE_TIER_ANTHROPIC_VALUES)[number];
 export type ServiceTierGoogleSettingValue = (typeof SERVICE_TIER_GOOGLE_VALUES)[number];
+
+/** Whether a runtime value is a supported OpenAI service-tier setting. */
+export function isServiceTierOpenAISettingValue(value: string): value is ServiceTierOpenAISettingValue {
+	return SERVICE_TIER_OPENAI_VALUES.some(tier => tier === value);
+}
+
+/** Whether a runtime value names a provider family with an independent service-tier knob. */
+export function isServiceTierFamily(value: unknown): value is ServiceTierFamily {
+	return value === "openai" || value === "anthropic" || value === "google";
+}
+
+/** Whether a runtime value is a supported service tier for one provider family. */
+export function isServiceTierForFamily(family: string, tier: unknown): tier is ServiceTier {
+	if (typeof tier !== "string" || tier === "none") return false;
+	let values: readonly string[];
+	switch (family) {
+		case "openai":
+			values = SERVICE_TIER_OPENAI_VALUES;
+			break;
+		case "anthropic":
+			values = SERVICE_TIER_ANTHROPIC_VALUES;
+			break;
+		case "google":
+			values = SERVICE_TIER_GOOGLE_VALUES;
+			break;
+		default:
+			return false;
+	}
+	return values.includes(tier);
+}
 
 /**
  * Inherit-capable single value for the subagent/advisor tiers. The chosen tier

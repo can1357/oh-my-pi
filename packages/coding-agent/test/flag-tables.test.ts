@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { parseArgs } from "../src/cli/args";
-import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
+import { parseArgs, validateToolNames } from "../src/cli/args";
+import { OPTIONAL_VALUE_FLAGS, restartArgv, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
 /**
@@ -56,19 +56,59 @@ describe("OPTIONAL_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 	}
 });
 
-describe("--tools legacy aliases", () => {
+describe("--external-thinking", () => {
+	it("enables external thinking without consuming the initial message", () => {
+		const result = parseArgs(["--external-thinking", "check this"]);
+
+		expect(result.externalThinking).toBe(true);
+		expect(result.messages).toEqual(["check this"]);
+	});
+
+	it("stays unset when omitted", () => {
+		expect(parseArgs([]).externalThinking).toBeUndefined();
+	});
+});
+describe("--session-dir", () => {
+	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {
+		const previous = Bun.env.PI_CODING_AGENT_SESSION_DIR;
+		Bun.env.PI_CODING_AGENT_SESSION_DIR = "/env/sessions";
+		try {
+			expect(parseArgs([]).sessionDir).toBe("/env/sessions");
+			expect(parseArgs(["--session-dir", "/cli/sessions"]).sessionDir).toBe("/cli/sessions");
+		} finally {
+			if (previous === undefined) {
+				delete Bun.env.PI_CODING_AGENT_SESSION_DIR;
+			} else {
+				Bun.env.PI_CODING_AGENT_SESSION_DIR = previous;
+			}
+		}
+	});
+});
+
+describe("--tools validation", () => {
 	it("maps search and find to grep and glob", () => {
 		const result = parseArgs(["--tools", "search,find,grep"]);
 
 		expect(result.tools).toEqual(["grep", "glob"]);
 	});
 
-	it("rejects unknown tool names instead of silently narrowing the toolset", () => {
-		// Removed tools (ssh, job, irc, launch, search_tool_bm25) used to be
-		// dropped with only a log-file warning, so `--tools bash,ssh` ran with
-		// just bash and no visible notice.
-		expect(() => parseArgs(["--tools", "bash,ssh"])).toThrow(CliUsageError);
-		expect(() => parseArgs(["--tools", "bash,ssh"])).toThrow(/Unknown tool in --tools: ssh/);
+	it("defers unknown-name validation until all session tools are discovered", () => {
+		expect(parseArgs(["--tools", "bash,intercom"]).tools).toEqual(["bash", "intercom"]);
+		expect(parseArgs(["--tools", "read,custom_tool"], new Map()).tools).toEqual(["read", "custom_tool"]);
+	});
+});
+
+describe("--tools discovered-registry validation", () => {
+	it("accepts extension and custom tools after they enter the session registry", () => {
+		expect(() =>
+			validateToolNames(["read", "intercom", "custom_tool"], ["read", "intercom", "custom_tool"]),
+		).not.toThrow();
+	});
+
+	it("rejects names absent from the final registry", () => {
+		expect(() => validateToolNames(["read", "missing"], ["read", "intercom", "custom_tool"])).toThrow(
+			/Unknown tool in --tools: missing/,
+		);
 	});
 });
 
@@ -128,5 +168,58 @@ describe("parseArgs @file parsing with quotes", () => {
 	it("parses single-quoted @'file' arguments", () => {
 		const result = parseArgs(["@'foo bar.png'"]);
 		expect(result.fileArgs).toEqual(["foo bar.png"]);
+	});
+});
+
+describe("foreign session import flags", () => {
+	it("parses each source flag without consuming the initial message", () => {
+		const claude = parseArgs(["--from-claude", "continue this session"]);
+		const codex = parseArgs(["--from-codex", "continue this session"]);
+
+		expect(claude.fromClaude).toBe(true);
+		expect(claude.messages).toEqual(["continue this session"]);
+		expect(claude.unrecognizedFlags).toEqual([]);
+		expect(codex.fromCodex).toBe(true);
+		expect(codex.messages).toEqual(["continue this session"]);
+		expect(codex.unrecognizedFlags).toEqual([]);
+	});
+});
+
+describe("restartArgv (/restart relaunch argv)", () => {
+	it("keeps configuration flags, drops positionals, and appends --resume", () => {
+		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], "sid")).toEqual([
+			"--model",
+			"gpt-5",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("drops every session-source flag, including inline = and value forms", () => {
+		expect(
+			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], "sid"),
+		).toEqual(["--resume", "sid"]);
+	});
+
+	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
+		expect(restartArgv(["--myext-flag", "val", "--no-tools"], "sid")).toEqual([
+			"--myext-flag",
+			"val",
+			"--no-tools",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("treats everything after -- as prompt text and drops it", () => {
+		expect(restartArgv(["--print-thoughts", "--", "--model", "opus"], "sid")).toEqual([
+			"--print-thoughts",
+			"--resume",
+			"sid",
+		]);
+	});
+
+	it("omits --resume for a session that never materialized on disk", () => {
+		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
 });

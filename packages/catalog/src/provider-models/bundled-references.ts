@@ -9,8 +9,18 @@ import type { Api, Model, ModelSpec } from "../types";
  * manager, which rebuilds via `buildModel`.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
-	const { compat: _compat, compatConfig, ...rest } = model;
-	return { ...rest, compat: compatConfig } as ModelSpec<TApi>;
+	const {
+		compat: _compat,
+		compatConfig,
+		supportsComputerUse: _derivedComputerUse,
+		supportsComputerUseConfig,
+		...rest
+	} = model;
+	return {
+		...rest,
+		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
+		compat: compatConfig,
+	} as ModelSpec<TApi>;
 }
 
 export function createBundledReferenceMap<TApi extends Api>(
@@ -23,33 +33,54 @@ export function createBundledReferenceMap<TApi extends Api>(
 	return references;
 }
 
-export function createReferenceResolver<TApi extends Api>(
-	providerRefs: Map<string, ModelSpec<TApi>>,
-): (modelId: string) => ModelSpec<TApi> | undefined {
-	const globalRefs = new Map<string, Model<Api>>();
+type ProviderReferenceSource<TApi extends Api> = Map<string, ModelSpec<TApi>> | (() => Map<string, ModelSpec<TApi>>);
+
+let globalReferences: Map<string, Model<Api>> | undefined;
+
+function getGlobalReferences(): Map<string, Model<Api>> {
+	if (globalReferences) {
+		return globalReferences;
+	}
+	const references = new Map<string, Model<Api>>();
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			if (isZeroCostXaiOAuthReference(candidate)) {
+			// ClinePass limits, pricing, and reasoning controls are gateway-specific;
+			// matching them by bare id would contaminate unrelated proxy models.
+			if (candidate.provider === "cline-pass" || isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
-			const existing = globalRefs.get(candidate.id);
+			const existing = references.get(candidate.id);
 			if (!existing) {
-				globalRefs.set(candidate.id, candidate);
+				references.set(candidate.id, candidate);
 			} else if (candidate.contextWindow !== existing.contextWindow) {
 				if ((candidate.contextWindow ?? 0) > (existing.contextWindow ?? 0)) {
-					globalRefs.set(candidate.id, candidate);
+					references.set(candidate.id, candidate);
 				}
 			} else if (candidate.maxTokens !== existing.maxTokens) {
 				if ((candidate.maxTokens ?? 0) > (existing.maxTokens ?? 0)) {
-					globalRefs.set(candidate.id, candidate);
+					references.set(candidate.id, candidate);
 				}
 			} else if (existing.provider !== "openai" && candidate.provider === "openai") {
-				globalRefs.set(candidate.id, candidate);
+				references.set(candidate.id, candidate);
 			}
 		}
 	}
+	globalReferences = references;
+	return references;
+}
+
+export function createReferenceResolver<TApi extends Api>(
+	providerReferenceSource: ProviderReferenceSource<TApi>,
+): (modelId: string) => ModelSpec<TApi> | undefined {
+	let lazyProviderReferences: Map<string, ModelSpec<TApi>> | undefined;
+	const getProviderReferences =
+		typeof providerReferenceSource === "function"
+			? () => (lazyProviderReferences ??= providerReferenceSource())
+			: () => providerReferenceSource;
 	return (modelId: string) => {
+		const providerRefs = getProviderReferences();
+		const globalRefs = getGlobalReferences();
 		const providerRef = providerRefs.get(modelId);
 		if (providerRef) return providerRef;
 		const globalRef = globalRefs.get(modelId);

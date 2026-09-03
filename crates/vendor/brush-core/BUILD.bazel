@@ -1,0 +1,29 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# Vendored fork, promoted to a workspace member so Bazel treats it as
+# first-party (crate_universe's path-dep rendering is machine-local and breaks
+# lockfile portability). Feature list mirrors cargo's resolved default set.
+rust_library(
+    name = "brush-core",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_features = [],
+    crate_name = "brush_core",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.5.0",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "brush-core_test",
+    crate = ":brush-core",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)

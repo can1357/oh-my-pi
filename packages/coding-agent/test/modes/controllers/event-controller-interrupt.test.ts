@@ -4,6 +4,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 
 function createContext() {
 	const setWorkingMessage = vi.fn();
@@ -21,6 +22,11 @@ function createContext() {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools,
 		hideThinkingBlock: false,
+		getUserMessageText: () => "new prompt",
+		locallySubmittedUserSignatures: new Set<string>(),
+		addMessageToChat: vi.fn(),
+		editor: { setText: vi.fn() },
+		updatePendingMessagesDisplay: vi.fn(),
 		setWorkingMessage,
 		clearPinnedError: vi.fn(),
 		ensureLoadingAnimation,
@@ -59,6 +65,27 @@ describe("EventController aborted-turn working messages", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		resetSettingsForTest();
+	});
+
+	it("preserves playback across internal continuations and clears it for a user message", async () => {
+		const clear = vi.spyOn(vocalizer, "clear").mockImplementation(() => {});
+		const { ctx } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent({ type: "turn_start" });
+		expect(clear).not.toHaveBeenCalled();
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "new prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+		expect(clear).toHaveBeenCalledTimes(1);
 	});
 
 	it("suppresses late intent-driven working-message updates while aborting", async () => {

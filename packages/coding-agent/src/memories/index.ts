@@ -3,7 +3,7 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
 
@@ -142,9 +142,12 @@ export function startMemoryStartupTask(options: {
 		return;
 	}
 
-	void runMemoryStartup({ session, settings, modelRegistry, agentDir, config: cfg }).catch(error => {
-		logger.warn("Memory startup failed", { error: String(error) });
-	});
+	const signal = session.beginLocalMemoryStartup?.() ?? new AbortController().signal;
+	void runMemoryStartup({ session, settings, modelRegistry, agentDir, config: cfg, signal })
+		.catch(error => {
+			if (!signal.aborted) logger.warn("Memory startup failed", { error: String(error) });
+		})
+		.finally(() => session.endLocalMemoryStartup?.(signal));
 }
 
 interface MemoryInstructionSession {
@@ -315,26 +318,32 @@ export function enqueueMemoryConsolidation(agentDir: string, cwd: string, source
 	}
 }
 
-async function runMemoryStartup(options: {
+interface MemoryStartupOptions {
 	session: AgentSession;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	agentDir: string;
 	config: MemoryRuntimeConfig;
-}): Promise<void> {
+	signal: AbortSignal;
+}
+
+function isMemoryStartupActive(options: MemoryStartupOptions): boolean {
+	return !options.signal.aborted && !options.session.isDisposed && options.settings.get("memory.backend") === "local";
+}
+
+async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
+	if (!isMemoryStartupActive(options)) return;
 	await runPhase1(options);
+	if (!isMemoryStartupActive(options)) return;
 	await runPhase2(options);
+	if (!isMemoryStartupActive(options)) return;
 	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
+	if (!isMemoryStartupActive(options)) return;
 	await options.session.refreshBaseSystemPrompt?.();
 }
 
-async function runPhase1(options: {
-	session: AgentSession;
-	settings: Settings;
-	modelRegistry: ModelRegistry;
-	agentDir: string;
-	config: MemoryRuntimeConfig;
-}): Promise<void> {
+async function runPhase1(options: MemoryStartupOptions): Promise<void> {
+	if (!isMemoryStartupActive(options)) return;
 	const { session, modelRegistry, agentDir, config } = options;
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
@@ -344,6 +353,7 @@ async function runPhase1(options: {
 
 	try {
 		const threads = await collectThreads(session, currentThreadId);
+		if (!isMemoryStartupActive(options)) return;
 		upsertThreads(db, threads);
 
 		const phase1Model = await resolveMemoryModel({
@@ -364,6 +374,7 @@ async function runPhase1(options: {
 			return;
 		}
 
+		if (!isMemoryStartupActive(options)) return;
 		const claims = claimStage1Jobs(db, {
 			nowSec,
 			threadScanLimit: config.threadScanLimit,
@@ -387,6 +398,7 @@ async function runPhase1(options: {
 		};
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
+			if (!isMemoryStartupActive(options)) return;
 			const result = await runStage1Job({
 				claim,
 				model: phase1Model,
@@ -395,6 +407,7 @@ async function runPhase1(options: {
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
 			});
+			if (!isMemoryStartupActive(options)) return;
 
 			if (result.kind === "failed") {
 				logger.error("Memory phase1 stage1 job failed", {
@@ -460,13 +473,8 @@ async function runPhase1(options: {
 	}
 }
 
-async function runPhase2(options: {
-	session: AgentSession;
-	settings: Settings;
-	modelRegistry: ModelRegistry;
-	agentDir: string;
-	config: MemoryRuntimeConfig;
-}): Promise<void> {
+async function runPhase2(options: MemoryStartupOptions): Promise<void> {
+	if (!isMemoryStartupActive(options)) return;
 	const { session, modelRegistry, agentDir, config } = options;
 	const cwd = session.sessionManager.getCwd();
 	const db = openMemoryDb(getAgentDbPath(agentDir));
@@ -488,8 +496,10 @@ async function runPhase2(options: {
 		const newWatermark = computeCompletionWatermark(claim.inputWatermark, outputs);
 
 		await syncPhase2Artifacts(memoryRoot, outputs);
+		if (!isMemoryStartupActive(options)) return;
 		if (outputs.length === 0) {
 			await cleanupConsolidatedArtifacts(memoryRoot);
+			if (!isMemoryStartupActive(options)) return;
 			const marked = markGlobalPhase2Succeeded(db, {
 				ownershipToken: claim.ownershipToken,
 				newWatermark,
@@ -502,6 +512,7 @@ async function runPhase2(options: {
 			return;
 		}
 
+		if (!isMemoryStartupActive(options)) return;
 		const phase2Model = await resolveMemoryModel({
 			modelRegistry,
 			session,
@@ -529,8 +540,13 @@ async function runPhase2(options: {
 			return;
 		}
 
+		if (!isMemoryStartupActive(options)) return;
 		let heartbeatLostOwnership = false;
 		const heartbeat = setInterval(() => {
+			if (!isMemoryStartupActive(options)) {
+				clearInterval(heartbeat);
+				return;
+			}
 			const ok = heartbeatGlobalJob(db, {
 				ownershipToken: claim.ownershipToken,
 				leaseSeconds: config.phase2LeaseSeconds,
@@ -544,13 +560,16 @@ async function runPhase2(options: {
 		}, config.phase2HeartbeatSeconds * 1000);
 
 		try {
+			if (!isMemoryStartupActive(options)) return;
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
+			if (!isMemoryStartupActive(options)) return;
 			await applyConsolidation(memoryRoot, consolidated);
+			if (!isMemoryStartupActive(options)) return;
 			if (heartbeatLostOwnership) {
 				throw new Error("Phase2 lease ownership lost before completion");
 			}
@@ -564,6 +583,7 @@ async function runPhase2(options: {
 				throw new Error("Phase2 could not mark success: ownership lost");
 			}
 		} catch (error) {
+			if (!isMemoryStartupActive(options)) return;
 			markPhase2FailureWithFallback(db, {
 				claim,
 				retryDelaySeconds: config.phase2RetryDelaySeconds,
@@ -730,18 +750,20 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: [stageOneSystemTemplate],
-				messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
-			},
-			{
-				apiKey,
-				metadata: options.metadata,
-				maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
-			},
+		const response = await retryTransientCompletion(() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [stageOneSystemTemplate],
+					messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
+				},
+				{
+					apiKey,
+					metadata: options.metadata,
+					maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
+					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+				},
+			),
 		);
 
 		if (response.stopReason === "error") {
@@ -867,18 +889,20 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [consolidationSystemTemplate],
-			messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-		},
-		{
-			apiKey,
-			metadata: options.metadata,
-			maxTokens: 8192,
-			reasoning: clampThinkingLevelForModel(model, Effort.Medium),
-		},
+	const response = await retryTransientCompletion(() =>
+		completeSimple(
+			model,
+			{
+				systemPrompt: [consolidationSystemTemplate],
+				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+			},
+			{
+				apiKey,
+				metadata: options.metadata,
+				maxTokens: 8192,
+				reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+			},
+		),
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");
@@ -1227,7 +1251,7 @@ async function resolveMemoryModel(options: {
 
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 	return {
-		enabled: settings.get("memory.backend") === "local" || settings.get("memories.enabled") === true,
+		enabled: settings.get("memory.backend") === "local",
 		maxRolloutsPerStartup: settings.get("memories.maxRolloutsPerStartup") ?? DEFAULTS.maxRolloutsPerStartup,
 		maxRolloutAgeDays: settings.get("memories.maxRolloutAgeDays") ?? DEFAULTS.maxRolloutAgeDays,
 		minRolloutIdleHours: settings.get("memories.minRolloutIdleHours") ?? DEFAULTS.minRolloutIdleHours,
@@ -1341,12 +1365,31 @@ async function appendLearnedLine(filePath: string, line: string): Promise<void> 
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
 	}
-	const prior = existing
-		.split("\n")
-		.map(l => l.trim())
-		.filter(l => l.startsWith("- ") && l !== line);
-	const lessons = [line, ...prior].slice(0, MAX_LEARNED_LESSONS);
-	await Bun.write(filePath, `${lessons.join("\n")}\n`);
+	// Treat the file as an ordered line list so headings, prose, and blank
+	// lines keep their positions relative to the bullets they scope. Managed
+	// operations touch only bullet lines: dedupe removes an existing copy of
+	// the incoming lesson in place, the new lesson enters at the head of the
+	// first bullet run (newest-first, matching the read path and cap docs),
+	// and the cap drops the oldest (bottom-most) bullets. Hand-edited content
+	// outside the list region survives every write byte-for-byte.
+	const lines = existing.split("\n");
+	// A well-formed file ends with "\n"; drop the terminal split artifact so
+	// repeated saves stay idempotent instead of growing a blank line each time.
+	if (lines.at(-1) === "") lines.pop();
+	const isLesson = (l: string) => l.trimStart().startsWith("- ");
+	const out = lines.filter(l => !(isLesson(l) && l.trim() === line));
+	const firstBullet = out.findIndex(isLesson);
+	if (firstBullet === -1) out.push(line);
+	else out.splice(firstBullet, 0, line);
+	let lessonCount = 0;
+	for (const l of out) if (isLesson(l)) lessonCount++;
+	for (let i = out.length - 1; i >= 0 && lessonCount > MAX_LEARNED_LESSONS; i--) {
+		if (isLesson(out[i])) {
+			out.splice(i, 1);
+			lessonCount--;
+		}
+	}
+	await Bun.write(filePath, `${out.join("\n")}\n`);
 }
 
 /**
@@ -1384,6 +1427,7 @@ async function runWithConcurrency<T>(
 	worker: (item: T) => Promise<void>,
 ): Promise<void> {
 	const queue = [...items];
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const workers = new Array(Math.max(1, concurrency)).fill(0).map(async () => {
 		while (queue.length > 0) {
 			const item = queue.shift();

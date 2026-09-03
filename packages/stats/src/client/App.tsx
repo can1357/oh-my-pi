@@ -10,13 +10,15 @@ import {
 	ModelsRoute,
 	OverviewRoute,
 	ProjectsRoute,
+	ProvidersRoute,
 	RequestsRoute,
 	ToolsRoute,
+	TracesRoute,
 } from "./routes";
 import { RequestDrawer } from "./ui/RequestDrawer";
 
 export default function App() {
-	const { section, setSection, range, setRange } = useHashRoute();
+	const { section, setSection, range, setRange, session, setSession } = useHashRoute();
 	const [refreshTrigger, setRefreshTrigger] = useState(0);
 	const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
 	const [updatedAt, setUpdatedAt] = useState<number | null>(() => Date.now());
@@ -62,6 +64,15 @@ export default function App() {
 						onRequestClick={setSelectedRequestId}
 					/>
 				);
+			case "traces":
+				return (
+					<TracesRoute
+						active={isActive}
+						session={session}
+						onOpenSession={setSession}
+						refreshTrigger={refreshTrigger}
+					/>
+				);
 			case "errors":
 				return (
 					<ErrorsRoute
@@ -73,6 +84,8 @@ export default function App() {
 				);
 			case "models":
 				return <ModelsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
+			case "providers":
+				return <ProvidersRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "tools":
 				return <ToolsRoute active={isActive} range={range} refreshTrigger={refreshTrigger} />;
 			case "costs":

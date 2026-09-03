@@ -87,6 +87,89 @@ class ControlledTitleUpdateBackend implements SessionStorageBackend {
 		this.#firstUpdate.reject(error);
 	}
 }
+describe("FileSessionStorage writer", () => {
+	let tempDir: string;
+	let storage: FileSessionStorage;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-writer-"));
+		storage = new FileSessionStorage();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("makes each append visible on disk without awaiting a microtask", () => {
+		const sessionPath = path.join(tempDir, "immediate.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		// Contract: visibility must not depend on awaiting the returned Promise
+		// (or a microtask drain). appendSync / the sync body of append writes
+		// before return; awaiting alone would pass on the old microtask writer.
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		appendSync("one\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\n");
+		appendSync("two\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+		void writer.close();
+	});
+
+	it("preserves append order through flush and close", async () => {
+		const sessionPath = path.join(tempDir, "ordered.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		await writer.append("one\n");
+		await writer.append("two\n");
+
+		await writer.flush();
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+		await writer.close();
+	});
+
+	it("flushes queued appends before closing", async () => {
+		const sessionPath = path.join(tempDir, "closed.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		await writer.append("one\n");
+		await writer.append("two\n");
+		await writer.close();
+
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+	});
+
+	it("rejects appendSync and append when the underlying write fails", async () => {
+		const sessionPath = path.join(tempDir, "append-error.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		vi.spyOn(fs, "writeSync").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("one\n")).toThrow("disk full");
+		await expect(writer.append("two\n")).rejects.toThrow("disk full");
+		await expect(writer.close()).rejects.toThrow("disk full");
+	});
+
+	it("rolls back bytes from a partial append before surfacing the error", () => {
+		const sessionPath = path.join(tempDir, "partial-append.jsonl");
+		fs.writeFileSync(sessionPath, "complete\n");
+		const writer = storage.openWriter(sessionPath);
+		vi.spyOn(fs, "writeSync")
+			.mockImplementationOnce(() => {
+				fs.appendFileSync(sessionPath, "par");
+				return 3;
+			})
+			.mockImplementation(() => {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			});
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
+	});
+});
+
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	let tempDir: string;
 	let storage: FileSessionStorage;
@@ -309,5 +392,36 @@ describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
 		await second;
 
 		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["seed"]);
+	});
+
+	it("drain waits for an in-flight atomic publish that passed its guard before the seal", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		// The guard passes at enqueue time, then the backend write parks on the
+		// wire (Redis/SQL). A terminal seal lands while it is in flight. drain()
+		// — what SessionManager.close() awaits before dispose returns — must not
+		// resolve until the publish settles, or a revival could reopen the path
+		// and be overwritten afterwards.
+		let sealed = false;
+		const write = storage.writeTextAtomic("/sessions/s.jsonl", "pre-seal body", {
+			commitGuard: () => !sealed,
+		});
+		await backend.firstWriteStarted.promise;
+		sealed = true;
+
+		let drained = false;
+		const drainP = storage.drain().then(() => {
+			drained = true;
+		});
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(drained).toBe(false);
+
+		backend.firstWriteRelease.resolve();
+		await drainP;
+		await write;
+		expect(drained).toBe(true);
+		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["pre-seal body"]);
 	});
 });

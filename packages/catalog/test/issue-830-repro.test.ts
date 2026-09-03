@@ -34,7 +34,7 @@ describe("deepseek built-in provider (issue #830)", () => {
 		}
 	});
 
-	test("models.dev mapping descriptor uses api.deepseek.com and forces reasoning_content + no tool_choice", () => {
+	test("stencil.so mapping descriptor uses api.deepseek.com and forces reasoning_content + no tool_choice", () => {
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "deepseek");
 		expect(descriptor).toBeDefined();
 		expect(descriptor?.modelsDevKey).toBe("deepseek");

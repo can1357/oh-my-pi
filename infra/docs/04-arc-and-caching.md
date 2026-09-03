@@ -5,7 +5,7 @@ RuntimeClass ([02-kata-runtime.md](02-kata-runtime.md)) and the preloaded runner
 image has been imported into the cluster containerd ([03-runner-image.md](03-runner-image.md)).
 Here we install **actions-runner-controller (ARC)**, register an ephemeral
 **scale set** whose pods each boot inside their own Kata microVM, stand up the
-in-cluster **RustFS (S3)** `sccache` backend and the runner cache PVC, and lock
+in-cluster **bazel-remote** Bazel cache and the runner cache PVC, and lock
 down runner egress with a NetworkPolicy. See [README.md](README.md) for the
 architecture overview.
 
@@ -161,64 +161,55 @@ githubConfigUrl: "https://github.com/<OWNER>/<REPO>"
 githubConfigSecret: arc-github
 runnerScaleSetName: omp-kata
 minRunners: 0
-maxRunners: 10
+maxRunners: 8
 # none: each job runs inside the runner container, which itself lives in a Kata microVM
 containerMode:
   type: ""
 template:
   spec:
-    runtimeClassName: kata-qemu      # <-- every runner pod boots its own KVM microVM
+    runtimeClassName: kata-qemu
     securityContext:
-      # ghcr.io/actions/actions-runner runs jobs as uid/gid 1001 ("runner").
-      # Let kubelet make the PVC writable by that user without changing image-owned
-      # ~/.cargo/bin or ~/.rustup.
       fsGroup: 1001
       fsGroupChangePolicy: OnRootMismatch
-    initContainers:
-      - name: prepare-runner-cache
-        image: omp-kata-runner:2026-06-15-002621
-        imagePullPolicy: IfNotPresent
-        command:
-          - bash
-          - -lc
-          - install -d -o 1001 -g 1001 -m 2775 /cache/bun-store /cache/cargo-registry
-        securityContext:
-          runAsUser: 0
-        volumeMounts:
-          - name: runner-cache
-            mountPath: /cache
     containers:
       - name: runner
-        # Preloaded image: stock ghcr.io/actions/actions-runner + CI deps baked in
-        # (apt cairo/pango/jpeg/gif/rsvg stack, fd/ripgrep/imagemagick, bun, rust
-        # nightly + clippy/rustfmt + arm64/msvc targets). Built + imported locally;
-        # see /root/omp-kata-runner-image/. IfNotPresent uses the local image.
-        image: omp-kata-runner:2026-06-15-002621
+        image: omp-kata-runner:2026-07-27-072222
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
-        # Shared sccache backend (in-cluster RustFS S3). Exposes SCCACHE_BUCKET/
-        # ENDPOINT/REGION/USE_SSL + AWS creds to every job; CI flips RUSTC_WRAPPER
-        # on for rust builds only. GitHub-hosted runners lack this env and keep the
-        # GHA cache backend. See /root/sccache-rustfs/.
         envFrom:
           - secretRef:
-              name: sccache-s3
+              name: bazel-remote-ci
+          - secretRef:
+              name: sccache-s3   # legacy - removed together with the cargo CI pipeline
         volumeMounts:
-          # Shared stores only. Keep node_modules, Cargo target/, and Cargo git
-          # checkouts per-job to avoid mutable build-output or checkout poisoning.
           - name: runner-cache
             mountPath: /home/runner/.bun/install/cache
             subPath: bun-store
           - name: runner-cache
-            mountPath: /home/runner/.cargo/registry
-            subPath: cargo-registry
+            mountPath: /home/runner/.cargo/registry/cache
+            subPath: cargo-registry/cache
+          - name: runner-cache
+            mountPath: /home/runner/.cargo/registry/index
+            subPath: cargo-registry/index
+          # Shared Bazel repository cache: pods are ephemeral, so without it
+          # every job re-downloads toolchains and crate archives. Content-
+          # addressed and written atomically, safe to share across pods.
+          # Deliberately OUTSIDE $HOME: kubelet creates missing mountpoint
+          # parents root-owned, and a root-owned ~/.cache breaks bazel's
+          # default output root and zig's wrapper cache.
+          - name: runner-cache
+            mountPath: /opt/bazel-repo-cache
+            subPath: bazel-repo-cache
         resources:
+          # Burstable on purpose: requests bin-pack 8 runners onto the
+          # 32-vCPU / 125 GiB host; limits are each Kata VM's hotplug
+          # ceiling. Keep sum(memory limits) under host RAM.
           requests:
-            cpu: "2"
-            memory: "4Gi"
+            cpu: "3"
+            memory: "10Gi"
           limits:
-            cpu: "16"
-            memory: "12Gi"
+            cpu: "8"
+            memory: "14Gi"
     volumes:
       - name: runner-cache
         persistentVolumeClaim:
@@ -232,10 +223,14 @@ Field by field:
 - **`githubConfigSecret: arc-github`** - the auth secret from [step 1](#1-github-app-and-the-arc-github-secret).
 - **`runnerScaleSetName: omp-kata`** - the runner label. This is the string that
   goes in a workflow's `runs-on:`.
-- **`minRunners: 0` / `maxRunners: 10`** - **scale-to-zero**. With no queued jobs
-  there are zero runner pods (and zero microVMs) consuming the node; the listener
-  scales up to ten concurrent runners on demand. (The older ops notes capped this
-  at 3; the live value is 10.)
+- **`minRunners: 0` / `maxRunners: 8`** - **scale-to-zero**. With no queued jobs
+  there are zero runner microVMs. Runner pods are **burstable**: a small
+  request (3 vCPU / 10 GiB) bin-packs eight runners onto the reference host,
+  while the limit (8 vCPU / 14 GiB) is each Kata VM's hotplug ceiling, so a
+  lone heavy job still gets 8 vCPUs. Keep the sum of memory *limits* under
+  host RAM — host OOM under Kata kills VMs unpredictably. (The original
+  guaranteed sizing, 4 x 8 vCPU / 24 GiB requests=limits, reserved the whole
+  host and queued every >4-job workflow fan-out for minutes.)
 - **`containerMode.type: ""`** - **none**. The default chart offers `dind`
   (Docker-in-Docker sidecar) or `kubernetes` mode for job-container isolation;
   both are unnecessary here because the *whole runner pod* is already isolated in
@@ -250,9 +245,10 @@ Field by field:
   here when you rebuild the image (see [Operate](#7-operate)).
 - **`command: ["/home/runner/run.sh"]`** - the stock actions-runner entrypoint;
   overridden explicitly because the custom image keeps the upstream layout.
-- **`envFrom.secretRef.name: sccache-s3`** - injects only the S3 configuration that
-  `sccache` needs ([step 5](#5-shared-caches-rustfs-s3--runner-pvc)). Bun and
-  Cargo no longer use RustFS.
+- **`envFrom.secretRef`** - injects the bazel-remote cache credentials
+  (`bazel-remote-ci`, [step 5](#5-shared-caches-bazel-remote--runner-pvc)) that
+  every runner needs for read-write cache access. `sccache-s3` is the legacy
+  sccache wiring and disappears with it ([5e](#5e-legacy-sccacherustfs-removed)).
 - **`securityContext.fsGroup: 1001`** - makes the mounted PVC writable by the
   image's `runner` user without replacing image-owned `~/.cargo/bin` or `~/.rustup`.
 - **`initContainers.prepare-runner-cache`** - uses the same locally imported image
@@ -266,14 +262,17 @@ Field by field:
   mounts to the `arc-runners/runner-cache` PVC. `ReadWriteOnce` is enough on this
   single-node k3s host; use a RWX-capable storage class before spreading runners
   across nodes.
-- **`resources`** - requests `2` CPU / `4Gi`, limits `16` CPU / `12Gi`. Kata reads
-  these and sizes the guest accordingly: the VM now boots at the same
-  guaranteed floor (`default_vcpus: 2`, `default_memory: 4096`) and only
-  hotplugs beyond that toward the limits, with `default_maxvcpus: 0` allowing up
-  to all host CPUs. Effectively the **requests are the boot-time VM size** and
-  the **limits are the hotplug ceiling**. See [02-kata-runtime.md](02-kata-runtime.md)
-  for the runtime knobs and [`infra/tune-kata-runtime.sh`](../tune-kata-runtime.sh)
-  for the SSH-driven patch helper.
+- **`resources`** - requests `3` CPU / `10Gi`, limits `8` CPU / `14Gi`
+  (burstable; see the `maxRunners` bullet above). Kata sizes the guest from
+  these: every VM boots at the fixed floor from the runtime config
+  (`default_vcpus: 2`, `default_memory: 4096` — deliberately at or below the
+  pod request so boot stays cheap) and hotplugs beyond it toward the pod
+  **limits**, with `default_maxvcpus: 0` allowing up to all host CPUs.
+  Effectively the **boot shape is a fixed floor**, the **requests are the
+  scheduler's bin-packing unit**, and the **limits are the hotplug ceiling**.
+  See [02-kata-runtime.md](02-kata-runtime.md) for the runtime knobs and
+  [`infra/tune-kata-runtime.sh`](../tune-kata-runtime.sh) for the SSH-driven
+  patch helper.
 
 ---
 
@@ -318,209 +317,125 @@ a compromised job is boxed into a throwaway VM with no cluster reach.
 
 ---
 
-## 5. Shared caches (RustFS S3 + runner PVC)
+## 5. Shared caches (bazel-remote + runner PVC)
 
 GitHub's hosted cache backend is only reachable over the node's NAT egress, so on
 a busy matrix (many concurrent jobs) it becomes the bottleneck. This setup keeps
 the hot paths inside the cluster:
 
-- **RustFS S3** backs `sccache` for Rust compiler outputs.
+- **bazel-remote** serves the Bazel remote cache (CAS + action cache) for the
+  native pipeline. Rust compilation, clippy, rustfmt, tests, and the final
+  `.node` addons are all Bazel actions, so this one content-addressed store
+  replaces the previous sccache/RustFS backend, the rolling Cargo `target/`
+  snapshots, and the native-artifact PVC directory ([5e](#5e-legacy-sccacherustfs-removed)).
 - **`runner-cache` PVC** is mounted into every runner for Bun's global package
   store and Cargo's crates.io registry cache.
 
-### 5a. Deploy RustFS
+### 5a. Deploy bazel-remote
 
-The store lives in its own `sccache` namespace: a `local-path` PVC for durability,
-a single-replica Deployment, and a ClusterIP Service. This is `rustfs.yaml`
-verbatim (no secrets inline - credentials come from a separate secret):
+Unlike the legacy stack, the whole deployment lives in the repo under
+[`infra/bazel-remote/`](../bazel-remote/):
 
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: sccache
-  labels:
-    kubernetes.io/metadata.name: sccache
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: rustfs-data
-  namespace: sccache
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 100Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: rustfs
-  namespace: sccache
-  labels: { app: rustfs }
-spec:
-  replicas: 1
-  strategy: { type: Recreate }
-  selector:
-    matchLabels: { app: rustfs }
-  template:
-    metadata:
-      labels: { app: rustfs }
-    spec:
-      containers:
-        - name: rustfs
-          image: rustfs/rustfs:latest
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: RUSTFS_ACCESS_KEY
-              valueFrom: { secretKeyRef: { name: rustfs-creds, key: RUSTFS_ACCESS_KEY } }
-            - name: RUSTFS_SECRET_KEY
-              valueFrom: { secretKeyRef: { name: rustfs-creds, key: RUSTFS_SECRET_KEY } }
-            - name: RUSTFS_VOLUMES
-              value: "/data"
-            - name: RUSTFS_ADDRESS
-              value: ":9000"
-            - name: RUSTFS_CONSOLE_ENABLE
-              value: "false"
-            - name: RUSTFS_OBS_LOG_DIRECTORY
-              value: "/logs"
-          ports:
-            - { name: s3, containerPort: 9000 }
-          volumeMounts:
-            - { name: data, mountPath: /data }
-            - { name: logs, mountPath: /logs }
-          readinessProbe:
-            tcpSocket: { port: 9000 }
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            tcpSocket: { port: 9000 }
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          resources:
-            requests: { cpu: "200m", memory: "256Mi" }
-            limits: { cpu: "2", memory: "2Gi" }
-      volumes:
-        - name: data
-          persistentVolumeClaim: { claimName: rustfs-data }
-        - name: logs
-          emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: rustfs
-  namespace: sccache
-spec:
-  selector: { app: rustfs }
-  ports:
-    - { name: s3, port: 9000, targetPort: 9000, protocol: TCP }
-```
+- [`bazel-remote.yaml`](../bazel-remote/bazel-remote.yaml) - namespace
+  `bazel-cache`, a 100Gi `local-path` PVC (`bazel-remote-data`), a
+  single-replica `Recreate` Deployment pinned to
+  `buchgr/bazel-remote-cache:v2.6.2` (`--max_size 90` GiB LRU, gRPC `:9092`,
+  HTTP `:8080`, TLS + htpasswd from secret mounts,
+  `--allow_unauthenticated_reads`), and the ClusterIP Service `bazel-remote`
+  (9092 grpc + 8080 http). There is deliberately **no public exposure**: the
+  cache is reachable only inside the cluster.
+- [`setup.sh`](../bazel-remote/setup.sh) - the idempotent bootstrap, run **on
+  the CI host** as root:
 
-Notes:
+  ```bash
+  ./setup.sh   # from a checkout of infra/bazel-remote/ on the host
+  ```
 
-- **`strategy: Recreate`** with a single replica and an RWO `local-path` PVC: the
-  data is node-local and only one pod ever mounts it.
-- **`RUSTFS_CONSOLE_ENABLE: "false"`** - only the S3 API on `:9000` is exposed;
-  no admin console.
-- The `kubernetes.io/metadata.name: sccache` namespace label is what the egress
-  NetworkPolicy's `namespaceSelector` matches ([step 6](#6-runner-egress-lockdown)).
+  It generates a self-signed CA + server certificate (SANs:
+  `bazel-remote.bazel-cache.svc.cluster.local`, `bazel-remote.bazel-cache.svc`,
+  plus a private admin name via `ADMIN_SAN`), creates the secrets
+  ([5b](#5b-endpoints-tls-and-auth)), applies `bazel-remote.yaml`, patches the
+  egress policy ([step 6](#6-runner-egress-lockdown)), and removes any retired
+  public exposure (NodePort service, firewalld `30992/tcp`) from earlier
+  iterations.
+  Re-running is safe: the CA, server cert, and `ci` password persist under
+  `/root/bazel-remote-cache`, and every kubectl step is `apply`-based or
+  guarded by a presence check.
 
-The RustFS pod credentials come from a two-key secret in the `sccache` namespace
-(values are the object-store root credentials - use placeholders):
+Verify:
 
 ```bash
-kubectl -n sccache create secret generic rustfs-creds \
-  --from-literal=RUSTFS_ACCESS_KEY=<S3_ACCESS_KEY> \
-  --from-literal=RUSTFS_SECRET_KEY=<S3_SECRET_KEY>
+kubectl -n bazel-cache get deploy,svc,pvc
+# deployment.apps/bazel-remote      1/1
+# service/bazel-remote              ClusterIP   10.43.x.x   9092/TCP,8080/TCP
+# (no public/NodePort service: the cache is cluster-internal only)
+# persistentvolumeclaim/bazel-remote-data   Bound   100Gi   local-path
+
+# Status endpoint (TLS is on, so use https; -k or --cacert the committed CA):
+curl -sk "https://$(kubectl -n bazel-cache get pod -l app=bazel-remote \
+  -o jsonpath='{.items[0].status.podIP}'):8080/status"
+# {"CurrSize": ..., "MaxSize": 96636764160, "NumFiles": ..., ...}
 ```
 
-Apply and verify:
+### 5b. Endpoints, TLS, and auth
 
-```bash
-kubectl apply -f rustfs.yaml
-kubectl -n sccache get deploy,svc,pvc
-# deployment.apps/rustfs   1/1
-# service/rustfs           ClusterIP   10.43.x.x   9000/TCP
-# persistentvolumeclaim/rustfs-data   Bound   100Gi   local-path
-```
+One endpoint, one auth model — **reads are unauthenticated, writes require the
+`ci` credentials**, and only in-cluster clients can reach it at all:
 
-Create the `sccache` bucket once (any S3 client - e.g. the `aws` CLI or `mc`
-pointed at the endpoint with the root creds): `mb s3://sccache`.
+| Client | Endpoint | Writes |
+| --- | --- | --- |
+| omp-kata runner pods (trusted `push`/main + release) | `grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092` | yes - `ci` credentials injected via the `bazel-remote-ci` secret |
+| GitHub-hosted runners (PRs, macOS, release) | — never touch this infrastructure; they persist a local `--disk_cache`/`--repository_cache` via `actions/cache` (`.github/actions/bazel-cache`) | n/a |
 
-### 5b. The `sccache-s3` secret (injected into every runner)
-
-Every runner pod gets the `sccache` S3 configuration via `envFrom` ([step 3](#3-scale-set-values-arc-omp-valuesyaml)).
-The secret lives in `arc-runners` (the runners' namespace) and has six keys:
-
-```bash
-kubectl -n arc-runners get secret sccache-s3 \
-  -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}'
-# AWS_ACCESS_KEY_ID
-# AWS_SECRET_ACCESS_KEY
-# SCCACHE_BUCKET
-# SCCACHE_ENDPOINT
-# SCCACHE_REGION
-# SCCACHE_S3_USE_SSL
-```
-
-Recreate it (the two credential values must equal the `rustfs-creds` above; the
-rest are non-sensitive cluster-local config):
-
-```bash
-kubectl -n arc-runners create secret generic sccache-s3 \
-  --from-literal=AWS_ACCESS_KEY_ID=<S3_ACCESS_KEY> \
-  --from-literal=AWS_SECRET_ACCESS_KEY=<S3_SECRET_KEY> \
-  --from-literal=SCCACHE_BUCKET=sccache \
-  --from-literal=SCCACHE_ENDPOINT=rustfs.sccache.svc.cluster.local:9000 \
-  --from-literal=SCCACHE_REGION=us-east-1 \
-  --from-literal=SCCACHE_S3_USE_SSL=false
-```
-
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` - the **only sensitive entries**;
-  RustFS's root credentials (S3 SigV4 auth).
-- `SCCACHE_BUCKET: sccache` - bucket name.
-- `SCCACHE_ENDPOINT` - the in-cluster Service DNS + port.
-- `SCCACHE_REGION: us-east-1` - arbitrary region label SigV4 requires.
-- `SCCACHE_S3_USE_SSL: false` - the endpoint is plain HTTP on the cluster network.
+- **TLS.** The server certificate is signed by a self-signed CA committed at
+  [`infra/bazel-remote/ca.crt`](../bazel-remote/ca.crt); every client passes
+  `--tls_certificate=infra/bazel-remote/ca.crt`. Only the CA *key* stays on the
+  host (`/root/bazel-remote-cache/ca.key`). `setup.sh` echoes the CA cert so
+  the operator can commit it (the script cannot commit).
+- **Secrets** (all maintained by `setup.sh`):
+  - `bazel-cache/bazel-remote-tls` - server cert + key, mounted at `/tls`;
+  - `bazel-cache/bazel-remote-auth` - bcrypt htpasswd with the single user
+    `ci`, mounted at `/auth` (`--allow_unauthenticated_reads` keeps reads open);
+  - `arc-runners/bazel-remote-ci` - `BAZEL_REMOTE_USER` / `BAZEL_REMOTE_PASSWORD`,
+    injected into every runner pod via `envFrom`
+    ([step 3](#3-scale-set-values-arc-omp-valuesyaml); `infra/reload-runner.sh`
+    inserts the `envFrom` entry into `arc-omp-values.yaml` idempotently on the
+    next image reload).
+- **No GitHub secrets.** Nothing outside the cluster holds cache credentials;
+  the public repo carries only the CA *certificate*.
 
 ### 5c. The cache consumers
 
-The presence of `$SCCACHE_BUCKET` in the environment is the repo's single signal
-for "am I on the self-hosted infra?". Cache behavior branches on it and falls
-back to GitHub-hosted cache backends off-infra. Off-infra covers GitHub-hosted
-macOS/arm runners (which never get the secret and cannot reach the private
-RustFS) and **every pull request**: `ci.yml` pins PR jobs to GitHub-hosted
-`ubuntu-22.04`, so omp-kata only runs trusted `push`/main + release builds (see
-[5d](#5d-poisoning-boundary-and-pressure)).
+**(a) Bazel remote cache** - `.bazelrc` carries the cache *policy* configs
+(`cache-rw` / `cache-ro`); CI composes the endpoint and credentials per
+environment:
 
-**(a) sccache for Rust compiler outputs** -
-[`.github/actions/build-native`](../../.github/actions/build-native/action.yml).
-One action serves both environments: a "Detect runner environment" step reads
-`$SCCACHE_BUCKET` and branches each toolchain/cache step on it. It sets
-`RUSTC_WRAPPER=sccache` and `CARGO_INCREMENTAL=0` (sccache silently no-ops with
-incremental enabled). The sccache backend is conditional:
+```bash
+bazel build \
+  --config=cache-rw \
+  --remote_cache=grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092 \
+  --tls_certificate=infra/bazel-remote/ca.crt \
+  --remote_header="authorization=Basic $(printf %s "$BAZEL_REMOTE_USER:$BAZEL_REMOTE_PASSWORD" | base64 -w0)" \
+  //:natives-linux-all
+```
 
-- `$SCCACHE_BUCKET` set (omp-kata) - sccache reads `SCCACHE_BUCKET/ENDPOINT/REGION`
-  and the AWS creds straight from the inherited pod env and uses the **shared S3
-  (RustFS)**; toolchains come from the baked image via the `ensure-*` actions.
-- otherwise (GitHub-hosted) - it installs the toolchains, exports
-  `SCCACHE_GHA_ENABLED=true`, and uses the **GitHub Actions cache**.
+On omp-kata the credentials come from the injected pod env
+(`bazel-remote-ci` secret) and `.github/actions/bazel-cache` composes the rc
+fragment. GitHub-hosted jobs get the disk-cache branch of the same action —
+no remote endpoint, no credentials, no infrastructure knowledge. The bridge
+between the two worlds is the **disk-cache export**: main-push rust jobs
+write a bazel disk cache alongside the remote cache and save it to the
+GitHub Actions cache (once per lockfile change, `linux` scope). GitHub only
+shares caches from the default branch across pull requests, so this export
+is what keeps PR builds warm; kata jobs otherwise skip artifact downloads
+entirely (`--remote_download_toplevel`), and the xwin MSVC splat persists on
+the runner-cache PVC (`OMP_XWIN_CACHE_DIR`).
 
-`Swatinem/rust-cache` runs only on GitHub-hosted runners (it caches Cargo
-`target/`). On omp-kata the mounted Cargo registry handles crate downloads and
-sccache fills the compile-output gap when `target/` is cold.
-
-**(b) Cargo registry cache** - the scale-set pod template mounts
-`runner-cache:/cargo-registry` at `/home/runner/.cargo/registry`. Cargo uses it
-automatically because the image keeps `CARGO_HOME=/home/runner/.cargo`.
-
-Only the registry cache is shared. Cargo `target/` stays per-job, and
-`/home/runner/.cargo/git` stays per-job too; this repo has no git dependencies,
-and git checkouts are a worse shared mutable-cache boundary than crates.io
-archives with lockfile checksums.
+**(b) Cargo registry cache** - the scale-set pod template mounts only the
+immutable download cache and sparse index at
+`/home/runner/.cargo/registry/cache` and `/home/runner/.cargo/registry/index`.
+Source extraction, lock files, Cargo git checkouts, and `target/` remain
+job-local; virtio-fs does not propagate Cargo's file locks safely across VMs.
 
 **(c) Bun package store** -
 [`.github/actions/bun-install`](../../.github/actions/bun-install/action.yml)
@@ -537,44 +452,48 @@ package tarball/extract store.
 
 ### 5d. Poisoning boundary and pressure
 
-The shared writable PVC and the sccache S3 bucket are both poisonable by any job
-that runs on `omp-kata`, and a poisoned entry could be consumed by a later
-trusted build (a supply-chain risk). The primary defense is to **keep untrusted
-code off the self-hosted runner entirely**:
+The bazel-remote store is content-addressed and **writes require the `ci`
+credentials**, so the poisoning surface is exactly the set of jobs holding those
+credentials. The primary defense is to keep untrusted code away from them:
 
-- `ci.yml` routes every pull-request job to GitHub-hosted `ubuntu-22.04`
+- `ci.yml` routes every pull-request job to GitHub-hosted runners
   (`runs-on` resolves to `omp-kata` only for `push`/main, manual dispatch, and
   release). That expression lives in the base workflow, which GitHub uses
-  verbatim for `pull_request` events, so a fork cannot override it. Fork/PR code
-  therefore never sees the PVC, the `sccache-s3` creds, or RustFS - it runs
-  sandboxed on GitHub-hosted runners with the off-infra cache backends.
+  verbatim for `pull_request` events, so a fork cannot override it. PR jobs
+  never talk to the cluster at all — they build against a local
+  `actions/cache`-backed disk cache — and fork code never sees
+  `bazel-remote-ci` (the cache has no publicly reachable endpoint to attack).
 - As defense in depth, set the repo's **Settings -> Actions -> Fork pull request
   workflows** policy to *Require approval for all outside collaborators* (or all
-  forks). GitHub's public-repo default only gates first-time contributors, which
-  would otherwise let a returning contributor's workflow start without review.
+  forks). GitHub's public-repo default only gates first-time contributors.
 
-omp-kata thus only ever serves trusted `push`/main + release builds. The
-mounted-cache design also narrows the blast radius of those trusted runs:
+The mounted-cache design still narrows the blast radius of trusted runs: no
+shared `node_modules`, no shared Cargo `target/`, Bun installs from `bun.lock`,
+and Cargo registry entries are checked against lockfile/source checksums.
 
-- no shared `node_modules`;
-- no shared Cargo `target/`;
-- no shared Cargo git checkouts;
-- Bun still installs from `bun.lock`;
-- Cargo registry entries are checked against Cargo's lockfile/source checksums;
-- Rust compiler outputs stay in sccache's content-addressed backend.
+Pressure is mostly self-managing:
 
-Pressure now has two places to watch:
+- `bazel-cache/bazel-remote-data` - bazel-remote evicts LRU at `--max_size 90`
+  GiB on its own; watch `CurrSize` on `/status` and grow the PVC/flag together
+  if hit rates drop.
+- `arc-runners/runner-cache` - coarse manual cleanup: scale `omp-kata` to zero,
+  delete `bun-store/` or `cargo-registry/` from the bound local-path volume,
+  let the next jobs repopulate it.
 
-- `sccache/rustfs-data` for Rust compiler objects;
-- `arc-runners/runner-cache` for Bun store + Cargo registry files.
+### 5e. Legacy: sccache/RustFS (removed)
 
-For the runner PVC, the safe cleanup is simple and coarse: scale `omp-kata` to
-zero, delete either `bun-store/` or `cargo-registry/` from the bound local-path
-volume, then let the next jobs repopulate it. There are no RustFS Bun objects and
-no `node_modules` archives to prune anymore.
+The previous cache stack - RustFS (S3) in the `sccache` namespace backing
+sccache, rolling Cargo `target/` snapshots via `scripts/ci-target-cache.ts`,
+and source-hash-addressed `.node` artifacts on the runner PVC - is superseded
+by the Bazel pipeline above. Once no workflow references remain, tear it down:
 
-RustFS remains inside the egress allow-list on `tcp/9000` because sccache still
-uses it ([step 6](#6-runner-egress-lockdown)).
+```bash
+kubectl -n arc-runners delete secret sccache-s3
+kubectl delete namespace sccache        # removes RustFS and the rustfs-data PVC
+# then: drop the sccache tcp/9000 rule from runner-egress-lockdown, and remove
+# the sccache-s3 envFrom entry, the native-artifacts subPath mount, and
+# OMP_NATIVE_CACHE_DIR from arc-omp-values.yaml (+ helm upgrade).
+```
 
 ---
 
@@ -629,7 +548,7 @@ spec:
               - 169.254.0.0/16
               - 100.64.0.0/10
               - <PUBLIC_IP>/32
-    # 3. RustFS shared cache (S3) over the cluster network.
+    # 3. RustFS shared cache (S3) - legacy, removed together with sccache.
     - to:
         - ipBlock:
             cidr: 10.43.0.0/16
@@ -638,6 +557,16 @@ spec:
               kubernetes.io/metadata.name: sccache
       ports:
         - port: 9000
+          protocol: TCP
+    # 4. bazel-remote shared cache (gRPC) over the cluster network.
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.0/16
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bazel-cache
+      ports:
+        - port: 9092
           protocol: TCP
 ```
 
@@ -651,9 +580,22 @@ The allow-list, rule by rule:
   used by the **tailnet** (`100.64.0.0/10`), and the **host's own public IP**
   (`<PUBLIC_IP>/32`). Note `10.0.0.0/8` covers the pod CIDR (`10.42.0.0/16`) and
   service CIDR (`10.43.0.0/16`), so this rule alone gives a job **zero** in-cluster
-  reach - rules 1 and 3 punch the only two holes the job legitimately needs.
-- **Rule 3 - RustFS cache.** TCP 9000 to the service CIDR (`10.43.0.0/16`) and the
-  `sccache` namespace - the sccache backend from [step 5](#5-shared-caches-rustfs-s3--runner-pvc).
+  reach - the remaining rules punch the only holes the job legitimately needs.
+- **Rule 3 - RustFS cache (legacy).** TCP 9000 to the service CIDR
+  (`10.43.0.0/16`) and the `sccache` namespace - drop this rule when the legacy
+  stack is torn down ([5e](#5e-legacy-sccacherustfs-removed)).
+- **Rule 4 - bazel-remote cache.** TCP 9092 to the service CIDR
+  (`10.43.0.0/16`) and the `bazel-cache` namespace - the Bazel remote cache
+  from [step 5](#5-shared-caches-bazel-remote--runner-pvc). `setup.sh` appends
+  this rule idempotently via
+  [`runner-egress-patch.yaml`](../bazel-remote/runner-egress-patch.yaml):
+
+  ```bash
+  kubectl -n arc-runners get networkpolicy runner-egress-lockdown -o json \
+    | jq -e '.spec.egress[].to[]? | select(.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "bazel-cache")' >/dev/null \
+    || kubectl -n arc-runners patch networkpolicy runner-egress-lockdown \
+         --type=json --patch-file=infra/bazel-remote/runner-egress-patch.yaml
+  ```
 - **Ingress.** `policyTypes` lists `Ingress` but no ingress rule is defined, which
   is a **default-deny**: nothing can open a connection *into* a runner pod.
 
@@ -669,7 +611,8 @@ Egress that survives rule 2 leaves the node via the host's firewalld masquerade
 - **No cluster rights.** Jobs run under `omp-kata-gha-rs-no-permission` with no
   RBAC ([step 4](#4-job-lifecycle-and-the-no-permission-serviceaccount)).
 - **Constrained network.** The policy above blocks the host, LAN, tailnet, and
-  arbitrary cluster pods; only DNS, the public internet, and RustFS are reachable.
+  arbitrary cluster pods; only DNS, the public internet, and the shared caches
+  (bazel-remote, plus legacy RustFS until torn down) are reachable.
 - **Ephemeral.** One job per VM, destroyed afterward - no state, secret, or
   artifact survives into the next job.
 - **Public-repo recommendation.** For a public repo, require approval for fork
@@ -704,12 +647,12 @@ kubectl -n arc-systems logs deploy/arc-gha-rs-controller -f
 kubectl -n arc-runners logs <runner-pod>
 ```
 
-**Verify the caches are being used.** A warm job logs
-`bun cache backend: mounted PVC (...)` and
-`sccache backend: shared S3 (sccache @ rustfs.sccache.svc.cluster.local:9000)` in
-its step output. To inspect the mounted cache, scale to zero and check the
-`runner-cache` local-path volume on the host; to inspect sccache objects, point
-an S3 client at RustFS and list `s3://sccache/`.
+**Verify the caches are being used.** A warm Bazel build on omp-kata logs
+`remote cache hit` counts in its build summary; `curl -sk https://<pod-ip>:8080/status`
+shows `CurrSize`/`NumFiles` growing ([5a](#5a-deploy-bazel-remote)). A warm job
+also logs `bun cache backend: mounted PVC (...)`. To inspect the mounted
+runner cache, scale to zero and check the `runner-cache` local-path volume on
+the host.
 
 **Resize a job's VM** - edit the `resources` block in `arc-omp-values.yaml`
 ([step 3](#3-scale-set-values-arc-omp-valuesyaml); requests = guaranteed VM size,

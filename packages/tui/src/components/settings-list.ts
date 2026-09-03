@@ -20,6 +20,8 @@ export interface SettingItem {
 	label: string;
 	/** Optional description shown when selected */
 	description?: string;
+	/** Optional risk note shown in warning styling above the description, with a glyph on the row. */
+	warning?: string;
 	/** Current value to display (right side) */
 	currentValue: string;
 	/** If provided, Enter/Space cycles through these values */
@@ -36,6 +38,10 @@ export interface SettingsListTheme {
 	label: (text: string, selected: boolean, changed: boolean) => string;
 	value: (text: string, selected: boolean, changed: boolean) => string;
 	description: (text: string) => string;
+	/** Style for risk notes and the row warning glyph. Falls back to `description` when omitted. */
+	warning?: (text: string) => string;
+	/** Glyph marking rows that carry a `warning`. Omitted hides the row marker. */
+	warningMark?: string;
 	cursor: string;
 	hint: (text: string) => string;
 	/** Style for section heading rows (dimmed when outside the active section). Falls back to `hint` when omitted. */
@@ -78,11 +84,14 @@ export interface SettingsListOptions {
 	sidebarWidth?: number;
 }
 
-/** Searchable text for a setting item: label, id, value, description, and cycle values. */
+/** Searchable text for a setting item: label, id, value, description, warning, and cycle values. */
 export function getSettingItemFilterText(item: SettingItem): string {
 	let text = `${item.label} ${item.id} ${item.currentValue}`;
 	if (item.description) {
 		text += ` ${item.description}`;
+	}
+	if (item.warning) {
+		text += ` ${item.warning}`;
 	}
 	if (item.values) {
 		text += ` ${item.values.join(" ")}`;
@@ -132,6 +141,25 @@ export class SettingsList implements Component {
 		this.#options = options;
 		this.#selectedIndex = this.#firstSelectableIndex();
 		this.#lastNotifiedSelectionId = this.getSelectedItem()?.id;
+	}
+	/** Return item, selection, filter, and submenu state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const selected = this.getSelectedItem();
+		return {
+			itemCount: this.#items.length,
+			filteredItemCount: this.#filteredItems.length,
+			selectedIndex: this.#filteredItems.length > 0 ? this.#selectedIndex : -1,
+			selectedItemId: selected?.id ?? null,
+			selectedItemLabel: selected?.label ?? null,
+			filterText: this.#filterQuery,
+			sectionFocused: this.#sectionFocus,
+			submenuOpen: this.#submenuComponent !== null,
+		};
+	}
+
+	/** Expose the active submenu to the debug tree walker. */
+	get debugChildren(): readonly Component[] {
+		return this.#submenuComponent ? [this.#submenuComponent] : [];
 	}
 
 	/** The currently selected item, or undefined when empty or on a heading. */
@@ -477,6 +505,11 @@ export class SettingsList implements Component {
 		return this.#padLines(this.#renderMainList(width));
 	}
 
+	/** Warning glyph suffix for a row that carries a risk note, or "" when none applies. */
+	#warningMark(item: SettingItem): string {
+		return item.warning && this.#theme.warningMark ? ` ${this.#theme.warningMark}` : "";
+	}
+
 	#renderItemRow(
 		item: SettingItem,
 		index: number,
@@ -495,7 +528,9 @@ export class SettingsList implements Component {
 		const isSelected = index === this.#selectedIndex && !this.#sectionFocus;
 		const prefix = isSelected ? this.#theme.cursor : "  ";
 		const prefixWidth = visibleWidth(prefix);
-		const labelPadded = item.label + padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
+		const mark = this.#warningMark(item);
+		const labelPlain = item.label + mark;
+		const labelPad = padding(Math.max(0, maxLabelWidth - visibleWidth(labelPlain)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
 		const valuePlain = truncateToWidth(String(item.currentValue ?? ""), valueMaxWidth, Ellipsis.Omit);
@@ -504,11 +539,13 @@ export class SettingsList implements Component {
 		// under one dim wash so inner label/value colors don't fight it.
 		if (dimmed && !isSelected) {
 			const text = this.#theme.hint(
-				truncateToWidth(`  ${labelPadded}${separator}${valuePlain}`, Math.max(0, rowWidth)),
+				truncateToWidth(`  ${labelPlain}${labelPad}${separator}${valuePlain}`, Math.max(0, rowWidth)),
 			);
 			return hovered && this.#theme.hovered ? this.#theme.hovered(text) : text;
 		}
-		const labelText = this.#theme.label(labelPadded, isSelected, item.changed === true);
+		const warningStyle = this.#theme.warning ?? this.#theme.description;
+		const labelText =
+			this.#theme.label(item.label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
 		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true);
 		const text = truncateToWidth(prefix + labelText + separator + valueText, Math.max(0, rowWidth));
 		// Pointer hover paints a band behind the whole row, distinct from the
@@ -550,7 +587,9 @@ export class SettingsList implements Component {
 				0,
 				Math.min(this.#selectedIndex - Math.floor(viewportHeight / 2), this.#filteredItems.length - viewportHeight),
 			);
-			const labelWidths = this.#filteredItems.filter(item => !item.heading).map(item => visibleWidth(item.label));
+			const labelWidths = this.#filteredItems
+				.filter(item => !item.heading)
+				.map(item => visibleWidth(item.label + this.#warningMark(item)));
 			const maxLabelWidth = Math.min(30, labelWidths.length > 0 ? Math.max(...labelWidths) : 0);
 			const itemRowsOverflow = this.#filteredItems.length > viewportHeight;
 			const itemRowWidth = Math.max(0, width - (itemRowsOverflow ? 1 : 0));
@@ -589,15 +628,25 @@ export class SettingsList implements Component {
 
 		// Description area: 1 blank + exactly 3 rows, clamped with an ellipsis,
 		// so moving between items with/without descriptions never shifts rows.
+		// The risk note leads so it survives the clamp when both are present.
 		lines.push("");
 		const selectedItem = this.#filteredItems[this.#selectedIndex];
 		const descLines: string[] = [];
-		if (selectedItem?.description && !selectedItem.heading) {
-			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
-			for (const line of wrappedDesc.slice(0, 3)) {
-				descLines.push(this.#theme.description(`  ${line}`));
+		if (selectedItem && !selectedItem.heading) {
+			if (selectedItem.warning) {
+				const warningStyle = this.#theme.warning ?? this.#theme.description;
+				const mark = this.#theme.warningMark ? `${this.#theme.warningMark} ` : "";
+				for (const line of wrapTextWithAnsi(`${mark}${selectedItem.warning}`, width - 4)) {
+					descLines.push(warningStyle(`  ${line}`));
+				}
 			}
-			if (wrappedDesc.length > 3) {
+			if (selectedItem.description) {
+				for (const line of wrapTextWithAnsi(selectedItem.description, width - 4)) {
+					descLines.push(this.#theme.description(`  ${line}`));
+				}
+			}
+			if (descLines.length > 3) {
+				descLines.splice(3);
 				descLines[2] = truncateToWidth(`${descLines[2]}…`, width);
 			}
 		}
@@ -659,7 +708,9 @@ export class SettingsList implements Component {
 			Math.min(this.#selectedIndex - Math.floor(viewportHeight / 2), this.#filteredItems.length - viewportHeight),
 		);
 		// Label column width spans all items so the layout stays stable across sections.
-		const labelWidths = this.#filteredItems.filter(item => !item.heading).map(item => visibleWidth(item.label));
+		const labelWidths = this.#filteredItems
+			.filter(item => !item.heading)
+			.map(item => visibleWidth(item.label + this.#warningMark(item)));
 		const maxLabelWidth = Math.min(30, labelWidths.length > 0 ? Math.max(...labelWidths) : 0);
 		const overflow = this.#filteredItems.length > viewportHeight;
 		const rowWidth = Math.max(0, paneWidth - (overflow ? 1 : 0));

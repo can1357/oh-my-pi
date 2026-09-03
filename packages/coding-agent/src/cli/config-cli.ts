@@ -6,12 +6,13 @@
  */
 
 import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	getDefault,
 	getEnumValues,
 	getType,
 	getUi,
+	isCredential,
 	type SettingPath,
 	Settings,
 	type SettingValue,
@@ -48,6 +49,9 @@ type CliSettingDef = {
 };
 
 const ALL_SETTING_PATHS = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
+
+/** Printed instead of a credential value in human output only. */
+const REDACTED = "********";
 
 /** Find setting definition by path */
 function findSettingDef(path: string): CliSettingDef | undefined {
@@ -277,13 +281,22 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 	const defs = ALL_SETTING_PATHS.map(path => findSettingDef(path)).filter((def): def is CliSettingDef => !!def);
 
 	if (flags.json) {
-		const result: Record<string, { value: unknown; type: string; description: string }> = {};
+		// A redacted entry omits `value` and says so, rather than substituting a
+		// placeholder string: a consumer cannot tell a stand-in from a real value
+		// and could write it back as the credential.
+		//
+		// Redaction is driven by the value, not by classification alone. Marking an
+		// unset credential as redacted would report every fresh install as having
+		// one configured, which leaks the opposite of what redaction is for. The
+		// settings panel persists "" when a credential is cleared and renders that
+		// as unset; the same semantics apply here (credentials are all strings).
+		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
 		for (const def of defs) {
-			result[def.path] = {
-				value: settings.get(def.path),
-				type: def.type,
-				description: def.description,
-			};
+			const value = settings.get(def.path);
+			result[def.path] =
+				isCredential(def.path) && value
+					? { redacted: true, type: def.type, description: def.description }
+					: { value, type: def.type, description: def.description };
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
 		return;
@@ -308,8 +321,13 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 	for (const group of sortedGroups) {
 		console.log(chalk.bold.blue(`[${group}]`));
 		for (const def of groups[group]) {
+			// `list` dumps every value without anyone asking for a specific
+			// credential, so redact here. `get <path>` stays an explicit
+			// single-value request and is left alone. An unset or cleared ("")
+			// credential keeps its ordinary rendering: masking it would imply one
+			// is configured.
 			const value = settings.get(def.path);
-			const valueStr = formatValue(value);
+			const valueStr = isCredential(def.path) && value ? REDACTED : formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
 		}
@@ -357,6 +375,7 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 
 	try {
 		parseAndSetValue(def.path, value);
+		await settings.flush();
 	} catch (err) {
 		console.error(chalk.red(String(err)));
 		process.exit(1);
@@ -387,7 +406,13 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 
 	const path = def.path as SettingPath;
 	const defaultValue = getDefault(path);
-	settings.set(path, defaultValue as SettingValue<typeof path>);
+	try {
+		settings.set(path, defaultValue as SettingValue<typeof path>);
+		await settings.flush();
+	} catch (err) {
+		console.error(chalk.red(String(err)));
+		process.exit(1);
+	}
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: defaultValue }));

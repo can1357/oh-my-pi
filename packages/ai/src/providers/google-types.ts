@@ -65,8 +65,15 @@ export interface Part {
 	thought?: boolean;
 	thoughtSignature?: string;
 	inlineData?: InlineDataPart;
+	fileData?: FileDataPart;
 	functionCall?: FunctionCallPart;
 	functionResponse?: FunctionResponsePart;
+}
+
+/** Remote media reference; the backend fetches `fileUri` server-side. */
+export interface FileDataPart {
+	fileUri: string;
+	mimeType?: string;
 }
 
 /** Conversation turn. Roles: `"user"`, `"model"`, optionally absent for system instructions. */

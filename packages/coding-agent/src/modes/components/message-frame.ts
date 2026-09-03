@@ -11,7 +11,7 @@
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import type { Box, Component } from "@oh-my-pi/pi-tui";
 import { Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMarkdownTheme, type Theme, theme } from "../../modes/theme/theme";
+import { getMarkdownTheme, type Theme, type ThemeColor, theme } from "../../modes/theme/theme";
 
 /** Message shape consumed by the shared frame. */
 export interface FramedMessage {
@@ -36,6 +36,10 @@ export interface RebuildFrameOptions<M extends FramedMessage> {
 	expanded: boolean;
 	/** Icon glyph shown before the customType in the default header (e.g. a hook/extension icon). */
 	icon?: string;
+	/** Hide the default type header while retaining the message body. */
+	hideHeader?: boolean;
+	/** Semantic color for the outline, defaulting to the muted border. */
+	borderColor?: ThemeColor;
 	/** Collapse the markdown body to this many lines when `expanded` is false. Omit to never collapse. */
 	collapseAfterLines?: number;
 	customRenderer?: FramedRenderer<M>;
@@ -43,9 +47,9 @@ export interface RebuildFrameOptions<M extends FramedMessage> {
 
 /**
  * Attempt the custom renderer; on failure or undefined return, populate `box`
- * with the default outlined card — an `icon customType` header + markdown body —
- * and return undefined. When the custom renderer succeeds, return its Component
- * so the caller can mount it and skip the default box.
+ * with the configured outline, optional type header, and markdown body. When
+ * the custom renderer succeeds, return its Component so the caller can mount
+ * it and skip the default box.
  */
 export function renderFramedMessage<M extends FramedMessage>(opts: RebuildFrameOptions<M>): Component | undefined {
 	if (opts.customRenderer) {
@@ -59,11 +63,13 @@ export function renderFramedMessage<M extends FramedMessage>(opts: RebuildFrameO
 
 	opts.box.clear();
 	// Match the skill card: a subtle rounded outline so injected messages read as cards.
-	opts.box.setBorder({ chars: theme.boxRound, color: t => theme.fg("borderMuted", t) });
+	opts.box.setBorder({ chars: theme.boxRound, color: t => theme.fg(opts.borderColor ?? "borderMuted", t) });
 
-	const tag = opts.icon ? `${opts.icon} ${opts.message.customType}` : opts.message.customType;
-	opts.box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(tag)), 0, 0));
-	opts.box.addChild(new Spacer(1));
+	if (!opts.hideHeader) {
+		const tag = opts.icon ? `${opts.icon} ${opts.message.customType}` : opts.message.customType;
+		opts.box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(tag)), 0, 0));
+		opts.box.addChild(new Spacer(1));
+	}
 
 	let text: string;
 	if (typeof opts.message.content === "string") {

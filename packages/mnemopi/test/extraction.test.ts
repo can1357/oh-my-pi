@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import {
 	buildExtractionPrompt,
 	extractFacts,
@@ -13,6 +14,7 @@ import {
 	setHostLlmBackend,
 } from "@oh-my-pi/pi-mnemopi/core/llm-backends";
 import {
+	type MnemopiLlmCompletionTask,
 	type ResolvedMnemopiRuntimeOptions,
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
@@ -114,10 +116,28 @@ describe("structured extraction", () => {
 		expect(getExtractionStats().by_tier.host.successes).toBe(1);
 	});
 
+	it("strips reasoning wrappers from remote extraction so facts are not reasoning prose", async () => {
+		process.env.MNEMOPI_LLM_ENABLED = "true";
+		process.env.MNEMOPI_HOST_LLM_ENABLED = "false";
+		process.env.MNEMOPI_LLM_BASE_URL = "http://reasoning.invalid/v1";
+		const content =
+			'<think>\nThe user is providing information in English. Let me analyze what qualifies:\n- candidate fact\n</think>\n{"facts":["My preferred shell is zsh"],"instructions":[],"preferences":[],"timelines":[],"kg":[]}';
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		const facts = await extractFacts("I use zsh.", { fetch: fetchMock });
+		expect(facts).toEqual(["My preferred shell is zsh"]);
+		expect(getExtractionStats().by_tier.remote.successes).toBe(1);
+	});
+
 	it("prefers a configured completion with the extraction-prompt override at temperature zero", async () => {
 		process.env.MNEMOPI_LLM_ENABLED = "true";
 		let capturedPrompt = "";
 		let capturedTemperature = -1;
+		let capturedTask: MnemopiLlmCompletionTask | undefined;
 		const resolved: ResolvedMnemopiRuntimeOptions = {
 			llm: {
 				enabled: true,
@@ -125,6 +145,7 @@ describe("structured extraction", () => {
 				complete: (prompt, opts) => {
 					capturedPrompt = prompt;
 					capturedTemperature = opts?.temperature ?? -1;
+					capturedTask = opts?.task;
 					return "Sam works at Globex\nSam prefers dark mode";
 				},
 			},
@@ -137,6 +158,10 @@ describe("structured extraction", () => {
 		expect(facts).toEqual(["Sam works at Globex", "Sam prefers dark mode"]);
 		expect(capturedPrompt).toContain("ONLY-LINES for: Sam works at Globex and prefers dark mode.");
 		expect(capturedTemperature).toBe(0);
+		expect(capturedTask).toEqual({
+			kind: "memory-extraction",
+			input: "Sam works at Globex and prefers dark mode.",
+		});
 		expect(getExtractionStats().by_tier.host.successes).toBe(1);
 	});
 

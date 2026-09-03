@@ -45,6 +45,20 @@ describe("repairOrphanResponsesToolCalls", () => {
 		expect(repaired).toBe(input);
 	});
 
+	it("does not pair a call with an output that appears earlier in replay order", () => {
+		const input: ResponseInput = [
+			{ type: "function_call_output", call_id: "call_a", output: "stale" } as ResponseInput[number],
+			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+		];
+
+		const repaired = repairOrphanResponsesToolCalls(input);
+		expect(repaired.at(-1)).toMatchObject({
+			type: "function_call_output",
+			call_id: "call_a",
+			output: expect.stringMatching(/interrupted/i),
+		});
+	});
+
 	it("composes with output repair so a tree-branch snapshot stays API-valid", () => {
 		// Branching to a node that ends on a tool call drops the result child:
 		// the assistant turn keeps the call, but no matching output remains.
@@ -65,5 +79,31 @@ describe("repairOrphanResponsesToolCalls", () => {
 				.map(i => (i as { call_id: string }).call_id),
 		);
 		for (const id of callIds) expect(outputIds.has(id)).toBe(true);
+	});
+});
+
+describe("repairOrphanResponsesToolOutputs", () => {
+	it("does not pair an output with a call that appears later in replay order", () => {
+		const input: ResponseInput = [
+			{ type: "function_call_output", call_id: "call_a", output: "stale" } as ResponseInput[number],
+			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+		];
+
+		const repaired = repairOrphanResponsesToolOutputs(input);
+		expect(repaired[0]).toMatchObject({
+			type: "message",
+			role: "assistant",
+			content: expect.stringContaining("stale"),
+		});
+		expect(repaired[1]).toBe(input[1]);
+	});
+
+	it("returns the input unchanged when every output follows its matching call", () => {
+		const input: ResponseInput = [
+			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_a", output: "ok" } as ResponseInput[number],
+		];
+
+		expect(repairOrphanResponsesToolOutputs(input)).toBe(input);
 	});
 });

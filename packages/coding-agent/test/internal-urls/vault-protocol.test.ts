@@ -10,7 +10,7 @@ import {
 	VaultProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as vaultProtocol from "@oh-my-pi/pi-coding-agent/internal-urls/vault-protocol";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-protocol-"));
@@ -183,6 +183,26 @@ describe("VaultProtocolHandler", () => {
 			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault", "info", "path"]);
 		});
 	});
+
+	it("targets a named vault by prepending vault= before the vault info subcommand", async () => {
+		await withTempDir(async tempDir => {
+			const root = path.join(tempDir, "work-vault");
+			await fs.mkdir(root, { recursive: true });
+			await Bun.write(path.join(root, "note.md"), "note");
+			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
+			const spawnSpy = vi.spyOn(vaultProtocol, "spawnObsidian").mockResolvedValue({
+				stdout: `name\tWork\npath\t${root}\n`,
+				stderr: "",
+				exitCode: 0,
+			});
+			const handler = testHandler(vaultProtocol.spawnObsidian);
+
+			await handler.resolve(resourceUrl("vault://Work"));
+
+			expect(spawnSpy).toHaveBeenCalledTimes(1);
+			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault=Work", "vault", "info"]);
+		});
+	});
 	it("writes files through the protocol hook and resolves cached vault paths for edit plumbing", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
@@ -290,31 +310,31 @@ describe("VaultProtocolHandler", () => {
 		}
 
 		expect(calls).toEqual({
-			outline: ["outline", "path=Note.md", "format=md", "vault=Work"],
-			backlinks: ["backlinks", "path=Note.md", "counts", "format=tsv", "vault=Work"],
-			links: ["links", "path=Note.md", "vault=Work"],
-			fileTags: ["tags", "path=Note.md", "counts", "format=json", "vault=Work"],
-			fileProperties: ["properties", "path=Note.md", "format=yaml", "vault=Work"],
-			fileTasks: ["tasks", "path=Note.md", "verbose", "format=json", "vault=Work"],
-			wordcount: ["wordcount", "path=Note.md", "vault=Work"],
-			history: ["history", "path=Note.md", "vault=Work"],
-			base: ["base:query", "path=Note.md", "view=Main", "format=md", "vault=Work"],
-			search: ["search:context", "query=plan", "path=Folder", "limit=5", "case", "format=json", "vault=Work"],
-			daily: ["daily:read", "vault=Work"],
-			dailyPath: ["daily:path", "vault=Work"],
-			vaultTags: ["tags", "counts", "format=json", "vault=Work"],
-			tag: ["tag", "name=#todo", "verbose", "vault=Work"],
-			vaultTasks: ["tasks", "todo", "verbose", "format=json", "vault=Work"],
-			orphans: ["orphans", "vault=Work"],
-			unresolved: ["unresolved", "counts", "verbose", "format=json", "vault=Work"],
-			deadends: ["deadends", "vault=Work"],
-			bases: ["bases", "vault=Work"],
-			bookmarks: ["bookmarks", "verbose", "format=json", "vault=Work"],
-			recents: ["recents", "vault=Work"],
-			templates: ["templates", "vault=Work"],
-			aliases: ["aliases", "verbose", "format=json", "vault=Work"],
-			vaultProperties: ["properties", "counts", "format=yaml", "vault=Work"],
-			property: ["property:read", "name=status", "path=Note.md", "vault=Work"],
+			outline: ["vault=Work", "outline", "path=Note.md", "format=md"],
+			backlinks: ["vault=Work", "backlinks", "path=Note.md", "counts", "format=tsv"],
+			links: ["vault=Work", "links", "path=Note.md"],
+			fileTags: ["vault=Work", "tags", "path=Note.md", "counts", "format=json"],
+			fileProperties: ["vault=Work", "properties", "path=Note.md", "format=yaml"],
+			fileTasks: ["vault=Work", "tasks", "path=Note.md", "verbose", "format=json"],
+			wordcount: ["vault=Work", "wordcount", "path=Note.md"],
+			history: ["vault=Work", "history", "path=Note.md"],
+			base: ["vault=Work", "base:query", "path=Note.md", "view=Main", "format=md"],
+			search: ["vault=Work", "search:context", "query=plan", "path=Folder", "limit=5", "case", "format=json"],
+			daily: ["vault=Work", "daily:read"],
+			dailyPath: ["vault=Work", "daily:path"],
+			vaultTags: ["vault=Work", "tags", "counts", "format=json"],
+			tag: ["vault=Work", "tag", "name=#todo", "verbose"],
+			vaultTasks: ["vault=Work", "tasks", "todo", "verbose", "format=json"],
+			orphans: ["vault=Work", "orphans"],
+			unresolved: ["vault=Work", "unresolved", "counts", "verbose", "format=json"],
+			deadends: ["vault=Work", "deadends"],
+			bases: ["vault=Work", "bases"],
+			bookmarks: ["vault=Work", "bookmarks", "verbose", "format=json"],
+			recents: ["vault=Work", "recents"],
+			templates: ["vault=Work", "templates"],
+			aliases: ["vault=Work", "aliases", "verbose", "format=json"],
+			vaultProperties: ["vault=Work", "properties", "counts", "format=yaml"],
+			property: ["vault=Work", "property:read", "name=status", "path=Note.md"],
 		});
 	});
 
@@ -347,9 +367,10 @@ describe("VaultProtocolHandler", () => {
 	});
 
 	it("aborts an in-flight spawn when the AbortSignal is cancelled", async () => {
-		if (!(await Bun.file("/bin/sleep").exists())) return;
+		const sleep = $which("sleep");
+		if (!sleep) return;
 		const controller = new AbortController();
-		const promise = vaultProtocol.spawnObsidian("/bin/sleep", ["10"], controller.signal, 30_000);
+		const promise = vaultProtocol.spawnObsidian(sleep, ["10"], controller.signal, 30_000);
 
 		await Bun.sleep(20);
 		controller.abort();

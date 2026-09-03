@@ -20,6 +20,9 @@ export interface ResolvedApproval {
 	tier: ToolTier;
 	reason?: string;
 	override: boolean;
+	source?: "tool" | "user" | "mode";
+	/** User-policy key that produced `source: "user"` (defaults to the tool name). */
+	policyKey?: string;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
@@ -50,7 +53,7 @@ function isToolTier(value: unknown): value is ToolTier {
 	return typeof value === "string" && TIER_VALUES.has(value as ToolTier);
 }
 
-function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> {
+function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	if (isToolTier(value)) {
 		return { tier: value, override: false };
 	}
@@ -59,17 +62,25 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> {
 		const record = value as Record<string, unknown>;
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
+		const policy = normalizePolicy(record.policy);
+		const policyKey =
+			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
 			tier,
 			override: record.override === true,
+			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
+			...(policyKey ? { policyKey } : {}),
 		};
 	}
 
 	return { tier: "exec", override: false };
 }
 
-function getToolDecision(tool: ApprovalSubject, args: unknown): Omit<ResolvedApproval, "policy"> {
+function getToolDecision(
+	tool: ApprovalSubject,
+	args: unknown,
+): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	const approval = tool.approval;
 	const decision: ToolApprovalDecision | undefined = typeof approval === "function" ? approval(args) : approval;
 	return normalizeDecision(decision);
@@ -95,6 +106,11 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  *
  * Resolution order:
  *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
+ *     A decision may carry a `policyKey` — `tools.approval.<policyKey>` is then
+ *     the user override consulted instead of `tools.approval.<tool.name>`, with
+ *     the invoking tool's own policy as the fallback when the user set none for
+ *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
+ *     policy still honors `tools.approval.write`).
  *  2. User per-tool override, if set and valid.
  *  3. Active mode tier comparison.
  *
@@ -108,38 +124,112 @@ export function resolveApproval(
 	userConfig: Record<string, unknown> = {},
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
-	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
+	const policyKey = decision.policyKey ?? tool.name;
+	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
+	const fallbackPolicy =
+		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
+			? normalizePolicy(userConfig[tool.name])
+			: undefined;
+	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
+	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
+
+	if (decision.policy === "deny") {
+		return {
+			policy: "deny",
+			tier: decision.tier,
+			override: decision.override,
+			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
+			...(decision.reason ? { reason: decision.reason } : {}),
+		};
+	}
+	if (effectiveUserPolicy === "deny") {
+		return {
+			policy: "deny",
+			tier: decision.tier,
+			override: decision.override,
+			source: "user",
+			policyKey: userPolicyKey,
+		};
+	}
 
 	if (mode === "yolo") {
-		return { policy: userPolicy ?? "allow", tier: decision.tier, override: false };
+		if (decision.policy) {
+			return {
+				policy: decision.policy,
+				tier: decision.tier,
+				override: false,
+				source: "tool",
+				...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
+				...(decision.reason ? { reason: decision.reason } : {}),
+			};
+		}
+		return {
+			policy: effectiveUserPolicy ?? "allow",
+			tier: decision.tier,
+			override: false,
+			source: effectiveUserPolicy ? "user" : "mode",
+			...(effectiveUserPolicy ? { policyKey: userPolicyKey } : {}),
+		};
 	}
 
 	if (decision.override) {
-		if (userPolicy === "deny") {
-			return { policy: "deny", tier: decision.tier, override: true };
-		}
 		return {
-			policy: "prompt",
+			policy: decision.policy === "allow" ? "allow" : "prompt",
 			tier: decision.tier,
 			override: true,
+			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
 
-	if (userPolicy) {
-		return { policy: userPolicy, tier: decision.tier, override: false };
+	if (decision.policy === "allow" || decision.policy === "prompt") {
+		return {
+			policy: decision.policy,
+			tier: decision.tier,
+			override: false,
+			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
+			...(decision.reason ? { reason: decision.reason } : {}),
+		};
+	}
+
+	if (effectiveUserPolicy) {
+		return {
+			policy: effectiveUserPolicy,
+			tier: decision.tier,
+			override: false,
+			source: "user",
+			policyKey: userPolicyKey,
+		};
 	}
 
 	if (modeApprovesTier(mode, decision.tier)) {
-		return { policy: "allow", tier: decision.tier, override: false };
+		return { policy: "allow", tier: decision.tier, override: false, source: "mode" };
 	}
 
 	return {
 		policy: "prompt",
 		tier: decision.tier,
 		override: false,
+		source: "mode",
 		...(decision.reason ? { reason: decision.reason } : {}),
 	};
+}
+
+/**
+ * Error for a resolved deny. Distinguishes tool-owned policy from user config.
+ */
+export function denyError(resolved: ResolvedApproval, toolName: string): Error {
+	const { source, reason, policyKey } = resolved;
+	if (source === "tool") {
+		return new Error(`Tool "${toolName}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
+	}
+	return new Error(
+		`Tool "${policyKey ?? toolName}" is blocked by user policy.\n` +
+			`To allow: remove "tools.approval.${policyKey ?? toolName}: deny" from config.`,
+	);
 }
 
 /**
@@ -154,13 +244,11 @@ export function requiresApproval(
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
 ): { required: boolean; reason?: string } {
-	const { policy, reason } = resolveApproval(tool, args, mode, userConfig);
+	const resolved = resolveApproval(tool, args, mode, userConfig);
+	const { policy, reason } = resolved;
 
 	if (policy === "deny") {
-		throw new Error(
-			`Tool "${tool.name}" is blocked by user policy.\n` +
-				`To allow: remove "tools.approval.${tool.name}: deny" from config.`,
-		);
+		throw denyError(resolved, tool.name);
 	}
 
 	if (policy === "prompt") return { required: true, reason };

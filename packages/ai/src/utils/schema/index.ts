@@ -12,4 +12,3 @@ export * from "./strict-tool-validation";
 export * from "./types";
 export * from "./typescript";
 export * from "./wire";
-export * from "./zod-decontaminate";

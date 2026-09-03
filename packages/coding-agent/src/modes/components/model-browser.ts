@@ -16,12 +16,13 @@ import {
 	fuzzyRank,
 	Input,
 	matchesKey,
+	replaceTabs,
 	ScrollView,
 	type SgrMouseEvent,
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
@@ -254,8 +255,16 @@ export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 }
 
 /**
- * A slim role chip: `●default ◉` — solid dot for configured assignments,
+ * A slim role chip: `● default ◉` — solid dot for configured assignments,
  * hollow for auto-selected fallbacks, thinking glyph attached when set.
+ *
+ * The space after the status glyph is load-bearing. Under the `nerd` preset
+ * these are Nerd Font private-use icons (U+F111 / U+F10C) whose glyphs are
+ * drawn two cells wide, while `visibleWidth` counts them as one
+ * (`ambiguousIsNarrow: true` in tui/utils.ts — the PUA block is
+ * East_Asian_Width=Ambiguous). Without a separator the icon overhangs and
+ * eats the label's first character (`● default` renders as `●efault`).
+ * Mirrors the spacing already used for `status.success` in model-hub.
  */
 export function formatRoleChip(role: string, assignment: RoleAssignment, settings: Settings): string {
 	const info = getRoleInfo(role, settings);
@@ -263,9 +272,9 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
 	const suffix = glyph ? ` ${theme.fg("dim", glyph)}` : "";
 	if (assignment.autoSelected) {
-		return theme.fg("dim", `${theme.status.shadowed}${label}`) + suffix;
+		return theme.fg("dim", `${theme.status.shadowed} ${label}`) + suffix;
 	}
-	return theme.fg(info.color ?? "muted", `${theme.status.enabled}${label}`) + suffix;
+	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
@@ -278,6 +287,13 @@ function formatCostPair(model: Model): string {
 		return s.replace(/\.?0+$/, "");
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+}
+
+/** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
+function formatDescription(description: string): string {
+	return replaceTabs(sanitizeText(description))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
 }
 
 /**
@@ -314,10 +330,10 @@ function padLeftVisible(text: string, width: number): string {
 export interface ModelBrowserOptions {
 	/** Render the dim `provider/` prefix before model ids. Default true. */
 	showProvider?: boolean;
-	/** Session token count used to disable models whose context window is exceeded. */
+	/** Session token count used to flag models whose context window is exceeded. */
 	currentContextTokens?: number;
-	/** When true, rows over the current context are unselectable (session-switch mode). */
-	disableOverContext?: boolean;
+	/** When true, over-context rows render grayed; picking one compacts first (session-switch mode). */
+	markOverContext?: boolean;
 	/** Host-provided empty-state text (e.g. provider discovery status). */
 	emptyText?: () => string | undefined;
 }
@@ -351,7 +367,7 @@ export class ModelBrowser implements Component {
 	#maxVisible = 10;
 	#showProvider: boolean;
 	#currentContextTokens: number;
-	#disableOverContext: boolean;
+	#markOverContext: boolean;
 	#emptyText?: () => string | undefined;
 	/** Keep role-like virtual rows in their host-defined order during search. */
 	#preserveQueryOrder = false;
@@ -375,7 +391,7 @@ export class ModelBrowser implements Component {
 		this.#showProvider = options.showProvider ?? true;
 		const tokens = options.currentContextTokens ?? 0;
 		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
-		this.#disableOverContext = options.disableOverContext ?? false;
+		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
 	}
 
@@ -420,9 +436,9 @@ export class ModelBrowser implements Component {
 	setPreserveQueryOrder(preserve: boolean): void {
 		this.#preserveQueryOrder = preserve;
 	}
-	/** Allow hosts to toggle context-window eligibility between browser modes. */
-	setDisableOverContext(disable: boolean): void {
-		this.#disableOverContext = disable;
+	/** Allow hosts to toggle context-window flagging between browser modes. */
+	setMarkOverContext(mark: boolean): void {
+		this.#markOverContext = mark;
 	}
 	/** Focused: accent cursor + selected-row background band. Unfocused: dim cursor, no band. */
 	setFocused(focused: boolean): void {
@@ -461,8 +477,13 @@ export class ModelBrowser implements Component {
 	}
 
 	#isDisabled(item: ModelBrowserItem): boolean {
-		if (item.id === "separator") return true;
-		if (!this.#disableOverContext || this.#currentContextTokens <= 0) return false;
+		return item.id === "separator";
+	}
+
+	/** True when `item`'s context window is smaller than the live session token count (grayed row; hosts compact before switching). */
+	isOverContext(item: ModelBrowserItem): boolean {
+		if (item.id === "separator") return false;
+		if (!this.#markOverContext || this.#currentContextTokens <= 0) return false;
 		const contextWindow = item.model.contextWindow ?? 0;
 		return contextWindow > 0 && this.#currentContextTokens > contextWindow;
 	}
@@ -718,7 +739,7 @@ export class ModelBrowser implements Component {
 			const line = theme.fg("muted", "─".repeat(dashCount));
 			return `  ${line}  `;
 		}
-		const disabled = this.#isDisabled(item);
+		const overContext = this.isOverContext(item);
 		const prefix = selected && this.#focused ? `${theme.fg("accent", theme.nav.cursor)} ` : "  ";
 		const providerPrefix = this.#showProvider ? theme.fg("dim", `${item.provider}/`) : "";
 		const name = item.labelColor
@@ -728,7 +749,7 @@ export class ModelBrowser implements Component {
 				: item.id;
 		const currentMark =
 			item.selector === this.#currentSelector ? ` ${theme.fg("success", theme.status.enabled)}` : "";
-		const overLimit = disabled
+		const overLimit = overContext
 			? ` ${theme.status.disabled} context>${formatNumber(item.model.contextWindow ?? 0).toLowerCase()}`
 			: "";
 		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
@@ -743,12 +764,15 @@ export class ModelBrowser implements Component {
 		const gap = Math.max(0, available - visibleWidth(left));
 
 		let line = `${left}${" ".repeat(gap)} ${meta}`;
-		if (disabled) {
-			line = theme.fg("dim", Bun.stripANSI(line));
+		if (overContext) {
+			// Gray the whole row but keep the selection cursor visible: over-context
+			// models stay selectable (the host compacts before switching).
+			const plainPrefix = Bun.stripANSI(prefix);
+			line = `${prefix}${theme.fg("dim", Bun.stripANSI(line).slice(plainPrefix.length))}`;
 		}
 		// The bg band is reserved for the mouse: it marks hover, nothing else.
 		// Keyboard selection is the cursor glyph + accent name.
-		if (hovered && !disabled) {
+		if (hovered) {
 			line = theme.bg("selectedBg", line);
 		}
 		return line;
@@ -760,6 +784,11 @@ export class ModelBrowser implements Component {
 		const model = selected.model;
 
 		const facts: string[] = [model.name];
+		// Upstream badges sit next to the name; the provider blurb goes last so
+		// width truncation eats prose before context, cost, or perf facts.
+		if (model.isNew) facts.push("new");
+		if (model.isBeta) facts.push("beta");
+		if (model.isRecommended) facts.push("recommended");
 		if (model.contextWindow) facts.push(`${formatNumber(model.contextWindow).toLowerCase()} ctx`);
 		if (model.maxTokens) facts.push(`${formatNumber(model.maxTokens).toLowerCase()} out`);
 		facts.push(`${formatCostPair(model)} per M`);
@@ -770,10 +799,14 @@ export class ModelBrowser implements Component {
 			facts.push(`~${formatTps(perf.tps)}`);
 			if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
 		}
+		if (model.description) {
+			const description = formatDescription(model.description);
+			if (description) facts.push(description);
+		}
 		const line1 = truncateToWidth(theme.fg("muted", `  ${facts.join(" · ")}`), width);
 
-		if (this.#isDisabled(selected)) {
-			const warning = `  ${theme.status.disabled} current context ${formatNumber(this.#currentContextTokens).toLowerCase()} exceeds ${formatNumber(model.contextWindow ?? 0).toLowerCase()} limit`;
+		if (this.isOverContext(selected)) {
+			const warning = `  ${theme.status.disabled} context ${formatNumber(this.#currentContextTokens).toLowerCase()} exceeds ${formatNumber(model.contextWindow ?? 0).toLowerCase()} limit · compacts with current model, then switches`;
 			return [line1, truncateToWidth(theme.fg("warning", warning), width)];
 		}
 

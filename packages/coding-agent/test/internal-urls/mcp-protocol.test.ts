@@ -1,22 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 function createMockManager(opts: {
 	servers?: string[];
 	resources?: Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>;
 	readResult?: MCPResourceReadResult | undefined;
 	readError?: Error;
+	ensureResources?: (name: string) => Promise<void>;
 }) {
 	return {
 		getConnectedServers: () => opts.servers ?? [],
 		getServerResources: (name: string) => opts.resources?.get(name),
+		ensureServerResources: async (name: string) => opts.ensureResources?.(name),
 		readServerResource: async (_name: string, _uri: string) => {
 			if (opts.readError) throw opts.readError;
 			return opts.readResult;
 		},
 	} as unknown as MCPManager;
+}
+
+function createToolSession(): ToolSession {
+	return {
+		cwd: os.tmpdir(),
+		hasUI: false,
+		settings: Settings.isolated(),
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+	};
 }
 
 describe("McpProtocolHandler", () => {
@@ -57,6 +73,20 @@ describe("McpProtocolHandler", () => {
 		await expect(router.resolve("mcp://test://missing")).rejects.toThrow("server-a");
 	});
 
+	it("lists resource templates alongside concrete resources when no server matches", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("server-a", {
+			resources: [{ uri: "example://items/open", name: "open-item" }],
+			templates: [{ uriTemplate: "example://items/{id}", name: "item-template" }],
+		});
+		const manager = createMockManager({ servers: ["server-a"], resources });
+		MCPManager.setInstance(manager);
+		const router = InternalUrlRouter.instance();
+
+		await expect(router.resolve("mcp://example://missing")).rejects.toThrow("example://items/open");
+		await expect(router.resolve("mcp://example://missing")).rejects.toThrow("example://items/{id}");
+	});
+
 	it("reads resource by exact URI match", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("my-server", {
@@ -74,6 +104,141 @@ describe("McpProtocolHandler", () => {
 		const resource = await router.resolve("mcp://test://doc");
 		expect(resource.content).toBe("hello world");
 		expect(resource.notes).toEqual(["MCP server: my-server"]);
+	});
+
+	it("preserves a literal semicolon in an exact MCP resource URI", async () => {
+		const uri = "catalog://items;active";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("catalog", {
+			resources: [{ uri, name: "active-items" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["catalog"],
+			resources,
+			readResult: { contents: [{ uri, text: "active items" }] },
+		});
+		MCPManager.setInstance(manager);
+
+		const result = await new ReadTool(createToolSession()).execute("read-semicolon-resource", {
+			path: `mcp://${uri}`,
+		});
+		const output = result.content.find(block => block.type === "text");
+
+		expect(output?.type).toBe("text");
+		if (output?.type !== "text") throw new Error("Expected text output");
+		expect(output.text).toContain("active items");
+		expect(output.text).not.toContain("interpreted as");
+	});
+
+	it("lets read consume a native URI advertised by an MCP server", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("ags", {
+			resources: [{ uri: "ags://capabilities/current-host", name: "current-host" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["ags"],
+			resources,
+			readResult: {
+				contents: [{ uri: "ags://capabilities/current-host", text: "host capabilities" }],
+			},
+		});
+		MCPManager.setInstance(manager);
+
+		const result = await new ReadTool(createToolSession()).execute("read-ags-resource", {
+			path: "ags://capabilities/current-host",
+		});
+		const output = result.content.find(block => block.type === "text");
+
+		expect(output?.type).toBe("text");
+		if (output?.type !== "text") throw new Error("Expected text output");
+		expect(output.text).toContain("host capabilities");
+	});
+
+	it("waits for the MCP resource catalog before rejecting a native URI", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		let ensureCalls = 0;
+		const manager = createMockManager({
+			servers: ["ags"],
+			resources,
+			ensureResources: async name => {
+				ensureCalls += 1;
+				resources.set(name, {
+					resources: [{ uri: "ags://capabilities/current-host", name: "current-host" }],
+					templates: [],
+				});
+			},
+			readResult: {
+				contents: [{ uri: "ags://capabilities/current-host", text: "loaded after discovery" }],
+			},
+		});
+		MCPManager.setInstance(manager);
+
+		const result = await new ReadTool(createToolSession()).execute("read-delayed-ags-resource", {
+			path: "ags://capabilities/current-host",
+		});
+		const output = result.content.find(block => block.type === "text");
+
+		expect(ensureCalls).toBe(1);
+		expect(output?.type).toBe("text");
+		if (output?.type !== "text") throw new Error("Expected text output");
+		expect(output.text).toContain("loaded after discovery");
+	});
+
+	it("resolves a native URI whose path is exactly a trailing slash", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("catalog", {
+			resources: [{ uri: "catalog://root/", name: "root" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["catalog"],
+			resources,
+			readResult: { contents: [{ uri: "catalog://root/", text: "catalog root" }] },
+		});
+		MCPManager.setInstance(manager);
+		const router = InternalUrlRouter.instance();
+
+		const resource = await router.resolve("catalog://root/");
+		expect(resource.content).toBe("catalog root");
+		expect(resource.notes).toEqual(["MCP server: catalog"]);
+	});
+
+	it("resolves an opaque resource URI advertised by an MCP server", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("registry", {
+			resources: [{ uri: "urn:example:document", name: "document" }],
+			templates: [],
+		});
+		const manager = createMockManager({
+			servers: ["registry"],
+			resources,
+			readResult: { contents: [{ uri: "urn:example:document", text: "opaque payload" }] },
+		});
+		MCPManager.setInstance(manager);
+
+		const result = await new ReadTool(createToolSession()).execute("read-opaque-resource", {
+			path: "urn:example:document",
+		});
+		const output = result.content.find(block => block.type === "text");
+
+		expect(output?.type).toBe("text");
+		if (output?.type !== "text") throw new Error("Expected text output");
+		expect(output.text).toContain("opaque payload");
+	});
+
+	it("recognizes opaque URIs in canResolve without swallowing path-like inputs", () => {
+		const router = InternalUrlRouter.instance();
+		expect(router.canResolve("urn:example:document")).toBe(true);
+		expect(router.canResolve("custom:item")).toBe(true);
+		// Windows drive paths and selector-shaped filesystem inputs stay on the
+		// filesystem path.
+		expect(router.canResolve("C:\\Temp\\notes.txt")).toBe(false);
+		expect(router.canResolve("C:/tmp/notes.txt")).toBe(false);
+		expect(router.canResolve("Makefile:12")).toBe(false);
+		expect(router.canResolve("foo.ts:50-80")).toBe(false);
+		expect(router.canResolve("README:raw")).toBe(false);
 	});
 
 	it("preserves query parameters in MCP resource URI", async () => {

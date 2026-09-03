@@ -6,6 +6,7 @@
  * Project-level discovery walks up from cwd to repoRoot.
  */
 import * as path from "node:path";
+import { isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
@@ -28,9 +29,102 @@ const DISPLAY_NAME = "Agent Dirs (.agent/.agents)";
 const PRIORITY = 70;
 const AGENT_DIR_CANDIDATES = [".agent", ".agents"] as const;
 
-/** User-level paths: ~/.agent/<segments> and ~/.agents/<segments>. */
-function getUserPathCandidates(ctx: LoadContext, ...segments: string[]): string[] {
-	return AGENT_DIR_CANDIDATES.map(baseDir => path.join(ctx.home, baseDir, ...segments));
+interface UserPathCandidateOptions {
+	platform?: NodeJS.Platform;
+	env?: NodeJS.ProcessEnv;
+	windowsUserProfile?: () => string | undefined;
+	wslPath?: (windowsPath: string) => string | undefined;
+}
+
+/**
+ * Hard cap for best-effort host-discovery probes.
+ *
+ * WSL→Windows interop can wedge indefinitely (issue #8402): a synchronous
+ * spawn with no timeout blocks the whole startup thread before the TUI paints
+ * or any log file is created. The probe result only ever augments discovery
+ * with an extra host-home candidate, so a few hundred milliseconds is a
+ * generous ceiling — past it we treat the host as unavailable.
+ */
+const HOST_PROBE_TIMEOUT_MS = 500;
+
+/**
+ * Run a best-effort discovery probe and return its trimmed stdout, or
+ * `undefined` when the command fails, produces no output, or exceeds the
+ * timeout. On timeout the child is killed with SIGKILL so a wedged interop pipe
+ * cannot hang startup; the killed/non-zero exit is then reported as
+ * "unavailable" and discovery falls back to the Linux `$HOME`/`~/.omp`
+ * candidates.
+ */
+export function runHostProbe(cmd: string[], timeoutMs = HOST_PROBE_TIMEOUT_MS): string | undefined {
+	try {
+		const result = Bun.spawnSync(cmd, {
+			stdout: "pipe",
+			stderr: "ignore",
+			timeout: timeoutMs,
+			killSignal: "SIGKILL",
+		});
+		if (result.exitCode !== 0) return undefined;
+		const resolved = result.stdout.toString().trim();
+		return resolved.length > 0 ? resolved : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function resolveWithWslPath(windowsPath: string): string | undefined {
+	return runHostProbe(["wslpath", "-u", windowsPath]);
+}
+
+function resolveWindowsUserProfile(): string | undefined {
+	const resolved = runHostProbe(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
+	return resolved && resolved !== "%USERPROFILE%" ? resolved : undefined;
+}
+
+/** Resolve the Windows host profile home exposed to WSL, if available. */
+export function getWslWindowsHomeCandidate(options: UserPathCandidateOptions = {}): string | undefined {
+	const platform = options.platform ?? process.platform;
+	const env = options.env ?? process.env;
+	if (!isWsl(platform, env)) return undefined;
+	const userProfile = env.USERPROFILE ?? (options.windowsUserProfile ?? resolveWindowsUserProfile)();
+	if (!userProfile) return undefined;
+	const interopPath = (options.wslPath ?? resolveWithWslPath)(userProfile);
+	if (interopPath !== undefined) return interopPath;
+	const trimmed = userProfile.trim();
+	return path.posix.isAbsolute(trimmed) ? path.posix.normalize(trimmed) : windowsPathToWslMount(trimmed);
+}
+
+/**
+ * Memo for the default-probe WSL home resolution, keyed by the inputs that
+ * decide it (platform + WSL markers + `USERPROFILE`). Discovery calls
+ * {@link getUserPathCandidates} from every loader (skills, rules, prompts,
+ * commands, AGENTS.md, SYSTEM.md); the host-home probe spawns `cmd.exe` over
+ * the WSL interop pipe, so without the memo a wedged pipe costs one
+ * {@link HOST_PROBE_TIMEOUT_MS} stall per loader. Keying by inputs keeps
+ * test/SDK environment changes visible instead of pinning the first answer
+ * for the process lifetime.
+ */
+const wslHomeMemo = new Map<string, string | undefined>();
+
+function getUserHomeCandidates(ctx: LoadContext): string[] {
+	const homes = [ctx.home];
+	const env = process.env;
+	const key = `${process.platform}\0${env.WSL_DISTRO_NAME ?? ""}\0${env.WSL_INTEROP ?? ""}\0${env.USERPROFILE ?? ""}`;
+	let wslHome: string | undefined;
+	if (wslHomeMemo.has(key)) {
+		wslHome = wslHomeMemo.get(key);
+	} else {
+		wslHome = getWslWindowsHomeCandidate();
+		wslHomeMemo.set(key, wslHome);
+	}
+	if (wslHome && !homes.includes(wslHome)) homes.push(wslHome);
+	return homes;
+}
+
+/** User-level paths: ~/.agent[s]/<segments>, plus the Windows host profile under WSL. */
+export function getUserPathCandidates(ctx: LoadContext, ...segments: string[]): string[] {
+	return getUserHomeCandidates(ctx).flatMap(home =>
+		AGENT_DIR_CANDIDATES.map(baseDir => path.join(home, baseDir, ...segments)),
+	);
 }
 
 /**

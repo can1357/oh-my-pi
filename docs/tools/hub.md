@@ -28,11 +28,11 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `to` | `string` | `send` (peer) | Recipient agent id, or `"all"` for broadcast. Mutually exclusive with `name`. |
 | `message` | `string` | `send` (peer) | Message body. Empty-after-trim is rejected. |
 | `replyTo` | `string` | No | `send`: message id being answered. |
-| `await` | `boolean` | No | `send`: after delivery, block until the next message from that peer arrives. Invalid with `to: "all"`. |
+| `await` | `boolean` | No | Peer `send`: after delivery, block until the next message from that peer arrives. Invalid with `to: "all"`. |
 | `from` | `string` | No | `wait`: only accept a message from this agent id (pure message wait). |
 | `ids` | `string[]` | No | `wait`: job ids to watch (omit = all running jobs); `cancel`: job ids to kill (required). |
-| `timeoutMs` | `number` | No | `wait` (messages/jobs): milliseconds; `0` waits indefinitely. Defaults to the poll window when jobs are watched, `irc.timeoutMs` otherwise. |
-| `peek` | `boolean` | No | `inbox`: list messages without consuming them. |
+| `timeoutMs` | `number` | No | Peer `send` with `await`, and message/job `wait`: milliseconds; `0` waits indefinitely. Defaults to `irc.timeoutMs` for a reply/pure-message wait and to the poll window when jobs are watched. |
+| `peek` | `boolean` | No | `inbox`: leave messages in the process-global bus mailbox. Note that messages already buffered on the live recipient session are still drained into this result by the current implementation. |
 | `name` | `string` | process ops | Stable project-scoped launch name (1-48 chars). On `send`/`wait` it routes the op to the process broker. |
 | `application`, `args`, `env`, `cwd`, `pty`, `ready`, `restart`, `persist`, `detached` | — | `start` | Launch spec, unchanged from the former `launch` tool. |
 | `lines`, `head`, `grep`, `follow`, `cursor` | — | `logs` | Log window controls, unchanged. |
@@ -41,8 +41,8 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `timeout` | `number` | No | `logs`/`stop`/`wait`-with-`name`: seconds; default 30 (stop: 5). |
 
 ## Op families and dispatch
-- **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Exact behavior of the former `irc` tool: fire-and-forget sends with delivery receipts (`injected`/`woken`/`revived`/`failed`), broadcast to live peers, parked-agent revival on direct send, `await: true` round-trip sugar, busy-recipient auto-reply when async execution is disabled.
-- **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Exact behavior of the former `job` tool: owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the `async.pollWaitDuration` fixed/smart wait window. `jobs` is the former `list: true` snapshot (plus the roster of running subagents with no job entry).
+- **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Fire-and-forget sends return delivery receipts (`injected`/`woken`/`revived`/`failed`); direct sends can revive parked agents, while broadcasts target visible live peers without reviving every parked agent. `await: true` waits for one reply after delivery. A busy recipient with async execution disabled may auto-reply rather than strand an awaiting sender.
+- **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the `async.pollWaitDuration` fixed/smart wait window. `jobs` is the former job-list snapshot plus the roster of running subagents with no running job entry.
 - **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus `send`/`wait` when they carry `name`. Exact behavior of the former `launch` tool; `ps` is the broker's `list`. See the launch sections below.
 
 `send` with both `to` and `name` is rejected as ambiguous. `wait` routes by target: `name` → process wait; otherwise the unified coordination wait.
@@ -114,7 +114,7 @@ Unchanged from the former `launch` tool: the first process op starts a detached 
 - Launch names 1-48 chars; `ready.port` 1..65535; `logs`/`wait`/`stop` timeouts capped at one hour.
 
 ## Errors
-- Text error results (`isError: true`), not throws: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, async disabled, launch disabled.
+- Most validation/availability failures are text results with `isError: true`: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, and launch disabled. The async-disabled `jobs`/`cancel` response is an exception: it returns `Async execution is disabled; no background jobs are available.` with an empty job list and no `isError` flag.
 - Launch validation (missing `name`/`application`, bad `ready.port`, unsupported key) throws `ToolError`, exactly as before.
 - A `wait` timeout is a normal result (`waited: null` or an all-running snapshot flagged `useless`), never an error.
 - Per-recipient delivery failures surface as `failed` receipts; `send` is `isError` only when nothing was delivered.

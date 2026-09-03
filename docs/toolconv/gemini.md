@@ -39,11 +39,11 @@ Tools are advertised in the prompt as a JSON-Schema catalog. Gemma 3's official 
 2. **JSON** (the sibling convention — see `qwen3.md` for the closely related Hermes shape):
    > … you MUST put it in the format of `{"name": function name, "parameters": dictionary of argument name and its value}`
 
-Hosted Gemini wraps the same idea in markdown fences and the `default_api` namespace. The function signatures themselves are passed as OpenAI-style tool JSON (`{"type":"function","function":{name,description,parameters}}`).
+Hosted Gemini wraps the same idea in markdown fences and the `default_api` namespace. The function signatures themselves are passed as OpenAI-style tool JSON (`{"type":"function","function":{name,description,parameters}}`). OMP's renderer emits `default_api.NAME(...)` without `print`; its scanner also accepts the wrapped and bare variants below.
 
 ## Tool-call format
 
-One call is a Python call expression. The hosted-Gemini canonical form is a `print()` of a `default_api` method, fenced:
+One call is a Python call expression. Hosted Gemini commonly emits a `print()` of a `default_api` method:
 
 ````text
 ```tool_code
@@ -73,15 +73,15 @@ Strings use Python escaping (`\n`, `\t`, `\\`, `\'`, `\"`); hosted Gemini emits 
 
 ## Multiple / parallel tool calls
 
-Two encodings exist, both inside a single `tool_code` block:
+Two encodings occur inside a single `tool_code` block:
 
-- **Gemma 3 Pythonic prompt** — a Python **list** of call expressions:
+- **OMP / Gemma 3 Pythonic form** — a Python **list** of call expressions. OMP renders this form for two or more calls:
   ````text
   ```tool_code
-  [get_current_temperature(location="London"), get_temperature_date(location="London", date="2024-10-01")]
+  [default_api.get_current_temperature(location="London"), default_api.get_temperature_date(location="London", date="2024-10-01")]
   ```
   ````
-- **Hosted Gemini** — one `print(default_api...)` **statement per line**:
+- **Hosted Gemini variant** — one `print(default_api...)` **statement per line**:
   ````text
   ```tool_code
   print(default_api.get_current_temperature(location="London"))
@@ -89,11 +89,11 @@ Two encodings exist, both inside a single `tool_code` block:
   ```
   ````
 
-Either way the calls are returned in source order; the application executes them and returns one result per call in the same order.
+The OMP scanner extracts top-level call expressions in source order from either form. It mints a tool-call id for each parsed call; the text convention itself has no id.
 
 ## Tool-result format
 
-Executed results are returned to the model in a ```` ```tool_outputs ```` block. Gemma 3 docs use assignment-style values (`result = 92.3`); for opaque tool output the block simply carries the returned text/JSON:
+Executed results are returned to the model in ```` ```tool_outputs ```` blocks. OMP renders one complete block per result, in call order; it does not encode `isError` separately. Gemma 3 docs also show assignment-style values (`result = 92.3`), while opaque output can be returned as text/JSON:
 
 ````text
 ```tool_outputs
@@ -125,7 +125,7 @@ It's currently 11.4°C in London.
 
 ## OpenAI-compatible / native API mapping
 
-- Hosted Gemini's native API normally returns a structured `functionCall` part (`{name, args}`); for Gemini 3 each carries an `id` that must be echoed in the matching `functionResponse`, plus a `thoughtSignature` that must be preserved. The Pythonic text form is what you get when the structured path *fails* (`finish_reason = MALFORMED_FUNCTION_CALL`) or when tool use is driven purely by prompt (Gemma, or Gemini via the code-execution `executableCode` part).
+- Hosted Gemini's native API normally returns a structured `functionCall` part (`{name, args}`). On direct Gemini Generative AI requests, Gemini 3 calls carry an `id` that OMP echoes in the matching `functionResponse`; their `thoughtSignature` must also be preserved. OMP's Vertex adapter is the exception: Vertex GenerateContent rejects function-part IDs, so OMP omits `id` from both `functionCall` and `functionResponse`, retains the originating function name, and relies on function name/order for matching. Thought signatures are still preserved.
 - When parsed out of an OpenAI-compatible shim, each recovered call becomes `tool_calls[i] = {id (server-minted), type:"function", function:{name, arguments:<JSON string>}}` — the Python kwargs are re-serialized to a JSON string at that boundary.
 - Feed results back as the deployment's tool/`functionResponse` turn (hosted) or a `tool_outputs` block in the next user turn (prompt-driven).
 
@@ -136,7 +136,10 @@ It's currently 11.4°C in London.
 - **Skip string contents when scanning.** A call like `search(pattern="foo(")` contains a `(` inside a string; a naive `\w+\(` scan mis-detects `foo` as a callee. Track string state and only treat top-level `(` as a call opener.
 - **Fence ambiguity.** The body terminates at the first bare ` ``` `; a string argument literally containing ` ``` ` will truncate the block early (rare, accepted limitation).
 - **It leaks.** Because nothing is a special token, the format appears verbatim in normal responses when the model "decides" to call a tool but the structured decoder misfires. Production code reading raw text should detect ` ```tool_code ` and parse it; production code on the structured API should retry on `MALFORMED_FUNCTION_CALL`.
+- **OMP streaming behavior.** The scanner buffers the entire `tool_code` body and emits tool events only after the closing fence; it does not stream partial arguments. An unterminated block is discarded on flush rather than exposed as text. Positional arguments and malformed keyword segments are skipped. In addition to ordinary quoted strings, the literal decoder accepts Python raw/byte/unicode prefixes, triple quotes, octal escapes, and `\x`/`\u`/`\U` escapes.
+- **Transcript rendering.** OMP wraps the transcript in `<bos>` and Gemma-style `<start_of_turn>user|model` turns. `developer` text is prepended to the next user turn (or emitted as its own user turn if no user message follows); consecutive tool results become one user turn containing their separate `tool_outputs` blocks.
 - **Variant divergence.** Gemma **4** abandoned this Pythonic form for a token-delimited brace syntax (`<|tool_call>call:NAME{…}<tool_call|>`) — a different convention documented in `gemma.md`. This spec covers hosted Gemini and Gemma 3.
+- **Gemma 3 automatic-selection caveat.** OMP's current family affinity maps every recognized Gemma version—including Gemma 3—to the `gemma` dialect. Therefore, when a Gemma 3 model is marked `supportsTools: false` and falls back from native tools, `tools.format=auto` selects the incompatible Gemma 4 grammar. Set `tools.format=gemini` explicitly for the Pythonic Gemma 3 convention documented here.
 
 ## Sources
 

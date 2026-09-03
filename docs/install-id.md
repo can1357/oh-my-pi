@@ -1,6 +1,6 @@
 # Install ID
 
-A persistent per-install UUID that identifies a single oh-my-pi installation across sessions. Used as a stable correlation key for server-side dedup of telemetry-style pushes (currently the auto-QA grievance flush from `report_tool_issue`).
+A persistent per-install UUID shared across sessions and profiles. It supplies a stable installation identity where provider compatibility protocols, account-scoped device metadata, auth-broker usage reporting, or deduplicated diagnostic pushes require one. The UUID itself is random; it is not derived from hostname, username, hardware, or account data.
 
 ## API
 
@@ -31,9 +31,14 @@ Generated IDs are lowercase RFC 4122 UUIDs. Existing persisted values are accept
 
 ## Consumers
 
-- `packages/coding-agent/src/tools/report-tool-issue.ts` — included as `installId` in the auto-QA grievance push body so the backend can deduplicate repeated reports from the same install. See `dev.autoqaPush.*` settings and `PI_AUTO_QA_PUSH_*` env vars.
+| Consumer                                                                                             | Use                                                                                                                                                                                    |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/ai/src/providers/openai-codex-responses.ts`                                                | Sends the value as the OpenAI Codex compatibility `installationId`, alongside per-session/thread/window IDs.                                                                           |
+| `packages/ai/src/providers/anthropic.ts` and `packages/coding-agent/src/session/session-metadata.ts` | Derives Claude-compatible `device_id` metadata from the install ID, scoped by the Anthropic account UUID when one is available. The raw install ID is not used as the device ID.       |
+| `packages/ai/src/auth-broker/remote-store.ts`                                                        | Includes it in observed-usage reports to the configured auth broker. Those reports also include the hostname; the install-ID helper itself does not generate or combine that metadata. |
+| `packages/coding-agent/src/tools/report-tool-issue.ts`                                               | Includes it as `installId` in auto-QA grievance pushes so the backend can correlate reports from the same installation.                                                                |
 
-New consumers MUST treat the value as opaque and MUST NOT derive PII from it; the helper does not mix in hostname, username, or any other host-identifying entropy.
+New consumers MUST treat the value as opaque. The helper contributes no PII, but a transport can still send it alongside other metadata; each consumer remains responsible for documenting and minimizing its complete payload.
 
 ## See also
 

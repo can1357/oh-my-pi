@@ -36,7 +36,16 @@ mkdir -p "$launch_dir"
 OMP_LAUNCH_CWD=$PWD
 export OMP_LAUNCH_CWD
 cd "$launch_dir"
+# Herdr 0.7.5 validates the foreground process name. The macOS shell can
+# preserve OMP's identity while still running the development CLI through Bun.
+run_bun() {
+	if [ "${HERDR_ENV:-}" = 1 ] && [ "$(uname -s)" = Darwin ]; then
+		exec -a omp bun "$@"
+	fi
+	exec bun "$@"
+}
+
 if [ -n "${PI_TIMING:-}" ]; then
-	exec bun --preload "$preload" --preload "$timing_preload" "$cli" "$@"
+	run_bun --preload "$preload" --preload "$timing_preload" "$cli" "$@"
 fi
-exec bun --preload "$preload" "$cli" "$@"
+run_bun --preload "$preload" "$cli" "$@"

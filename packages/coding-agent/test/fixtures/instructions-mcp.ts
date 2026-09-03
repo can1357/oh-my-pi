@@ -1,20 +1,20 @@
 #!/usr/bin/env bun
 /**
- * Test fixture: a minimal, well-behaved stdio MCP server that reports
- * server-provided `instructions` on `initialize` and exposes a single tool.
+ * Test fixture: a minimal, well-behaved stdio MCP server that exposes
+ * deterministic tools. By default it reports server-provided `instructions`
+ * on `initialize`; its Context Mode fixture mode omits that field entirely.
  *
- * Used by `sdk-mcp-instructions.test.ts` to prove that a deferred interactive
- * (`hasUI`) session, whose MCP discovery runs in the background, still folds
- * each connected server's instructions into the system prompt once the
- * connection completes — see issue: instructions were previously dropped
- * permanently for deferred UI sessions.
+ * Used by `sdk-mcp-instructions.test.ts` to prove that deferred interactive
+ * (`hasUI`) discovery rebuilds global mounted-route guidance independently of
+ * optional server instructions, while still folding instructions into the
+ * prompt when a connected server provides them.
  *
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`):
  * one JSON object per line on stdin, one JSON response per line on stdout.
  * Only requests (objects with an `id`) get a response; notifications are
  * dropped. Server-to-client requests are never sent — the client side only
  * needs `initialize` + `tools/list` answered to register the tool and capture
- * the instructions.
+ * any optional instructions.
  *
  * Exported `SERVER_INSTRUCTIONS` is imported by the test for the assertion;
  * the server only starts when run as the entry module (`import.meta.main`), so
@@ -26,9 +26,14 @@ import * as readline from "node:readline";
 export const SERVER_INSTRUCTIONS =
 	"INSTR_FIXTURE_SENTINEL_3f9a2c: when this server is connected, always greet in Latin.";
 
-/** Single tool advertised by the fixture so `tools/list` is non-empty. */
-export const TOOL_NAME = "do_thing";
+/** Default advertised tool; bounded and Context Mode fixture modes replace it. */
+export const TOOL_NAME = "do`thing";
 export const TOOL_RESULT = "MCP_DEFERRED_SMOKE_OK_5c92";
+export const BOUNDED_GUIDANCE_MODE = "--bounded-guidance";
+export const CONTEXT_MODE_NO_INSTRUCTIONS_MODE = "--context-mode-no-instructions";
+const CONTEXT_MODE_TOOL_NAME = "ctx_execute";
+/** One more tool than the 64-row prompt budget, forcing the static fallback. */
+export const BOUNDED_GUIDANCE_TOOL_COUNT = 65;
 
 type JsonRpcRequest = {
 	jsonrpc: "2.0";
@@ -38,6 +43,7 @@ type JsonRpcRequest = {
 };
 
 function buildResult(method: string): Record<string, unknown> {
+	const contextModeWithoutInstructions = process.argv.includes(CONTEXT_MODE_NO_INSTRUCTIONS_MODE);
 	switch (method) {
 		case "initialize":
 			return {
@@ -46,18 +52,29 @@ function buildResult(method: string): Record<string, unknown> {
 				// Declare only the tools capability so the client never probes
 				// resources/list or prompts/list — keeps the fixture minimal.
 				capabilities: { tools: {} },
-				instructions: SERVER_INSTRUCTIONS,
+				...(contextModeWithoutInstructions ? {} : { instructions: SERVER_INSTRUCTIONS }),
 			};
-		case "tools/list":
-			return {
-				tools: [
-					{
-						name: TOOL_NAME,
-						description: "Fixture tool returning a deterministic sentinel.",
-						inputSchema: { type: "object", properties: {}, additionalProperties: false },
-					},
-				],
-			};
+		case "tools/list": {
+			const tools = process.argv.includes(BOUNDED_GUIDANCE_MODE)
+				? Array.from({ length: BOUNDED_GUIDANCE_TOOL_COUNT }, (_, index) => {
+						const suffix = String.fromCharCode(97 + Math.floor(index / 26), 97 + (index % 26));
+						return {
+							name: `row_${suffix}`,
+							description: `Bounded guidance fixture tool ${suffix}.`,
+							inputSchema: { type: "object", properties: {}, additionalProperties: false },
+						};
+					})
+				: [
+						{
+							name: contextModeWithoutInstructions ? CONTEXT_MODE_TOOL_NAME : TOOL_NAME,
+							description: contextModeWithoutInstructions
+								? "Execute code through the Context Mode fixture."
+								: "Fixture tool returning a deterministic sentinel.",
+							inputSchema: { type: "object", properties: {}, additionalProperties: false },
+						},
+					];
+			return { tools };
+		}
 		case "tools/call":
 			return { content: [{ type: "text", text: TOOL_RESULT }], isError: false };
 		default:

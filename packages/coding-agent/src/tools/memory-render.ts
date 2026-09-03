@@ -27,7 +27,7 @@ import {
 // from the active theme (`•` by default, a nerd-font dot under nerd themes).
 
 interface RetainRenderArgs {
-	items?: Array<{ content?: string; context?: string }>;
+	items?: unknown;
 }
 
 interface QueryRenderArgs {
@@ -35,7 +35,16 @@ interface QueryRenderArgs {
 }
 
 function retainContents(args: RetainRenderArgs | undefined): string[] {
-	return (args?.items ?? []).map(item => replaceTabs((item?.content ?? "").trim())).filter(line => line.length > 0);
+	const items = args?.items;
+	if (!Array.isArray(items)) return [];
+
+	const contents: string[] = [];
+	for (const item of items) {
+		if (!item || typeof item !== "object" || !("content" in item) || typeof item.content !== "string") continue;
+		const content = replaceTabs(item.content.trim());
+		if (content.length > 0) contents.push(content);
+	}
+	return contents;
 }
 
 function resultText(result: { content?: Array<{ type: string; text?: string }> }): string {

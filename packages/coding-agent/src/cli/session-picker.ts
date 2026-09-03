@@ -4,18 +4,30 @@ import { SessionSelectorComponent } from "../modes/components/session-selector";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
+import { loadPinnedSessionIds } from "../session/session-pins";
 import { FileSessionStorage } from "../session/session-storage";
+
+/** Presentation and capability controls for the standalone session picker. */
+export interface SessionPickerOptions {
+	allSessions?: SessionInfo[];
+	title?: string;
+	scopeLabel?: string | false;
+	showCwd?: boolean;
+	allowDelete?: boolean;
+	allowGlobalScope?: boolean;
+	historySearch?: boolean;
+	pinnedIds?: ReadonlySet<string>;
+}
 
 /**
  * Show the TUI session selector and return the selected session, or null if
- * cancelled. Rendered as a fullscreen overlay on the terminal's alternate
- * screen, so the list scrolls and rows are clickable with the mouse. Tab
- * toggles between current-folder and all-projects scope; the all-projects list
- * is loaded lazily via `SessionManager.listAll`.
+ * cancelled. The default OMP picker supports deletion, transcript-history
+ * search, and an all-projects scope; foreign import pickers disable those
+ * source-owned capabilities.
  */
 export async function selectSession(
 	sessions: SessionInfo[],
-	options?: { allSessions?: SessionInfo[] },
+	options: SessionPickerOptions = {},
 ): Promise<SessionInfo | null> {
 	const { promise, resolve } = Promise.withResolvers<SessionInfo | null>();
 	const ui = new TUI(new ProcessTerminal());
@@ -25,12 +37,16 @@ export async function selectSession(
 	// Rank sessions with prompt-history matches too, recovering prompts the 4KB
 	// session-list prefix never sees. Best-effort: a missing/locked history.db
 	// must not break the picker.
+	const pinnedIds = options.pinnedIds ?? (await loadPinnedSessionIds());
+
 	let historyMatcher: ((query: string) => string[]) | undefined;
-	try {
-		const history = HistoryStorage.open();
-		historyMatcher = (query: string) => history.matchingSessionIds(query);
-	} catch (error) {
-		logger.warn("History storage unavailable for session ranking", { error: String(error) });
+	if (options.historySearch !== false) {
+		try {
+			const history = HistoryStorage.open();
+			historyMatcher = (query: string) => history.matchingSessionIds(query);
+		} catch (error) {
+			logger.warn("History storage unavailable for session ranking", { error: String(error) });
+		}
 	}
 
 	const showSelector = () => {
@@ -58,16 +74,22 @@ export async function selectSession(
 				}
 			},
 			{
-				onDelete: async (session: SessionInfo) => {
-					// Delete handler - SessionList will show confirmation internally
-					await storage.deleteSessionWithArtifacts(session.path);
-					return true;
-				},
+				onDelete:
+					options.allowDelete === false
+						? undefined
+						: async (session: SessionInfo) => {
+								await storage.deleteSessionWithArtifacts(session.path);
+								return true;
+							},
 				historyMatcher,
-				loadAllSessions: () => SessionManager.listAll(storage),
-				allSessions: options?.allSessions,
+				loadAllSessions: options.allowGlobalScope === false ? undefined : () => SessionManager.listAll(storage),
+				allSessions: options.allSessions,
 				getTerminalRows: () => ui.terminal.rows,
 				fillHeight: true,
+				title: options.title,
+				scopeLabel: options.scopeLabel,
+				showCwd: options.showCwd,
+				pinnedIds,
 			},
 		);
 		return selector;

@@ -22,17 +22,24 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 
 ## 1) Input handling and parameter merge
 
-`BashTool.execute()` currently handles input before execution as follows:
+`BashTool.execute()` currently handles input as follows:
 
 - validates optional `env` names against shell-variable syntax,
-- extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied,
-- rejects `async: true` when `async.enabled` is false.
+- extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied, unless the path needs shell expansion,
+- rejects `async: true` when `async.enabled` is false,
+- defaults `timeout` to 300 seconds; `0` explicitly disables the command deadline.
 
-There are no structured `head` or `tail` tool parameters in the current schema, and commands run exactly as written — no pre-execution rewrites. Output limiting is handled by `OutputSink` truncation/artifacts.
+There are no structured `head` or `tail` parameters. Before execution, internal URLs in the command and environment values are expanded to backing filesystem paths; an internal URL used as `cwd` is also resolved. Expansion can create parent directories for writable `local://` paths. The configured direnv/devenv preflight can then merge project environment changes, with explicit `env` values taking precedence.
+
+### Approval policy
+
+The bash tool has the `exec` approval tier. `bash.patterns` rules can explicitly `allow`, `deny`, or `prompt`: deny/prompt rules match the complete command or a tokenized compound-command segment, while allow rules must match the entire command and never allow shell-control syntax. A fixed set of critical destructive and remote-fetch-and-execute patterns always forces exec approval even if a user allow rule matched. Interception and approval are separate mechanisms: interception routes misuse toward dedicated tools; approval governs whether execution may proceed.
+
+These rules govern the **`bash` tool only**. They do not constrain shells started through other tools — notably `eval`, which can spawn a shell via subprocess (`subprocess.run(["bash", "-c", ...])`, `Bun.$`, etc.). A `bash.patterns` `deny` rule therefore does nothing when the same command is issued through `eval`. To harden against destructive commands across both surfaces, pair `bash.patterns` with a `tools.approval.eval` policy (`prompt` or `deny`); see [Tool approval mode](./approval-mode.md).
 
 ## 2) Optional interception (blocked-command path)
 
-If `bashInterceptor.enabled` is true, `BashTool` loads rules from settings (`getBashInterceptorRules()`) and runs `checkBashInterception()` against the command — checking both the original and the cwd-normalized form (after a leading `cd … &&` is extracted) when they differ.
+If `bashInterceptor.enabled` is true, `BashTool` loads rules from settings (`getBashInterceptorRules()`) and runs `checkBashInterception()` against the command — checking both the original and the cwd-normalized form (after a leading `cd … &&` is extracted) when they differ. Rule syntax is unchanged: each rule checks the complete input first, then raw flat command fragments separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines, then those fragments with leading `NAME=value` assignments removed. Fragments that receive piped stdin from `|` or `|&` are excluded from the fragment candidates, including across blank/comment continuation lines, because a stdin-consuming stage cannot be replaced by a path-based dedicated tool.
 
 Interception behavior:
 
@@ -43,6 +50,7 @@ Interception behavior:
 - on block, `BashTool` throws `ToolError` with message:
   - `Blocked: ...`
   - original command included.
+- heredocs, parameter expansion, command substitutions, backticks, grouping, and malformed quoting do not produce extra fragments; they retain only the complete-input check. Interception is best-effort routing to dedicated tools, not a shell-security policy.
 
 Default rule patterns (defined in code) target common misuses:
 
@@ -56,14 +64,14 @@ Default rule patterns (defined in code) target common misuses:
 
 `InterceptionResult` includes `suggestedTool`, but `BashTool` currently surfaces only the message text (no structured suggested-tool field in `details`).
 
-## 3) CWD validation and timeout clamping
+## 3) CWD validation and timeout resolution
 
 `cwd` is resolved relative to session cwd (`resolveToCwd`), then validated via `stat`:
 
 - missing path -> `ToolError("Working directory does not exist: ...")`
 - non-directory -> `ToolError("Working directory is not a directory: ...")`
 
-Timeout is clamped to `[1, 3600]` seconds and converted to milliseconds.
+The default timeout is 300 seconds. `timeout: 0` disables the deadline. Other values are clamped to `[1, 3600]` seconds and by a positive `tools.maxTimeout` ceiling; a clamp notice and both requested/resolved values are recorded when they differ.
 
 ## 4) Artifact allocation
 
@@ -102,30 +110,39 @@ That means print mode and non-UI RPC/tool contexts always use non-PTY.
 Session-level bang-command executions pass `sessionKey: this.sessionId`.
 
 Tool-call executions pass `sessionKey: this.session.getSessionId?.()`, when available. In both surfaces, a session key isolates shell reuse per session; without one, reuse falls back to shell config/snapshot/env.
-
 Concurrent calls never share one `Shell`: the native session runs one command at a time and `Shell.abort()` kills every in-flight run on it. `executeBash()` tracks in-flight keys in `shellSessionsInUse`; while a key is busy, overlapping calls skip the cache and run through one-shot `executeShell()` (same isolation as quarantined sessions). Only the owning call releases the in-use flag or deletes the cached session in its `finally`.
 
-## Shell config and snapshot behavior
+## Bundled `jq` compatibility
 
-At each call, executor loads settings shell config (`shell`, `env`, optional `prefix`).
+Unless `PI_DISABLE_UUTILS_BUILTINS` is truthy, the non-PTY native shell registers a bundled `jq` command backed by vendored [jaq](https://github.com/01mf02/jaq), not the system `jq`. Setting that flag disables the in-process uutils command set and falls back to system binaries. The bundled jaq errors when chained access indexes through a null or missing intermediate: `.a.b` over `{}` exits 5, whereas jq returns `null`.
 
-If selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
+Guard the access with `[.a.b?][0]` when the parent may be null or absent. The `?` suppresses jaq's traversal error (jq never raises it), and `[…][0]` maps the suppressed empty output to `null` while preserving a legitimate `false` or `null` value:
+
+```jq
+{"c": [.a.b?][0]}
+```
+
+Avoid the naive `.a.b? // null`: `//` treats a legitimate `false` (and `null`) as absent, so it silently rewrites boolean data to the fallback. It also diverges on parse — `{"c": .a.b? // null}` is accepted by jaq but is a syntax error in jq (the value needs parentheses: `{"c": (.a.b? // null)}`).
+
+## Shell config, direnv, and snapshot behavior
+
+At each call, the executor loads settings shell config (`shell`, `env`, optional `prefix`) and runs `applyDirenvPreflight()`.
+
+Unless `bash.direnv` is `"off"`, preflight attempts to load the cwd's direnv/devenv changes within `bash.direnvLoadTimeoutMs`, additionally bounded by a positive command timeout. Direnv-provided variables are merged below explicit caller `env`; safe variables removed by direnv are prepended as `unset -v ...`. ACP-terminal and PTY routes run the same preflight before their backend; the non-PTY executor runs it internally.
+
+If the selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
 
 - snapshot captures aliases/functions/options from user rc,
 - snapshot creation is best-effort,
 - failure falls back to no snapshot.
 
-If `prefix` is configured, command becomes:
+If `prefix` is configured, it wraps the command after any direnv unset prefix.
 
-```text
-<prefix> <command>
-```
-
-The per-command child environment is built by `buildNonInteractiveEnv()` (`src/exec/non-interactive-env.ts`), which layers non-interactive hardening defaults **under** the caller's `env` overrides:
+The per-command child environment is then built by `buildNonInteractiveEnv()` (`src/exec/non-interactive-env.ts`), which layers non-interactive hardening defaults **under** the caller and direnv overrides:
 
 - pagers disabled (`PAGER=cat`, `GIT_PAGER=cat`, … and `LESS=FRX`),
 - editor prompts disabled (`GIT_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
-- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS=/usr/bin/false`, `NO_COLOR=1`, `CI=1`),
+- terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS=/usr/bin/false`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
 - package-manager/tooling automation flags for non-interactive behavior (npm/pnpm/yarn/pip/cargo/terraform/gh, …),
 - on Windows, UTF-8 locale/codepage defaults are added when absent.
 
@@ -197,32 +214,26 @@ For non-PTY foreground execution, `BashTool` uses a separate `TailBuffer` for pa
 
 For PTY execution, live rendering is handled by custom UI overlay, not by `onUpdate` text chunks.
 
-When `async.enabled` is true and the call passes `async: true`, `BashTool` starts a managed bash job, returns a running job result with a job id, and stores completion through the session managed-job path. Auto-backgrounding can also start this path after `bash.autoBackground.thresholdMs`.
+When `async.enabled` is true and the call passes `async: true`, `BashTool` starts a managed bash job immediately, returns a running result with a job id, and stores completion through the session job manager. Auto-backgrounding can also use this path after `bash.autoBackground.thresholdMs`; it is skipped for PTY and client-bridge terminal routes and falls back to foreground execution when the job manager is at capacity. A queued steering message can background a still-running auto-background candidate early.
 
 ## Result shaping, metadata, and error mapping
 
 After execution:
 
-1. `cancelled` handling:
-   - if abort signal is aborted -> throw `ToolAbortError` (abort semantics),
-   - else -> throw `ToolError` (treated as tool failure).
-2. PTY `timedOut` -> throw `ToolError`.
-3. empty output becomes `(no output)`.
-4. attach truncation metadata via `toolResult(...).truncationFromSummary(result, { direction: "tail" })`.
-5. exit-code mapping:
-   - missing exit code -> throw `ToolError("... missing exit status")`
-   - non-zero exit -> error result with `"Command exited with code N"` and `details.exitCode`
-   - zero exit -> success result.
+1. A cancellation or missing exit status throws a tool error. The client-bridge
+   terminal route also throws `ToolError` for timeout before structured result
+   shaping.
+2. Local non-PTY and interactive-PTY timeouts return an error result with
+   `details.timedOut = true` so the renderer can distinguish them from an
+   ordinary failure.
+3. Empty output becomes `(no output)`.
+4. A final inline byte cap protects routes that bypass `OutputSink`; it reuses the sink artifact when available or saves a `bash-original` artifact.
+5. Truncation metadata is attached from the sink summary.
+6. A nonzero exit returns an error result with `details.exitCode`; zero returns success.
 
-Success payload structure:
+Result details can also include resolved/requested timeout, `timeoutDisabled`, client `terminalId`, wall time, async job state, and truncation metadata. Truncation includes direction/reason, total and shown line/byte counts, shown range, and `artifactId` when persistence succeeded.
 
-- `content`: text output,
-- `details.meta.truncation` when truncated, including:
-  - `direction`, `truncatedBy`, total/output line+byte counts,
-  - `shownRange`,
-  - `artifactId` when available.
-
-Because built-in tools are wrapped with `wrapToolWithMetaNotice()`, truncation notice text is appended to final text content automatically (for example: `Read artifact://<id> for full output`).
+Built-in tool wrapping appends the model-facing recovery notice automatically, for example `Read artifact://<id> for full output`.
 
 ## Rendering paths
 
@@ -266,17 +277,17 @@ This component is wired by `CommandController.handleBashCommand()` and fed from 
 - Interceptor only blocks commands when suggested tool is currently available in context.
 - If artifact allocation fails, truncation still occurs but no `artifact://` back-reference is available.
 - Shell session cache has no explicit eviction in this module; lifetime is process-scoped.
-- PTY and non-PTY timeout surfaces differ:
-  - PTY exposes explicit `timedOut` result field,
-  - non-PTY maps timeout into `cancelled + annotation` summary.
+- Timeout shaping is backend-specific: local non-PTY and interactive-PTY timeouts return error results with `details.timedOut`; the client-bridge terminal creation/execution timeout paths throw `ToolError`. Non-timeout cancellations throw across these tool-call routes.
 
 ## Implementation files
 
 - [`src/tools/bash.ts`](../packages/coding-agent/src/tools/bash.ts) — tool entrypoint, input handling/interception, async and PTY/non-PTY selection, result/error mapping, bash tool renderer.
 - [`src/tools/bash-pty-selection.ts`](../packages/coding-agent/src/tools/bash-pty-selection.ts) — `canUseInteractiveBashPty` predicate for choosing the local PTY overlay.
 - [`src/tools/bash-interceptor.ts`](../packages/coding-agent/src/tools/bash-interceptor.ts) — interceptor rule matching and blocked-command messages.
+- [`src/tools/bash-skill-urls.ts`](../packages/coding-agent/src/tools/bash-skill-urls.ts) — internal-URL expansion for commands, env values, and cwd.
 - [`src/exec/bash-executor.ts`](../packages/coding-agent/src/exec/bash-executor.ts) — non-PTY executor, shell session reuse, cancellation wiring, output sink integration.
 - [`src/exec/non-interactive-env.ts`](../packages/coding-agent/src/exec/non-interactive-env.ts) — non-interactive child-process env defaults (`buildNonInteractiveEnv`) used by the non-PTY executor.
+- [`src/exec/direnv.ts`](../packages/coding-agent/src/exec/direnv.ts) — direnv/devenv environment loading used by executor preflight.
 - [`src/tools/bash-interactive.ts`](../packages/coding-agent/src/tools/bash-interactive.ts) — PTY runtime, overlay UI, input normalization, and interactive `TERM` setup.
 - [`src/session/streaming-output.ts`](../packages/coding-agent/src/session/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
 - [`src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — truncation metadata shape + notice injection wrapper.

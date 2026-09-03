@@ -78,6 +78,35 @@ function laxUriToFile(uri: string): string {
 	return filePath;
 }
 
+/** Map that treats equivalent file URI spellings as the same key. */
+export class EquivalentUriMap<Value> extends Map<string, Value> {
+	#key(uri: string): string {
+		if (!uri.startsWith("file://")) return uri;
+		const filePath = path.normalize(uriToFile(uri));
+		return process.platform === "win32" ? filePath.toLowerCase() : filePath;
+	}
+
+	override delete(uri: string): boolean {
+		const key = this.#key(uri);
+		return super.delete(key);
+	}
+
+	override get(uri: string): Value | undefined {
+		const key = this.#key(uri);
+		return super.get(key);
+	}
+
+	override has(uri: string): boolean {
+		const key = this.#key(uri);
+		return super.has(key);
+	}
+
+	override set(uri: string, value: Value): this {
+		const key = this.#key(uri);
+		return super.set(key, value);
+	}
+}
+
 // =============================================================================
 // Diagnostic Formatting
 // =============================================================================

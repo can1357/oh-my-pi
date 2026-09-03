@@ -1,0 +1,22 @@
+{
+  "documentType": "codex-security.coverage",
+  "schemaVersion": "1.0",
+  "scanId": "scan_example_001",
+  "mode": "repository",
+  "completeness": "complete",
+  "inventoryStrategy": "repository",
+  "includePaths": [
+    "src/"
+  ],
+  "excludePaths": [],
+  "surfaces": [
+    {
+      "id": "surface_archive_extraction",
+      "label": "Archive extraction",
+      "disposition": "reported",
+      "receiptRefs": []
+    }
+  ],
+  "explicitExclusions": [],
+  "deferred": []
+}

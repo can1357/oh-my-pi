@@ -4,6 +4,37 @@ Historical research note, not a current runtime contract. The statistics below
 come from the named local stats database snapshot, not from checked-in tests or
 runtime code.
 
+## Current runtime mitigation
+
+Current behavior is implemented in
+`packages/ai/src/utils/harmony-leak.ts` and
+`packages/agent/src/agent-loop.ts`:
+
+- Requests to Harmony-dialect models escape reserved `<|...|>` spellings in
+  untrusted text, tool results, and serialized tool arguments before replay.
+- Response leak detection is enabled for every model whose provider is
+  `openai-codex`, rather than for a fixed model-ID list.
+- A bare `to=functions.NAME` marker is not sufficient. Detection requires a
+  co-signal (channel adjacency, glitch token, script mismatch, cascade,
+  fake-result framing, or a trusted trailing-parse boundary); fenced examples
+  are ignored.
+- The agent loop scans finalized visible text and thinking. On a hit it discards
+  the partial response and retries up to two times, then escalates with an
+  error. Audit callbacks receive action/signal metadata and a hash/redacted
+  preview of removed content.
+- Tool-argument detection is intentionally inert unless a caller supplies the
+  byte offset where a structurally valid tool parse ended. The main agent loop
+  does not currently supply that boundary, avoiding false aborts on legitimate
+  tool data that discusses the protocol.
+- Recovery support exists for bounded free-form `eval` input and the current
+  hashline `edit` DSL (input beginning with `@`): it truncates at the
+  contaminated line and appends `*** Abort`. Apply-patch envelopes and
+  JSON-schema edit inputs are not recovery-eligible and use abort/retry when a
+  bounded detection is available.
+
+The corpus tables below describe the historical input formats present in that
+snapshot; they are not a list of the current `edit` tool's accepted syntaxes.
+
 ## 1. The problem
 
 OpenAI frames tool calls in the Harmony chat protocol:

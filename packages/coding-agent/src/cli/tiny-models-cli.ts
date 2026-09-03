@@ -1,5 +1,5 @@
 import { formatBytes } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
 	getTinyLocalModelSpec,

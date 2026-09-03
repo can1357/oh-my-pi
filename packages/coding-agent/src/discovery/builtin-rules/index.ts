@@ -28,6 +28,7 @@ import tsNoAny from "./ts-no-any.md" with { type: "text" };
 import tsNoDeprecatedLeftovers from "./ts-no-deprecated-leftovers.md" with { type: "text" };
 import tsNoDynamicImport from "./ts-no-dynamic-import.md" with { type: "text" };
 import tsNoInlineCastAccess from "./ts-no-inline-cast-access.md" with { type: "text" };
+import tsNoLocalIsRecord from "./ts-no-local-is-record.md" with { type: "text" };
 import tsNoReturnType from "./ts-no-return-type.md" with { type: "text" };
 import tsNoTestTimers from "./ts-no-test-timers.md" with { type: "text" };
 import tsNoTinyFunctions from "./ts-no-tiny-functions.md" with { type: "text" };
@@ -63,6 +64,7 @@ export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "ts-no-deprecated-leftovers", content: tsNoDeprecatedLeftovers },
 	{ name: "ts-no-dynamic-import", content: tsNoDynamicImport },
 	{ name: "ts-no-inline-cast-access", content: tsNoInlineCastAccess },
+	{ name: "ts-no-local-is-record", content: tsNoLocalIsRecord },
 	{ name: "ts-no-return-type", content: tsNoReturnType },
 	{ name: "ts-no-test-timers", content: tsNoTestTimers },
 	{ name: "ts-no-tiny-functions", content: tsNoTinyFunctions },

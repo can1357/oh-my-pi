@@ -54,11 +54,109 @@ describe("BashTool interception", () => {
 			},
 		]);
 
+		const command = "cd packages/coding-agent && cat package.json";
 		await expect(
-			tool.execute("tool-call", { command: "cd packages/coding-agent && cat package.json" }, undefined, undefined, {
+			tool.execute("tool-call", { command }, undefined, undefined, {
 				toolNames: ["read"],
 			} as AgentToolContext),
-		).rejects.toThrow("Use read instead");
+		).rejects.toThrow(`Use read instead.\n\nOriginal command: ${command}`);
+	});
+});
+
+describe("compound command interception", () => {
+	const rules: BashInterceptorRule[] = [
+		{
+			pattern: "^\\s*git\\s+commit\\b",
+			tool: "commit",
+			message: "Use the commit tool instead.",
+		},
+	];
+
+	it.each([
+		"git commit -m message",
+		"git add file && git commit -m message",
+		"git add file; git commit -m message",
+		"git add file || git commit -m message",
+		"git add file & git commit -m message",
+		"git add file\ngit commit -m message",
+	])("blocks a later command after %s", command => {
+		expect(checkBashInterception(command, ["commit"], rules).block).toBe(true);
+	});
+
+	it("does not intercept a downstream pipe stage that consumes piped stdin", () => {
+		// `git commit` after a single `|` reads the previous stage's stdout, so
+		// the dedicated tool cannot replace it. `||` still starts a fresh command.
+		expect(checkBashInterception("git add file | git commit -m message", ["commit"], rules).block).toBe(false);
+		expect(checkBashInterception("git add file || git commit -m message", ["commit"], rules).block).toBe(true);
+	});
+
+	it("removes one or more leading environment assignments before matching", () => {
+		expect(
+			checkBashInterception('GIT_AUTHOR_EMAIL="a@example.com" git commit -m message', ["commit"], rules).block,
+		).toBe(true);
+		expect(
+			checkBashInterception(
+				'GIT_AUTHOR_EMAIL="a@example.com" GIT_AUTHOR_NAME=Dev git commit -m message',
+				["commit"],
+				rules,
+			).block,
+		).toBe(true);
+	});
+
+	it("does not treat quoted, escaped, or commented text as a later command", () => {
+		for (const command of [
+			"printf '%s\\n' \"git add file && git commit -m message\"",
+			'echo "git commit"',
+			"echo git\\ commit",
+			"echo ok # git commit -m message",
+		]) {
+			expect(checkBashInterception(command, ["commit"], rules).block).toBe(false);
+		}
+	});
+
+	it("does not treat redirection targets as later commands", () => {
+		for (const command of [
+			"echo hi >|git commit -m message",
+			"echo hi >| git commit -m message",
+			"echo hi >&git commit -m message",
+			"echo hi >& git commit -m message",
+			"echo hi <&3 git commit -m message",
+		]) {
+			expect(checkBashInterception(command, ["commit"], rules).block).toBe(false);
+		}
+		// <& is a redirect operator, so the & does not split the command;
+		// but when a && follows the redirect, the later command is still extracted.
+		expect(checkBashInterception("echo hi <&3 && git commit -m message", ["commit"], rules).block).toBe(true);
+	});
+
+	it("does not add matches for unsupported shell syntax", () => {
+		for (const command of [
+			'echo "$(git commit -m message)"',
+			"echo `git commit -m message`",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell parameter expansion under test
+			"echo ${x:-foo;git commit -m message}",
+			"( git commit -m message )",
+			"echo start; { true; git commit -m message; }",
+			"cat <<'EOF'\ngit commit -m message\nEOF",
+		]) {
+			expect(checkBashInterception(command, ["commit"], rules).block).toBe(false);
+		}
+	});
+
+	it("keeps matching a rule written for the complete original input", () => {
+		const command = "git add file && git commit -m message";
+		const completeInputRule: BashInterceptorRule[] = [
+			{
+				pattern: "^git add file && git commit",
+				tool: "commit",
+				message: "Use the commit tool instead.",
+			},
+		];
+		expect(checkBashInterception(command, ["commit"], completeInputRule).block).toBe(true);
+	});
+
+	it("does not block when the suggested tool is unavailable", () => {
+		expect(checkBashInterception("git add file && git commit -m message", [], rules).block).toBe(false);
 	});
 });
 
@@ -108,6 +206,40 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception('echo "<p>hi</p>"', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception("printf 'use 2>&1'", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		expect(checkBashInterception('echo "err" >&2', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+	});
+});
+
+describe("default grep rule and pipeline stdin", () => {
+	const tools = ["grep"];
+
+	it("blocks standalone file searches", () => {
+		expect(checkBashInterception("grep pattern path", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("rg pattern src", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+	});
+
+	it("blocks a first-stage grep that produces pipeline input", () => {
+		expect(checkBashInterception("grep x file | wc -l", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+	});
+
+	it("does not block grep consuming pipeline stdin", () => {
+		expect(checkBashInterception("printf 'x\\n' | grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(
+			checkBashInterception("tr -d '\\r' < input.log | grep -v '^ *foo'", tools, DEFAULT_BASH_INTERCEPTOR_RULES)
+				.block,
+		).toBe(false);
+		expect(checkBashInterception("printf 'x\\n' |\n grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+		expect(
+			checkBashInterception("printf 'x\\n' |\n # filter\n grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
+		).toBe(false);
+		expect(checkBashInterception("printf 'x\\n' |& grep x", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+	});
+
+	it("still blocks a standalone grep sequenced after a pipeline", () => {
+		expect(
+			checkBashInterception("cat log | tr a b && grep err file", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
+		).toBe(true);
 	});
 });
 

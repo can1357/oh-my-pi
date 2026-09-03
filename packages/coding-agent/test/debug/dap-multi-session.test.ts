@@ -6,7 +6,9 @@ import type {
 	DapClientState,
 	DapEventMessage,
 	DapResolvedAdapter,
+	DapThread,
 } from "@oh-my-pi/pi-coding-agent/dap/types";
+import { type ChildProcess, ptree } from "@oh-my-pi/pi-utils";
 
 const TEST_ADAPTER: DapResolvedAdapter = {
 	name: "js-debug-adapter",
@@ -25,6 +27,13 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 type EventHandler = (body: unknown, event: DapEventMessage) => void | Promise<void>;
 type ReverseHandler = (args: unknown) => unknown | Promise<unknown>;
 
+interface FakeOptions {
+	/** Threads returned by this session's `threads` request. */
+	threads?: DapThread[];
+	/** Thread id reported by the synthetic `stopped` event (defaults to 7). */
+	stopThreadId?: number;
+}
+
 class FakeDapClient {
 	readonly proc: DapClientState["proc"];
 	readonly port = 8123;
@@ -39,6 +48,7 @@ class FakeDapClient {
 		readonly childConfiguration?: Record<string, unknown>,
 		readonly childRequest: "launch" | "attach" = "launch",
 		readonly stopOnStart = true,
+		readonly options: FakeOptions = {},
 	) {
 		this.proc = {
 			exited: this.#exited.promise,
@@ -71,10 +81,10 @@ class FakeDapClient {
 					});
 				});
 			} else if (this.stopOnStart) {
-				queueMicrotask(() => this.#emit("stopped", { reason: "entry", threadId: 7 }));
+				queueMicrotask(() => this.#emit("stopped", { reason: "entry", threadId: this.options.stopThreadId ?? 7 }));
 			}
 		}
-		if (command === "threads") return { threads: [{ id: 7, name: "target.js" }] };
+		if (command === "threads") return { threads: this.options.threads ?? [{ id: 7, name: "target.js" }] };
 		if (command === "stackTrace") {
 			return {
 				stackFrames: [{ id: 70, name: "main", line: 2, column: 1, source: { path: "/tmp/target.js" } }],
@@ -125,6 +135,11 @@ class FakeDapClient {
 
 	emit(event: string, body: unknown): void {
 		this.#emit(event, body);
+	}
+
+	/** Drive an adapter-initiated reverse request (e.g. a late `startDebugging`). */
+	async triggerReverse(command: string, args: unknown): Promise<void> {
+		await this.#emitReverse(command, args);
 	}
 
 	async #emitReverse(command: string, args: unknown): Promise<void> {
@@ -196,6 +211,9 @@ describe("DAP multi-session debugging", () => {
 				__pendingTargetId: "attached-child",
 			},
 			"attach",
+			true,
+			// Threadless launcher: answers `threads` with an empty list.
+			{ threads: [] },
 		);
 		const child = new FakeDapClient(undefined, "launch", false);
 		spyOn(DapClient, "spawn").mockResolvedValue(root as unknown as DapClient);
@@ -209,7 +227,9 @@ describe("DAP multi-session debugging", () => {
 		expect(active?.parentSessionId).toBeDefined();
 		expect(threads.threads).toEqual([{ id: 7, name: "target.js" }]);
 		expect(child.requests.filter(request => request.command === "threads")).toHaveLength(1);
-		expect(root.requests.filter(request => request.command === "threads")).toHaveLength(0);
+		// The root is queried too (no topology guess), but being threadless it
+		// contributes nothing.
+		expect(root.requests.filter(request => request.command === "threads")).toHaveLength(1);
 
 		await manager.terminate(undefined, 100);
 	});
@@ -245,5 +265,159 @@ describe("DAP multi-session debugging", () => {
 		expect(root.requests.filter(request => request.command === "threads")).toHaveLength(1);
 
 		await manager.terminate(undefined, 100);
+	});
+
+	it("keeps focus on the stopped script child when a worker attaches later", async () => {
+		const root = new FakeDapClient(
+			{
+				name: "script.mts",
+				type: "pwa-node",
+				__pendingTargetId: "main",
+				program: "/tmp/script.mts",
+			},
+			"launch",
+			true,
+			// Threadless launcher: it answers `threads` with an empty list.
+			{ threads: [] },
+		);
+		// The script child stops on entry (thread 1), then a worker session
+		// attaches afterwards via a late reverse `startDebugging`.
+		const main = new FakeDapClient(undefined, "launch", true, {
+			threads: [{ id: 1, name: "script.mts" }],
+			stopThreadId: 1,
+		});
+		const worker = new FakeDapClient(undefined, "launch", false, {
+			threads: [{ id: 1, name: "[worker 1]" }],
+		});
+		const children = [main, worker];
+		spyOn(DapClient, "spawn").mockResolvedValue(root as unknown as DapClient);
+		spyOn(DapClient, "connect").mockImplementation(async () => {
+			const next = children.shift();
+			if (!next) throw new Error("Unexpected child DAP connection");
+			return next as unknown as DapClient;
+		});
+		const manager = new DapSessionManager();
+
+		const launched = await manager.launch(
+			{ adapter: TEST_ADAPTER, program: "/tmp/script.mts", cwd: "/tmp" },
+			undefined,
+			1_000,
+		);
+		expect(launched.status).toBe("stopped");
+		const scriptSessionId = launched.id;
+
+		// A worker_threads spawn triggers a late child attach on the launcher.
+		await root.triggerReverse("startDebugging", {
+			request: "launch",
+			configuration: { name: "[worker 1]", type: "pwa-node" },
+		});
+		expect(manager.listSessions()).toHaveLength(3);
+
+		// Focus must stay on the stopped script child, not jump to the worker.
+		const active = manager.getActiveSession();
+		expect(active?.id).toBe(scriptSessionId);
+		expect(active?.threadId).toBe(1);
+
+		// `threads` must surface every live thread across the tree, not just one.
+		const threads = await manager.threads(undefined, 1_000);
+		expect(threads.threads).toHaveLength(2);
+		expect(threads.threads).toEqual(
+			expect.arrayContaining([
+				{ id: 1, name: "script.mts" },
+				{ id: 1, name: "[worker 1]" },
+			]),
+		);
+		// The launcher is still queried, but being threadless it contributes none.
+		expect(root.requests.filter(request => request.command === "threads")).toHaveLength(1);
+
+		await manager.terminate(undefined, 1_000);
+	});
+
+	it("preserves per-session threads that share an id and name across children", async () => {
+		const root = new FakeDapClient(
+			{ name: "pool.mjs", type: "pwa-node", __pendingTargetId: "main", program: "/tmp/pool.mjs" },
+			"launch",
+			true,
+			{ threads: [] },
+		);
+		// Two identical worker scripts each expose the same session-local thread
+		// id and name; DAP scopes ids per session, so both are distinct threads.
+		const main = new FakeDapClient(undefined, "launch", true, {
+			threads: [{ id: 1, name: "worker.js" }],
+			stopThreadId: 1,
+		});
+		const worker = new FakeDapClient(undefined, "launch", false, {
+			threads: [{ id: 1, name: "worker.js" }],
+		});
+		const children = [main, worker];
+		spyOn(DapClient, "spawn").mockResolvedValue(root as unknown as DapClient);
+		spyOn(DapClient, "connect").mockImplementation(async () => {
+			const next = children.shift();
+			if (!next) throw new Error("Unexpected child DAP connection");
+			return next as unknown as DapClient;
+		});
+		const manager = new DapSessionManager();
+
+		await manager.launch({ adapter: TEST_ADAPTER, program: "/tmp/pool.mjs", cwd: "/tmp" }, undefined, 1_000);
+		await root.triggerReverse("startDebugging", {
+			request: "launch",
+			configuration: { name: "worker #2", type: "pwa-node" },
+		});
+		expect(manager.listSessions()).toHaveLength(3);
+
+		const threads = await manager.threads(undefined, 1_000);
+		// Both identical threads survive aggregation \u2014 not collapsed into one.
+		expect(threads.threads).toEqual([
+			{ id: 1, name: "worker.js" },
+			{ id: 1, name: "worker.js" },
+		]);
+
+		await manager.terminate(undefined, 1_000);
+	});
+
+	it("drains a runInTerminal debuggee's stdout into the session output buffer", async () => {
+		const root = new FakeDapClient(undefined, "launch", true);
+		spyOn(DapClient, "spawn").mockResolvedValue(root as unknown as DapClient);
+
+		// Synthetic debuggee stdout: >64KB ahead of a unique terminal marker,
+		// then a trailing sentinel and EOF. The handler discards the ptree child
+		// after reading its PID, so the drain must consume this whole stream and
+		// route it to the session output — undrained, the marker never reaches
+		// the buffer. The sentinel after the marker guarantees the marker chunk
+		// is routed (in the read cycle before it) before `closed` resolves.
+		const marker = "__RUNINTERMINAL_MARKER__";
+		const enc = new TextEncoder();
+		const chunks = [enc.encode("x".repeat(128 * 1024)), enc.encode(`${marker}\n`), enc.encode("tail\n")];
+		let next = 0;
+		const closed = Promise.withResolvers<void>();
+		const stdout = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (next < chunks.length) {
+					controller.enqueue(chunks[next++]);
+				} else {
+					controller.close();
+					closed.resolve();
+				}
+			},
+		});
+		const spawnSpy = spyOn(ptree, "spawn").mockReturnValue({ pid: 4242, stdout } as unknown as ChildProcess);
+
+		const manager = new DapSessionManager();
+		await manager.launch({ adapter: TEST_ADAPTER, program: "/tmp/target.js", cwd: "/tmp" }, undefined, 1_000);
+
+		await root.triggerReverse("runInTerminal", { args: ["/usr/bin/debuggee", "--verbose"] });
+		// The stream reaching EOF proves the drain consumed it end to end; the
+		// marker (routed before close) is then present in the session output.
+		await closed.promise;
+
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+		expect(spawnSpy.mock.calls[0]?.[0]).toEqual(["/usr/bin/debuggee", "--verbose"]);
+		const output = manager.getOutput();
+		expect(output.output).toContain(marker);
+		expect(output.snapshot.outputBytes).toBeGreaterThan(128 * 1024);
+		expect(output.snapshot.outputTruncated).toBe(true);
+		expect(Buffer.byteLength(output.output, "utf-8")).toBeLessThanOrEqual(128 * 1024);
+
+		await manager.terminate(undefined, 1_000);
 	});
 });

@@ -18,6 +18,7 @@ export type OpenAIResponsesToolChoice =
 	| "required"
 	| { type: "function"; name: string }
 	| { type: "custom"; name: string }
+	| { type: "computer" }
 	| undefined;
 
 /** Anthropic-compatible tool choice format */
@@ -78,6 +79,7 @@ export function mapToOpenAIResponsesToolChoice(choice?: ToolChoice): OpenAIRespo
 		if (choice === "auto" || choice === "none" || choice === "required") return choice;
 		return undefined;
 	}
+	if (choice.type === "computer") return { type: "computer" };
 	const name = extractFunctionName(choice);
 	return name ? { type: "function", name } : undefined;
 }

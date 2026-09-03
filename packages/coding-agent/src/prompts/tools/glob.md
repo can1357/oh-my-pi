@@ -1,15 +1,16 @@
-Globs files and directories via fast pattern matching, any codebase size.
+Globs files, directories, and path-backed internal URLs with fast pattern matching.
 
 <instruction>
-- `path`: a glob, file, or directory. Search several at once by passing a semicolon-delimited list (`src/**/*.ts; test/**/*.ts`).
-- `gitignore` (default `true`) hides `.gitignore` matches. Set `gitignore: false` to find `.env*`, `*.log`, fresh build outputs, or anything your repo ignores.
-- `hidden` (default `true`); combine with `gitignore: false` to surface dotfiles also gitignored.
+- `path`: glob, file, directory, or path-backed internal URL; separate targets with `;` (`src/**/*.ts; test/**/*.ts`).
+- `memory://` glob patterns are supported. `ssh://` has no local path; use `read`. Other internal URLs accept exact paths only.
+- `gitignore` defaults `true`. Set `false` for ignored files such as `.env*`, logs, or build output.
+- `hidden` defaults `true`; pair it with `gitignore: false` for ignored dotfiles.
 </instruction>
 
 <output>
-Matching paths sorted by mtime (newest first), grouped under `# <dir>/` headers with basenames below; directories get a trailing `/`.
+Matches are newest-first and grouped by directory; directories end in `/`.
 </output>
 
 <avoid>
-Open-ended searches needing multiple rounds of globbing/searching: you MUST use the Task tool instead.
+Open-ended multi-round discovery → {{#if scoutAvailable}}Task + scout.{{else}}Task.{{/if}}
 </avoid>

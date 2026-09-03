@@ -1,7 +1,8 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { parseHTML } from "linkedom";
+import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatScraperQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -98,15 +99,19 @@ function isBlockedPage(page: LoadedHtmlPage): boolean {
 }
 
 async function callEcosiaHtml(params: SearchParams): Promise<string> {
-	const signal = withHardTimeout(params.signal);
+	const signal = withHardTimeout(params.signal, params.timeoutMs);
 	const url = new URL(ECOSIA_SEARCH_URL);
-	url.searchParams.set("q", params.query);
+	// Ecosia serves Google-backed results, so classic operators pass through
+	// inline; canonicalize aliases (domain: -> site:, since: -> after:) and
+	// demote scraper-hostile operators via the shared scraper formatter.
+	url.searchParams.set("q", formatScraperQuery(params.query, params.parsedQuery));
 
 	let page: LoadedHtmlPage;
 	try {
 		page = await browserFetch(url.href, {
 			fetch: params.fetch,
 			signal,
+			timeoutMs: params.timeoutMs,
 			referer: ECOSIA_HOME_URL,
 			browser: {
 				homeUrl: ECOSIA_HOME_URL,
@@ -168,7 +173,7 @@ export class EcosiaProvider extends SearchProvider {
 		return true;
 	}
 
-	isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

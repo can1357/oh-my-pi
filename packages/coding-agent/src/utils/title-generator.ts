@@ -1,10 +1,12 @@
 /**
  * Generate session titles using a smol, fast model.
  */
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
+import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
@@ -20,8 +22,73 @@ import { tinyTitleClient } from "../tiny/title-client";
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
+// Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
+// OS UI font, which has no nerd-font PUA coverage.
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+/**
+ * Emit a raw title escape sequence. While the TUI owns stdout its frames are
+ * written by an off-thread pump, and a direct `process.stdout.write` can land
+ * mid-frame — inside a torn escape sequence — making the terminal print the
+ * title payload as text into the viewport. Route through the active terminal's
+ * write path; fall back to stdout only when no TUI has the terminal.
+ */
+function writeTitleSequence(seq: string): void {
+	if (!writeThroughActiveTerminal(seq)) process.stdout.write(seq);
+}
+
+interface WindowsConsoleTitleApi {
+	set(title: string): boolean;
+	close(): void;
+}
+
+let windowsConsoleTitleApi: WindowsConsoleTitleApi | null | undefined;
+let lastTerminalTitle: string | undefined;
+
+function getWindowsConsoleTitleApi(): WindowsConsoleTitleApi | null {
+	if (process.platform !== "win32") return null;
+	if (windowsConsoleTitleApi !== undefined) return windowsConsoleTitleApi;
+	try {
+		const kernel32 = dlopen("kernel32.dll", {
+			SetConsoleTitleW: { args: [FFIType.ptr], returns: FFIType.bool },
+		});
+		windowsConsoleTitleApi = {
+			set(title) {
+				const wideTitle = Buffer.from(`${title}\0`, "utf16le");
+				return kernel32.symbols.SetConsoleTitleW(ptr(wideTitle));
+			},
+			close: () => kernel32.close(),
+		};
+	} catch {
+		windowsConsoleTitleApi = null;
+	}
+	return windowsConsoleTitleApi;
+}
+
+function setWindowsConsoleTitle(title: string): boolean {
+	const api = getWindowsConsoleTitleApi();
+	if (!api) return false;
+	try {
+		return api.set(title);
+	} catch {
+		try {
+			api.close();
+		} catch {
+			// Ignore cleanup failures after the native title path has already failed.
+		}
+		windowsConsoleTitleApi = null;
+		return false;
+	}
+}
+
+function disposeWindowsConsoleTitleApi(): void {
+	try {
+		windowsConsoleTitleApi?.close();
+	} catch {
+		// Terminal teardown must remain best-effort.
+	}
+	windowsConsoleTitleApi = undefined;
+}
 
 // Cover the "backend ignores `disableReasoning`" case unconditionally: the
 // static `model.reasoning` catalog flag can't distinguish a thinking model that
@@ -69,6 +136,8 @@ function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel
  *   reflects the credential actually selected for this request.
  * @param customSystemPrompt Optional title-specific system prompt override
  * @param signal Session-lifecycle cancellation for background title requests
+ * @param credentialSourceSessionId Optional foreground session whose selected
+ *   OAuth credential should seed an isolated title-request session.
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -79,6 +148,7 @@ export async function generateSessionTitle(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	customSystemPrompt?: string,
 	signal?: AbortSignal,
+	credentialSourceSessionId?: string,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -101,6 +171,7 @@ export async function generateSessionTitle(
 			metadataResolver,
 			signal,
 			titleSystemPrompt,
+			credentialSourceSessionId,
 		);
 	}
 
@@ -159,6 +230,7 @@ export async function generateTitleOnline(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
+	credentialSourceSessionId?: string,
 ): Promise<string | null> {
 	const model = getTitleModel(registry, settings, currentModel);
 	if (!model) {
@@ -184,6 +256,14 @@ export async function generateTitleOnline(
 	logger.debug("title-generator: start", modelContext);
 
 	try {
+		if (credentialSourceSessionId && sessionId && credentialSourceSessionId !== sessionId) {
+			const foregroundCredential = registry.authStorage
+				.listOAuthAccounts(model.provider, credentialSourceSessionId)
+				.find(account => account.active);
+			if (foregroundCredential) {
+				registry.authStorage.pinSessionOAuthAccount(model.provider, sessionId, foregroundCredential.credentialId);
+			}
+		}
 		const apiKey = await registry.getApiKey(model, sessionId);
 		if (!apiKey) {
 			logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
@@ -199,19 +279,28 @@ export async function generateTitleOnline(
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt,
-				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-			},
-			{
-				apiKey: registry.resolver(model, sessionId),
-				maxTokens,
-				disableReasoning: true,
-				metadata,
-				signal,
-			},
+		const response = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						systemPrompt,
+						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(model, sessionId),
+						maxTokens,
+						disableReasoning: true,
+						// Greedy decode: titling is extraction, not generation. Backends that
+						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+						// from the message ("hashline" → "HasHroshi"). Providers whose models
+						// reject sampling params drop this via `supportsSamplingParams`.
+						temperature: 0,
+						metadata,
+						signal,
+					},
+				),
+			{ signal },
 		);
 
 		if (response.stopReason === "error") {
@@ -379,15 +468,152 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
 }
 
 /**
- * Set the terminal title using OSC 0 (sets both tab and window title). Unsupported terminals ignore it.
+ * Set the terminal title through the native Win32 API or OSC 0.
+ *
+ * Repeating the same sanitized title is a no-op on every platform.
  */
 export function setTerminalTitle(title: string): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	process.stdout.write(`\x1b]0;${sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE}\x07`);
+	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
+	if (next === lastTerminalTitle) return;
+	if (!setWindowsConsoleTitle(next)) writeTitleSequence(`\x1b]0;${next}\x07`);
+	lastTerminalTitle = next;
 }
 
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
-	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd));
+	// An authoritative session title (rename, new session, focus swap) supersedes
+	// any extension override so the base title tracks the real session again.
+	terminalTitleRuntime.extensionOverride = undefined;
+	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	emitTerminalTitle();
+}
+
+/**
+ * Set a terminal title from an extension's `setTitle()`. Unlike the session base
+ * title, this owns the terminal verbatim: periodic and run-state updates will not
+ * rewrite it. Cleared when the app next sets an authoritative session title via
+ * {@link setSessionTerminalTitle}.
+ */
+export function setExtensionTerminalTitle(title: string): void {
+	terminalTitleRuntime.extensionOverride = title;
+	emitTerminalTitle();
+}
+
+export type TerminalTitleState = "idle" | "working" | "attention";
+
+/** Windows uses a static working separator instead of scheduling title animation. */
+const WINDOWS_TITLE_WORKING_SEPARATOR = ":";
+const TITLE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const TITLE_SPINNER_INTERVAL_MS = 80;
+/** The user's turn: the title reads like a shell prompt awaiting input. */
+const TITLE_IDLE_SEPARATOR = ">";
+/** Agent blocked on the user (ask / approval prompt). */
+const TITLE_ATTENTION_SEPARATOR = "!";
+
+const terminalTitleRuntime: {
+	label: string | undefined;
+	state: TerminalTitleState;
+	frame: number;
+	enabled: boolean;
+	timer: NodeJS.Timeout | undefined;
+	/** A title an extension set via `setTitle()`. While set, it owns the terminal
+	 *  title verbatim: the run-state separator never rewrites it. Cleared when the
+	 *  app next establishes an authoritative session title (rename, new session,
+	 *  focus swap) via `setSessionTerminalTitle`. */
+	extensionOverride: string | undefined;
+} = {
+	label: undefined,
+	state: "idle",
+	frame: 0,
+	enabled: true,
+	timer: undefined,
+	extensionOverride: undefined,
+};
+
+/**
+ * Compose the terminal title from the `π` brand, a state-carrying separator, and
+ * the session label. Pure (no I/O) so the state→separator contract is testable:
+ *   - `idle` (user's turn):  `π > label`;
+ *   - `working`:             `π ⠋ label` (`π : label` on Windows);
+ *   - `attention`:           `π ! label`;
+ *   - disabled:              `π: label`.
+ * Without a label the separator trails the brand (`π >`) so the state stays visible.
+ */
+export function buildTerminalTitleWithState(
+	label: string | undefined,
+	state: TerminalTitleState,
+	frame: number,
+	enabled: boolean,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	const separator =
+		state === "working"
+			? platform === "win32"
+				? WINDOWS_TITLE_WORKING_SEPARATOR
+				: TITLE_SPINNER_FRAMES[frame % TITLE_SPINNER_FRAMES.length]
+			: state === "attention"
+				? TITLE_ATTENTION_SEPARATOR
+				: TITLE_IDLE_SEPARATOR;
+	return label ? `${DEFAULT_TERMINAL_TITLE} ${separator} ${label}` : `${DEFAULT_TERMINAL_TITLE} ${separator}`;
+}
+
+function emitTerminalTitle(): void {
+	// An extension override owns the terminal verbatim; the terminal sink
+	// deduplicates repeated state updates.
+	const next =
+		terminalTitleRuntime.extensionOverride ??
+		buildTerminalTitleWithState(
+			terminalTitleRuntime.label,
+			terminalTitleRuntime.state,
+			terminalTitleRuntime.frame,
+			terminalTitleRuntime.enabled,
+			isConPTYHosted() ? "win32" : process.platform,
+		);
+	setTerminalTitle(next);
+}
+
+function stopTerminalTitleSpinner(): void {
+	clearInterval(terminalTitleRuntime.timer);
+	terminalTitleRuntime.timer = undefined;
+}
+
+function startTerminalTitleSpinner(): void {
+	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	terminalTitleRuntime.timer = setInterval(() => {
+		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
+		emitTerminalTitle();
+	}, TITLE_SPINNER_INTERVAL_MS);
+	// Never keep the event loop alive for a cosmetic animation.
+	terminalTitleRuntime.timer.unref?.();
+}
+
+/**
+ * Reflect the agent run state in the terminal title's separator: `working`
+ * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
+ * turn), and `attention` shows `!` (agent blocked on you). Gated off by
+ * `tui.titleState`.
+ */
+export function setTerminalTitleState(state: TerminalTitleState): void {
+	terminalTitleRuntime.state = state;
+	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
+export function setTerminalTitleStateEnabled(enabled: boolean): void {
+	terminalTitleRuntime.enabled = enabled;
+	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
+	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/** Release terminal-title runtime resources. */
+export function disposeTerminalTitleState(): void {
+	stopTerminalTitleSpinner();
+	disposeWindowsConsoleTitleApi();
+	lastTerminalTitle = undefined;
 }
 
 /**
@@ -395,7 +621,7 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  */
 export function pushTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	process.stdout.write("\x1b[22;2t");
+	writeTitleSequence("\x1b[22;2t");
 }
 
 /**
@@ -403,5 +629,5 @@ export function pushTerminalTitle(): void {
  */
 export function popTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	process.stdout.write("\x1b[23;2t");
+	writeTitleSequence("\x1b[23;2t");
 }

@@ -126,6 +126,14 @@ Some Harmony serializers include an explicit JSON content type and place the rec
 
 The arguments body is a raw JSON object. The optional `<|constrain|>json` content-type signals JSON (and is the hook for constrained/grammar-based decoding); the content-type may also be a bare word such as `code` (seen with built-in tools). Built-in tools differ only in channel and recipient: they typically render on `analysis`, with recipient `browser.search` / `browser.open` / `browser.find` or always `python`.
 
+### OMP `harmony` dialect behavior
+
+OMP emits the first form above: no `<|constrain|>` marker, recipient in the channel section, and compact JSON arguments. It synthesizes a call id on receipt because Harmony carries none. The stateful scanner accepts the recipient in either header section, strips a leading `functions.` from the exposed tool name, and treats any nonempty recipient other than `assistant` as a tool call (including built-ins such as `browser.search`).
+
+Arguments are accumulated until `<|call|>`, `<|end|>`, or `<|return|>` and parsed with JSON repair. Empty arguments, or input that still cannot be parsed after repair, become `{}` rather than a scanner error. The scanner emits `toolStart` when the header completes and `toolEnd` only at the message terminator; `analysis` body chunks stream as thinking deltas, while ordinary assistant `commentary`/`final` bodies stream as text. Non-assistant messages, including tool-result envelopes, are skipped by this output scanner.
+
+An important owned-scanner edge case differs from canonical Harmony. After a recipient-bearing header reaches `<\|message\|>`, OMP has already emitted `toolStart`. If the ordinary streaming path drains the body bytes and the stream then ends without `<\|call\|>`, `<\|end\|>`, or `<\|return\|>`, `flush()` emits no `toolEnd` and does not retract the start. The Harmony scanner emits no argument deltas, so the retained canonical call still has `{}` even if unterminated body text was seen. On a normal stop, OMP changes the turn to `toolUse` and may dispatch that empty call. This is permissive and unsafe recovery behavior, not a valid Harmony terminator rule.
+
 ## Multiple / parallel tool calls
 
 Harmony has no special "parallel" wrapper. Multiple calls are just multiple consecutive messages. The model may first emit an optional **preamble** — a *user-visible* assistant message on the `commentary` channel (unlike `analysis`, this is meant to be shown) — then one tool-call message per function. Each individual call still ends with its own `<|call|>` stop token, so a host that stops on `<|call|>` collects calls one at a time, executes, feeds the result back, and resumes:
@@ -148,6 +156,8 @@ The executed tool's output is fed back as a message whose **author/role is the t
 ```
 
 The header ordering is `{toolname} to=assistant<|channel|>commentary`. Built-in tool results follow the same shape (e.g. `<|start|>browser.search to=assistant<|channel|>commentary<|message|>{"result": "https://openai.com/"}<|end|>`). The minimal form the renderer accepts when channel/recipient are not set on the message is just `<|start|>{toolname}<|message|>{output}<|end|>`, but emitting the full `to=assistant<|channel|>commentary` header is what the reference parser round-trips and is recommended. After appending the result, restart generation by emitting the next `<|start|>assistant`.
+
+OMP always renders the full canonical result header shown above and passes `result.text` through verbatim. Harmony has no dedicated error bit, so `isError` is not represented separately; a failure must be described in the result payload.
 
 ## End-to-end example
 
@@ -198,7 +208,9 @@ When a server (vLLM/SGLang/Ollama) bridges Harmony to Chat Completions JSON:
 - **`tool_call_id`**: Harmony has no native call ID. The server synthesizes one (e.g. `call_abc123`) and is responsible for correlating the follow-up `role:"tool"` message back to the Harmony tool-result envelope (recipient `to=functions.<name>` / call order).
 - **Tool result messages** (`{"role":"tool","tool_call_id":...,"content":...}`) are rendered into `<|start|>{toolname} to=assistant<|channel|>commentary<|message|>{content}<|end|>`. The server maps `tool_call_id` → the original function name to build the `{toolname}` author.
 - **Reasoning**: `analysis`-channel text is surfaced as `reasoning_content` (vLLM/SGLang) or as a `reasoning`/`thinking` field, and is generally not echoed back on subsequent requests. `final`-channel text is the normal `message.content`. `commentary` preambles, if surfaced, also map to assistant content.
-- **`tools` / `tool_choice`** request fields are compiled by the chat template into the developer-message `namespace functions { ... }` block; the system message gains the commentary-routing line.
+- **OMP transcript rendering:** `developer`, `user`, and other non-assistant roles map directly to Harmony envelopes. Assistant messages emit, in order, a complete `analysis` message for thinking, a complete `final` message for visible text, then one `commentary` call message per tool call. Thus visible text accompanying a tool call is rendered as `final`, not as a commentary preamble. Tool-result runs become consecutive canonical tool-author envelopes.
+- **Native server/chat-template compilation:** on the native vLLM/SGLang path, request `tools` / `tool_choice` are compiled by the server's chat template into the developer-message `namespace functions { ... }` block; the system message gains the commentary-routing line.
+- **OMP owned-dialect advertisement:** when OMP's `harmony` dialect is selected, OMP removes native provider tools and appends its generic compact `<tools>` JSON catalog plus the Harmony format guide to the system prompt. This path does not use the canonical developer-message namespace as its tool advertisement.
 
 ## Parsing notes & gotchas
 

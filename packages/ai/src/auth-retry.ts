@@ -1,8 +1,9 @@
+import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { OAuthAccess } from "./auth-storage";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
-import { isUsageLimit } from "./error/flags";
-import { isUsageLimitOutcome } from "./error/rate-limit";
+import { isAccountPolicyError, isUsageLimit } from "./error/flags";
+import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -18,9 +19,9 @@ import { isUsageLimitOutcome } from "./error/rate-limit";
  *   (invalidate/usage-limit the current credential and rotate to a sibling).
  *
  * Current drivers preserve that bounded a/b/c sequence for ordinary 401/auth
- * failures. Usage/account-limit failures skip refresh and may repeat step (c)
- * until the resolver returns `undefined`, cycles, or hits
- * {@link AUTH_RETRY_MAX_ATTEMPTS}.
+ * failures. Account-scoped policy denials, 403s, and usage-limit failures skip
+ * refresh and may repeat step (c) until the resolver returns `undefined`,
+ * cycles, or hits {@link AUTH_RETRY_MAX_ATTEMPTS}.
  */
 export interface ApiKeyResolveContext {
 	/** True when the resolver should rotate to a sibling credential. */
@@ -90,9 +91,17 @@ export const AUTH_RETRY_STEPS: readonly boolean[] = [false, true];
 export const AUTH_RETRY_MAX_ATTEMPTS = 64;
 
 function isDirectCredentialRotationError(error: unknown): boolean {
+	if (isAccountPolicyError(error)) return true;
 	if (isUsageLimit(error) || isInvalidatedOAuthTokenError(error)) return true;
 	const status = AIError.status(error);
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+	// A 403 normally means a valid token lacks access, so rotate through
+	// siblings. A concurrency-cap 403 is transient instead; do not burn a
+	// sibling before the caller's backoff layer can retry it.
+	const isForbidden =
+		status === 403 ||
+		(status === undefined && message !== undefined && extractHttpStatusFromError({ message }) === 403);
+	if (isForbidden && !isConcurrencyCapExclusion(status, message)) return true;
 	return isUsageLimitOutcome(status, message);
 }
 
@@ -121,6 +130,8 @@ export interface AuthRetryKeyState {
 	refreshedCurrent: boolean;
 	/** Whether the legacy non-usage auth path already switched to one sibling. */
 	legacyAuthSwitchUsed: boolean;
+	/** Whether this operation already replayed once after an explicit token-refresh request. */
+	tokenRefreshReplayUsed?: boolean;
 	/** Total outbound attempts accepted for this logical operation, including the initial request. */
 	attempts: number;
 }
@@ -131,6 +142,7 @@ export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
 		lastKey: initialKey,
 		refreshedCurrent: false,
 		legacyAuthSwitchUsed: false,
+		tokenRefreshReplayUsed: false,
 		attempts: 1,
 	};
 }
@@ -152,6 +164,14 @@ export async function resolveNextAuthRetryKey(
 ): Promise<string | undefined> {
 	if (signal?.aborted) return undefined;
 	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
+	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
+		if (state.tokenRefreshReplayUsed) return undefined;
+		state.tokenRefreshReplayUsed = true;
+		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey);
+		state.refreshedCurrent = true;
+		if (signal?.aborted || refreshed === undefined) return undefined;
+		return acceptRetryKey(state, refreshed, true);
+	}
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (state.legacyAuthSwitchUsed) return undefined;
@@ -198,9 +218,11 @@ async function runOAuthAttempt<T>(
  *   retry (identical to the legacy static-key path).
  * - A resolver → initial `attempt`, then resolver-driven retries until the
  *   applicable policy is exhausted, the resolver declines or cycles, or the
- *   operation reaches {@link AUTH_RETRY_MAX_ATTEMPTS}. Ordinary 401/auth
- *   failures retain one refresh-same plus one sibling switch; usage/account
- *   limits rotate directly through distinct siblings.
+ *   operation reaches {@link AUTH_RETRY_MAX_ATTEMPTS}. An explicit typed
+ *   token-refresh request gets exactly one refresh-current replay and never
+ *   enters sibling rotation. Ordinary 401/auth failures retain one
+ *   refresh-same plus one sibling switch; 403/usage-limit failures rotate
+ *   directly through distinct siblings.
  *
  * Used by non-streaming consumers (image generation, web search, completion
  * helpers). The streaming driver in `stream.ts` implements the same policy with
@@ -287,9 +309,10 @@ export interface WithOAuthAccessOptions {
  * `projectId`, `enterpriseUrl`) instead of bare API-key bytes.
  *
  * - initial → `getOAuthAccess` (or `opts.seed`).
+ * - typed token-refresh request → one forced refresh-current replay, then stop.
  * - 401/auth failure → one `getOAuthAccess` with `forceRefresh: true` for the
  *   current account, then sibling rotation.
- * - usage-limit failure → `rotateSessionCredential` directly, without a
+ * - 403/usage-limit failure → `rotateSessionCredential` directly, without a
  *   force-refresh detour.
  *
  * A refresh-same step may retry a new bearer for the same credential identity;
@@ -322,6 +345,7 @@ export async function withOAuthAccess<T>(
 	let attemptCount = 1;
 	let legacyAuthSwitchUsed = false;
 	let refreshedCurrent = false;
+	let tokenRefreshReplayUsed = false;
 	let attemptResult = await runOAuthAttempt(lastAccess, attempt, isAuthError);
 	if (attemptResult.ok) return attemptResult.result;
 
@@ -329,6 +353,29 @@ export async function withOAuthAccess<T>(
 	while (true) {
 		let next: OAuthAccess | undefined;
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
+		const tokenRefreshReplay = lastError instanceof AIError.OAuthError && lastError.kind === "token-refresh";
+		if (tokenRefreshReplay) {
+			if (tokenRefreshReplayUsed) break;
+			tokenRefreshReplayUsed = true;
+			refreshedCurrent = true;
+			try {
+				next = await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
+			} catch {
+				next = undefined;
+			}
+			if (signal?.aborted || !next) break;
+			const bearer = next.accessToken;
+			if (attemptedBearers.has(bearer) || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
+			attemptedCredentialIdentities.add(oauthCredentialIdentity(next));
+			attemptedBearers.add(bearer);
+			attemptCount += 1;
+			lastAccess = next;
+			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
+			if (attemptResult.ok) return attemptResult.result;
+			lastError = attemptResult.error;
+			continue;
+		}
+
 		const directRotation = isDirectCredentialRotationError(lastError);
 		if (!directRotation) {
 			if (legacyAuthSwitchUsed) break;

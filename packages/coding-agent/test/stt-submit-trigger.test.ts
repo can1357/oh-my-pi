@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings, settings } from "../src/config/settings";
+import * as asrClient from "../src/stt/asr-client";
 import * as downloader from "../src/stt/downloader";
-import * as recorder from "../src/stt/recorder";
 import { STTController } from "../src/stt/stt-controller";
 import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../src/stt/submit-trigger";
-import * as transcriber from "../src/stt/transcriber";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 describe("STT Submit Trigger Evaluation", () => {
@@ -189,12 +188,16 @@ describe("STTController submit trigger integration", () => {
 		};
 	}
 
-	async function transcribeBatch(transcript: string, trigger: SttSubmitTrigger) {
+	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger) {
 		settings.set("stt.submitTrigger", trigger);
-		vi.spyOn(transcriber, "transcribe").mockResolvedValue(transcript);
+		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
+			pushAudio: vi.fn(),
+			stop: vi.fn().mockResolvedValue(transcript),
+			cancel: vi.fn(),
+		});
 		const editor = makeEditor();
 		const options = makeOptions();
-		controller = new STTController();
+		controller = new STTController(() => ({ stop: vi.fn() }));
 
 		await controller.toggle(editor, options);
 		expect(controller.state).toBe("recording");
@@ -211,10 +214,6 @@ describe("STTController submit trigger integration", () => {
 		settings.set("stt.submitTrigger", "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
-		vi.spyOn(recorder, "ensureRecorder").mockResolvedValue({ tool: "sox", bin: "sox" });
-		vi.spyOn(recorder, "detectRecorder").mockReturnValue({ tool: "powershell", bin: "powershell" });
-		vi.spyOn(recorder, "startRecording").mockResolvedValue({ stop: vi.fn().mockResolvedValue(undefined) });
-		vi.spyOn(recorder, "verifyRecordingFile").mockResolvedValue(1);
 	});
 
 	afterEach(() => {
@@ -224,31 +223,33 @@ describe("STTController submit trigger integration", () => {
 		restoreSettingsTestState(state);
 	});
 
-	it("submits batch dictation on release when the transcript has at least two words", async () => {
-		const { editor } = await transcribeBatch("hello world", "release");
+	it("submits streaming dictation on release when the transcript has at least two words", async () => {
+		const { editor } = await transcribeStream("hello world", "release");
 
-		expect(editor.insertText).toHaveBeenCalledWith("hello world");
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("hello world");
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not submit one-word batch dictation on release", async () => {
-		const { editor } = await transcribeBatch("hello", "release");
+	it("does not submit one-word streaming dictation on release", async () => {
+		const { editor } = await transcribeStream("hello", "release");
 
-		expect(editor.insertText).toHaveBeenCalledWith("hello");
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("hello");
 		expect(editor.submit).not.toHaveBeenCalled();
 	});
 
-	it("strips the spoken submit command before submitting batch dictation", async () => {
-		const { editor } = await transcribeBatch("please review this submit.", "say-submit");
+	it("strips the spoken submit command before submitting streaming dictation", async () => {
+		const { editor } = await transcribeStream("please review this submit.", "say-submit");
 
-		expect(editor.insertText).toHaveBeenCalledWith("please review this");
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
+		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(8);
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
 
-	it("submits the existing draft when the batch transcript only says submit", async () => {
-		const { editor } = await transcribeBatch("submit", "say-submit");
+	it("submits the existing draft when streaming dictation only says submit", async () => {
+		const { editor } = await transcribeStream("submit", "say-submit");
 
-		expect(editor.insertText).not.toHaveBeenCalled();
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("submit");
+		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(6);
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
 });

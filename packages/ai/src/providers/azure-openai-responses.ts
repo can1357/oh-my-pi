@@ -11,7 +11,9 @@ import type {
 	StreamOptions,
 	ToolChoice,
 } from "../types";
+import { resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -64,6 +66,7 @@ export interface AzureOpenAIResponsesOptions extends StreamOptions {
 	azureDeploymentName?: string;
 	toolChoice?: ToolChoice;
 	serviceTier?: ServiceTier;
+	disableReasoning?: boolean;
 }
 
 type AzureOpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
@@ -74,10 +77,8 @@ type AzureOpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	repetition_penalty?: number;
 };
 
-/**
- * Generate function for Azure OpenAI Responses API
- */
-export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"> = (
+/** Runs one Azure OpenAI Responses request and decodes its event stream. */
+const streamAzureOpenAIResponsesOnce = (
 	model: Model<"azure-openai-responses">,
 	context: Context,
 	options?: AzureOpenAIResponsesOptions,
@@ -125,9 +126,10 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { url, headers } = buildAzureResponsesRequest(model, apiKey, options);
-			let params = buildParams(model, context, options, deploymentName);
-			const replacementPayload = await options?.onPayload?.(params, model);
+			const { url, headers, baseUrl } = buildAzureResponsesRequest(model, apiKey, options);
+			const requestModel = modelForAzureEndpoint(model, baseUrl);
+			let params = buildParams(requestModel, context, options, deploymentName);
+			const replacementPayload = await options?.onPayload?.(params, requestModel);
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;
 			}
@@ -257,6 +259,24 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	return stream;
 };
 
+/**
+ * Retries transient Azure stream failures only before assistant output commits
+ * the attempt. The unsupported explicit prompt-cache config is rejected
+ * synchronously here — callers of the direct entrypoint get the immediate
+ * `ConfigurationError` rather than a stream whose `.result()` rejects later.
+ */
+export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"> = (model, context, options) => {
+	if (options?.promptCache?.mode === "explicit" && resolveCacheRetention(options.cacheRetention) !== "none") {
+		throw new AIError.ConfigurationError(
+			`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; Azure Responses does not emit explicit cache controls.`,
+		);
+	}
+	return withReplaySafeStreamRetry(model, context, options, streamAzureOpenAIResponsesOnce, {
+		retryProviderErrors: true,
+		maxProviderErrorRetries: 1,
+	});
+};
+
 function resolveAzureConfig(
 	model: Model<"azure-openai-responses">,
 	options?: AzureOpenAIResponsesOptions,
@@ -288,6 +308,23 @@ function resolveAzureConfig(
 	};
 }
 
+function modelForAzureEndpoint(
+	model: Model<"azure-openai-responses">,
+	baseUrl: string,
+): Model<"azure-openai-responses"> {
+	if (model.supportsComputerUseConfig !== undefined || model.supportsComputerUse !== true) return model;
+	try {
+		const url = new URL(baseUrl);
+		if (
+			url.protocol === "https:" &&
+			(url.hostname.endsWith(".openai.azure.com") || url.hostname === "models.inference.ai.azure.com")
+		) {
+			return model;
+		}
+	} catch {}
+	return { ...model, supportsComputerUse: false };
+}
+
 /**
  * Replicates the `AzureOpenAI` SDK client's request shape for `/responses`:
  * a string api key becomes a single `api-key` header (azure.mjs `authHeaders`;
@@ -301,7 +338,7 @@ function buildAzureResponsesRequest(
 	model: Model<"azure-openai-responses">,
 	apiKey: string,
 	options?: AzureOpenAIResponsesOptions,
-): { url: string; headers: Record<string, string> } {
+): { url: string; headers: Record<string, string>; baseUrl: string } {
 	if (!apiKey) {
 		const envKey = $env.AZURE_OPENAI_API_KEY;
 		if (!envKey) {
@@ -313,7 +350,7 @@ function buildAzureResponsesRequest(
 		apiKey = envKey;
 	}
 
-	const headers: Record<string, string> = { "api-key": apiKey, ...(model.headers ?? {}) };
+	const headers: Record<string, string> = { "api-key": apiKey, ...model.headers };
 	if (options?.headers) {
 		Object.assign(headers, options.headers);
 	}
@@ -323,6 +360,7 @@ function buildAzureResponsesRequest(
 	return {
 		url: `${baseUrl}/responses?api-version=${encodeURIComponent(apiVersion)}`,
 		headers,
+		baseUrl,
 	};
 }
 
@@ -339,9 +377,11 @@ function buildParams(
 		strictResponsesPairing: true,
 		supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
 		systemRole,
+		nativeHistory: { replay: true, filterReasoning: false },
 		includeThinkingSignatures: true,
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
+		repairOrphanOutputs: true,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {
@@ -355,24 +395,53 @@ function buildParams(
 	};
 
 	applyCommonResponsesSamplingParams(params, options, model);
+	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 
 	if (context.tools) {
-		params.tools = context.tools.map(tool => ({
-			type: "function" as const,
-			name: tool.name,
-			description: tool.description || "",
-			parameters: sanitizeSchemaForOpenAIResponses(toolWireSchema(tool)),
-			strict: false,
-		}));
-		if (options?.toolChoice && context.tools.length > 0) {
-			const toolChoice = mapToOpenAIResponsesToolChoice(options.toolChoice);
-			if (
-				toolChoice &&
-				(typeof toolChoice === "string" ||
-					toolChoice.type !== "function" ||
-					context.tools.some(tool => tool.name === toolChoice.name))
-			) {
-				params.tool_choice = toolChoice;
+		const serializedTools: NonNullable<AzureOpenAIResponsesSamplingParams["tools"]> = [];
+		for (const tool of context.tools) {
+			if (tool.native?.type === "computer") {
+				if (model.supportsComputerUse === true) {
+					serializedTools.push({ type: "computer" });
+					continue;
+				}
+				// Fall through: unsupported models get the computer tool as a
+				// plain function tool so function-calling models can drive it.
+			} else if (tool.native !== undefined) continue;
+			serializedTools.push({
+				type: "function",
+				name: tool.name,
+				description: tool.description || "",
+				parameters: sanitizeSchemaForOpenAIResponses(toolWireSchema(tool)),
+				strict: false,
+			});
+		}
+		if (serializedTools.length > 0) {
+			params.tools = serializedTools;
+			if (options?.toolChoice) {
+				let toolChoice = mapToOpenAIResponsesToolChoice(options.toolChoice);
+				const hasComputerTool = serializedTools.some(tool => tool.type === "computer");
+				if (toolChoice && typeof toolChoice !== "string" && toolChoice.type === "computer" && !hasComputerTool) {
+					const computer = context.tools.find(tool => tool.native?.type === "computer");
+					if (computer && serializedTools.some(tool => tool.type === "function" && tool.name === computer.name)) {
+						toolChoice = { type: "function", name: computer.name };
+					}
+				}
+				if (toolChoice && typeof toolChoice !== "string" && toolChoice.type === "function" && hasComputerTool) {
+					const computer = context.tools.find(tool => tool.native?.type === "computer");
+					if (computer?.name === toolChoice.name) {
+						toolChoice = { type: "computer" };
+					}
+				}
+				if (
+					toolChoice &&
+					(typeof toolChoice === "string" ||
+						(toolChoice.type === "computer" && hasComputerTool) ||
+						(toolChoice.type === "function" &&
+							serializedTools.some(tool => tool.type === "function" && tool.name === toolChoice.name)))
+				) {
+					params.tool_choice = toolChoice;
+				}
 			}
 		}
 	}

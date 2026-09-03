@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import {
 	copyFileSync,
@@ -188,7 +188,7 @@ function isSqliteFile(bytes: Uint8Array): boolean {
 function writeGzippedSqlDump(sql: string, tempPath: string): void {
 	let db: Database | null = null;
 	try {
-		db = new Database(tempPath, { create: true, readwrite: true, strict: true });
+		db = openDatabase(tempPath, { pragmas: false });
 		db.exec(sql);
 	} finally {
 		closeQuietly(db);

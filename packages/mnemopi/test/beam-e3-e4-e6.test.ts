@@ -33,7 +33,7 @@ function oldTimestamp(): string {
 }
 
 function seedOldWorking(beam: BeamMemory, ids: readonly string[], sessionId = "s1"): void {
-	const insert = beam.db.prepare(
+	using insert = beam.db.prepare(
 		"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance, veracity) VALUES (?, ?, ?, ?, ?, ?, ?)",
 	);
 	for (const [index, id] of ids.entries()) {

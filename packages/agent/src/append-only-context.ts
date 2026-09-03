@@ -15,9 +15,9 @@
  */
 
 import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
-import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { normalizeTools } from "./agent-loop";
-import type { AgentContext } from "./types";
+import { messageEstimateVersion } from "./compaction/message-cache";
+import type { AgentContext, AgentMessage } from "./types";
 
 // ---------------------------------------------------------------------------
 // StablePrefix (formerly ImmutablePrefix)
@@ -34,7 +34,6 @@ export interface StablePrefixSnapshot {
 export interface BuildOptions {
 	/** Inject the `i` intent field into tool schemas (must match agent-loop's normalizeTools). */
 	intentTracing: boolean;
-	exampleDialect?: Dialect;
 	/** Strip tool descriptions from the provider-bound specs (must match normalizeTools). */
 	pruneToolDescriptions?: boolean;
 }
@@ -179,6 +178,26 @@ export class AppendOnlyContextManager {
 	 * point on every subsequent turn.
 	 */
 	#messageDigests: number[] = [];
+	/**
+	 * Digests memoized by message object identity, validated by the message's
+	 * estimate version ({@link messageEstimateVersion}). Synced message objects
+	 * are stable between calls: converted fragments are cached per session
+	 * message identity and handed back unchanged on every call, so an unchanged
+	 * history re-hits this memo instead of re-serializing every previously-
+	 * synced message on each LLM call.
+	 *
+	 * Owner-side rewrites (prune/shake/strip-images) mutate messages IN PLACE
+	 * under stable identity — for assistant pass-through fragments the log
+	 * aliases the very object being mutated — so a bare identity memo would
+	 * serve pre-mutation bytes forever. Those owners MUST call
+	 * `invalidateMessageCache`, which bumps the symbol-keyed version tag
+	 * this memo validates before every hit; a version mismatch recomputes from
+	 * actual bytes and the sync diverges exactly as if a fresh object had
+	 * arrived. Mutating a synced message without that bump violates the
+	 * cache-coherence contract shared with the tokenizer and convert caches
+	 * (see `compaction/message-cache.ts`) and is unsupported.
+	 */
+	#digestMemo = new WeakMap<object, { version: number; digest: number }>();
 
 	build(context: AgentContext, options: BuildOptions): Context {
 		this.prefix.build(context, options);
@@ -292,6 +311,9 @@ export class AppendOnlyContextManager {
 	#messageDigest(msg: unknown): number {
 		if (!msg || typeof msg !== "object") return 0;
 		const m = msg as Record<string, unknown>;
+		const version = messageEstimateVersion(msg as AgentMessage);
+		const cached = this.#digestMemo.get(m);
+		if (cached !== undefined && cached.version === version) return cached.digest;
 		const payload = JSON.stringify({
 			r: m.role ?? null,
 			c: m.content ?? null,
@@ -306,7 +328,9 @@ export class AppendOnlyContextManager {
 		for (let j = 0; j < payload.length; j++) {
 			hash = ((hash << 5) - hash + payload.charCodeAt(j)) | 0;
 		}
-		return hash >>> 0;
+		const hash32 = hash >>> 0;
+		this.#digestMemo.set(m, { version, digest: hash32 });
+		return hash32;
 	}
 }
 
@@ -317,7 +341,10 @@ export class AppendOnlyContextManager {
 function takeSnapshot(context: AgentContext, options: BuildOptions): StablePrefixSnapshot {
 	const systemPrompt = [...context.systemPrompt];
 	const tools =
-		normalizeTools(context.tools, options.intentTracing, options.exampleDialect, options.pruneToolDescriptions) ?? [];
+		normalizeTools(context.tools, {
+			injectIntent: options.intentTracing,
+			pruneDescriptions: options.pruneToolDescriptions,
+		}) ?? [];
 	return {
 		systemPrompt,
 		tools,
@@ -337,7 +364,6 @@ function computeFingerprint(systemPrompt: string[], tools: Tool[], options: Buil
 			cw: t.customWireName,
 		})),
 		i: options.intentTracing,
-		ex: options.exampleDialect,
 		pd: options.pruneToolDescriptions,
 	});
 	let hash = 0;

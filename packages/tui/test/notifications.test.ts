@@ -19,6 +19,10 @@ const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin,
 const originalOsc99Probe = Bun.env.PI_TUI_OSC99_PROBE;
 const originalTmux = Bun.env.TMUX;
 const originalZellij = Bun.env.ZELLIJ;
+const originalHerdrEnv = Bun.env.HERDR_ENV;
+const originalHerdrPaneId = Bun.env.HERDR_PANE_ID;
+const originalHerdrTabId = Bun.env.HERDR_TAB_ID;
+const originalHerdrWorkspaceId = Bun.env.HERDR_WORKSPACE_ID;
 const originalPiNotifications = Bun.env.PI_NOTIFICATIONS;
 const originalCmuxSurfaceId = Bun.env.CMUX_SURFACE_ID;
 const originalCmuxWorkspaceId = Bun.env.CMUX_WORKSPACE_ID;
@@ -77,6 +81,10 @@ describe("terminal notifications", () => {
 		// assertions never see a stray inherited TMUX leaking the DCS wrap in.
 		delete Bun.env.TMUX;
 		delete Bun.env.ZELLIJ;
+		delete Bun.env.HERDR_ENV;
+		delete Bun.env.HERDR_PANE_ID;
+		delete Bun.env.HERDR_TAB_ID;
+		delete Bun.env.HERDR_WORKSPACE_ID;
 		delete Bun.env.CMUX_SURFACE_ID;
 		delete Bun.env.CMUX_WORKSPACE_ID;
 		delete Bun.env.CMUX_SOCKET_PATH;
@@ -94,6 +102,10 @@ describe("terminal notifications", () => {
 		restoreEnv("PI_TUI_OSC99_PROBE", originalOsc99Probe);
 		restoreEnv("TMUX", originalTmux);
 		restoreEnv("ZELLIJ", originalZellij);
+		restoreEnv("HERDR_ENV", originalHerdrEnv);
+		restoreEnv("HERDR_PANE_ID", originalHerdrPaneId);
+		restoreEnv("HERDR_TAB_ID", originalHerdrTabId);
+		restoreEnv("HERDR_WORKSPACE_ID", originalHerdrWorkspaceId);
 		restoreEnv("PI_NOTIFICATIONS", originalPiNotifications);
 		restoreEnv("CMUX_SURFACE_ID", originalCmuxSurfaceId);
 		restoreEnv("CMUX_WORKSPACE_ID", originalCmuxWorkspaceId);

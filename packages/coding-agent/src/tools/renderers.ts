@@ -16,6 +16,7 @@ import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
+import { computerToolRenderer } from "./computer-renderer";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
 import { githubToolRenderer } from "./gh-renderer";
@@ -26,6 +27,7 @@ import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
 import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
+import { thinkToolRenderer } from "./think";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
 import { writeToolRenderer } from "./write";
@@ -40,6 +42,21 @@ import { setXdevRendererLookup } from "./xdev";
  */
 export type FirstResultViewportRepaint = boolean | ((args: unknown, options: RenderResultOptions) => boolean);
 
+/** Semantic activity text consumed by the transcript's generic compact card. */
+export interface ToolActivitySummary {
+	label: string;
+	detail?: string;
+}
+
+/** Live execution fields that are safe for compact transcript presentation. */
+export interface ToolActivityContext {
+	readonly expanded: boolean;
+	readonly isPartial: boolean;
+	readonly spinnerFrame?: number;
+	/** Tool-specific render context (same shape `renderCall` receives), when available. */
+	readonly renderContext?: Record<string, unknown>;
+}
+
 export type ToolRenderer = {
 	renderCall: (args: unknown, options: RenderResultOptions, theme: Theme) => Component;
 	renderResult: (
@@ -49,6 +66,8 @@ export type ToolRenderer = {
 		args?: unknown,
 	) => Component;
 	mergeCallAndResult?: boolean;
+	/** Describes current activity without coupling a renderer to terminal layout. */
+	activitySummary?: (args: unknown, context: ToolActivityContext) => ToolActivitySummary;
 	/** Render without background box, inline in the response flow */
 	inline?: boolean;
 	/**
@@ -82,6 +101,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	ast_edit: astEditToolRenderer as ToolRenderer,
 	bash: bashToolRenderer as ToolRenderer,
 	browser: browserToolRenderer as ToolRenderer,
+	computer: computerToolRenderer as ToolRenderer,
 	debug: debugToolRenderer as ToolRenderer,
 	eval: evalToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
@@ -90,7 +110,13 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	grep: grepToolRenderer as ToolRenderer,
 	lsp: lspToolRenderer as ToolRenderer,
 	inspect_image: inspectImageToolRenderer as ToolRenderer,
-	hub: hubToolRenderer as ToolRenderer,
+	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →
+	// persisted-agents → vibe/runtime → task/executor → sdk) close an import
+	// cycle back here, so reading it at init order-dependently hits its
+	// temporal dead zone. Deferring the read to first access sidesteps it.
+	get hub(): ToolRenderer {
+		return hubToolRenderer as ToolRenderer;
+	},
 	read: readToolRenderer as ToolRenderer,
 	// Keyed by xd:// resolution-device names: the write dispatch delegates here
 	// by dispatch tool, and historical `resolve` tool transcripts still render
@@ -107,6 +133,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	get task(): ToolRenderer {
 		return taskToolRenderer as ToolRenderer;
 	},
+	think: thinkToolRenderer as ToolRenderer,
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,

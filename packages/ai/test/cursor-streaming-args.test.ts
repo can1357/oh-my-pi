@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type BlockState,
+	flushOpenToolCalls,
 	mergeCursorMcpToolCallArgs,
 	processInteractionUpdate,
 	synthesizeCursorExecToolCall,
@@ -58,6 +59,7 @@ function newHarness(): Harness {
 		get currentToolCall() {
 			return toolCall;
 		},
+		openToolCalls: new Map(),
 		resolvedMcpToolCallIds: new Set(),
 		firstTokenTime: undefined,
 		setTextBlock: b => {
@@ -74,7 +76,7 @@ function newHarness(): Harness {
 	return { output, stream, captured, state, usageState: { sawTokenDelta: false } };
 }
 
-function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
+function startMcpToolCall(h: Harness, name: string, id = "call-1", args?: Record<string, Uint8Array>): void {
 	processInteractionUpdate(
 		{
 			message: {
@@ -82,7 +84,7 @@ function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
 				value: {
 					callId: id,
 					toolCall: {
-						mcpToolCall: { args: { name, toolName: name, toolCallId: id } },
+						mcpToolCall: { args: { name, toolName: name, toolCallId: id, args } },
 					},
 				},
 			},
@@ -184,6 +186,26 @@ describe("Cursor MCP exec resolution", () => {
 		expect(block[kCursorExecResolved]).toBe(true);
 		expect(h.state.resolvedMcpToolCallIds.size).toBe(0);
 	});
+
+	it("does not duplicate an MCP call synthesized from an earlier exec frame", () => {
+		const h = newHarness();
+		synthesizeCursorExecToolCall(h.output, h.stream, h.state, "call-resolved", "web_search", {
+			query: "latest chess news",
+		});
+		h.state.resolvedMcpToolCallIds.add("call-resolved");
+
+		startMcpToolCall(h, "web_search", "call-resolved");
+
+		expect(h.output.content).toHaveLength(1);
+		expect(h.output.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call-resolved",
+			name: "web_search",
+			arguments: { query: "latest chess news" },
+		});
+		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+		expect(h.state.resolvedMcpToolCallIds.size).toBe(0);
+	});
 });
 
 describe("processInteractionUpdate content block ordering", () => {
@@ -212,6 +234,41 @@ describe("processInteractionUpdate content block ordering", () => {
 });
 
 describe("processInteractionUpdate args_text_delta handling", () => {
+	it("preserves announced args when Cursor streams no argument deltas", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "get_weather", "call-weather", {
+			city: new TextEncoder().encode(`"Paris"`),
+		});
+
+		completeMcpToolCall(h, undefined);
+
+		expect(h.output.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call-weather",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		});
+		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+	});
+
+	it("preserves announced args when the stream ends before tool completion", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "get_weather", "call-weather", {
+			city: new TextEncoder().encode(`"Paris"`),
+		});
+
+		flushOpenToolCalls(h.output, h.stream, h.state);
+
+		expect(h.output.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call-weather",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		});
+		expect(h.state.currentToolCall).toBeNull();
+		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+	});
+
 	it("treats cumulative argsTextDelta snapshots as snapshots, not append-only fragments", () => {
 		const h = newHarness();
 		startMcpToolCall(h, "task");
@@ -391,9 +448,42 @@ describe("synthesizeCursorExecToolCall (issue #4348)", () => {
 			type: "toolCall",
 			id: "t2",
 			name: "bash",
-			arguments: { command: "echo hi", cwd: undefined, timeout: undefined },
+			// Undefined optional kwargs are dropped so ArkType optional-field
+			// validation does not reject the synthesized block.
+			arguments: { command: "echo hi" },
 		});
 		expect(t3).toMatchObject({ type: "text", text: "done" });
+	});
+
+	it("omits undefined optional kwargs from synthesized exec tool args", () => {
+		const h = newHarness();
+		synthesizeCursorExecToolCall(h.output, h.stream, h.state, "bash-1", "bash", {
+			command: "pwd",
+			cwd: undefined,
+			timeout: 30,
+		});
+		synthesizeCursorExecToolCall(h.output, h.stream, h.state, "grep-1", "grep", {
+			pattern: "needle",
+			path: ".",
+			case: undefined,
+			skip: undefined,
+		});
+		const [bashCall, grepCall] = h.output.content;
+		expect(bashCall).toMatchObject({
+			type: "toolCall",
+			id: "bash-1",
+			name: "bash",
+			arguments: { command: "pwd", timeout: 30 },
+		});
+		expect(Object.hasOwn((bashCall as { arguments: object }).arguments, "cwd")).toBe(false);
+		expect(grepCall).toMatchObject({
+			type: "toolCall",
+			id: "grep-1",
+			name: "grep",
+			arguments: { pattern: "needle", path: "." },
+		});
+		expect(Object.hasOwn((grepCall as { arguments: object }).arguments, "case")).toBe(false);
+		expect(Object.hasOwn((grepCall as { arguments: object }).arguments, "skip")).toBe(false);
 	});
 
 	it("emits toolcall events at the exact index the block occupies in content", () => {

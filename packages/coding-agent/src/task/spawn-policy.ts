@@ -56,3 +56,17 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 		allowedPromptText: allowedAgents.map(agent => `\`${agent}\``).join(", "),
 	};
 }
+
+/**
+ * Whether the `scout` agent is spawnable in a session: not disabled via
+ * `task.disabledAgents`, and permitted by the session spawn policy.
+ */
+export function isScoutSpawnable(
+	disabledAgents: readonly string[] | undefined,
+	spawns: string | boolean | null | undefined,
+): boolean {
+	if (disabledAgents?.includes("scout")) return false;
+	const policy = resolveSpawnPolicy(spawns);
+	if (!policy.enabled) return false;
+	return policy.allowedAgents === null || policy.allowedAgents.includes("scout");
+}

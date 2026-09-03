@@ -31,6 +31,31 @@ describe.skipIf(!SHOULD_RUN)("python eval workflow helpers", () => {
 		}
 	});
 
+	it("parallel and pipeline results may be awaited without repeating work", async () => {
+		using tempDir = TempDir.createSync("@eval-workflow-awaitable-results-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const code = [
+				"calls = []",
+				"def mark(value):",
+				"    calls.append(value)",
+				"    return value",
+				"sync_parallel = parallel([lambda: mark('sync')])",
+				"awaited_parallel = await parallel([lambda: mark('awaited')])",
+				"sync_pipeline = pipeline([1], lambda value: value + 1)",
+				"awaited_pipeline = await pipeline([1], lambda value: value + 2)",
+				"empty_parallel = await parallel([])",
+				"empty_pipeline = await pipeline([])",
+				"print(sync_parallel, awaited_parallel, sync_pipeline, awaited_pipeline, empty_parallel, empty_pipeline, calls)",
+			].join("\n");
+			const result = await executePythonWithKernel(kernel, code);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("['sync'] ['awaited'] [2] [3] [] [] ['sync', 'awaited']");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("parallel runs thunks concurrently", async () => {
 		using tempDir = TempDir.createSync("@eval-workflow-parallel-concurrent-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

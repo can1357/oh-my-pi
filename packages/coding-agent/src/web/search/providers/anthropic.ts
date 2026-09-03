@@ -19,6 +19,7 @@ import {
 	withAuth,
 	wrapFetchForCch,
 } from "@oh-my-pi/pi-ai";
+import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { $env } from "@oh-my-pi/pi-utils";
 import type {
 	AnthropicApiResponse,
@@ -28,14 +29,84 @@ import type {
 	SearchSource,
 } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
+
+function hasSamplingRestrictions(modelId: string): boolean {
+	const identity = classifyModel("anthropic", modelId, { lenient: true });
+	if (identity.class !== "anthropic" || identity.revision === undefined) return false;
+	const revision = parseRevision(identity.revision);
+	const floor = parseRevision(identity.family === "opus" ? "4.7" : "5");
+	return (
+		revision !== undefined &&
+		floor !== undefined &&
+		(identity.family === "opus" ||
+			identity.family === "sonnet" ||
+			identity.family === "fable" ||
+			identity.family === "mythos") &&
+		compareRevision(revision, floor) >= 0
+	);
+}
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
 const DEFAULT_MAX_TOKENS = 4096;
 const WEB_SEARCH_TOOL_NAME = "web_search";
 const WEB_SEARCH_TOOL_TYPE = "web_search_20250305";
+
+/**
+ * Claude's search backend understands common Google-style operators, so most
+ * directives are re-emitted as query text. `site:` is intentionally absent:
+ * site includes/excludes map onto the web_search tool's native
+ * `allowed_domains`/`blocked_domains` parameters instead.
+ */
+const ANTHROPIC_QUERY_SYNTAX: QuerySyntax = {
+	phrases: true,
+	negation: true,
+	or: true,
+	inUrl: true,
+	inTitle: true,
+	filetype: true,
+	dateRange: true,
+};
+
+/** Upstream request shape derived from the parsed query. */
+interface AnthropicQueryPlan {
+	query: string;
+	allowedDomains?: string[];
+	blockedDomains?: string[];
+}
+
+/**
+ * Map parsed directives onto the request: `site:` includes become
+ * `allowed_domains`, `-site:` exclusions become `blocked_domains` (the two are
+ * mutually exclusive on the API, so exclusions are only sent when there are no
+ * includes), and remaining directives are re-emitted as query syntax.
+ * Directive-free queries pass through byte-identical. Anthropic domain
+ * filters take bare hosts (subdomains included automatically); any path part
+ * of a `site:` value is enforced by the central constraint filter.
+ */
+function planQuery(rawQuery: string, parsed: StructuredQuery): AnthropicQueryPlan {
+	if (!parsed.hasDirectives) return { query: rawQuery };
+	const hosts = (sites: readonly string[]) => {
+		const unique = new Set<string>();
+		for (const site of sites) {
+			const slash = site.indexOf("/");
+			const host = slash === -1 ? site : site.slice(0, slash);
+			if (host.length > 0) unique.add(host);
+		}
+		return [...unique];
+	};
+	const allowed = hosts(parsed.sites);
+	const blocked = allowed.length === 0 ? hosts(parsed.excludedSites) : [];
+	return {
+		query: formatQuery(parsed, ANTHROPIC_QUERY_SYNTAX),
+		allowedDomains: allowed.length > 0 ? allowed : undefined,
+		blockedDomains: blocked.length > 0 ? blocked : undefined,
+	};
+}
+
 export interface AnthropicSearchParams {
 	query: string;
 	system_prompt?: string;
@@ -43,6 +114,7 @@ export interface AnthropicSearchParams {
 	max_tokens?: number;
 	temperature?: number;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 }
 
@@ -74,7 +146,6 @@ function buildSystemBlocks(
 	return buildAnthropicSystemBlocks(systemPrompt ? [systemPrompt] : undefined, {
 		includeClaudeCodeInstruction: includeClaudeCode,
 		extraInstructions,
-		cacheControl: { type: "ephemeral" },
 	});
 }
 
@@ -82,7 +153,7 @@ function buildSystemBlocks(
  * Calls the Anthropic API with web search tool enabled.
  * @param auth - Authentication configuration (API key or OAuth)
  * @param model - Model identifier to use
- * @param query - Search query from the user
+ * @param plan - Query text plus native domain filters derived from parsed directives
  * @param metadataUserId - Optional Anthropic Messages metadata.user_id (already shaped for OAuth)
  * @param systemPrompt - Optional system prompt for guiding response style
  * @returns Raw API response from Anthropic
@@ -91,13 +162,14 @@ function buildSystemBlocks(
 async function callSearch(
 	auth: AnthropicAuthConfig,
 	model: string,
-	query: string,
+	plan: AnthropicQueryPlan,
 	metadataUserId?: string,
 	systemPrompt?: string,
 	maxTokens?: number,
 	temperature?: number,
 	signal?: AbortSignal,
 	fetchImpl: FetchImpl = fetch,
+	timeoutMs?: number,
 ): Promise<AnthropicApiResponse> {
 	const url = buildAnthropicUrl(auth);
 	const headers = buildAnthropicSearchHeaders(auth);
@@ -107,11 +179,13 @@ async function callSearch(
 	const body: Record<string, unknown> = {
 		model,
 		max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
-		messages: [{ role: "user", content: query }],
+		messages: [{ role: "user", content: plan.query }],
 		tools: [
 			{
 				type: WEB_SEARCH_TOOL_TYPE,
 				name: WEB_SEARCH_TOOL_NAME,
+				...(plan.allowedDomains ? { allowed_domains: plan.allowedDomains } : {}),
+				...(plan.blockedDomains ? { blocked_domains: plan.blockedDomains } : {}),
 			},
 		],
 	};
@@ -120,7 +194,8 @@ async function callSearch(
 		body.metadata = { user_id: metadataUserId };
 	}
 
-	if (temperature !== undefined) {
+	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400.
+	if (temperature !== undefined && !hasSamplingRestrictions(model)) {
 		body.temperature = temperature;
 	}
 
@@ -135,7 +210,7 @@ async function callSearch(
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
-		signal: withHardTimeout(signal),
+		signal: withHardTimeout(signal, timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -283,6 +358,8 @@ export async function searchAnthropic(
 	const callerSessionId = "authStorage" in params ? params.sessionId : undefined;
 	const accountId =
 		"authStorage" in params ? params.authStorage.getOAuthAccountId("anthropic", params.sessionId) : undefined;
+	const parsed = ("parsedQuery" in params ? params.parsedQuery : undefined) ?? parseSearchQuery(params.query);
+	const plan = planQuery(params.query, parsed);
 	const response = await withAuth(
 		keyOrResolver,
 		key => {
@@ -302,13 +379,14 @@ export async function searchAnthropic(
 			return callSearch(
 				auth,
 				model,
-				params.query,
+				plan,
 				metadataUserId,
 				systemPrompt,
 				maxTokens,
 				params.temperature,
 				params.signal,
 				params.fetch,
+				params.timeoutMs,
 			);
 		},
 		{

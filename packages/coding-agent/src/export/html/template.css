@@ -104,11 +104,14 @@
     }
 
     .sidebar-controls {
+      display: flex;
+      gap: 6px;
       padding: 0 0 6px;
     }
 
     .sidebar-search {
-      width: 100%;
+      flex: 1;
+      min-width: 0;
       box-sizing: border-box;
       padding: 5px 9px;
       font-size: 11px;
@@ -136,6 +139,21 @@
 
     .sidebar-search::placeholder {
       color: var(--muted);
+    }
+
+    .theme-select {
+      padding: 5px 8px;
+      font: inherit;
+      font-size: 10px;
+      background: var(--body-bg);
+      color: var(--text);
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-ctl);
+      cursor: pointer;
+    }
+
+    .theme-select:hover {
+      border-color: var(--hairline-strong);
     }
 
     .sidebar-filters {

@@ -187,6 +187,17 @@ export class HindsightRetainQueue {
 	}
 }
 
+/** Rolling hash of messages[0, count) for retention-cache validation (see #lastRetainedPrefixKey). */
+function retentionPrefixKey(messages: HindsightMessage[], count: number): string {
+	let key = "";
+	for (let i = 0; i < count; i++) {
+		const m = messages[i];
+		if (m === undefined) break;
+		key = Bun.hash(`${key}\u0000${m.role}\u0000${m.content}\u0000${m.timestamp ?? ""}`).toString(36);
+	}
+	return key;
+}
+
 /** Per-session Hindsight runtime state owned by its AgentSession. */
 export class HindsightSessionState {
 	/** Session id used for retain-queue metadata. */
@@ -202,6 +213,17 @@ export class HindsightSessionState {
 	session: AgentSession;
 	banksSet: Set<string>;
 	lastRetainedTurn: number;
+	#lastRetainedMessageIndex: number = 0;
+	#cachedTranscript: string = "";
+	// Rolling hash of ALL messages in [0, #lastRetainedMessageIndex) at cache
+	// time. The incremental full-session cache assumes the branch is append-only;
+	// a rewind, branch switch, compaction, or in-place edit rewrites the prefix
+	// without changing the session id. Re-hashing the current prefix at use time
+	// makes the cache self-healing: on ANY prefix change (not just the boundary
+	// message) we rebuild the full transcript instead of retaining stale content
+	// or silently retaining nothing forever. Hashing is orders of magnitude
+	// cheaper than the re-formatting this cache avoids.
+	#lastRetainedPrefixKey: string = "";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -236,6 +258,9 @@ export class HindsightSessionState {
 		this.session = options.session;
 		this.banksSet = options.banksSet;
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
+		this.#lastRetainedPrefixKey = "";
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
@@ -243,12 +268,18 @@ export class HindsightSessionState {
 
 	setSessionId(sessionId: string): void {
 		this.sessionId = sessionId;
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
+		this.#lastRetainedPrefixKey = "";
 	}
 
 	resetConversationTracking(): void {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
+		this.#lastRetainedPrefixKey = "";
 	}
 
 	enqueueRetain(content: string, context?: string): void {
@@ -282,23 +313,48 @@ export class HindsightSessionState {
 		}
 	}
 
+	#sessionSourceTimestamp(): Date | undefined {
+		const header = this.session.sessionManager?.getHeader?.();
+		const timestamp = header?.timestamp;
+		if (typeof timestamp !== "string") return undefined;
+		const trimmed = timestamp.trim();
+		if (!trimmed) return undefined;
+		const parsed = new Date(trimmed);
+		return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+	}
+
 	async retainSession(messages: HindsightMessage[]): Promise<void> {
 		const retainedAt = new Date();
+		const sourceTimestamp = this.#sessionSourceTimestamp() ?? retainedAt;
 		const retainFullWindow = this.config.retainMode === "full-session";
-		let target: HindsightMessage[];
 		let documentId: string;
+		let transcript: string;
+		let nextCachedTranscript: string | undefined;
 
 		if (retainFullWindow) {
-			target = messages;
 			documentId = this.sessionId;
+			const boundary = this.#lastRetainedMessageIndex;
+			if (boundary > messages.length || retentionPrefixKey(messages, boundary) !== this.#lastRetainedPrefixKey) {
+				this.#lastRetainedMessageIndex = 0;
+				this.#cachedTranscript = "";
+				this.#lastRetainedPrefixKey = "";
+			}
+			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
+			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true, { includeTimestamps: true });
+			if (!newPart) return;
+			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
+			transcript = nextCachedTranscript;
 		} else {
 			const windowTurns = this.config.retainEveryNTurns + this.config.retainOverlapTurns;
-			target = sliceLastTurnsByUserBoundary(messages, windowTurns);
+			const target = sliceLastTurnsByUserBoundary(messages, windowTurns);
 			documentId = `${this.sessionId}-${retainedAt.getTime()}`;
+			this.#lastRetainedMessageIndex = 0;
+			this.#cachedTranscript = "";
+			this.#lastRetainedPrefixKey = "";
+			const { transcript: windowTranscript } = prepareRetentionTranscript(target, true, { includeTimestamps: true });
+			if (!windowTranscript) return;
+			transcript = windowTranscript;
 		}
-
-		const { transcript } = prepareRetentionTranscript(target, true);
-		if (!transcript) return;
 
 		await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
 		await this.client.retain(this.bankId, transcript, {
@@ -306,9 +362,14 @@ export class HindsightSessionState {
 			context: this.config.retainContext,
 			metadata: { session_id: this.sessionId },
 			tags: this.retainTags,
-			timestamp: retainedAt,
+			timestamp: sourceTimestamp,
 			async: true,
 		});
+		if (nextCachedTranscript !== undefined) {
+			this.#cachedTranscript = nextCachedTranscript;
+			this.#lastRetainedMessageIndex = messages.length;
+			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
+		}
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
@@ -341,6 +402,14 @@ export class HindsightSessionState {
 	async forceRetainCurrentSession(): Promise<void> {
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
+		// Forced retains are user-initiated rebuilds (`/memory enqueue`): drop the
+		// incremental cache so the full transcript is reformatted and resent even
+		// when no new messages arrived since the last auto-retain — otherwise a
+		// rebuild could never recover an upstream document that was deleted or a
+		// previous async retain that never materialized.
+		this.#lastRetainedMessageIndex = 0;
+		this.#cachedTranscript = "";
+		this.#lastRetainedPrefixKey = "";
 		try {
 			await this.retainSession(messages);
 			this.lastRetainedTurn = messages.filter(m => m.role === "user").length;
@@ -351,24 +420,6 @@ export class HindsightSessionState {
 				error: String(err),
 			});
 		}
-	}
-
-	async maybeRecallOnAgentStart(): Promise<void> {
-		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return;
-		const messages = extractMessages(this.session.sessionManager);
-		const lastUser = messages.findLast(m => m.role === "user");
-		if (!lastUser) return;
-
-		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
-		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
-		const { context, ok } = await this.recallForContext(truncated);
-		if (!ok) return;
-
-		this.hasRecalledForFirstTurn = true;
-		if (!context) return;
-
-		this.lastRecallSnippet = context;
-		await this.#refreshBaseSystemPromptAfter("recall");
 	}
 
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
@@ -451,9 +502,7 @@ export class HindsightSessionState {
 	attachSessionListeners(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = this.session.subscribe(event => {
-			if (event.type === "agent_start") {
-				void this.maybeRecallOnAgentStart();
-			} else if (event.type === "agent_end") {
+			if (event.type === "agent_end") {
 				void this.maybeRetainOnAgentEnd();
 				// Drain any queued tool-initiated retain calls now that the turn
 				// is settled. The queue is also debounced/size-bounded, but
@@ -482,7 +531,7 @@ export class HindsightSessionState {
 		this.retainQueue.dispose();
 	}
 
-	async #refreshBaseSystemPromptAfter(reason: "recall" | "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
+	async #refreshBaseSystemPromptAfter(reason: "MM load" | "MM reload" | "MM TTL reload"): Promise<void> {
 		try {
 			await this.session.refreshBaseSystemPrompt();
 		} catch (err) {

@@ -1,31 +1,22 @@
 /**
  * Utilities for formatting keybinding hints in the UI.
  */
-import { getKeybindings, type Keybinding, type KeyId } from "@oh-my-pi/pi-tui";
-import type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
+import { getKeybindings, type Keybinding } from "@oh-my-pi/pi-tui";
+import { type AppKeybinding, formatKeyHints, type KeybindingsManager } from "../../config/keybindings";
 import { theme } from "../../modes/theme/theme";
-
-/**
- * Format keys array as display string (e.g., ["ctrl+c", "escape"] -> "ctrl+c/escape").
- */
-function formatKeys(keys: KeyId[]): string {
-	if (keys.length === 0) return "";
-	if (keys.length === 1) return keys[0]!;
-	return keys.join("/");
-}
 
 /**
  * Get display string for an editor action.
  */
 export function editorKey(action: Keybinding): string {
-	return formatKeys(getKeybindings().getKeys(action));
+	return formatKeyHints(getKeybindings().getKeys(action));
 }
 
 /**
  * Get display string for an app action.
  */
 export function appKey(keybindings: KeybindingsManager, action: AppKeybinding): string {
-	return formatKeys(keybindings.getKeys(action));
+	return formatKeyHints(keybindings.getKeys(action));
 }
 
 /**

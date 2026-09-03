@@ -219,7 +219,7 @@ class OmpLocal(BaseInstalledAgent):
         # JSON-array-encoded by the runner (OMP_BENCH_AGENT_ARGS) so multi-word
         # values survive without a second layer of shell quoting.
         self._agent_args = self._parse_agent_args()
-        self._bun_version = _env("OMP_BENCH_BUN_VERSION", "1.3.14")
+        self._bun_version = _env("OMP_BENCH_BUN_VERSION", "1.4.0")
         self._gateway_on = _env("OMP_BENCH_GATEWAY", "1") != "0"
 
         # web_search auth can't route through the gateway (dedicated provider creds);

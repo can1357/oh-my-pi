@@ -30,6 +30,8 @@ import {
 	completeSimple,
 	type Message,
 	type Model,
+	type OneshotRetryOptions,
+	retryTransientCompletion,
 	type ServiceTier,
 	type SimpleStreamOptions,
 	type StopReason,
@@ -157,6 +159,8 @@ export const enum PiGenAIAttr {
 	GatewayEndpoint = "pi.gen_ai.gateway.endpoint",
 	GatewayCallId = "pi.gen_ai.gateway.call_id",
 	GatewayRoutedTo = "pi.gen_ai.gateway.routed_to",
+	/** Cloudflare AI Gateway response-cache status (`cf-aig-cache-status`), never prompt-cache. */
+	GatewayResponseCacheStatus = "pi.gen_ai.gateway.response_cache.status",
 }
 
 /** GenAI operation names — values for {@link GenAIAttr.OperationName}. */
@@ -1278,17 +1282,56 @@ export function detectGatewayFromHeaders(
 	return undefined;
 }
 
+/**
+ * Bounded Cloudflare AI Gateway response-cache statuses emitted on
+ * {@link PiGenAIAttr.GatewayResponseCacheStatus}. Distinct from provider
+ * prompt-cache token counters (`gen_ai.usage.cache_*`).
+ *
+ * Cloudflare documents `HIT` / `MISS` on `cf-aig-cache-status`; `bypass` covers
+ * skip-cache / CDN-aligned BYPASS values. Any other present value is `unknown`.
+ */
+export type GatewayResponseCacheStatus = "hit" | "miss" | "bypass" | "unknown";
+
+/**
+ * Classify Cloudflare AI Gateway `cf-aig-cache-status` into a bounded
+ * response-cache status. Returns `undefined` when the allow-listed header is
+ * absent so non-Cloudflare traffic stays unaffected. Does not read TTL,
+ * skip-cache, custom-key, or other Cloudflare headers.
+ */
+export function classifyGatewayResponseCacheStatus(
+	headers: Readonly<Record<string, string>> | undefined,
+): GatewayResponseCacheStatus | undefined {
+	if (!headers) return undefined;
+	const raw = headers["cf-aig-cache-status"];
+	if (raw == null) return undefined;
+	switch (raw.trim().toLowerCase()) {
+		case "hit":
+			return "hit";
+		case "miss":
+			return "miss";
+		case "bypass":
+			return "bypass";
+		default:
+			return "unknown";
+	}
+}
+
 function applyGatewayAttributes(
 	span: Span,
 	headers: Readonly<Record<string, string>> | undefined,
 	baseUrl: string | undefined,
 ): void {
 	const gateway = detectGatewayFromHeaders(headers);
-	if (!gateway) return;
-	span.setAttribute(PiGenAIAttr.GatewayName, gateway.name);
-	if (baseUrl) span.setAttribute(PiGenAIAttr.GatewayEndpoint, baseUrl);
-	if (gateway.callId) span.setAttribute(PiGenAIAttr.GatewayCallId, gateway.callId);
-	if (gateway.routedTo) span.setAttribute(PiGenAIAttr.GatewayRoutedTo, gateway.routedTo);
+	if (gateway) {
+		span.setAttribute(PiGenAIAttr.GatewayName, gateway.name);
+		if (baseUrl) span.setAttribute(PiGenAIAttr.GatewayEndpoint, baseUrl);
+		if (gateway.callId) span.setAttribute(PiGenAIAttr.GatewayCallId, gateway.callId);
+		if (gateway.routedTo) span.setAttribute(PiGenAIAttr.GatewayRoutedTo, gateway.routedTo);
+	}
+	const responseCacheStatus = classifyGatewayResponseCacheStatus(headers);
+	if (responseCacheStatus) {
+		span.setAttribute(PiGenAIAttr.GatewayResponseCacheStatus, responseCacheStatus);
+	}
 }
 
 interface AppliedCostEstimate {
@@ -1622,6 +1665,23 @@ export interface InstrumentedChatSpanOptions {
 		ctx: Context,
 		options: SimpleStreamOptions,
 	) => Promise<AssistantMessage>;
+	/**
+	 * Opt in to transient-failure retry for this oneshot (Anthropic
+	 * `overloaded_error`, `rate_limit_error`, 429/500/502/503/529). Omitted or
+	 * `undefined` means **no retry** — the failure is surfaced exactly as before.
+	 *
+	 * Deliberately opt-in rather than default-on: `oneshotKind` is free-form and
+	 * callers may pass arbitrary `ctx.tools` / `options.toolChoice`, so this
+	 * funnel cannot itself prove a given request is replay-safe. Re-issuing is
+	 * only safe when the call performs no side effect and nothing consumed
+	 * partial output — true for summaries, titles, handoffs and image
+	 * descriptions, which parse a complete response after it resolves. Enable it
+	 * per call site, as a reviewed decision.
+	 *
+	 * Pass `{}` to accept the {@link retryTransientCompletion} defaults
+	 * (3 attempts, 500ms base backoff, `retry-after` honored).
+	 */
+	readonly retry?: OneshotRetryOptions;
 }
 
 /**
@@ -1682,10 +1742,26 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
 			const complete = span.completeImpl ?? completeSimple;
-			const message = await complete(model, ctx, {
-				...options,
-				onResponse: captureOnResponse,
-			});
+			// Opt-in only (see `retry` on InstrumentedChatSpanOptions): each attempt
+			// re-issues the whole request, which is safe only for replay-safe
+			// oneshots. `getResponseHeaders` hands the failed attempt's headers to
+			// the retry layer — an AssistantMessage carries none, so this is what
+			// makes `retry-after` on a real 429/529 actually honored.
+			const runOnce = () => {
+				// Clear first so a previous attempt's `retry-after` can never be
+				// reused for a later failure that arrived without headers.
+				capturedHeaders = undefined;
+				return complete(model, ctx, { ...options, onResponse: captureOnResponse });
+			};
+			const message = span.retry
+				? await retryTransientCompletion(runOnce, {
+						...span.retry,
+						// Framework-owned: the caller must not be able to detach the
+						// abort signal or the header source by passing them itself.
+						signal: options.signal,
+						getResponseHeaders: () => capturedHeaders,
+					})
+				: await runOnce();
 			await finishChatSpan(telemetry, chatSpan, message, {
 				stepNumber,
 				serviceTier: options.serviceTier,

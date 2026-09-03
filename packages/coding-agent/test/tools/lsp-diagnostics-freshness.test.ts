@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createLspWritethrough, type FileDiagnosticsResult } from "@oh-my-pi/pi-coding-agent/lsp";
+import { createLspWritethrough, type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
-import type { Diagnostic, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import { formatContent } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type ptree, TempDir } from "@oh-my-pi/pi-utils";
@@ -15,6 +16,19 @@ const TEST_SERVER: ServerConfig = {
 	fileTypes: ["ts"],
 	rootMarkers: [],
 };
+
+function createFormatter(format: (filePath: string, content: string) => Promise<string>): ServerConfig {
+	return {
+		command: "test-formatter",
+		fileTypes: ["ts"],
+		rootMarkers: [],
+		createClient: () =>
+			({
+				format,
+				lint: async () => [],
+			}) satisfies LinterClient,
+	};
+}
 
 function createDiagnostic(message: string): Diagnostic {
 	return {
@@ -34,7 +48,7 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		config,
 		proc: {} as ptree.ChildProcess<"pipe">,
 		requestId: 0,
-		diagnostics: new Map(),
+		diagnostics: new EquivalentUriMap(),
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),
@@ -161,6 +175,179 @@ describe("LSP diagnostics freshness", () => {
 		expect(loadConfig).not.toHaveBeenCalled();
 		expect(getServers).not.toHaveBeenCalled();
 		expect(getOrCreate).not.toHaveBeenCalled();
+	});
+
+	it("does not cold-start an LSP server for custom formatting when diagnostics are disabled", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const formatter = createFormatter(async () => "export const value = 1;\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+			["test-lsp", TEST_SERVER],
+			["formatter", formatter],
+		]);
+		const getOrCreate = vi
+			.spyOn(lspClient, "getOrCreateClient")
+			.mockRejectedValue(new Error("format-only writes must not cold-start an LSP server"));
+		vi.spyOn(lspClient, "getActiveOrPendingClient").mockResolvedValue(undefined);
+		const sync = vi.spyOn(lspClient, "syncContent").mockResolvedValue();
+		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+		const result = await writethrough(filePath, "export const value=1\n");
+
+		expect(result?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
+		expect(getOrCreate).not.toHaveBeenCalled();
+		expect(sync).not.toHaveBeenCalled();
+		expect(notifySaved).not.toHaveBeenCalled();
+	});
+	it("reports a rejected custom formatter instead of unchanged formatting", async () => {
+		const filePath = path.join(tempDir.path(), "format-failure.ts");
+		const formatter = createFormatter(async () => {
+			throw new Error("formatter crashed");
+		});
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+		const content = "export const value=1\n";
+		const result = await writethrough(filePath, content);
+
+		expect(result?.formatter).toBe(FileFormatResult.FAILED);
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
+
+	it("keeps an earlier formatter failure when a later server is unsupported", async () => {
+		const failedClient = createClient(tempDir.path(), { ...TEST_SERVER, command: "capable" });
+		failedClient.serverCapabilities = { documentFormattingProvider: true };
+		const unsupportedClient = createClient(tempDir.path(), { ...TEST_SERVER, command: "unsupported" });
+		unsupportedClient.serverCapabilities = {};
+		vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config =>
+			config.command === "capable" ? failedClient : unsupportedClient,
+		);
+		const sendRequest = vi.spyOn(lspClient, "sendRequest").mockRejectedValue(new Error("formatter crashed"));
+		const content = "export const value=1\n";
+		const failed = await formatContent(path.join(tempDir.path(), "failed.ts"), content, tempDir.path(), [
+			["capable", failedClient.config],
+			["unsupported", unsupportedClient.config],
+		]);
+		const unsupported = await formatContent(path.join(tempDir.path(), "unsupported.ts"), content, tempDir.path(), [
+			["unsupported", unsupportedClient.config],
+		]);
+
+		expect(failed).toEqual({ content, failed: true, unsupported: false });
+		expect(unsupported).toEqual({ content, failed: false, unsupported: true });
+		expect(sendRequest).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps an already-running LSP client synchronized after custom formatting", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		const formatter = createFormatter(async () => "export const value = 1;\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+			["test-lsp", TEST_SERVER],
+			["formatter", formatter],
+		]);
+		const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient");
+		vi.spyOn(lspClient, "getActiveOrPendingClient").mockResolvedValue(client);
+		const sync = vi.spyOn(lspClient, "syncContent").mockResolvedValue();
+		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+		await writethrough(filePath, "export const value=1\n");
+
+		expect(getOrCreate).not.toHaveBeenCalled();
+		expect(sync).toHaveBeenCalledWith(client, filePath, "export const value = 1;\n", expect.any(AbortSignal));
+		expect(notifySaved).toHaveBeenCalledWith(client, filePath, expect.any(AbortSignal));
+	});
+
+	it("waits for an already-starting LSP client without cold-starting another one", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		const pendingClient = Promise.withResolvers<LspClient | undefined>();
+		const formatter = createFormatter(async () => "export const value = 1;\n");
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+			["test-lsp", TEST_SERVER],
+			["formatter", formatter],
+		]);
+		const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient");
+		const getActiveOrPending = vi
+			.spyOn(lspClient, "getActiveOrPendingClient")
+			.mockImplementation(async () => pendingClient.promise);
+		const sync = vi.spyOn(lspClient, "syncContent").mockResolvedValue();
+		const notifySaved = vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+		const resultPromise = writethrough(filePath, "export const value=1\n");
+		await Bun.sleep(0);
+		expect(sync).not.toHaveBeenCalled();
+		pendingClient.resolve(client);
+		await resultPromise;
+
+		expect(getOrCreate).not.toHaveBeenCalled();
+		expect(getActiveOrPending).toHaveBeenNthCalledWith(1, TEST_SERVER, tempDir.path(), expect.any(AbortSignal));
+		expect(getActiveOrPending).toHaveBeenNthCalledWith(2, TEST_SERVER, tempDir.path(), expect.any(AbortSignal));
+		expect(sync).toHaveBeenCalledWith(client, filePath, "export const value = 1;\n", expect.any(AbortSignal));
+		expect(notifySaved).toHaveBeenCalledWith(client, filePath, expect.any(AbortSignal));
+	});
+
+	it("starts cold diagnostic initialization before custom formatting completes", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const uri = fileToUri(filePath);
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		const init = Promise.withResolvers<LspClient>();
+		let initStarted = false;
+		const formatter = createFormatter(async () => {
+			expect(initStarted).toBe(true);
+			init.resolve(client);
+			return "export const value = 1;\n";
+		});
+		const clock = new VirtualClock(Date.now());
+		installVirtualTime(clock);
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+			["test-lsp", TEST_SERVER],
+			["formatter", formatter],
+		]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(() => {
+			initStarted = true;
+			return init.promise;
+		});
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		});
+		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+			publishDiagnostics(mockClient, uri, [], 1);
+		});
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: true,
+		});
+		const result = await writethrough(filePath, "export const value=1\n");
+
+		expect(result?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(result?.messages).toEqual([]);
+		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
 	});
 
 	it("announces batched sibling writes before syncing the diagnostic target", async () => {
@@ -292,6 +479,51 @@ describe("LSP diagnostics freshness", () => {
 		expect(result?.errored).toBe(true);
 		expect(result?.messages.some(m => m.includes("real error"))).toBe(true);
 		expect(result?.messages.some(m => m.includes("stale error"))).toBe(false);
+	});
+
+	it("matches published diagnostics when the server renormalizes the document URI", async () => {
+		const filePath = path.join(tempDir.path(), "renormalized.ts");
+		const uri = fileToUri(filePath);
+		const serverUri = uri.replace("/renormalized.ts", "/%72enormalized.ts");
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		const clock = new VirtualClock(Date.now());
+		installVirtualTime(clock);
+
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
+			const syncedUri = fileToUri(syncedFilePath);
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+		});
+		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+			clock.in(10, () => {
+				publishDiagnostics(mockClient, serverUri, [createDiagnostic("renormalized URI error")], 1);
+			});
+		});
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: false,
+			enableDiagnostics: true,
+		});
+		const result = await writethrough(filePath, "export const value = missing;\n");
+
+		expect(result?.errored).toBe(true);
+		expect(result?.messages.some(message => message.includes("renormalized URI error"))).toBe(true);
+	});
+
+	it("matches Windows drive-letter case and percent-encoding differences", () => {
+		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+		if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+		try {
+			const diagnostics = new EquivalentUriMap<string>();
+			diagnostics.set("file:///c%3A/Users/serge/doc.md", "published");
+
+			expect(diagnostics.get("file:///C:/Users/serge/doc.md")).toBe("published");
+		} finally {
+			Object.defineProperty(process, "platform", platformDescriptor);
+		}
 	});
 
 	it("returns completed pull diagnostics inside the inline write window", async () => {

@@ -1,0 +1,94 @@
+# Bazel build configuration for the pi-natives NAPI addon pipeline.
+# Cross targets, ISA variants, and release codegen are encoded in the
+# //:natives-* addon targets (bazel/defs.bzl transition), so a bare
+# `bazel build //:natives-<target>` is always release-grade.
+
+common --enable_platform_specific_config
+
+# Hermetic-ish action env: no host env leaks into action keys. Build scripts
+# that need host tools (cmake for audiopus_sys' bundled opus) get an explicit
+# PATH through crate annotations in MODULE.bazel.
+build --incompatible_strict_action_env
+
+# Third-party crate resolution (rules_rust crate_universe) shells out to
+# `cargo-bazel splice`, which runs `cargo metadata` + fetches every git/registry
+# dep. Two knobs matter on cold caches:
+#   1. CARGO_BAZEL_ISOLATED=0 — reuse the host's ~/.cargo registry/index instead
+#      of building a throwaway cargo home per invocation. Without this, every
+#      splice re-clones the entire crates.io index (~1 GiB, minutes on cold DNS).
+#   2. CARGO_BAZEL_TIMEOUT=1800 — cargo-bazel honors this to raise Bazel's
+#      default `repository_ctx.execute` 600s cap. Fresh machines / ephemeral
+#      runners with git-hosted forks (brush, uutils) blow past 600s and abort
+#      with `Timed out` (rules_rust common_utils.bzl:61) before we can help.
+common --repo_env=CARGO_BAZEL_ISOLATED=0
+common --repo_env=CARGO_BAZEL_TIMEOUT=1800
+
+# NOTE: rust pipelined_compilation stays OFF: handing dependents rmeta-only
+# crates breaks `rust_test(crate = ...)` harness compiles whose deps export
+# macro_rules! ("can't find crate" at macro expansion).
+
+# Keep rustc errors readable.
+build --@rules_rust//rust/settings:error_format=human
+# Generated toolchains carry target_settings requiring the nightly channel.
+build --@rules_rust//rust/toolchain/channel=nightly
+
+
+# --- Rust validation (replaces cargo clippy/nextest in CI) --------------------
+# Mirrors cargo semantics: crates with `[lints] workspace = true` (pi-ast,
+# pi-iso, pi-natives, pi-shell, pi-voice, pi-walker) get the strict workspace
+# policy
+# (clippy-strict; bazel/clippy.bazelrc is generated from Cargo.toml); everything
+# else gets default clippy + -Dwarnings (clippy). pi-builtins allows every
+# clippy group in its manifest (ported brush/uutils/jaq code) while keeping
+# rustc warnings at zero; the aspect ignores Cargo `[lints]`, so clippy-ported
+# re-states those allows on top of -Dwarnings.
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=+clippy_checks
+build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+build:clippy-strict --config=clippy
+build:clippy-ported --config=clippy
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::all
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::pedantic
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::nursery
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::cargo
+build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aunfulfilled_lint_expectations
+import %workspace%/bazel/clippy.bazelrc
+# rustfmt check via aspect, against the workspace rustfmt.toml.
+build:rustfmt --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
+build:rustfmt --output_groups=+rustfmt_checks
+build:rustfmt --@rules_rust//rust/settings:rustfmt.toml=//:rustfmt.toml
+test --test_output=errors
+test --test_summary=terse
+
+# --- CI base -----------------------------------------------------------------
+build:ci --curses=no --color=yes --show_timestamps
+build:ci --announce_rc
+build:ci --verbose_failures
+# Fail-fast inside one invocation; job-level matrix provides isolation.
+build:ci --keep_going=false
+# Reuse sandbox trees between actions: the zig/xwin toolchains stage ~10k-file
+# input trees per action, and rebuilding+async-deleting them for thousands of
+# actions exhausts file descriptors on the kata pods (EMFILE in unix_jni).
+build:ci --reuse_sandbox_directories
+
+# --- Remote cache ------------------------------------------------------------
+# The bazel-remote endpoint is cluster-internal only; .github/actions/bazel-cache
+# composes endpoint + credentials into an rc fragment on omp-kata pods.
+# GitHub-hosted runners never use a remote cache (actions/cache-backed
+# --disk_cache instead). These configs carry only the policy bits.
+#
+# cache-rw: trusted in-cluster writers (omp-kata pods).
+build:cache-rw --remote_upload_local_results=true
+build:cache-rw --remote_local_fallback
+# cache-ro: read-only consumers (e.g. local dev via .bazelrc.user + VPN/tailnet).
+build:cache-ro --remote_upload_local_results=false
+build:cache-ro --remote_local_fallback
+# Don't let a cache outage fail the build.
+build:cache-rw --remote_retries=2
+build:cache-ro --remote_retries=2
+build:cache-rw --remote_timeout=60s
+build:cache-ro --remote_timeout=60s
+
+# --- Local development ---------------------------------------------------------
+# Optional user overrides (remote cache endpoint, disk cache, etc.).
+try-import %workspace%/.bazelrc.user

@@ -9,6 +9,7 @@
   - `packages/coding-agent/src/lsp/client.ts` — client process lifecycle and JSON-RPC
   - `packages/coding-agent/src/lsp/config.ts` — config loading, auto-detect, server selection
   - `packages/coding-agent/src/lsp/lspmux.ts` — optional `lspmux` command wrapping
+  - `packages/coding-agent/src/lsp/mux/daemon.ts` — broker-shared LSP transport and private-process fallback
   - `packages/coding-agent/src/lsp/edits.ts` — apply `WorkspaceEdit` and text edits
   - `packages/coding-agent/src/lsp/utils.ts` — URI conversion, symbol resolution, formatting, glob expansion
   - `packages/coding-agent/src/lsp/types.ts` — tool schema and protocol types
@@ -31,24 +32,24 @@
 | `query` | string | No | Workspace symbol query, code-action selector/filter, or LSP method name for `action=request`. |
 | `new_name` | string | No | Required for `rename` and `rename_file`. |
 | `apply` | boolean | No | For `rename`/`rename_file`, apply unless explicitly `false`. For `code_actions`, list unless explicitly `true`. |
-| `timeout` | number | No | Seconds, clamped by `clampTimeout("lsp", ...)` to `5..300`, default `20`. |
+| `timeout` | number | No | Seconds, default `20`; `clampTimeout("lsp", ...)` applies the positive `tools.maxTimeout` cap first, then the tool's `5..300` range (so the 5-second floor still wins over a lower global cap). |
 | `payload` | string | No | JSON string for `action=request`; overrides auto-built params. |
 
 ## Outputs
-- Single-shot `AgentToolResult`.
-- `content` is always one text block: `[{ type: "text", text: string }]`.
+- Single-shot `AgentToolResult`; `content` is always one text block: `[{ type: "text", text: string }]`.
 - `details` is `LspToolDetails`: `action`, `success`, optional `serverName`, optional original `request`.
-- No streaming updates.
-- No artifact URIs or background jobs.
+- Empty navigation/symbol lookups such as `No definition found` are additionally marked `useless: true` so compaction may elide them; a clean diagnostics result is retained as verification evidence.
+- No streaming updates, artifact URIs, or background jobs. The inline TUI renderer merges call and result, adds action-aware formatting, and supports collapsed/expanded views.
+- The tool is discoverable rather than eagerly loaded. Read-only actions (`diagnostics`, navigation, hover, symbols, `status`, `capabilities`) request read approval; `rename`, `rename_file`, `code_actions`, `reload`, and `request` request write approval regardless of `apply`.
 - Many validation failures are returned as ordinary text results with `details.success: false`; aborts throw `ToolAbortError` instead.
 
 ## Flow
-1. `packages/coding-agent/src/tools/index.ts` registers `lsp: LspTool.createIf`; session creation also gates it behind `session.enableLsp !== false` and `settings.get("lsp.enabled")`.
-2. `LspTool.execute()` in `packages/coding-agent/src/lsp/index.ts` clamps `timeout` with `clampTimeout("lsp", ...)`, builds an `AbortSignal.timeout(...)`, and combines it with the caller signal.
-3. `getConfig()` loads and caches `LspConfig` per cwd, applies idle-timeout config via `setIdleTimeout()`, and reuses the cached config on later calls.
-4. Config loading in `packages/coding-agent/src/lsp/config.ts` merges `defaults.json` with JSON/YAML overrides from project, project config dirs, user config dirs, plugin roots, and home; if there are no overrides it auto-detects servers from root markers plus executable discovery.
+1. `packages/coding-agent/src/tools/index.ts` registers `lsp: LspTool.createIf`. The tool is present only when both `session.enableLsp !== false` and `lsp.enabled` (default `true`) allow it. A session with `lspReadOnly` rejects every action outside `LSP_READONLY_ACTIONS`; restricted sessions default both to LSP disabled and read-only if it is explicitly re-enabled.
+2. `LspTool.execute()` in `packages/coding-agent/src/lsp/index.ts` clamps `timeout` with `clampTimeout("lsp", ...)`, including the optional global `tools.maxTimeout` ceiling, builds an `AbortSignal.timeout(...)`, and combines it with the caller signal.
+3. `getConfig()` loads and caches `LspConfig` per cwd, applies idle-timeout config via `setIdleTimeout()`, and reuses the cached config on later calls. Workspace `reload` is the explicit exception: it clears and rebuilds that cwd's config cache before reloading the newly selected servers.
+4. Config loading in `packages/coding-agent/src/lsp/config.ts` merges `defaults.json` with JSON/YAML overrides from project, project config dirs, user config dirs, plugin roots/marketplace metadata, and home; if there are no overrides it auto-detects servers from root markers plus executable discovery. See [LSP configuration](../lsp-config.md) for filenames, precedence, and server fields.
 5. Server routing uses `getServersForFile()` / `getServerForFile()` from `config.ts`: extension or basename match, then sort primary servers before linters. `index.ts` further filters custom linter clients out of navigation/refactor paths with `getLspServersForFile()` / `getLspServerForFile()`.
-6. `getOrCreateClient()` in `client.ts` creates one process per `command:cwd`, optionally wraps supported commands with `lspmux`, spawns the server, starts the background message reader, sends `initialize`, stores server capabilities, then sends `initialized`.
+6. `getOrCreateClient()` caches one client per `command:cwd`. With `lsp.shared` (default `true` in SDK sessions), it first asks the broker-managed project mux for a shared transport; failure falls back to a private `ptree.spawn()`. An external `lspmux` wrapper takes precedence over broker sharing. The client then starts its message reader, sends `initialize`, stores capabilities, and sends `initialized`.
 7. The message reader in `client.ts` parses LSP frames, resolves pending requests, caches `publishDiagnostics`, tracks `$/progress` tokens for project-load completion, answers `workspace/configuration`, and applies `workspace/applyEdit` requests through `applyWorkspaceEdit()`.
 8. File-scoped actions call `ensureFileOpen()` before requests. Column resolution uses `resolveSymbolColumn()` from `utils.ts`: read the target file, pick first non-whitespace when `symbol` is omitted, otherwise find the exact or case-insensitive match on the target line and honor `#N` occurrence selectors.
 9. Actions dispatch in `LspTool.execute()` through dedicated branches: workspace-only branches (`status`, some `diagnostics`, workspace `symbols`, workspace `reload`, `capabilities`, `request`) run before the single-file switch; all other single-file actions share one client lookup and `switch(action)`.
@@ -71,7 +72,7 @@
 - Optional: `timeout`.
 
 **Execution**
-- `file: "*"`: `runWorkspaceDiagnostics()` detects project type from root markers and runs one subprocess command: Rust `cargo check --message-format=short`, TypeScript `npx tsc --noEmit`, Go `go build ./...`, Python `pyright`.
+- `file: "*"`: `runWorkspaceDiagnostics()` selects the first matching project type in Rust → TypeScript → Go workspace/module → Python order. It runs Rust `cargo check --message-format=short`, TypeScript `npx tsc --noEmit`, Python `pyright`, or Go `go build`: `go.mod` uses `./...`, while `go.work` first reads `go work edit -json` and builds every `Use[].DiskPath/...` pattern (falling back to `./...`). Unknown projects return a supported-marker message without spawning a checker.
 - Concrete file or glob: `resolveDiagnosticTargets()` treats non-globs as one target, otherwise expands a `Bun.Glob` up to `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Per file, every matching server runs: custom clients call `lint(file)`; real LSP servers optionally wait for project load, capture `diagnosticsVersion`, `refreshFile()`, then `waitForDiagnostics()` for fresh `publishDiagnostics` (settles on the latest publish; exact-version match accepted immediately).
 - Results are deduplicated by range+message and severity-sorted.
@@ -97,10 +98,10 @@
 - `No definition found` or `Found N definition(s):` followed by `file:line:col` and one context line above/below each location.
 
 ### `type_definition`
-Same as `definition`, but sends `textDocument/typeDefinition` and reports `type definition(s)`.
+Uses the same location normalization and output shape as `definition`, but sends `textDocument/typeDefinition` and reports `type definition(s)`. Unlike `definition`, the implementation does not require an explicit `symbol` when `line` is supplied; without one it resolves the first non-whitespace column.
 
 ### `implementation`
-Same as `definition`, but sends `textDocument/implementation` and reports `implementation(s)`.
+Uses the same location normalization and output shape as `definition`, but sends `textDocument/implementation` and reports `implementation(s)`. Unlike `definition`, the implementation does not require an explicit `symbol` when `line` is supplied; without one it resolves the first non-whitespace column.
 
 ### `references`
 **Inputs**
@@ -130,7 +131,7 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
 
 ### `symbols`
 **Inputs**
-- Workspace mode: `file: "*"` or omitted file on the early workspace branch, plus required `query`.
+- Workspace mode: required `file: "*"`, plus required `query`. Omitting `file` currently returns `Error: file parameter required...` before workspace-symbol dispatch.
 - Document mode: required `file`.
 - Optional: `timeout`.
 
@@ -179,7 +180,8 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
 **Execution**
 - Reads cached diagnostics for the open URI from `client.diagnostics` and sends `textDocument/codeAction` for a zero-width range at the resolved position.
 - When `apply !== true`, `query` is passed as `context.only: [query]`; this is a server-side kind filter.
-- When `apply === true`, `query` becomes a required client-side selector: either a zero-based numeric index or a case-insensitive substring of the action title.
+- When `apply === true` and `query` is non-empty, it is a client-side selector: either a zero-based numeric index or a case-insensitive substring of the action title.
+- When `apply === true` but `query` is omitted, the current implementation falls through to list mode and does not apply an action.
 - Applying a `CodeAction` uses `applyCodeAction()`: optionally `codeAction/resolve`, then `applyWorkspaceEdit(edit)`, then optional `workspace/executeCommand`.
 - Applying a bare `Command` only runs `workspace/executeCommand`.
 
@@ -207,9 +209,9 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
 - Optional: `timeout`.
 
 **Execution**
-- Workspace mode reloads every non-custom LSP server.
-- Single-file mode reloads the primary server for that file.
-- `reloadServer()` tries `rust-analyzer/reloadWorkspace`, then `workspace/didChangeConfiguration` with `{ settings: {} }`; if neither works it kills the process so the next request cold-starts a new client.
+- Workspace mode first invalidates the per-cwd configuration cache, reloads configuration from disk, and then reloads every newly configured non-custom LSP server.
+- Single-file mode keeps the cached configuration and reloads the primary server for that file.
+- Both modes clear matching recent initialization failures before starting a server. For rust-analyzer servers, `reloadServer()` first tries the `rust-analyzer/reloadWorkspace` request (only rust-analyzer implements it; sending it to other servers such as Roslyn can crash them, so it is gated on the server binary/name). Every server then falls back to a `workspace/didChangeConfiguration` notification carrying the active client's configured settings. If that notification fails, reload tears down the client so the next request cold-starts it. For a shared-mux client, teardown first sends the mux restart notification so the shared server—not only this session's link—is replaced.
 
 **Output text**
 - One line per server: `Reloaded <server>`, `Restarted <server>`, or `Failed to reload <server>: ...`.
@@ -250,16 +252,17 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
   - `rename` and `code_actions` may edit/create/delete/rename files via `applyWorkspaceEdit()`.
   - `rename_file` always renames the source path on disk in apply mode.
   - Server-initiated `workspace/applyEdit` requests also mutate files through `applyWorkspaceEdit()`.
-- Network
-  - None directly; communication is local stdio JSON-RPC to subprocesses.
+- Network / IPC
+  - With `lsp.shared=true` (the default), SDK sessions try a local Unix socket or Windows named pipe to the broker-managed per-project LSP mux. If the mux cannot be reached or started, the client silently falls back to a private subprocess.
+  - Private and externally multiplexed servers communicate over local stdio JSON-RPC; the tool itself does not make remote network requests.
 - Subprocesses / native bindings
-  - Spawns language servers with `ptree.spawn()`.
+  - Private fallback spawns language servers with `ptree.spawn()`; shared mode asks the broker to maintain one server per project.
   - Workspace diagnostics spawns `cargo`, `npx`, `go`, or `pyright`.
   - `BiomeClient` and `SwiftLintClient` spawn CLI tools.
-  - Optional `lspmux` detection spawns `lspmux status`; supported servers may be wrapped through `lspmux client`.
+  - Optional external `lspmux` detection spawns `lspmux status`; supported servers may be wrapped through `lspmux client`.
 - Session state (transcript, memory, jobs, checkpoints, registries)
-  - Caches config per cwd in `configCache`.
-  - Caches LSP clients per `command:cwd`, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state.
+  - Caches config per cwd in `configCache`; workspace `reload` invalidates the entry.
+  - Caches LSP clients per `command:cwd`, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state. The transport may represent a shared mux link rather than an owned process.
   - Caches custom linter clients by `serverName:cwd`.
   - Updates client `lastActivity`; optional idle-timeout cleanup is driven by `setIdleTimeout()`.
 - Background work / cancellation
@@ -273,6 +276,7 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
 - Warmup initialize timeout default: `5_000ms` — `WARMUP_TIMEOUT_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Project-load wait fallback: `15_000ms` — `PROJECT_LOAD_TIMEOUT_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Idle-client sweep interval when enabled: `60_000ms` — `IDLE_CHECK_INTERVAL_MS` in `packages/coding-agent/src/lsp/client.ts`.
+- Failed initialization backoff: `3 * 60 * 1000ms` — `INIT_FAILURE_BACKOFF_MS`; a matching single-file or workspace `reload` clears this negative cache so retry is immediate.
 - Diagnostic message output cap: first `50` messages — `DIAGNOSTIC_MESSAGE_LIMIT` in `packages/coding-agent/src/lsp/index.ts`.
 - Single-file diagnostics wait: `3_000ms` — `SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
 - Batch/glob diagnostics wait per file: `400ms` — `BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
@@ -307,11 +311,11 @@ Same as `definition`, but sends `textDocument/implementation` and reports `imple
 - `getServersForFile()` matches both file extensions and exact basenames from `fileTypes`; config can target names like `Dockerfile` if present.
 - `symbol` matching is exact first, then case-insensitive, and falls back to the Nth occurrence on the specified line only; it never scans other lines.
 - For `definition`, `references`, and `rename` against project-aware servers, omitting `symbol` while passing `line` is rejected with a `ToolError` instead of silently falling back to the first non-whitespace column.
-- `code_actions` uses `query` in two different ways: server-side `context.only` filter in list mode, client-side title/index selector in apply mode.
+- `code_actions` uses `query` in two different ways: server-side `context.only` filter in list mode, client-side title/index selector when both `apply: true` and a non-empty `query` are present. Despite the model prompt requiring a selector, the implementation currently lists actions rather than applying one when `apply: true` omits `query`.
 - `rename` and `rename_file` default to apply. Preview requires `apply: false`.
 - `request` with `file: "*"` is treated the same as omitted `file`: it does not build workspace-specific params.
 - `reload` does not recreate a client immediately after killing it; the next request triggers reinitialization.
 - `workspace/applyEdit` can apply edits initiated by the server outside the direct tool action result path.
 - `detectLspmux()` can be disabled with `PI_DISABLE_LSPMUX=1`; only `rust-analyzer` is in `DEFAULT_SUPPORTED_SERVERS`.
 - Startup LSP discovery (`discoverStartupLspServers(cwd)` in `sdk.ts`) runs for `enableLsp && options.hasUI`; the background warmup additionally requires `!settings.get("lsp.lazy")`. `lsp.lazy` defaults to `true`, so by default discovered servers are surfaced with status `"available"` (gray dot in the welcome screen) and cold-start through `getOrCreateClient()` on first use (lsp tool call or edit/write on a matching file type). Print/RPC/ACP/script sessions skip discovery and warmup entirely. See `docs/sdk.md` § Startup performance.
-- `configCache` is per-process and never auto-invalidated; config changes require a fresh process to be observed by `getConfig()` callers.
+- `configCache` is per-process and is not automatically invalidated. Use workspace `reload` (omitted `file` or `file: "*"`) to re-read config, root markers, and plugin configuration; a concrete-file reload only reloads that server and keeps the cached configuration.

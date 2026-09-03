@@ -8,11 +8,13 @@ import {
 	serviceTierFamily,
 	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai/types";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 
-const m = (provider: string, api: Api, id: string): { provider: string; api: Api; id: string } => ({
+const m = (provider: string, api: Api, id: string) => ({
 	provider,
 	api,
 	id,
+	identity: classifyModel(provider, id),
 });
 
 const openai = m("openai", "openai-responses", "gpt-5");
@@ -78,17 +80,22 @@ describe("resolveModelServiceTier", () => {
 });
 
 describe("shouldSendServiceTier", () => {
-	it("sends flex/scale/priority on the OpenAI family and OpenRouter", () => {
-		for (const p of ["openai", "openai-codex", "openrouter"]) {
+	it("sends every explicit tier on the OpenAI family, omits auto, supported tiers elsewhere", () => {
+		for (const p of ["openai", "openai-codex"] as const) {
 			expect(shouldSendServiceTier("flex", p)).toBe(true);
 			expect(shouldSendServiceTier("scale", p)).toBe(true);
 			expect(shouldSendServiceTier("priority", p)).toBe(true);
-			expect(shouldSendServiceTier("default", p)).toBe(false);
+			expect(shouldSendServiceTier("default", p)).toBe(true);
+			// `auto` is OpenAI's implicit default and the Codex endpoint rejects it — never sent.
 			expect(shouldSendServiceTier("auto", p)).toBe(false);
 		}
+		expect(shouldSendServiceTier("auto", codex)).toBe(false);
+		expect(shouldSendServiceTier("auto", customOpenAI)).toBe(false);
+		expect(shouldSendServiceTier("flex", "openrouter")).toBe(true);
+		expect(shouldSendServiceTier("default", "openrouter")).toBe(false);
 		expect(shouldSendServiceTier("priority", customCodex)).toBe(true);
 		expect(shouldSendServiceTier("scale", customOpenAI)).toBe(true);
-		expect(shouldSendServiceTier("default", customOpenAI)).toBe(false);
+		expect(shouldSendServiceTier("default", customOpenAI)).toBe(true);
 		for (const model of customOpenAIAliases) {
 			expect(shouldSendServiceTier("priority", model)).toBe(true);
 		}

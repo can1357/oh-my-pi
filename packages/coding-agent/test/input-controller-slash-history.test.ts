@@ -15,6 +15,7 @@ function makeCtx(isStreaming = false) {
 	const handleMCPCommand = vi.fn(async () => {});
 	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
+	const prompt = vi.fn(async () => false);
 	const onInputCallback = vi.fn();
 	let text = "";
 	const editor = {
@@ -23,6 +24,10 @@ function makeCtx(isStreaming = false) {
 		setText: (t: string) => {
 			text = t;
 		},
+		setCollapsedText: (t: string) => {
+			text = t;
+		},
+		composerChips: () => [],
 		addToHistory,
 		pendingImages: [] as ImageContent[],
 		pendingImageLinks: [] as (string | undefined)[],
@@ -42,8 +47,11 @@ function makeCtx(isStreaming = false) {
 			isCompacting: false,
 			queuedMessageCount: 0,
 			extensionRunner: undefined,
+			customCommands: [],
+			promptTemplates: [],
 			followUp,
 			steer,
+			prompt,
 		},
 		focusedAgentId: undefined,
 		collabGuest: undefined,
@@ -61,6 +69,8 @@ function makeCtx(isStreaming = false) {
 		}) => ({ ...input, cancelled: false, started: false }),
 		ui: { requestRender: vi.fn() },
 		compactionQueuedMessages: [],
+		skillCommands: new Map(),
+		fileSlashCommands: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		showWarning: vi.fn(),
@@ -75,6 +85,7 @@ function makeCtx(isStreaming = false) {
 		onInputCallback,
 		handleMCPCommand,
 		showStatus: ctx.showStatus,
+		prompt,
 	};
 }
 
@@ -115,6 +126,28 @@ describe("input controller — slash command history (#3148)", () => {
 		expect(handleMCPCommand).toHaveBeenCalledWith("/mcp add srv --url http://x --token sk-secret123");
 		// ...but the secret-bearing text is kept out of recallable history.
 		expect(addToHistory).not.toHaveBeenCalled();
+	});
+
+	it("executes extension commands without rendering them as user prompts or retaining image drafts", async () => {
+		const { ctx, editor, addToHistory, onInputCallback, prompt } = makeCtx();
+		Object.defineProperty(ctx.session, "extensionRunner", {
+			value: {
+				getCommand: (name: string) => (name === "id" ? { name } : undefined),
+				hasHandlers: () => false,
+			},
+		});
+		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///draft.png"];
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("/id [Image #1]");
+
+		expect(prompt).toHaveBeenCalledWith("/id [Image #1]", { images: [image] });
+		expect(addToHistory).toHaveBeenCalledWith("/id [Image #1]");
+		expect(onInputCallback).not.toHaveBeenCalled();
+		expect(editor.pendingImages).toEqual([]);
+		expect(editor.pendingImageLinks).toEqual([]);
 	});
 
 	it("routes /queue through the yield-only follow-up queue while streaming", async () => {

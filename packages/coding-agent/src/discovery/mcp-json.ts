@@ -12,7 +12,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -26,6 +26,7 @@ interface MCPConfigFile {
 		{
 			enabled?: boolean;
 			timeout?: number;
+			requestIdFormat?: "string" | "number";
 			command?: string;
 			args?: string[];
 			env?: Record<string, string>;
@@ -83,10 +84,19 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				}
 			}
 
+			const requestIdFormat = parseRequestIdFormat(serverConfig.requestIdFormat);
+			if (requestIdFormat === undefined && serverConfig.requestIdFormat !== undefined) {
+				logger.warn("MCP server has invalid 'requestIdFormat' value, ignoring", {
+					name,
+					value: serverConfig.requestIdFormat,
+				});
+			}
+
 			const server: MCPServer = {
 				name,
 				enabled,
 				timeout,
+				requestIdFormat,
 				command: serverConfig.command,
 				args: serverConfig.args,
 				env: serverConfig.env,

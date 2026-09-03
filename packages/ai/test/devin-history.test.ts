@@ -1,11 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { gunzipSync } from "node:zlib";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetChatMessageRequestSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/api_server_pb/api_server_pb";
-import { GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/auth_pb/auth_pb";
+import { GetChatMessageRequestSchema, GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const devinModel: Model<"devin-agent"> = buildModel({
 	id: "devin-test",
@@ -107,5 +106,14 @@ describe("streamDevin history handoff", () => {
 		expect(native?.messageId).toBe("bot-12345678-1234-4234-8234-123456789abc");
 		expect(native?.thinking).toBe("native reasoning");
 		expect(native?.signature).toBe("native-signature");
+	});
+
+	it("accepts a bare-string system prompt", async () => {
+		const request = await captureRequest({
+			systemPrompt: "You are a test." as unknown as string[],
+			messages: [{ role: "user", content: "hi", timestamp: 0 }],
+		});
+
+		expect(request.prompt).toBe("You are a test.");
 	});
 });

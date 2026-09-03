@@ -1,46 +1,48 @@
 # Non-compaction auto-retry policy
 
-This document describes the standard API-error retry path in `AgentSession`.
+This document describes the standard API-error retry path coordinated by `AgentSession` and implemented by `TurnRecovery`.
 
-It explicitly excludes context-overflow recovery via auto-compaction. Overflow is handled by compaction logic and is documented separately in [`compaction.md`](../docs/compaction.md).
+It explicitly excludes context-overflow recovery via auto-compaction. Overflow is handled by compaction logic and is documented separately in [`compaction.md`](./compaction.md).
 
 ## Implementation files
 
-- [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
-- [`../src/config/settings-schema.ts`](../packages/coding-agent/src/config/settings-schema.ts)
-- [`../src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
-- [`../src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
-- [`../src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts)
-- [`../src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
-- [`../src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
+- [`../packages/coding-agent/src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
+- [`../packages/coding-agent/src/session/turn-recovery.ts`](../packages/coding-agent/src/session/turn-recovery.ts) — retry classification, backoff, credential rotation, and model fallback
+- [`../packages/coding-agent/src/config/settings-schema.ts`](../packages/coding-agent/src/config/settings-schema.ts)
+- [`../packages/coding-agent/src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
+- [`../packages/coding-agent/src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
+- [`../packages/coding-agent/src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts)
+- [`../packages/coding-agent/src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
+- [`../packages/coding-agent/src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
 
 ## Scope boundary vs compaction
 
 Retry and compaction are checked from the same `agent_end` path, but they are intentionally separated:
 
 1. `agent_end` inspects the last assistant message.
-2. `#isRetryableError(...)` runs first.
+2. `TurnRecovery.isRetryableError(...)` runs before ordinary compaction recovery.
 3. If retry is initiated, compaction checks are skipped for that turn.
-4. Context-overflow errors are hard-excluded from retry classification (`isContextOverflow(...)` short-circuits retry).
-5. Overflow therefore falls through to `#checkCompaction(...)` instead of standard retry.
+4. Context-overflow errors are excluded from retry classification by `AIError.isContextOverflow(...)`.
+5. Overflow therefore reaches `SessionMaintenance.checkCompaction(...)` instead of the standard retry.
 
 So: overload/rate/server/network-style failures use this retry policy; context-window overflow uses compaction recovery.
 
 ## Retry classification
 
-`#isRetryableError(...)` requires all of the following:
+`TurnRecovery.isRetryableError(...)` requires all of the following:
 
 - assistant `stopReason === "error"`
-- `errorMessage` exists
 - message is **not** context overflow
 - one of:
   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
-  - the error is a stale OpenAI Responses replay failure (`Item with id '…' not found`, or an invalid/expired/not-found `previous_response`)
-  - `errorMessage` matches transient transport/envelope patterns or `isUsageLimitError(...)`
+  - the error is a stale OpenAI Responses replay failure
+  - the normalized `AIError` classification is retryable (including transient transport/provider failures and usage limits)
 
-The stale-replay and transient/usage-limit branches additionally require that the stream was **not** interrupted after already emitting observable output. `#streamInterruptedAfterObservableOutput(...)` treats a `STREAM_INTERRUPTED_AFTER_CONTENT` stop detail — or any tool call, non-empty text, thinking, or redacted-thinking block — as non-retryable, so a partially produced turn is not silently replayed. Classifier refusals are checked first and bypass this exclusion.
+Retry classification runs through `AIError.classifyMessage(...)`, using the persisted `errorId`/status when present and augmenting it from provider-aware message classification. It is not solely a regex policy, although legacy/string-only provider failures still use text classification.
 
-Current retryable inputs are regex/string-classified:
+The stale-replay and retryable-error branches additionally require that the stream did **not** already emit replay-unsafe output. Non-empty visible text, images, tool calls, and Anthropic server-tool blocks prevent replay. Thinking-only and whitespace-only partials are safe to discard and retry. Classifier refusals are subject to the same replay-safety check.
+
+Current retryable categories include:
 
 - transient transport/envelope failures, including Anthropic stream-envelope failures before `message_start`
 - overloaded/provider-returned-error wording
@@ -50,34 +52,28 @@ Current retryable inputs are regex/string-classified:
 - provider-suggested retry wording, including OpenAI `retry your request` failures
 - network/connection/socket failures, refused/closed connections, upstream connect/reset-before-headers, socket hang up, timeout/timed out, fetch failed, terminated, retry delay wording, and unexpected socket close messages
 
-Transport classification is regex text matching, not typed provider error codes; classifier refusals are the exception, detected from the typed `stopDetails` field.
+The normalized classifier recognizes the transient categories above from structured flags/status and provider-aware text patterns. Classifier refusals remain a separate typed `stopDetails` decision.
 
-Beyond `#isRetryableError(...)`, a narrower trigger feeds the same retry engine: `#isRetryableReasonlessAbort(...)` routes a content-less `aborted` stop carrying the generic abort sentinel (`GENERIC_ABORT_SENTINEL`) — only when no user, dispose, or streaming-edit-guard abort is in progress — into `#handleRetryableError(message, { allowModelFallback: false })`, i.e. retried without model fallback.
+Beyond `isRetryableError(...)`, empty generic aborts may enter the same retry engine when no user, dispose, or streaming-edit-guard abort is in progress. An interrupted turn whose tool calls already have matching results can also be continued safely: the failed assistant/tool-result sequence is preserved so completed side effects are not replayed. Resolved stream stalls and HTTP/2 stream resets (`NGHTTP2_INTERNAL_ERROR`, `NGHTTP2_REFUSED_STREAM`, `HTTP2StreamReset`) use the same preserve-and-continue path. Cursor idle-stall recovery continues after every emitted tool call has a result; the Connect stream is already closed by the idle abort. An HTTP/2 RST is the same: the stream is already dead.
 
-## Retry lifecycle and state transitions
+Retry state is owned by `TurnRecovery`:
 
-Session state used by retry:
-
-- `#retryAttempt: number` (`0` means idle)
-- `#retryPromise: Promise<void> | undefined` (tracks in-progress retry lifecycle)
-- `#retryResolve: (() => void) | undefined` (resolves `#retryPromise`)
-- `#retryAbortController: AbortController | undefined` (cancels backoff sleep)
+- retry attempt counter (`0` means idle)
+- retry lifecycle promise and resolver
+- retry backoff abort controller
 
 Flow (`#handleRetryableError`):
 
-1. Read `retry` settings group.
-2. If `retry.enabled === false`, stop immediately (`false`, no retry started).
-3. Increment `#retryAttempt`.
-4. Create `#retryPromise` once (first attempt in a chain).
-5. If attempt exceeded `retry.maxRetries`, emit final failure event and stop.
-6. Compute capped jittered local delay: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors skip the backoff entirely (delay `0`) after resetting the cached provider session.
-7. For usage-limit errors, parse retry hints and call auth storage (`markUsageLimitReached(...)`); if credential switching succeeds — including spending a banked Codex reset via the opt-in auto-redeem — force delay to `0`. Otherwise wait for whichever comes first — the provider's retry-after/backoff hint, or the earliest moment a temporarily blocked sibling credential frees up (`retryAtMs` + 1s buffer) so the next attempt can pick it up.
-8. If no credential switch occurred and `retry.modelFallback` is enabled, suppress the current model selector for cooldown and try configured retry model fallback chains, forcing delay to `0` on model switch. Classifier refusals skip the cooldown and only proceed when a fallback model was actually applied (pinned); with no fallback, the chain ends without an `auto_retry_start`.
-9. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure and do not sleep.
-10. Emit `auto_retry_start`.
-11. Remove the trailing assistant error message from agent runtime state (kept in persisted session history).
-12. Sleep with abort support.
-13. Schedule `agent.continue()` through the post-prompt task scheduler (`delayMs: 1`) for the same prompt generation.
+1. Read the `retry` settings group and stop when retry is disabled (except the intrinsic one-shot Fireworks Fast-to-base fallback).
+2. Increment the retry attempt and create the shared retry lifecycle promise on the first attempt.
+3. Calculate whether the current model's retry budget is exhausted.
+4. Classify the error, parse retry timing, and compute capped jittered backoff: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors reset the provider session and use delay `0`.
+5. For usage limits, apply a successful credential switch or banked Codex reset immediately; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
+6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals only continue when a fallback is applied.
+7. If the current model's retry budget is exhausted, stop unless a fallback model was found. A fallback receives a fresh retry budget.
+8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping.
+9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless this is a resolved interrupted tool turn.
+10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
 ### What resets retry counters
 
@@ -87,9 +83,10 @@ Flow (`#handleRetryableError`):
 - retry cancellation during backoff sleep
 - max retries exceeded path
 - max delay exceeded path
-- classifier refusal with no fallback model applied (chain ends silently, no retry started)
+- classifier refusal or hard error with no fallback model applied
+- a later error settles without retry or compaction continuation
 
-`#retryPromise` resolves/clears when retry chain ends (success, cancellation, max-exceeded, max-delay failure, or classifier-refusal stop), via `#resolveRetry()`.
+The retry promise resolves and clears whenever the chain ends.
 
 ## Backoff and max-attempt semantics
 
@@ -171,6 +168,9 @@ Defined in settings schema under retry group:
 - `retry.modelFallback` (default `true`; gates retry model-fallback switching)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
+- `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
+- `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
+- `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
 
 Programmatic toggles in session:
 
@@ -190,16 +190,16 @@ Client helpers:
 - `RpcClient.setAutoRetry(enabled)`
 - `RpcClient.abortRetry()`
 
-Both commands return success responses; retry progress/failure details come from streamed session events, not command response payloads.
-
 ## Event emission and failure surfacing
 
 Session-level retry events:
 
-- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage }`
-- `auto_retry_end { success, attempt, finalError? }`
+- `auto_retry_start { attempt, maxAttempts, delayMs, errorMessage, errorId? }`
+- `auto_retry_end { success, attempt, finalError?, retryErrors? }`
 - `retry_fallback_applied { from, to, role }`
 - `retry_fallback_succeeded { model, role }`
+
+On success, `auto_retry_end` also carries additive `retryErrors`: one `RetryErrorUpdate` (`entryId`, `persistenceKey?`, `note`, `retryRecovery`) per persisted error entry left behind by the retry chain, recording how recovery happened (`recovery`: `plain`/`wait`/`credential`/`model`, plus a human-readable `note` such as `rate-limited; switched account; retried`) and which successful message superseded each error (`supersededBy` with timestamp/provider/model/responseId). Extensions and RPC consumers receive the same fields.
 
 Propagation:
 
@@ -222,7 +222,7 @@ Retry stops and will not auto-continue when any of these occur:
 - `retry.enabled` is false
 - error is not retry-classified
 - error is context overflow (delegated to compaction path)
-- max retries exceeded
+- max retries are exceeded and no fallback model is available
 - provider-requested delay exceeds `retry.maxDelayMs` and no credential/model switch is available
 - user cancels retry (`abort_retry` or `Esc` during retry loader)
 - global abort (`abort`) cancels retry first
@@ -231,7 +231,8 @@ A new retry chain can still start later on a future retryable error after counte
 
 ## Operational caveats
 
-- Classification is regex text matching; provider-specific structured errors are not used here.
-- Retry strips the failing assistant error from **runtime context** before re-continue, but session history still keeps that error entry.
+- Classification uses normalized `AIError` flags/status plus provider-aware text fallback; it is not limited to structured errors or to regex matching alone.
+- Retry strips the failing assistant error from **runtime context** before re-continue, but session history still keeps that error entry. When the retry chain eventually succeeds, each persisted error entry from the chain is marked with a `retryRecovery` marker (`status: "recovered"`, plus kind/attempt/note and the superseding message; entries whose error was rendered moot carry `status: "superseded"` instead). Marked entries render as a dim, non-error one-line note instead of a red failure (live UI included, via the success event's `retryErrors`), and they are excluded when the LLM context is rebuilt — the display transcript still keeps them visible.
 - `RpcSessionState` currently exposes `autoCompactionEnabled` but not an `autoRetryEnabled` field; RPC callers must track their own toggle state or query settings through other APIs.
 - Model fallback changes append temporary `model_change` entries and may later restore the primary model when its cooldown expires, depending on `retry.fallbackRevertPolicy`.
+- Usage-aware fallback runs before a provider request when both `retry.modelFallback` and `retry.usageAwareFallback` are enabled. Unknown/unmapped usage fails open. At the reserve threshold, `"confirm"` asks interactive sessions and keeps the current model when declined; sessions without a confirmation UI automatically apply an eligible configured fallback. `"auto"` applies an eligible fallback without asking. `"fail-closed"` rejects reserve or depleted usage instead of spending it or selecting a fallback. Depleted usage under the other policies applies an eligible fallback without a reserve confirmation.

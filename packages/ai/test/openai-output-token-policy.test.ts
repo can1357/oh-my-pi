@@ -147,6 +147,23 @@ describe("applyOpenAIGatewayRouting", () => {
 		expect(params.provider).toBeUndefined();
 	});
 
+	it("merges Vercel automatic caching with existing gateway routing", () => {
+		const params = routingParams();
+		applyOpenAIGatewayRouting(params, {
+			isOpenRouterHost: false,
+			isVercelGatewayHost: true,
+			vercelGatewayRouting: {
+				only: ["bedrock"],
+				order: ["bedrock", "anthropic"],
+				caching: "auto",
+			},
+		});
+		expect(params.providerOptions).toEqual({
+			gateway: { only: ["bedrock"], order: ["bedrock", "anthropic"], caching: "auto" },
+		});
+		expect(params.provider).toBeUndefined();
+	});
+
 	it("ignores Vercel gateway routing with neither only nor order", () => {
 		const params = routingParams();
 		applyOpenAIGatewayRouting(params, {

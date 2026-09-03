@@ -753,7 +753,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	fn brace_expand_if_needed(&self, word: &'a str) -> Result<Cow<'a, str>, error::Error> {
 		let mut words = self.brace_expand_words(word)?;
 		if words.len() == 1 {
-			Ok(words.pop().unwrap())
+			Ok(words.remove(0))
 		} else {
 			Ok(Cow::Owned(words.join(" ")))
 		}

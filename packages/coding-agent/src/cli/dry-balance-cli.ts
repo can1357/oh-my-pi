@@ -14,7 +14,7 @@ import type {
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -615,6 +615,7 @@ async function mapConcurrent<T, R>(
 	concurrency: number,
 	fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<R>(items.length);
 	let nextIndex = 0;
 	const workerCount = Math.min(concurrency, items.length);

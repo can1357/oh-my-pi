@@ -1,0 +1,77 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_shared_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+# The NAPI cdylib. build.rs is intentionally not wired in: its only effects are
+# napi_build::setup() link args (hardcoded in linkopts below — see napi-build
+# src/lib.rs) and a vestigial no-op filter-defs scan that belongs to pi-shell.
+# TypeScript typedef regeneration stays a cargo-side dev flow
+# (`bun --cwd packages/natives run build:bindings`); index.js/index.d.ts are
+# committed, so artifact builds never need the napi CLI.
+rust_shared_library(
+    name = "pi_natives",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob([
+        "src/syntaxes/*.sublime-syntax",
+        "src/fonts/*",
+        "data/*.bin.zst",
+        "src/utok/claude/testdata/*.json",
+        "fixtures/*.json",
+    ]),
+    crate_features = [],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_flags = select({
+        "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
+        "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
+        "//conditions:default": [],
+    }) + select({
+        # napi_build::setup() equivalents (build.rs is not wired into Bazel):
+        # napi addons resolve Node symbols at load time on macOS; DF_1_NODELETE
+        # keeps the addon resident across Worker teardown on linux-gnu (napi
+        # emits it for gnu; harmless under musl's loader). windows-msvc needs
+        # nothing — napi-sys v3 imports node.exe via raw-dylib.
+        "@platforms//os:macos": ["-Clink-arg=-Wl,-undefined,dynamic_lookup"],
+        "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
+        "//conditions:default": [],
+    }) + select({
+        # musl defaults to +crt-static, under which rustc silently emits no
+        # cdylib at all; napi musl addons have always linked the dynamic CRT.
+        "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+        "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+        # Statically link the MSVC CRT so the shipped .node does not import
+        # VCRUNTIME140.dll from the Visual C++ Redistributable, which is absent
+        # on a clean Windows install and makes the loader's dlopen fail with
+        # "The specified module could not be found" (error 126). The C deps are
+        # switched to /MT in lock-step via the static_link_msvcrt cc feature in
+        # the native_addon transition (bazel/defs.bzl).
+        "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//conditions:default": [],
+    }),
+    version = "17.1.5",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/pi-ast",
+        "//crates/pi-iso",
+        "//crates/pi-shell",
+        "//crates/pi-vcs",
+        "//crates/pi-voice",
+        "//crates/pi-walker",
+    ],
+)
+
+rust_test(
+    name = "pi_natives_test",
+    crate = ":pi_natives",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        # dev-dependency on every platform (desktop_x11's pure keysym helpers
+        # compile under cfg(test) everywhere), but cargo-bazel folds it into
+        # the linux-only normal dep entry; restore it for the test build.
+        "@crates//:xkeysym",
+    ],
+)
