@@ -3305,6 +3305,9 @@ describe("ACP extension session_start/resources_discover send draining (PR #9379
 		await Settings.init({ agentDir, inMemory: true });
 
 		const authStorage = createInMemoryAuthStorage();
+		// `AgentSession.prompt` preflights a provider key through the registry; the
+		// extension-triggered turn below must not depend on the developer's env.
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		let session: AgentSession | undefined;
 		try {
 			// A `resources_discover` handler that announces itself via

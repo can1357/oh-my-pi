@@ -1374,6 +1374,9 @@ export default function (pi) {
 	it("drains a resources_discover-triggered sendUserMessage before returning (regression: PR #9379 round-5 review)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-discover-drain-"));
 		const authStorage = createInMemoryAuthStorage();
+		// `AgentSession.prompt` preflights a provider key through the registry; the
+		// extension-triggered turn below must not depend on the developer's env.
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		let session: AgentSession | undefined;
 		try {
 			// A `resources_discover` handler that announces itself via
