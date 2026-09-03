@@ -50,7 +50,7 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -2384,9 +2384,10 @@ interface WakeSource {
 	messageId?: string;
 }
 
-function wakeSources(records: CustomMessage[], selfId: string): WakeSource[] {
+function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 	const sources: WakeSource[] = [];
 	for (const record of records) {
+		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
@@ -2407,7 +2408,7 @@ function wakeSources(records: CustomMessage[], selfId: string): WakeSource[] {
  */
 async function relayWakeTurnOutput(args: {
 	id: string;
-	records: CustomMessage[];
+	records: AgentMessage[];
 	turnStartTime: number;
 	yielded: boolean;
 	result: SingleResult;
@@ -2444,6 +2445,16 @@ async function relayWakeTurnOutput(args: {
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
  */
+/** Extracts display text from an IRC/aside record's content, shared by the custom-role and
+ *  user-role branches below (both fields share the same string | text-part-array shape). */
+function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	if (typeof content === "string") return content;
+	return content
+		.filter(part => part.type === "text")
+		.map(part => part.text ?? "")
+		.join("\n");
+}
+
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
@@ -2452,11 +2463,16 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const ircTask =
 			records
 				.map(record => {
-					const body =
-						record.details && typeof record.details === "object"
-							? Reflect.get(record.details, "message")
-							: undefined;
-					return typeof body === "string" ? body : record.content;
+					if (record.role === "custom") {
+						const body =
+							record.details && typeof record.details === "object"
+								? Reflect.get(record.details, "message")
+								: undefined;
+						if (typeof body === "string") return body;
+						return extractIrcRecordText(record.content);
+					}
+					if (record.role === "user") return extractIrcRecordText(record.content);
+					return "";
 				})
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
@@ -3295,6 +3311,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentAgentId: options.parentAgentId,
 				agentId: id,
 				agentDisplayName: agent.name,
+				agentName: agent.name,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,

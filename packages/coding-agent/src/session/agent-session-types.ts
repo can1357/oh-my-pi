@@ -329,8 +329,10 @@ export interface PromptOptions {
 	expandPromptTemplates?: boolean;
 	/** Image attachments. */
 	images?: ImageContent[];
-	/** Queue behavior while streaming. */
-	streamingBehavior?: "steer" | "followUp";
+	/** Queue behavior while streaming. `"aside"` is non-interrupting — it does not steer/follow-up
+	 *  an in-flight tool batch, injecting at the next step boundary instead (see
+	 *  AgentSession.sendUserMessage's `deliverAs: "aside"`). */
+	streamingBehavior?: "steer" | "followUp" | "aside";
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */

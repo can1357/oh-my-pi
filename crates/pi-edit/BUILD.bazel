@@ -26,6 +26,7 @@ rust_library(
 
 rust_test(
     name = "pi-edit_test",
+    compile_data = glob(["tests/fixtures/notebooks/*"]),
     crate = ":pi-edit",
     data = glob(["tests/fixtures/**"]),
     edition = "2024",

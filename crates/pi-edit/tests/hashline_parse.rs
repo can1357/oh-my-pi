@@ -16,7 +16,7 @@ use pi_edit::modes::hashline::{
 	types::{BlockMode, Cursor, Edit, FileOp, PasteTarget},
 };
 
-fn options<'a>() -> SplitOptions<'a> {
+const fn options<'a>() -> SplitOptions<'a> {
 	SplitOptions { cwd: None, path: None }
 }
 
@@ -618,7 +618,7 @@ fn prefix_helpers_strip_read_and_diff_shapes() {
 	assert_eq!(strip_one_leading_hashline_prefix(" >>> + 42:hello"), "hello");
 	let lines = vec!["[a.ts#1A2B]".into(), "1:one".into(), "2:two".into()];
 	assert_eq!(strip_hashline_prefixes(&lines), ["one", "two"]);
-	assert_eq!(strip_new_line_prefixes(&vec!["+one".into(), "+two".into()]), ["one", "two"]);
+	assert_eq!(strip_new_line_prefixes(&["+one".into(), "+two".into()]), ["one", "two"]);
 	assert_eq!(hashline_parse_text(Some("1:one\r\n2:two\n")), ["one", "two"]);
 	assert!(is_read_metadata_line("[Showing lines 1-2 of 8. Use :3 to continue]"));
 	assert!(is_read_metadata_line("2-4: omitted …"));

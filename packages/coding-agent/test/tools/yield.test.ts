@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -57,6 +59,57 @@ describe("YieldTool", () => {
 		const tool = new YieldTool(createSession());
 		const result = await tool.execute("call-1", { result: { data: { ok: true } } } as never);
 		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
+	});
+
+	it("commits a terminal yield emitted before parent steering lands (#10645)", async () => {
+		// The parent's `hub send` arrives while the child is still streaming its
+		// yield call. The already-generated yield must execute and settle the
+		// child instead of being skipped for the queued steer.
+		const tool = new YieldTool(createSession());
+		const yieldCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-yield-steering",
+			name: "yield",
+			arguments: { result: { data: { report: "finished" } } },
+		};
+		const mock = createMockModel({
+			responses: [{ content: [yieldCall] }, { content: ["parent steering handled"] }],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			interruptMode: "immediate",
+		});
+		const events: AgentEvent[] = [];
+		let steeringSent = false;
+		const unsubscribe = agent.subscribe(event => {
+			events.push(event);
+			if (
+				!steeringSent &&
+				event.type === "message_update" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(content => content.type === "toolCall" && content.name === "yield")
+			) {
+				steeringSent = true;
+				agent.steer({
+					role: "user",
+					content: "Wrap up now with your findings.",
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+			}
+		});
+
+		await agent.prompt("start");
+		unsubscribe();
+
+		expect(steeringSent).toBe(true);
+		const yieldEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === yieldCall.id,
+		);
+		expect(yieldEnd?.isError).toBe(false);
+		expect(yieldEnd?.result.details).toEqual({ data: { report: "finished" }, status: "success", error: undefined });
 	});
 
 	it("accepts aborted payload with error only", async () => {

@@ -25,8 +25,8 @@ describe("composer startup cache", () => {
 			const lspServers = [{ name: "rust-analyzer", status: "connecting" as const, fileTypes: [".rs"] }];
 			const status: ComposerStatusSnapshot = {
 				shape: "rail",
-				topBorder: { content: "…", width: 1 },
-				bottomLines: ["", "… | … | …"],
+				topBorder: { content: "placeholder", width: 11 },
+				bottomLines: ["", "placeholder"],
 			};
 			await Promise.all([
 				writeComposerUiCache(cwd, preferences, {
@@ -71,7 +71,7 @@ describe("composer startup cache", () => {
 		}
 	});
 
-	it("redacts values from legacy status snapshots", async () => {
+	it("ignores legacy status snapshots", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-composer-cache-legacy-status-"));
 		const key = Bun.hash.wyhash(path.resolve(cwd)).toString(16).padStart(16, "0");
 		const cacheDir = path.join(getComposerCacheDir(), key);
@@ -86,10 +86,7 @@ describe("composer startup cache", () => {
 				}),
 			);
 
-			const status = readComposerStartupCache(cwd).status;
-			expect(status?.topBorder?.content).toBe("… | … | …");
-			expect(status?.topBorder?.width).toBe(Bun.stringWidth("… | … | …"));
-			expect(status?.bottomLines).toEqual(["", "… | … | …"]);
+			expect(readComposerStartupCache(cwd).status).toBeUndefined();
 		} finally {
 			await Promise.all([
 				fs.rm(cwd, { recursive: true, force: true }),

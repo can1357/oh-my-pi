@@ -368,7 +368,7 @@ fn parses_marker_add_runs_as_inline_insertions_without_consuming_the_next_anchor
 #[test]
 fn recovers_a_rewrite_written_as_a_selection_directive_list() {
 	let operations = parse_operations(
-		concat!("«\nconst value = oldValue;\n»\n\u{27ea}oldValue\u{2502}newValue\u{27eb}",),
+		"«\nconst value = oldValue;\n»\n⟪oldValue│newValue⟫",
 		"const value = oldValue;\n",
 	)
 	.unwrap();

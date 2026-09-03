@@ -8,7 +8,7 @@ use pi_edit::{
 	text::adjust_indentation,
 };
 
-fn fuzzy_options(threshold: Option<f64>) -> FindMatchOptions<'static> {
+const fn fuzzy_options(threshold: Option<f64>) -> FindMatchOptions<'static> {
 	FindMatchOptions { allow_fuzzy: true, threshold, excluded_ranges: &[] }
 }
 

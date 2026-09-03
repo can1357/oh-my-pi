@@ -18,6 +18,7 @@ export interface ProviderOverride {
 	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
+	requestMetadata?: Model<Api>["requestMetadata"];
 }
 
 /**
