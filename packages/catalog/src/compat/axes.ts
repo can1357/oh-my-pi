@@ -128,6 +128,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
+	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",

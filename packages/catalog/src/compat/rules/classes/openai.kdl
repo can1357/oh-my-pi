@@ -30,6 +30,12 @@ class "openai" {
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		requires-reasoning-off-juice-instruction #true
 	}
+	// GPT-6 Astra changes reasoning effort mid-conversation through a
+	// `configuration_update` input item so the request-level effort (and the
+	// cached prompt prefix) stays put; every other SKU 400s on the item type.
+	models "gpt-6-astra" {
+		supports-configuration-update #true
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {

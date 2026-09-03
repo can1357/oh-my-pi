@@ -6226,6 +6226,19 @@
 			{
 				"source": "classes/openai.kdl:36",
 				"class": "openai",
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra"
+					}
+				],
+				"wire": {
+					"supportsConfigurationUpdate": true
+				}
+			},
+			{
+				"source": "classes/openai.kdl:42",
+				"class": "openai",
 				"family": "codex",
 				"revision": [
 					{
@@ -10650,7 +10663,7 @@
 					},
 					{
 						"op": "<",
-						"revision": "6.0.0"
+						"revision": "7.0.0"
 					}
 				],
 				"catalog": {
@@ -10955,7 +10968,7 @@
 					},
 					{
 						"op": "<",
-						"revision": "6.0.0"
+						"revision": "7.0.0"
 					}
 				],
 				"catalog": {
@@ -14919,7 +14932,7 @@
 					"authorizeParams": {
 						"id_token_add_organizations": "true",
 						"codex_cli_simplified_flow": "true",
-						"originator": "pi"
+						"originator": "omp"
 					},
 					"clientId": {
 						"value": "app_EMoamEEZ73f0CkXaXp7hrann"

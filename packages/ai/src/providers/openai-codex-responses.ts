@@ -5,6 +5,7 @@ import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
+	codexRoutingHint,
 	getCodexAccountId,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
@@ -74,11 +75,17 @@ import {
 	type CodexReasoningContext,
 	type CodexRequestOptions,
 	type InputItem,
+	type ReasoningConfig,
 	type RequestBody,
 	resolveCodexResponsesLite,
 	transformRequestBody,
 } from "./openai-codex/request-transformer";
 import { CodexApiError } from "./openai-codex/response-handler";
+import {
+	getOpenAIEffortControlState,
+	type OpenAIEffortControlState,
+	planStableOpenAIEffort,
+} from "./openai-configuration-update";
 import type {
 	ResponseComputerToolCall,
 	ResponseCustomToolCall,
@@ -476,6 +483,8 @@ interface CodexProviderSessionState extends ProviderSessionState {
 	webSocketSessions: Map<string, CodexWebSocketSessionState>;
 	webSocketPublicToPrivate: Map<string, string>;
 	metadataSessions: Map<string, CodexMetadataSessionState>;
+	/** `configuration_update` effort baselines, keyed by model + session. */
+	effortControls: Map<string, OpenAIEffortControlState<ReasoningConfig["effort"]>>;
 }
 
 /** Request classification encoded in Codex turn metadata. */
@@ -1051,6 +1060,7 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 		webSocketSessions: new Map(),
 		webSocketPublicToPrivate: new Map(),
 		metadataSessions: new Map(),
+		effortControls: new Map(),
 		close: () => {
 			for (const session of state.webSocketSessions.values()) {
 				session.connection?.close("session_disposed");
@@ -1058,6 +1068,7 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 			state.webSocketSessions.clear();
 			state.webSocketPublicToPrivate.clear();
 			state.metadataSessions.clear();
+			state.effortControls.clear();
 		},
 	};
 	return state;
@@ -1071,7 +1082,9 @@ function isCodexProviderSessionState(state: ProviderSessionState | undefined): s
 		"webSocketPublicToPrivate" in state &&
 		state.webSocketPublicToPrivate instanceof Map &&
 		"metadataSessions" in state &&
-		state.metadataSessions instanceof Map
+		state.metadataSessions instanceof Map &&
+		"effortControls" in state &&
+		state.effortControls instanceof Map
 	);
 }
 
@@ -1573,7 +1586,30 @@ export async function buildTransformedCodexRequestBody(
 		responsesLite: options?.responsesLite,
 	};
 
-	return transformRequestBody(params, model, codexOptions, { developerMessages });
+	const body = await transformRequestBody(params, model, codexOptions, { developerMessages });
+	applyCodexStableEffort(model, body, options);
+	return body;
+}
+
+/**
+ * Keep the request-level effort byte-stable across a conversation and carry
+ * later changes as `configuration_update` items (GPT-6 Astra). Requires a
+ * session id and provider session state to remember the baseline; without
+ * them every request stands alone and sends its own effort.
+ */
+function applyCodexStableEffort(
+	model: Model<"openai-codex-responses">,
+	body: RequestBody,
+	options: OpenAICodexResponsesOptions | undefined,
+): void {
+	if (!model.compat.supportsConfigurationUpdate || options?.codexCompaction) return;
+	const effort = body.reasoning?.effort;
+	if (effort === undefined || effort === "none" || !body.input) return;
+	const providerState = getCodexProviderSessionState(options?.providerSessionState);
+	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
+	if (!providerState || !sessionId) return;
+	const state = getOpenAIEffortControlState(providerState.effortControls, `${model.id}\u0000${sessionId}`);
+	body.reasoning = { ...body.reasoning, effort: planStableOpenAIEffort(state, body.input, effort) };
 }
 
 async function openInitialCodexEventStream(
@@ -1800,6 +1836,7 @@ async function openCodexWebSocketTransport(
 		requestContext.responsesLite,
 		requestContext.requestMetadata,
 		await getCodexAttestationHeader(requestContext.accountId),
+		requestContext.transformedBody,
 	);
 	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
 	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
@@ -4273,6 +4310,7 @@ async function openCodexSseEventStream(
 		responsesLite,
 		requestMetadata,
 		await getCodexAttestationHeader(accountId),
+		body,
 	);
 	// `wrapCodexSseStream` arms the iterator-level idle watchdog only after this
 	// fetch resolves. Each transport attempt needs its own pre-response timer:
@@ -4367,11 +4405,19 @@ function createCodexHeaders(
 	responsesLite = false,
 	requestMetadata?: CodexCompatibilityIdentity,
 	attestation?: string,
+	routedRequest?: Pick<RequestBody, "model" | "service_tier">,
 ): Headers {
 	const headers = new Headers(initHeaders ?? {});
 	headers.delete("x-api-key");
 	headers.set("Authorization", `Bearer ${accessToken}`);
 	if (accountId) headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
+	// codex-rs sends the hint on every ChatGPT-OAuth request and WebSocket
+	// handshake; this provider only ever speaks to the Codex backend.
+	if (routedRequest) {
+		headers.set(OPENAI_HEADERS.ROUTING_HINT, codexRoutingHint(routedRequest.model, routedRequest.service_tier));
+	} else {
+		headers.delete(OPENAI_HEADERS.ROUTING_HINT);
+	}
 	// Region-pinned enterprise workspaces answer 401 `Workspace is not authorized
 	// in this region.` when the request's egress region does not match them and
 	// the client did not declare the workspace's residency. The access token

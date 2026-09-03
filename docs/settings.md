@@ -242,7 +242,7 @@ tools:
     bash: prompt
 
 compaction:
-  strategy: snapcompact
+  methodOrder: [snapcompact, remote, soft]
   thresholdPercent: 80
 
 theme:
