@@ -239,7 +239,11 @@ export class JsRuntime {
 	 */
 	setRunScope(scope: Record<string, unknown>): void {
 		this.#activateGlobals("set run scope");
-		Object.assign(globalThis, scope);
+		for (const key in scope) {
+			this.#ownGlobal(key);
+			(globalThis as Record<string, unknown>)[key] = scope[key];
+			recordGlobalValue(key, this.#globalOwner);
+		}
 	}
 
 	/** Read a prelude-owned global from this runtime's active global set. */
