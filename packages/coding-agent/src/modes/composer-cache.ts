@@ -7,6 +7,8 @@ import type { ComposerPreferences, ComposerStatusSnapshot } from "./composer";
 import type { SymbolPreset } from "./theme/theme";
 
 const CACHE_VERSION = 1;
+const STATUS_CACHE_VERSION = 3;
+const LEGACY_STATUS_PLACEHOLDER = "… | … | …";
 /** Theme inputs cached from the last resolved settings load for stable prepaint colors. */
 export interface ComposerThemePreferences {
 	readonly symbolPreset?: SymbolPreset;
@@ -128,6 +130,9 @@ function readStatus(file: string): ComposerStatusSnapshot | undefined {
 	}
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
 	if (field(parsed, "version") !== CACHE_VERSION) return undefined;
+	const statusVersion = field(parsed, "statusVersion");
+	if (statusVersion !== undefined && statusVersion !== 2 && statusVersion !== STATUS_CACHE_VERSION) return undefined;
+	const legacy = statusVersion !== STATUS_CACHE_VERSION;
 	const shape = field(parsed, "shape");
 	const rawBorderColor = field(parsed, "borderColor");
 	const rawTopBorder = field(parsed, "topBorder");
@@ -149,12 +154,16 @@ function readStatus(file: string): ComposerStatusSnapshot | undefined {
 		if (typeof prefix !== "string" || typeof suffix !== "string") return undefined;
 		borderColor = { prefix, suffix };
 	}
-	if (rawTopBorder === undefined) return { shape, borderColor, bottomLines };
+	const safeBottomLines = legacy ? bottomLines.map(line => (line ? LEGACY_STATUS_PLACEHOLDER : "")) : bottomLines;
+	if (rawTopBorder === undefined) return { shape, borderColor, bottomLines: safeBottomLines };
 	if (typeof rawTopBorder !== "object" || rawTopBorder === null || Array.isArray(rawTopBorder)) return undefined;
 	const borderContent = field(rawTopBorder, "content");
 	const borderWidth = field(rawTopBorder, "width");
 	if (typeof borderContent !== "string" || typeof borderWidth !== "number") return undefined;
-	return { shape, borderColor, topBorder: { content: borderContent, width: borderWidth }, bottomLines };
+	const topBorder = legacy
+		? { content: LEGACY_STATUS_PLACEHOLDER, width: Bun.stringWidth(LEGACY_STATUS_PLACEHOLDER) }
+		: { content: borderContent, width: borderWidth };
+	return { shape, borderColor, topBorder, bottomLines: safeBottomLines };
 }
 
 function readUiState(file: string): { preferences: ComposerPreferences; theme: ComposerThemePreferences } | undefined {
@@ -276,11 +285,11 @@ export async function writeComposerWelcomeCache(cwd: string, welcome: ComposerWe
 	);
 }
 
-/** Persist the last real status-line chrome for speculative first-frame rendering. */
+/** Persist placeholder-only status chrome for speculative first-frame rendering. */
 export async function writeComposerStatusCache(cwd: string, status: ComposerStatusSnapshot): Promise<void> {
 	await Bun.write(
 		path.join(projectCacheDir(cwd), "status.json"),
-		JSON.stringify({ version: CACHE_VERSION, ...status }),
+		JSON.stringify({ version: CACHE_VERSION, statusVersion: STATUS_CACHE_VERSION, ...status }),
 	);
 }
 

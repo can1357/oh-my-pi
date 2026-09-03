@@ -1276,6 +1276,59 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("normalizes trailing periods from intent at extraction site", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["test"],
+			messages: [],
+			tools: [
+				{
+					name: "echo",
+					label: "echo",
+					description: "echoes value",
+					parameters: type({ value: "string" }),
+					execute: async (_toolCallId, params: { value: string }) => ({
+						content: [{ type: "text", text: params.value }],
+					}),
+				},
+			],
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: { value: "hello", [INTENT_FIELD]: "Reading model role settings." },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			intentTracing: true,
+		};
+
+		const stream = agentLoop([createUserMessage("run")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const assistantWithToolCall = messages.find(
+			message => message.role === "assistant" && message.content.some(content => content.type === "toolCall"),
+		) as AssistantMessage | undefined;
+		const tracedToolCall = assistantWithToolCall?.content.find(content => content.type === "toolCall");
+
+		expect(tracedToolCall?.type).toBe("toolCall");
+		if (tracedToolCall?.type === "toolCall") {
+			expect(tracedToolCall.intent).toBe("Reading model role settings");
+		}
+	});
+
 	it("runs shared tools in parallel and emits completion-ordered results", async () => {
 		const toolSchema = type({ value: "string" });
 		const startTimes: Record<string, number> = {};

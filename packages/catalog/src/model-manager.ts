@@ -257,7 +257,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
 			: restoredCache.models;
 		const cachedModels = additiveStaticModelIds
-			? mergeDynamicModels(staticModels, cacheContribution)
+			? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
 			: restoredCache.models;
 		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
 		return {
@@ -312,7 +312,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		: modelsDevFetchSucceeded;
 	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);
 	const mergedWithModelsDev = mergeDynamicModels(mergedWithCache, modelsDevModels);
-	const mergedModels = mergeDynamicModels(mergedWithModelsDev, dynamicModels);
+	const catalogMetricsSource = modelsDevFetchSucceeded ? normalizedModelsDevModels : preparedCacheModels;
+	const mergedWithCatalogMetrics = additiveStaticModelIds
+		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
+		: mergedWithModelsDev;
+	const mergedModels = mergeDynamicModels(mergedWithCatalogMetrics, dynamicModels);
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
@@ -465,6 +469,39 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 		sanitizedModels.push(staticIds?.has(model.id) ? { ...model, contextWindow: null, maxTokens: null } : model);
 	}
 	return sanitizedModels;
+}
+
+function mergeCatalogMetrics<TApi extends Api>(
+	models: Model<TApi>[],
+	catalogModels: readonly Model<TApi>[],
+): Model<TApi>[] {
+	if (models.length === 0 || catalogModels.length === 0) return models;
+	const metrics = new Map<string, Pick<Model<TApi>, "int" | "tps">>();
+	for (const model of catalogModels) {
+		if (model.int == null && model.tps == null) continue;
+		metrics.set(model.id, { int: model.int, tps: model.tps });
+	}
+	if (metrics.size === 0) return models;
+
+	let merged: Model<TApi>[] | undefined;
+	for (let index = 0; index < models.length; index++) {
+		const model = models[index];
+		const metric = metrics.get(model.id);
+		if (!metric) continue;
+		if (
+			(metric.int === undefined || metric.int === model.int) &&
+			(metric.tps === undefined || metric.tps === model.tps)
+		) {
+			continue;
+		}
+		merged ??= [...models];
+		merged[index] = {
+			...model,
+			...(metric.int !== undefined ? { int: metric.int } : {}),
+			...(metric.tps !== undefined ? { tps: metric.tps } : {}),
+		};
+	}
+	return merged ?? models;
 }
 
 function mergeDynamicModels<TApi extends Api>(

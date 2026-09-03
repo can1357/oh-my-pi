@@ -2,7 +2,7 @@
  * Edit tool renderer and LSP batching helpers.
  */
 
-import { HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_MOVE_KEYWORD, HL_REM_KEYWORD } from "@oh-my-pi/hashline";
+import { editInspect } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -39,11 +39,7 @@ import {
 	WidthAwareText,
 } from "../tui";
 import type { EditMode } from "../utils/edit-mode";
-import type { DiffError, DiffResult } from "./diff";
-import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
-import type { Operation } from "./modes/patch";
-import { type SloppySection, splitSloppySections } from "./sloppy";
-import type { PerFileDiffPreview } from "./streaming";
+import { HL_FILE_PREFIX, HL_FILE_SUFFIX, HL_MOVE_KEYWORD, HL_REM_KEYWORD } from "../tools/hashline-format";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LSP Batching
@@ -54,6 +50,19 @@ export { getLspBatchRequest, type LspBatchRequest };
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool Details Types
 // ═══════════════════════════════════════════════════════════════════════════
+
+export type Operation = "create" | "delete" | "update";
+
+export interface PerFileDiffPreview {
+	path: string;
+	diff?: string;
+	firstChangedLine?: number;
+	error?: string;
+}
+
+type EditDiffPreview =
+	| { diff: string; firstChangedLine?: number }
+	| { error: string; diff?: undefined; firstChangedLine?: undefined };
 
 export interface EditToolPerFileResult {
 	path: string;
@@ -150,8 +159,14 @@ interface HashlineInputRenderSummary {
 	entries: HashlineInputEntry[];
 }
 
+interface InspectedInputEntry {
+	path: string;
+	op?: Operation;
+	rename?: string;
+}
+
 interface ApplyPatchRenderSummary {
-	entries: ApplyPatchEntry[];
+	entries: InspectedInputEntry[];
 	error?: string;
 }
 
@@ -160,7 +175,7 @@ export interface EditRenderContext {
 	/** Edit mode resolved by the caller; lets the renderer dispatch without shape-sniffing */
 	editMode?: EditMode;
 	/** Pre-computed diff preview (computed before tool executes) */
-	editDiffPreview?: DiffResult | DiffError;
+	editDiffPreview?: EditDiffPreview;
 	/** Multi-file streaming diff preview (edits spanning several files) */
 	perFileDiffPreview?: PerFileDiffPreview[];
 	/** Raw in-flight edit text shown while a computed diff preview is unavailable */
@@ -188,6 +203,18 @@ function previewCacheAt(caches: RenderedStringCache[] | undefined, index: number
 
 const CALL_TEXT_PREVIEW_LINES = 6;
 const CALL_TEXT_PREVIEW_WIDTH = 80;
+
+export function renderStreamingFallback(editMode: EditMode, args: unknown, theme: Theme): string {
+	if (editMode !== "replace" || !args || typeof args !== "object") return "";
+	const record = args as Record<string, unknown>;
+	const newString =
+		typeof record.new_string === "string"
+			? record.new_string
+			: typeof record.newText === "string"
+				? record.newText
+				: undefined;
+	return newString ? renderPlainTextPreview(newString, theme) : "";
+}
 
 /** Extract file path from an edit entry. */
 function filePathFromEditEntry(p: unknown): string | undefined {
@@ -561,6 +588,10 @@ function getCallPreview(
 	if (renderContext?.editStreamingFallback) {
 		return renderContext.editStreamingFallback;
 	}
+	const contextPreview = renderContext?.editDiffPreview;
+	if (contextPreview && "error" in contextPreview && contextPreview.error) {
+		return uiTheme.fg("error", replaceTabs(contextPreview.error));
+	}
 	return "";
 }
 
@@ -636,21 +667,36 @@ function getHashlineInputRenderSummary(
 	return { entries: getHashlineInputSections(input) };
 }
 
-/**
- * Per-file section descriptors for a (possibly mid-stream) sloppy payload.
- * Paths live inside the payload's `[path]` headers, so the call header would
- * otherwise render a bare `…` for the whole stream.
- */
+function inspectInputEntries(mode: EditMode, input: string): InspectedInputEntry[] {
+	const inspection = editInspect(mode, JSON.stringify({ input }));
+	const entries = new Map<string, InspectedInputEntry>();
+	for (const path of inspection.paths) entries.set(path, { path });
+	for (const intent of inspection.fileOps) {
+		const entry = entries.get(intent.path) ?? { path: intent.path };
+		if (intent.kind === "delete") {
+			entry.op = "delete";
+		} else if (intent.kind === "move") {
+			entry.op = "update";
+			entry.rename = intent.to;
+		}
+		entries.set(intent.path, entry);
+	}
+	return [...entries.values()];
+}
+
+/** Per-file descriptors for a possibly partial sloppy payload. */
 function getSloppyInputRenderSummary(
 	args: EditRenderArgs,
 	editMode: EditMode | undefined,
-): { entries: SloppySection[] } | undefined {
+): { entries: InspectedInputEntry[] } | undefined {
 	const input = args.input ?? args._input;
-	if (editMode !== "sloppy" || typeof input !== "string") {
+	if (editMode !== "sloppy" || typeof input !== "string") return undefined;
+	try {
+		const entries = inspectInputEntries("sloppy", input);
+		return entries.length > 0 ? { entries } : undefined;
+	} catch {
 		return undefined;
 	}
-	const entries = splitSloppySections(input);
-	return entries.length > 0 ? { entries } : undefined;
 }
 
 function getApplyPatchRenderSummary(
@@ -658,22 +704,12 @@ function getApplyPatchRenderSummary(
 	isPartial: boolean,
 	editMode: EditMode | undefined,
 ): ApplyPatchRenderSummary | undefined {
-	if (editMode !== undefined && editMode !== "apply_patch") {
-		return undefined;
-	}
-
-	if (typeof args.input !== "string") {
-		return undefined;
-	}
-
+	if ((editMode !== undefined && editMode !== "apply_patch") || typeof args.input !== "string") return undefined;
 	try {
-		return { entries: expandApplyPatchToEntries({ input: args.input }) };
+		return { entries: inspectInputEntries("apply_patch", args.input) };
 	} catch (err) {
 		const error = err instanceof Error ? err.message : String(err);
-		if (isPartial && error === MISSING_APPLY_PATCH_END_ERROR) {
-			return { entries: expandApplyPatchToPreviewEntries({ input: args.input }) };
-		}
-		return { entries: [], error };
+		return isPartial && error === MISSING_APPLY_PATCH_END_ERROR ? { entries: [] } : { entries: [], error };
 	}
 }
 /** Header facts (path, op, rename, file count) resolved from streamed edit args; shared by the framed call header and the compact activity summary. */
