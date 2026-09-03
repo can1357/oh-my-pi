@@ -126,6 +126,15 @@ function aggregateRowStatus(windows: CardWindowRow[]): UsageLimit["status"] {
 	return "unknown";
 }
 
+/** Shared leading word to omit when it would hide distinguishing suffixes at narrow widths. */
+function sharedLeadingWordPrefix(windows: readonly CardWindowRow[], labelWidth: number): string {
+	if (windows.length < 2 || windows.every(window => visibleWidth(window.label) <= labelWidth)) return "";
+	const separator = windows[0].label.indexOf(" ");
+	if (separator < 1) return "";
+	const prefix = windows[0].label.slice(0, separator + 1);
+	return windows.every(window => window.label.startsWith(prefix) && window.label.length > prefix.length) ? prefix : "";
+}
+
 /**
  * Collapse usage reports into one compact card per provider: limits grouped by
  * quota bucket (label + window), each bucket showing the mean used fraction
@@ -400,13 +409,14 @@ export class UsageDashboardComponent implements Component {
 			0,
 		);
 		const labelWidth = Math.min(16, Math.max(6, width - 24));
+		const sharedLabelPrefix = sharedLeadingWordPrefix(visibleWindows, labelWidth);
 		const barWidth = Math.max(5, width - 2 - labelWidth - 1 - 5 - (resetWidth > 0 ? resetWidth + 1 : 0));
 		for (const window of visibleWindows) {
 			const tagPlain = window.windowTag
 				? truncateToWidth(window.windowTag, Math.max(2, Math.floor(labelWidth / 2) - 1))
 				: "";
 			const baseWidth = tagPlain ? labelWidth - visibleWidth(tagPlain) - 1 : labelWidth;
-			const basePlain = truncateToWidth(window.label, baseWidth).padEnd(baseWidth);
+			const basePlain = truncateToWidth(window.label.slice(sharedLabelPrefix.length), baseWidth).padEnd(baseWidth);
 			const label = tagPlain
 				? `${theme.fg("muted", basePlain)} ${theme.fg("dim", tagPlain)}`
 				: theme.fg("muted", basePlain);

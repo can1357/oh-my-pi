@@ -1,7 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { buildHeatmapLayout, buildProviderCards } from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import {
+	buildHeatmapLayout,
+	buildProviderCards,
+	UsageDashboardComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
 	return { day, cost, requests, totalTokens: 0 };
@@ -106,5 +111,35 @@ describe("buildProviderCards", () => {
 		expect(idle.sort()).toEqual(["cursor", "ollama-cloud"]);
 		const unlimited = cards.find(card => card.provider === "ollama-cloud");
 		expect(unlimited?.unlimited).toBe(true);
+	});
+});
+
+describe("UsageDashboardComponent", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("keeps shared-prefix limit labels distinguishable at narrow widths", () => {
+		const reports = [
+			report("anthropic", "a@x.test", [
+				limit("anthropic", "a", "7d", "Claude 7 Day", 0.55, "warning"),
+				limit("anthropic", "a", "7d-fable", "Claude 7 Day (Fable)", 0.46, "ok"),
+				limit("anthropic", "a", "5h", "Claude 5 Hour", 0.01, "ok"),
+				limit("anthropic", "a", "extra", "Claude Extra", 1, "exhausted"),
+			]),
+		];
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: () => "",
+			loadActivity: async push => push([]),
+			requestRender: () => {},
+			onClose: () => {},
+		});
+
+		const rendered = Bun.stripANSI(dashboard.render(73).join("\n"));
+		expect(rendered).toContain("7 Day");
+		expect(rendered).toContain("7 Day (F…");
+		expect(rendered).not.toContain("Claude 7…");
+		dashboard.dispose();
 	});
 });

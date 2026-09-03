@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed narrow `/usage` dashboards truncating distinct quota labels to identical text ([#10649](https://github.com/can1357/oh-my-pi/issues/10649)).
 - Fixed protocol handler incorrectly escaping raw text content from agent responses
 - Fixed `<task-result>` previews of structured subagent yields collapsing to a lone `{` when the JSON's second line exceeded the preview budget
 - Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
