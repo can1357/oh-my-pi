@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed data-less subagent yields discarding a report when the report and yield tool call arrive in separate assistant messages ([#10635](https://github.com/can1357/oh-my-pi/issues/10635)).
+
 ## [18.1.5] - 2026-09-03
 
 ### Added

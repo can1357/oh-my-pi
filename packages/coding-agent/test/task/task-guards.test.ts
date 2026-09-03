@@ -23,6 +23,8 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
  * 3. A cancelled/aborted child that produced no completed output salvages its
  *    last assistant text into a `[cancelled after N req, …]` summary instead
  *    of the parent seeing "(no output)" and redoing the work.
+ * 4. A data-less terminal yield resolves the preceding non-empty assistant
+ *    message when the yield tool call lands in a separate turn.
  */
 
 interface SteerCall {
@@ -67,6 +69,32 @@ function yieldToolEnd(): AgentSessionEvent {
 		},
 		isError: false,
 	} as AgentSessionEvent;
+}
+
+function dataLessYieldToolEnd(): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId: "tool-yield",
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", type: "result", useLastTurn: true },
+		},
+		isError: false,
+	} as unknown as AgentSessionEvent;
+}
+
+function incrementalYieldToolEnd(id: string, label: string): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId: id,
+		toolName: "yield",
+		result: {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", type: [label], useLastTurn: true },
+		},
+		isError: false,
+	} as unknown as AgentSessionEvent;
 }
 
 function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
@@ -280,6 +308,52 @@ describe("runSubprocess request guards", () => {
 		expect(result.abortReason).toContain("request budget exceeded");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		expect(handle.steerCalls.length).toBe(1);
+	});
+
+	it("uses the preceding assistant report when a data-less yield is a separate message", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const report = "# Inventory\n\nComplete report.";
+		const handle = createFakeSession({
+			events: [assistantMessageEnd(report), assistantMessageEnd(""), dataLessYieldToolEnd()],
+			lastAssistantMessage: {
+				role: "assistant",
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tool-yield", name: "yield", arguments: {} }],
+			},
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-data-less-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(report);
+	});
+
+	it("binds each data-less incremental yield to its own report turn", async () => {
+		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
+		const handle = createFakeSession({
+			events: [
+				assistantMessageEnd("first finding report"),
+				incrementalYieldToolEnd("tool-inc-1", "findings"),
+				assistantMessageEnd("second finding report"),
+				incrementalYieldToolEnd("tool-inc-2", "findings"),
+				assistantMessageEnd(""),
+				dataLessYieldToolEnd(),
+			],
+			lastAssistantMessage: {
+				role: "assistant",
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tool-yield", name: "yield", arguments: {} }],
+			},
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-incremental-yield", settings });
+
+		expect(result.exitCode).toBe(0);
+		// Each section keeps its contemporaneous report instead of both collapsing
+		// onto the run's final assistant message.
+		expect(JSON.parse(result.output)).toEqual({ findings: ["first finding report", "second finding report"] });
 	});
 
 	it("salvages the last assistant text for an aborted child with no completed output", async () => {

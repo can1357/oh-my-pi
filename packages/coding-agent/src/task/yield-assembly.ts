@@ -47,11 +47,14 @@ function resolveYieldPayload(
 ): { value: unknown; fromLastAssistantText: boolean; missingData: boolean } {
 	const hasData = item.data !== undefined;
 	const shouldUseLastTurn = item.useLastTurn === true || (labels.length > 0 && !hasData);
-	if (shouldUseLastTurn && lastAssistantText !== undefined) {
+	// Prefer the text bound to this specific yield; fall back to the run-level
+	// value only for items the executor never stamped (e.g. render rebuilds).
+	const resolvedText = item.lastTurnText ?? lastAssistantText;
+	if (shouldUseLastTurn && resolvedText !== undefined) {
 		return {
-			value: lastAssistantText,
+			value: resolvedText,
 			fromLastAssistantText: true,
-			missingData: lastAssistantText.length === 0,
+			missingData: resolvedText.length === 0,
 		};
 	}
 	return {
