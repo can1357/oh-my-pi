@@ -93,6 +93,24 @@ describe("executeJs", () => {
 		expect(resetResult.output.trim()).toBe("undefined");
 	});
 
+	it("resolves a bare package subpath import that carries a query suffix", async () => {
+		const pkgDir = path.join(tempDir.path(), "node_modules", "qpkg");
+		await Bun.write(
+			path.join(pkgDir, "package.json"),
+			JSON.stringify({ name: "qpkg", version: "1.0.0", exports: { "./feature": "./feature.js" } }),
+		);
+		await Bun.write(path.join(pkgDir, "feature.js"), "export const marker = 'feature-loaded';");
+
+		const result = await executeJs("const m = await import('qpkg/feature?v=1'); return m.marker;", {
+			sessionId,
+			session,
+			sessionFile,
+			reset: true,
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("feature-loaded");
+	});
+
 	it("parallel() barriers until every thunk settles and throws the lowest-index error", async () => {
 		const result = await executeJs(
 			[

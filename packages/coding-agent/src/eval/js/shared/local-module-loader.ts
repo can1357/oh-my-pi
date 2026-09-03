@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as vm from "node:vm";
 import { collectModuleSourceSpecifiers, stripTypeScriptSyntax } from "./rewrite-imports";
+import { IMPORT_CONDITIONS, REQUIRE_CONDITIONS, resolveBareSpecifier } from "./node-modules-resolver";
 
 interface LocalModuleEntry {
 	version: number;
@@ -307,7 +308,52 @@ export class LocalModuleLoader {
 
 function buildRequire(fromPath: string): NodeJS.Require {
 	const basePath = path.extname(fromPath) ? fromPath : path.join(fromPath, "[eval]");
-	return createRequire(pathToFileURL(basePath).href);
+	const base = createRequire(pathToFileURL(basePath).href);
+	return wrapRequireWithOnDiskFallback(base, path.dirname(basePath));
+}
+
+// In a `bun build --compile` binary, Bun's own require/resolver roots resolution at
+// the embedded `$bunfs` and never sees the project's on-disk `node_modules` (#10496).
+// Fall back to an on-disk walk that resolves the bare specifier to an absolute file
+// path, which the compiled runtime can load; dev builds resolve via `base` and never
+// hit the fallback.
+function wrapRequireWithOnDiskFallback(base: NodeJS.Require, baseDir: string): NodeJS.Require {
+	const req = ((id: string) => {
+		try {
+			return base(id);
+		} catch (err) {
+			const fallback = onDiskFallback(err, id, baseDir, REQUIRE_CONDITIONS);
+			if (fallback) return base(fallback);
+			throw err;
+		}
+	}) as NodeJS.Require;
+	const resolve = ((id: string, options?: { paths?: string[] }) => {
+		try {
+			return base.resolve(id, options);
+		} catch (err) {
+			const fallback = onDiskFallback(err, id, baseDir, REQUIRE_CONDITIONS);
+			if (fallback) return fallback;
+			throw err;
+		}
+	}) as NodeJS.RequireResolve;
+	resolve.paths = request => base.resolve.paths(request);
+	req.resolve = resolve;
+	req.cache = base.cache;
+	req.extensions = base.extensions;
+	req.main = base.main;
+	return req;
+}
+
+// Attempt on-disk resolution for a specifier the primary resolver could not find.
+// Only bare specifiers on genuine not-found errors qualify — relative/absolute/URL
+// specifiers and other failures (e.g. errors thrown while loading the module) pass
+// through unchanged.
+function onDiskFallback(err: unknown, id: string, baseDir: string, conditions: string[]): string | null {
+	if (!(err && typeof err === "object" && "code" in err)) return null;
+	const code = err.code;
+	if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") return null;
+	if (isLocalPathSpecifier(id) || /^[a-z][a-z0-9+.-]*:/i.test(id)) return null;
+	return resolveBareSpecifier(id, baseDir, conditions);
 }
 
 function buildModuleSource(source: string, modulePath: string): string {
@@ -325,7 +371,8 @@ function resolveImportSpecifier(cwd: string, source: string): string {
 	try {
 		return Bun.resolveSync(source, cwd);
 	} catch {
-		return source;
+		if (isLocalPathSpecifier(source)) return source;
+		return resolveBareSpecifier(source, cwd, IMPORT_CONDITIONS) ?? source;
 	}
 }
 
@@ -359,6 +406,10 @@ function isManagedLocalModulePath(target: string): boolean {
 }
 
 function normalizeImportTarget(target: string): string {
-	if (path.isAbsolute(target)) return pathToFileURL(target).href;
-	return target;
+	if (!path.isAbsolute(target)) return target;
+	// Preserve a `?query`/`#fragment` suffix through file-URL conversion; pathToFileURL
+	// would otherwise percent-encode `?`/`#` into the pathname and break the query.
+	const cut = target.search(/[?#]/);
+	if (cut === -1) return pathToFileURL(target).href;
+	return pathToFileURL(target.slice(0, cut)).href + target.slice(cut);
 }
