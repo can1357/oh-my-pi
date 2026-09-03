@@ -1902,6 +1902,63 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("waits the project-aware budget per file when diagnostics target a glob (#10701)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-glob-slow-pull-");
+		try {
+			const files = ["a.ts", "b.ts"].map(name => path.join(tempDir.path(), name));
+			for (const file of files) await Bun.write(file, "export const x = 1;\n");
+			await initTheme();
+
+			const server: ServerConfig = { command: "slow-pull-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client = {
+				name: "slow-pull-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+				serverCapabilities: { diagnosticProvider: {} },
+			} as LspClient;
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["slow-pull-lsp", server]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			// First pull on a large workspace takes longer than the old 400ms batch cap.
+			const pullMs = 800;
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(
+				(_client, _method, _params, _signal, timeoutMs) =>
+					new Promise((resolve, reject) => {
+						setTimeout(() => resolve({ kind: "full", items: [] }), pullMs);
+						if (timeoutMs !== undefined && timeoutMs < pullMs) {
+							setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+						}
+					}),
+			);
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("glob-slow-pull", {
+				action: "diagnostics",
+				file: path.join(tempDir.path(), "*.ts"),
+				timeout: 5,
+			});
+
+			expect(result.details?.success).toBe(true);
+			expect(textResult(result)).not.toContain("all language servers failed");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("reports failure when every workspace-symbol server fails (#8387)", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-workspace-symbol-all-fail-");
 		try {
