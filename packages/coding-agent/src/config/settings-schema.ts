@@ -976,7 +976,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "appearance",
 			group: "Status Line",
 			label: "Cost Prefix",
-			description: "Prefix displayed before cost amounts (e.g. $, ¥, €, £). Cosmetic only — does not convert values.",
+			description:
+				"Prefix displayed before cost amounts (e.g. $, ¥, €, £). Cosmetic only — does not convert values.",
 		},
 	},
 
