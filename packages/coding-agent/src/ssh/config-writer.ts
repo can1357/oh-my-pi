@@ -122,8 +122,8 @@ export async function addSSHHost(filePath: string, name: string, hostConfig: SSH
 
 	// Read, duplicate-check, and write under the resolved-target lock so
 	// concurrent mutations (including paths aliasing one referent) serialize.
-	await withConfigFileLock(filePath, async () => {
-		const existing = await readSSHConfigFile(filePath);
+	await withConfigFileLock(filePath, async writePath => {
+		const existing = await readSSHConfigFile(writePath);
 
 		// Check for duplicate name
 		if (existing.hosts?.[name]) {
@@ -140,7 +140,7 @@ export async function addSSHHost(filePath: string, name: string, hostConfig: SSH
 		};
 
 		// Write back
-		await writeSSHConfigFile(filePath, updated);
+		await writeSSHConfigFile(writePath, updated);
 	});
 }
 
@@ -162,9 +162,9 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
 		throw new Error("Host address cannot be empty");
 	}
 
-	await withConfigFileLock(filePath, async () => {
+	await withConfigFileLock(filePath, async writePath => {
 		// Read existing config
-		const existing = await readSSHConfigFile(filePath);
+		const existing = await readSSHConfigFile(writePath);
 
 		// Update host
 		const updated: SSHConfigFile = {
@@ -176,7 +176,7 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
 		};
 
 		// Write back
-		await writeSSHConfigFile(filePath, updated);
+		await writeSSHConfigFile(writePath, updated);
 	});
 }
 
@@ -186,9 +186,9 @@ export async function updateSSHHost(filePath: string, name: string, hostConfig: 
  * @throws Error if host doesn't exist
  */
 export async function removeSSHHost(filePath: string, name: string): Promise<void> {
-	await withConfigFileLock(filePath, async () => {
+	await withConfigFileLock(filePath, async writePath => {
 		// Read existing config
-		const existing = await readSSHConfigFile(filePath);
+		const existing = await readSSHConfigFile(writePath);
 
 		// Check if host exists
 		if (!existing.hosts?.[name]) {
@@ -203,7 +203,7 @@ export async function removeSSHHost(filePath: string, name: string): Promise<voi
 		};
 
 		// Write back
-		await writeSSHConfigFile(filePath, updated);
+		await writeSSHConfigFile(writePath, updated);
 	});
 }
 

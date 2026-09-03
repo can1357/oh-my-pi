@@ -137,15 +137,17 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 					const segment = remaining.shift()!;
 					if (segment === "" || segment === ".") {
 						if (frozen) {
-							// A trailing `/` (empty segment) or `/.` demands the
-							// preceding component be a traversable directory. Before the
-							// freeze that component was confirmed on disk, so the
-							// requirement holds and the segment is inert. After the
-							// freeze the component is a nonexistent/dangling name that
-							// can never be a directory (`config.yml -> missing/`):
-							// dropping the segment and writing a regular file there
+							// An INTERIOR separator or `.` after the frozen component is
+							// inert — `managed//mcp.json` and `managed/./mcp.json` are
+							// equivalent spellings of `managed/mcp.json`, and the write
+							// below creates the missing parent. Only a TRAILING `/`
+							// (empty segment) or `/.` demands the preceding component be
+							// a directory: after the freeze that component is a
+							// nonexistent/dangling name that can never be a directory
+							// (`config.yml -> missing/`), so writing a regular file there
 							// mislocates and falsely reports success while the logical
 							// config path stays unusable with ENOTDIR. Surface it.
+							if (remaining.length > 0) continue;
 							throw enotDir(`symlink target requires an unresolved component to be a directory for ${filePath}`);
 						}
 						// The walk is not frozen, so `acc` was resolved by realpath()
@@ -313,10 +315,15 @@ function enotDir(message: string): Error & { code?: string } {
  * referent's parent directory is materialized first — also covering a link
  * dangling into a directory that does not exist yet.
  */
-export async function withConfigFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+export async function withConfigFileLock<T>(filePath: string, fn: (writePath: string) => Promise<T>): Promise<T> {
 	const writePath = await resolveSymlinkWriteTarget(filePath);
 	await fs.promises.mkdir(path.dirname(writePath), { recursive: true, mode: 0o700 });
-	return withFileLock(writePath, fn);
+	// The callback receives the LOCKED target and must do both its read and
+	// its write through it: if the link is retargeted mid-callback, resolving
+	// the logical path again would publish to the new referent while this
+	// lock still names the old one, letting another mutation lock the new
+	// referent independently and race its read-modify-write.
+	return withFileLock(writePath, async () => fn(writePath));
 }
 
 /**
