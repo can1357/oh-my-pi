@@ -163,8 +163,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 export function sendToUserProductTool(): ProductWireTool {
 	return {
 		name: SEND_TO_USER_WIRE_NAME,
-		description:
-			"Send a user-visible message. The user cannot see tool output or your thinking — only SendToUser.",
+		description: "Send a user-visible message. The user cannot see tool output or your thinking — only SendToUser.",
 		parameters: wrapToolParameters({
 			type: "object",
 			properties: {

@@ -4,7 +4,12 @@ import * as grokbotCatalogAuth from "@oh-my-pi/pi-catalog/discovery/grokbot-auth
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-utils";
-import { formatGrokbotConnectTrailerError, streamGrokBot, toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
+import {
+	formatGrokbotConnectTrailerError,
+	streamGrokBot,
+	toInferenceMessages,
+	toSandImageDataUrl,
+} from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	createGrokbotChecksum,

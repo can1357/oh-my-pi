@@ -101,11 +101,7 @@ describe("--no-tools leak prevention", () => {
 			customTool("mcp__node_repl_js_reset", true),
 		]);
 		expect(names).toEqual([]);
-		for (const name of [
-			"mcp__node_repl_js",
-			"mcp__node_repl_js_add_node_module_dir",
-			"mcp__node_repl_js_reset",
-		]) {
+		for (const name of ["mcp__node_repl_js", "mcp__node_repl_js_add_node_module_dir", "mcp__node_repl_js_reset"]) {
 			expect(names).not.toContain(name);
 		}
 	});

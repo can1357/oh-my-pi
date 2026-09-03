@@ -105,8 +105,7 @@ export function resolveGrokbotRequestedModel(
 		// (thinking/context/effort/fast). Partial sets work for some vendors but
 		// Anthropic variants are defined as complete combinations.
 		if (allowed.has("thinking")) {
-			const thinking =
-				options?.thinking !== undefined ? options.thinking : Boolean(effortValue);
+			const thinking = options?.thinking !== undefined ? options.thinking : Boolean(effortValue);
 			parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
 		}
 		if (allowed.has("context")) {

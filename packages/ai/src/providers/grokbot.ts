@@ -588,9 +588,7 @@ export function formatGrokbotConnectTrailerError(parsedEnd: Record<string, unkno
 		if (!debug) continue;
 		const providerError = typeof debug.error === "string" ? debug.error : "";
 		const nested =
-			debug.details && typeof debug.details === "object"
-				? (debug.details as Record<string, unknown>)
-				: undefined;
+			debug.details && typeof debug.details === "object" ? (debug.details as Record<string, unknown>) : undefined;
 		const title = nested && typeof nested.title === "string" ? nested.title : "";
 		const detail = nested && typeof nested.detail === "string" ? nested.detail : "";
 		const info =
@@ -601,9 +599,7 @@ export function formatGrokbotConnectTrailerError(parsedEnd: Record<string, unkno
 			info && (typeof info.providerStatusCode === "string" || typeof info.providerStatusCode === "number")
 				? String(info.providerStatusCode)
 				: "";
-		const chunk = [providerError, title, status ? `HTTP ${status}` : "", detail]
-			.filter(s => s.length > 0)
-			.join(": ");
+		const chunk = [providerError, title, status ? `HTTP ${status}` : "", detail].filter(s => s.length > 0).join(": ");
 		if (chunk) parts.push(chunk);
 	}
 

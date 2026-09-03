@@ -14,7 +14,11 @@ import {
 	wrapToolParameters,
 } from "../../src/providers/grokbot/product-wire";
 import { resolveGrokbotRequestedModel } from "../../src/providers/grokbot/model-request";
-import { decodeInferenceStreamRequest, encodeInferenceStreamRequest, fieldNumbers } from "../../src/providers/grokbot/proto";
+import {
+	decodeInferenceStreamRequest,
+	encodeInferenceStreamRequest,
+	fieldNumbers,
+} from "../../src/providers/grokbot/proto";
 
 describe("anthropic sand tool wire", () => {
 	test("detects anthropic sand model ids", () => {
@@ -242,7 +246,10 @@ describe("product wire helpers", () => {
 		expect(writes[0]?.description).toBe("write file");
 		expect(writes[0]?.parameters).toEqual(wrapToolParameters(writeSchema));
 
-		const index = new Map<string, { name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }>([
+		const index = new Map<
+			string,
+			{ name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }
+		>([
 			["edit", { name: "edit", isGrammar: false }],
 			["write", { name: "write", isGrammar: false }],
 		]);
@@ -259,7 +266,10 @@ describe("product wire helpers", () => {
 			{ name: "bash", description: "shell", parameters: { type: "object", properties: {} } },
 			{ name: "read", description: "read", parameters: { type: "object", properties: {} } },
 		];
-		const index = new Map<string, { name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }>([
+		const index = new Map<
+			string,
+			{ name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }
+		>([
 			["bash", { name: "bash", isGrammar: false }],
 			["read", { name: "read", isGrammar: false }],
 		]);

@@ -180,16 +180,17 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 	for (const variant of row.variants ?? []) {
 		const legacySlug = variant.legacySlug?.trim();
 		const variantString = variant.variantStringRepresentation?.trim();
-		const selector = legacySlug && legacySlug !== id ? legacySlug : variantString && variantString !== id ? variantString : undefined;
+		const selector =
+			legacySlug && legacySlug !== id
+				? legacySlug
+				: variantString && variantString !== id
+					? variantString
+					: undefined;
 		if (!selector) continue;
 		const variantParams = collectVariantParameterIds(variant);
 		const parameterIds = variantParams.length > 0 ? variantParams : base.sandParameterIds;
 		const sandMaxMode =
-			variant.isDefaultMaxConfig === true
-				? true
-				: variant.isDefaultNonMaxConfig === true
-					? false
-					: base.sandMaxMode;
+			variant.isDefaultMaxConfig === true ? true : variant.isDefaultNonMaxConfig === true ? false : base.sandMaxMode;
 		out.push({
 			...base,
 			id: selector,
