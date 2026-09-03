@@ -209,21 +209,18 @@ jobs:
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
 
-   # Provides the native addons every downstream TS job installs. PRs never
-   # build: they fetch the latest release's Linux x64 pair from the
-   # @oh-my-pi/pi-natives-linux-x64 npm leaf instead. The workspace loader
-   # skips its version sentinel for workspace loads, so release addons load
-   # fine under a newer checkout; a PR whose TS tests depend on changed
-   # native behavior fails visibly and the native side lands via main.
-   # Main (kata, cluster remote cache) builds all Linux-hosted targets with
-   # bazel. Job name says "bazel" for continuity with required checks.
+   # Provides the native addons every downstream TS job installs. PRs reuse the
+   # latest npm release while its binding surface satisfies the checkout, then
+   # build the current Linux x64 pair on GitHub-hosted runners when main has
+   # native APIs newer than that release. Main always builds every Linux-hosted
+   # target on omp-kata with the cluster cache.
    native_addons:
       name: Build native addons (bazel)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
 
-         # ---- PR path: latest release addons from npm ----
+         # ---- PR path: reuse compatible release addons, otherwise build current ----
          - name: Fetch release native addons (npm)
            if: github.event_name == 'pull_request'
            shell: bash
@@ -231,47 +228,43 @@ jobs:
               set -euo pipefail
               tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
               echo "Fetching $tarball"
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+              curl -A "OpenAI File Downloader, XaiImageApiFetch/1.0" -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
               mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
               cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
               cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
-         # A corrupt download must fail here, not as a confusing dlopen error
-         # in every downstream test shard.
-         - name: Smoke release addons
+         - name: Probe release addon compatibility
+           id: release-native
            if: github.event_name == 'pull_request'
            shell: bash
            run: |
               set -euo pipefail
-              # NOTE: `bun -e 'require("./x.node")'` swallows dlopen failures
-              # (exit 0 on a bogus addon); a script file enforces them in
-              # both bun and node. Verified against a corrupt .node fixture.
-              cat > "$RUNNER_TEMP/smoke-addons.js" <<'EOF'
-              for (const f of process.argv.slice(2)) {
-               const m = require(f);
-               if (!m || Object.keys(m).length === 0) {
-               	console.error(`addon failed to load: ${f}`);
-               	process.exit(1);
-               }
+              cat > "$RUNNER_TEMP/probe-addons.cjs" <<'EOF'
+              const fs = require("node:fs");
+              const path = require("node:path");
+              const wrapper = fs.readFileSync("packages/natives/native/index.js", "utf8");
+              const expected = new Set([...wrapper.matchAll(/nativeBindings\.([A-Za-z_$][\w$]*)/g)].map(match => match[1]));
+              let buildCurrent = false;
+              for (const file of process.argv.slice(2)) {
+                const bindings = require(path.resolve(file));
+                const missing = [...expected].filter(name => bindings[name] === undefined);
+                if (missing.length === 0) continue;
+                buildCurrent = true;
+                console.log(`::warning title=Release native addon is stale::${path.basename(file)} lacks ${missing.join(", ")}; building current checkout`);
               }
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `build_current=${buildCurrent}\n`);
               EOF
-              loader=node
-              if command -v bun >/dev/null 2>&1; then loader=bun; fi
-              "$loader" "$RUNNER_TEMP/smoke-addons.js" \
+              node "$RUNNER_TEMP/probe-addons.cjs" \
                 "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-         # Make the policy visible on the rare native-touching PR instead of
-         # leaving a reviewer to wonder which addons the tests exercised.
-         # Best-effort: a diff-API failure must not fail the job over a notice.
-         - name: Note native changes tested against release addons
-           if: github.event_name == 'pull_request'
-           shell: bash
-           env:
-              GH_TOKEN: ${{ github.token }}
-           run: |
-              if gh pr diff ${{ github.event.pull_request.number }} --name-only 2>/dev/null \
-                 | grep -qE '^(crates/|bazel/|Cargo\.(toml|lock)|MODULE\.bazel(\.lock)?|BUILD\.bazel|\.bazelrc|\.bazelignore|\.bazelversion|rust-toolchain\.toml|rustfmt\.toml)'; then
-                echo "::notice title=Native sources changed::PR CI tests against the latest release addons by design; native changes are validated post-merge on main and at release."
-              fi
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           if: github.event_name == 'pull_request' && steps.release-native.outputs.build_current == 'true'
+           with:
+              bun-version-file: package.json
+         - uses: ./.github/actions/bazel-natives
+           if: github.event_name == 'pull_request' && steps.release-native.outputs.build_current == 'true'
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+              cache-scope: pr-linux-native
 
          # ---- main path: bazel build of all Linux-hosted targets ----
          - id: cache

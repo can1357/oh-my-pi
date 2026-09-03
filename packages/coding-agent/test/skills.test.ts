@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,7 @@ import {
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -47,6 +48,20 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 } as const;
 
 describe("skills", () => {
+	let originalAgentDir: string;
+	let isolatedAgentDir: string;
+
+	beforeAll(async () => {
+		originalAgentDir = getAgentDir();
+		isolatedAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-agent-"));
+		setAgentDir(isolatedAgentDir);
+	});
+
+	afterAll(async () => {
+		setAgentDir(originalAgentDir);
+		await removeWithRetries(isolatedAgentDir);
+	});
+
 	describe("loadSkillsFromDir", () => {
 		let fixtureRoot: LoadSkillsResult;
 

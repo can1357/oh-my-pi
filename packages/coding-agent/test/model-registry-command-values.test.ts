@@ -70,9 +70,9 @@ function okChatCompletionStream(): Response {
  */
 function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): FetchImpl {
 	return async (_url, init) => {
-		const headers = (init?.headers ?? {}) as Record<string, string>;
-		const auth = headers.Authorization;
-		const tenant = headers["x-tenant-token"];
+		const headers = new Headers(init?.headers);
+		const auth = headers.get("authorization") ?? undefined;
+		const tenant = headers.get("x-tenant-token") ?? undefined;
 		seen.push({ auth, tenant });
 		if (auth !== "Bearer fresh-bearer" || tenant !== "fresh-tenant") {
 			return new Response(JSON.stringify({ error: { message: "invalid api key", type: "authentication_error" } }), {

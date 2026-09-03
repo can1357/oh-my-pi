@@ -56,7 +56,7 @@ const PROMPT_GLOBS = [
 	"packages/agent/src/compaction/prompts/*.md",
 	"packages/ai/src/prompts/*.md",
 	"packages/typescript-edit-benchmark/src/prompts/*.md",
-	"packages/hashline/src/prompt.md",
+	"crates/pi-edit/prompts/hashline.md",
 ];
 
 /** Matches one inline token that must survive a rewrite untouched. */
