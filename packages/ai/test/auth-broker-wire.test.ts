@@ -302,6 +302,82 @@ describe("auth-broker wire surface", () => {
 		]);
 	});
 
+	test("translates Meta block provider keys across legacy credential projection", async () => {
+		const credential = storage!.upsertCredential("meta", {
+			type: "oauth",
+			access: "meta-access",
+			refresh: "meta-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "meta-account",
+			apiKey: "LLM|subscription-key",
+		})[0];
+		if (!credential) throw new Error("expected Meta credential");
+		const currentBlockedUntilMs = Date.now() + 60_000;
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "meta:oauth",
+			blockScope: "",
+			blockedUntilMs: currentBlockedUntilMs,
+		});
+
+		const legacyClient = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(),
+		});
+		const legacyResult = await legacyClient.fetchSnapshot();
+		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
+		expect(
+			credentialBlocks(legacyResult.snapshot, credential.id).map(block => ({
+				providerKey: block.providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: block.blockedUntilMs,
+			})),
+		).toEqual([
+			{
+				providerKey: "meta:api_key",
+				blockScope: "",
+				blockedUntilMs: currentBlockedUntilMs,
+			},
+		]);
+
+		const legacyBlockedUntilMs = currentBlockedUntilMs + 60_000;
+		await legacyClient.upsertCredentialBlock(credential.id, {
+			providerKey: "meta:api_key",
+			blockScope: "",
+			blockedUntilMs: legacyBlockedUntilMs,
+		});
+
+		expect(
+			storage!.listCredentialBlocks([credential.id]).map(block => ({
+				providerKey: block.providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: block.blockedUntilMs,
+			})),
+		).toEqual([
+			{
+				providerKey: "meta:oauth",
+				blockScope: "",
+				blockedUntilMs: legacyBlockedUntilMs,
+			},
+		]);
+		const currentResult = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (currentResult.status !== 200) throw new Error("expected current-client snapshot");
+		expect(
+			credentialBlocks(currentResult.snapshot, credential.id).map(block => ({
+				providerKey: block.providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: block.blockedUntilMs,
+			})),
+		).toEqual([
+			{
+				providerKey: "meta:oauth",
+				blockScope: "",
+				blockedUntilMs: legacyBlockedUntilMs,
+			},
+		]);
+	});
+
 	test("fails closed when a legacy broker cannot store Meta PAYG recency", async () => {
 		let uploadedCredential: Record<string, unknown> | undefined;
 		const legacyFetch: typeof fetch = Object.assign(

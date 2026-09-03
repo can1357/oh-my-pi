@@ -441,6 +441,42 @@ function projectCredentialEntryForClient(
 	return credential === entry.credential ? entry : { ...entry, credential };
 }
 
+function projectCredentialBlocksForClient(
+	rawEntry: AuthCredentialSnapshotEntry,
+	entry: AuthCredentialSnapshotEntry,
+	blocks: CredentialBlockSnapshot[] | undefined,
+): CredentialBlockSnapshot[] | undefined {
+	if (
+		!blocks ||
+		rawEntry.credential.type !== "oauth" ||
+		entry.credential.type !== "api_key" ||
+		!usesOAuthMintedApiKeyWithDirectApiKey(entry.provider)
+	) {
+		return blocks;
+	}
+	const oauthProviderKey = `${entry.provider}:oauth`;
+	const apiKeyProviderKey = `${entry.provider}:api_key`;
+	return blocks.map(block =>
+		block.providerKey === oauthProviderKey ? { ...block, providerKey: apiKeyProviderKey } : block,
+	);
+}
+
+function normalizeCredentialBlockForClient(
+	entry: AuthCredentialSnapshotEntry,
+	block: StoredCredentialBlock,
+	clientSupportsMetaApiKeyAuthorizedAt: boolean,
+): StoredCredentialBlock {
+	if (
+		clientSupportsMetaApiKeyAuthorizedAt ||
+		entry.credential.type !== "oauth" ||
+		!usesOAuthMintedApiKeyWithDirectApiKey(entry.provider) ||
+		block.providerKey !== `${entry.provider}:api_key`
+	) {
+		return block;
+	}
+	return { ...block, providerKey: `${entry.provider}:oauth` };
+}
+
 function buildSnapshot(
 	storage: AuthStorage,
 	refresher: AuthBrokerRefresher | undefined,
@@ -459,7 +495,7 @@ function buildSnapshot(
 	for (const rawEntry of base.credentials) {
 		const entry = projectCredentialEntryForClient(rawEntry, capabilities.metaApiKeyAuthorizedAt);
 		if (!entry) continue;
-		const blocks = blocksByCredentialId.get(entry.id);
+		const blocks = projectCredentialBlocksForClient(rawEntry, entry, blocksByCredentialId.get(entry.id));
 		const rotatesInMs = computeRotatesInMs(entry, wire, nextSweepAt, serverNowMs);
 		credentials.push(blocks && blocks.length > 0 ? { ...entry, rotatesInMs, blocks } : { ...entry, rotatesInMs });
 	}
@@ -859,16 +895,21 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const id = Number.parseInt(blockMatch[1], 10);
 					const parsed = await parseBody(req, credentialBlockRequestSchema);
 					if (!parsed.ok) return parsed.response;
-					const block: StoredCredentialBlock = {
-						credentialId: id,
-						providerKey: parsed.data.providerKey,
-						blockScope: parsed.data.blockScope,
-						blockedUntilMs: parsed.data.blockedUntilMs,
-					};
-					if (!opts.storage.exportSnapshot().credentials.some(entry => entry.id === id)) {
+					const credentialEntry = opts.storage.exportSnapshot().credentials.find(entry => entry.id === id);
+					if (!credentialEntry) {
 						logger.info("auth-broker credential block miss", { id, peer });
 						return json(404, { error: `No credential with id=${id}` });
 					}
+					const block = normalizeCredentialBlockForClient(
+						credentialEntry,
+						{
+							credentialId: id,
+							providerKey: parsed.data.providerKey,
+							blockScope: parsed.data.blockScope,
+							blockedUntilMs: parsed.data.blockedUntilMs,
+						},
+						getClientCapabilities(req).metaApiKeyAuthorizedAt,
+					);
 					try {
 						opts.storage.upsertCredentialBlock(block);
 						const response: CredentialBlockResponse = { ok: true };
