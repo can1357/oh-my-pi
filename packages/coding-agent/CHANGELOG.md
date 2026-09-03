@@ -32,6 +32,9 @@
 ### Changed
 
 - Agent delegation is now model-aware, allowing some models to favor focused inline work instead of spawning subagents.
+### Changed
+
+- The `/models` roles view now treats a role's primary model and its retry fallbacks as one reorder set: `]` on the primary demotes it into the chain and `[` on the first fallback promotes it to primary. `[`/`]` on a role no longer reorder the quick-switch cycle; use shift+↑/↓ for that.
 
 ### Fixed
 
