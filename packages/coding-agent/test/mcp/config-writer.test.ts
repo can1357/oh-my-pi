@@ -151,4 +151,41 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		const config = await readMCPConfigFile(linkA);
 		expect(Object.keys(config.mcpServers ?? {}).sort()).toEqual(["alpha", "bravo"]);
 	});
+
+	it("follows a dangling intermediate directory symlink instead of freezing on the link", async () => {
+		// mcp.json -> alias/config.json where `alias` is itself a dangling
+		// symlink to a missing directory. The walk must follow `alias` and
+		// recreate its referent (missing-dir/config.json); freezing on the
+		// link path would leave the writer unable to create anything through
+		// the link.
+		await fs.symlink("missing-dir", path.join(dir, "alias"));
+		const link = path.join(dir, "mcp.json");
+		await fs.symlink("alias/config.json", link);
+
+		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		expect((await fs.lstat(path.join(dir, "alias"))).isSymbolicLink()).toBe(true);
+		const config = await readMCPConfigFile(link);
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+
+	it("collapses aliased parent directories onto one lock for a first-time config", async () => {
+		// alias-a and alias-b both point at real/; mcp.json does not exist yet.
+		// Creating it through either alias must lock on the same physical
+		// parent, or the two first-time adds race on different lexical paths
+		// and one mutation is lost.
+		const realDir = path.join(dir, "real");
+		await fs.mkdir(realDir);
+		await fs.symlink(realDir, path.join(dir, "alias-a"));
+		await fs.symlink(realDir, path.join(dir, "alias-b"));
+
+		await Promise.all([
+			addMCPServer(path.join(dir, "alias-a", "mcp.json"), "alpha", { type: "stdio", command: "a" }),
+			addMCPServer(path.join(dir, "alias-b", "mcp.json"), "bravo", { type: "stdio", command: "b" }),
+		]);
+
+		const config = await readMCPConfigFile(path.join(realDir, "mcp.json"));
+		expect(Object.keys(config.mcpServers ?? {}).sort()).toEqual(["alpha", "bravo"]);
+	});
 });

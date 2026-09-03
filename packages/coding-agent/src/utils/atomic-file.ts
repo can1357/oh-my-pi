@@ -97,7 +97,7 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 					// before this readlink. Land on the deepest hop we resolved
 					// rather than collapsing to the chain head, which would let
 					// the atomic rename replace the first user-managed symlink.
-					return current === filePath ? path.resolve(filePath) : current;
+					return current === filePath ? canonicalizeMissingLeaf(filePath) : current;
 				}
 				// Resolve the target one physical segment at a time so an
 				// intermediate directory symlink is followed by the filesystem
@@ -131,7 +131,10 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 				// cannot be satisfied by the filesystem and must surface ENOTDIR
 				// rather than lexically landing a regular file at a mislocated path.
 				let frozen = false;
-				for (const segment of physicalTargetSegments(target)) {
+				const remaining = physicalTargetSegments(target);
+				let linkHops = 0;
+				while (remaining.length > 0) {
+					const segment = remaining.shift()!;
 					if (segment === "" || segment === ".") {
 						if (frozen) {
 							// A trailing `/` (empty segment) or `/.` demands the
@@ -206,8 +209,41 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 						acc = await fs.promises.realpath(candidate);
 					} catch (error) {
 						if (!isEnoent(error)) throw error;
-						acc = candidate;
-						frozen = true;
+						// The component is missing — but it may itself be a DANGLING
+						// SYMLINK whose referent the write should recreate
+						// (`mcp.json -> alias/config.json` with `alias -> missing-dir`).
+						// Freezing on the link path would leave the writer unable to
+						// create anything THROUGH the link; follow it instead and splice
+						// its target's segments in front of the walk, so intermediate
+						// links survive exactly like final-component chains do.
+						let linkTarget: string | undefined;
+						try {
+							if ((await fs.promises.lstat(candidate)).isSymbolicLink()) {
+								linkTarget = await fs.promises.readlink(candidate);
+							}
+						} catch (lstatError) {
+							if (!isEnoent(lstatError)) throw lstatError;
+						}
+						if (linkTarget === undefined) {
+							acc = candidate;
+							frozen = true;
+							continue;
+						}
+						// A cycle among dangling links (`a -> b`, `b -> a`) never
+						// reaches the outer chain check, which only counts hops of
+						// the FINAL component. Bound this walk's follows and surface
+						// a bounded ELOOP instead of splicing forever.
+						if (++linkHops >= MAX_SYMLINK_HOPS) {
+							const cyclic = new Error(
+								`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
+							) as Error & { code?: string };
+							cyclic.code = "ELOOP";
+							throw cyclic;
+						}
+						if (path.isAbsolute(linkTarget)) acc = path.parse(linkTarget).root;
+						// A relative target resolves against the link's parent — the
+						// canonical `acc` we are standing on.
+						remaining.unshift(...physicalTargetSegments(linkTarget));
 					}
 				}
 				const resolved = acc;
@@ -224,7 +260,24 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
-	return path.resolve(filePath);
+	return canonicalizeMissingLeaf(filePath);
+}
+
+/**
+ * Canonicalize the deepest existing ancestor of a missing leaf: realpath()
+ * already handled the case where every component exists, so reaching this
+ * fallback means only the leaf (or its link chain) was missing. Resolving the
+ * PARENT collapses directory aliases onto one physical location —
+ * `alias-a/mcp.json` and `alias-b/mcp.json` over one real directory must lock
+ * and publish on the same target, not race on two lexical paths. If even the
+ * parent cannot be resolved, the best-effort absolute path stands.
+ */
+async function canonicalizeMissingLeaf(filePath: string): Promise<string> {
+	try {
+		return path.join(await fs.promises.realpath(path.dirname(filePath)), path.basename(filePath));
+	} catch {
+		return path.resolve(filePath);
+	}
 }
 
 /**
