@@ -1379,7 +1379,19 @@ impl AttemptEncoder<Call, Option<CredentialLease>> for RouteEncoder {
 			route.endpoint.api_version.as_deref(),
 			execution,
 		)?;
-		merge_static_headers(&mut encoded.headers, &self.headers, execution)?;
+		if encoded.operation == OperationKind::DiscoverModels
+			&& route.provider.as_str() == "anthropic"
+		{
+			let discovery_headers = self
+				.headers
+				.iter()
+				.filter(|header| !header.name.eq_ignore_ascii_case("anthropic-version"))
+				.cloned()
+				.collect::<Vec<_>>();
+			merge_static_headers(&mut encoded.headers, &discovery_headers, execution)?;
+		} else {
+			merge_static_headers(&mut encoded.headers, &self.headers, execution)?;
+		}
 		apply_before_request_mutation(&mut encoded, mutation, execution)?;
 		let header_names = encoded
 			.headers

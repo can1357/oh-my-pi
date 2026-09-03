@@ -167,6 +167,7 @@ pub use omp_proto::{
 	thread::v1::{Item, Thread},
 };
 pub use omp_scribe::Props;
+pub use omp_storage::transcript::ModelChange;
 pub use oneshot::{
 	Completion, CompletionError, CompletionRequest, resolve_completion, select_choice,
 };

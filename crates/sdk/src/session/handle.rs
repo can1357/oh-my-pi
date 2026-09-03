@@ -5,8 +5,8 @@ use std::{error, future::Future, path::PathBuf, pin::Pin, sync, sync::Arc, time,
 use flume::Receiver;
 use omp_agent::{
 	AbortHandle, ActivationId, Agent, AgentError, AgentEvent, AgentRunSummary, EventSubscription,
-	ManualCompactionOutcome, ManualCompactionRequest, PromptError, PromptPatchSet, Props, Regime,
-	RegimeRecord, RegimeSpec, StartOptions, StartReceipt, TurnClient, TurnId,
+	ManualCompactionOutcome, ManualCompactionRequest, ModelChange, PromptError, PromptPatchSet,
+	Props, Regime, RegimeRecord, RegimeSpec, StartOptions, StartReceipt, TurnClient, TurnId,
 };
 use omp_core::Str;
 use omp_observability::firehose::{Envelope, Event as TelemetryEvent, Firehose, SessionDispatch};
@@ -173,6 +173,7 @@ type ActiveRegimesFuture<'a> =
 	Pin<Box<dyn Future<Output = Result<Vec<RegimeRecord>, AgentError>> + Send + 'a>>;
 type StopRegimeFuture<'a> =
 	Pin<Box<dyn Future<Output = Result<(bool, Vec<RegimeRecord>), AgentError>> + Send + 'a>>;
+type ModelOverrideFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, AgentError>> + Send + 'a>>;
 
 trait RuntimeDriver: Send {
 	fn install_callbacks(&mut self, callbacks: &RuntimeCallbacks);
@@ -187,6 +188,7 @@ trait RuntimeDriver: Send {
 	) -> StartRegimeFuture<'a>;
 	fn active_regimes(&mut self) -> ActiveRegimesFuture<'_>;
 	fn stop_regime<'a>(&'a mut self, activation: ActivationId, now_ms: u64) -> StopRegimeFuture<'a>;
+	fn model_override<'a>(&'a mut self, ts: u64, model: ModelChange) -> ModelOverrideFuture<'a>;
 }
 
 struct AgentRuntime<C: TurnClient + Clone + Send + 'static> {
@@ -232,6 +234,15 @@ impl<C: TurnClient + Clone + Send + 'static> RuntimeDriver for AgentRuntime<C> {
 			let stopped = self.agent.stop_regime(activation.as_str(), now_ms)?;
 			let records = self.agent.arbiter().regimes().records();
 			Ok((stopped, records))
+		})
+	}
+
+	fn model_override<'a>(&'a mut self, ts: u64, model: ModelChange) -> ModelOverrideFuture<'a> {
+		Box::pin(async move {
+			self
+				.agent
+				.record_model_override(ts, model)
+				.map_err(AgentError::from)
 		})
 	}
 }
@@ -305,6 +316,11 @@ enum Command {
 		activation: ActivationId,
 		now_ms:     u64,
 		reply:      flume::Sender<Result<(bool, Vec<RegimeRecord>), SessionHandleError>>,
+	},
+	ModelOverride {
+		ts:    u64,
+		model: ModelChange,
+		reply: flume::Sender<Result<u64, SessionHandleError>>,
 	},
 	Dispose {
 		reply: flume::Sender<()>,
@@ -590,6 +606,31 @@ impl SessionHandle {
 			.map_err(|_| actor_transport_closed())?
 	}
 
+	/// Appends a durable model override on the actor-owned live agent.
+	#[tracing::instrument(
+		level = "debug",
+		name = "sdk_session_model_override",
+		skip_all,
+		fields(session_id = %self.inner.identity.id)
+	)]
+	pub async fn model_override(
+		&self,
+		ts: u64,
+		model: ModelChange,
+	) -> Result<u64, SessionHandleError> {
+		let (reply, response) = flume::bounded(1);
+		self
+			.inner
+			.commands
+			.send_async(Command::ModelOverride { ts, model, reply })
+			.await
+			.map_err(|_| actor_transport_closed())?;
+		response
+			.recv_async()
+			.await
+			.map_err(|_| actor_transport_closed())?
+	}
+
 	/// Interrupts the active submission without waiting for the actor mailbox.
 	pub fn interrupt(&self) {
 		if let Some(abort) = self.inner.abort.lock().as_ref() {
@@ -678,6 +719,18 @@ async fn run_handle_actor(
 				let result = live
 					.driver
 					.stop_regime(activation, now_ms)
+					.await
+					.map_err(SessionHandleError::from);
+				let _ = reply.send(result);
+			},
+			Command::ModelOverride { ts, model, reply } => {
+				let Some(live) = runtime.as_mut() else {
+					let _ = reply.send(Err(SessionHandleError::NotRevivable));
+					continue;
+				};
+				let result = live
+					.driver
+					.model_override(ts, model)
 					.await
 					.map_err(SessionHandleError::from);
 				let _ = reply.send(result);

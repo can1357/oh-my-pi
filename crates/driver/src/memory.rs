@@ -219,11 +219,10 @@ async fn wait_extraction_retry(
 	delay: Duration,
 ) -> bool {
 	if draining {
-		tokio::time::sleep(delay).await;
-		return true;
+		return false;
 	}
 	tokio::select! {
-		_ = cancel.cancelled() => true,
+		_ = cancel.cancelled() => false,
 		_ = tokio::time::sleep(delay) => true,
 	}
 }
@@ -383,4 +382,26 @@ fn memory_outcome_text(outcome: &v1::Outcome) -> String {
 		}
 	}
 	text
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn extraction_retry_stops_when_shutdown_is_requested() {
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+
+		let retry = tokio::time::timeout(
+			Duration::from_millis(100),
+			wait_extraction_retry(&cancel, false, Duration::from_secs(60)),
+		)
+		.await
+		.expect("shutdown cancellation must wake a pending retry");
+		assert!(!retry);
+		assert!(
+			!wait_extraction_retry(&CancellationToken::new(), true, Duration::from_secs(60)).await
+		);
+	}
 }

@@ -1,7 +1,7 @@
 //! Model catalog commands with inference-routed runtime discovery refresh.
 
 use std::{
-	collections::BTreeMap,
+	collections::{BTreeMap, BTreeSet},
 	env, fs,
 	path::{Path, PathBuf},
 	sync::Arc,
@@ -9,11 +9,11 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::{DiscoveredModel, ModelSpec, OperationBits, ProviderId, snapshot::Catalog};
+use omp_catalog::{DiscoveredModel, ModelSpec, ProviderId, snapshot::Catalog};
 use omp_core::Str;
 use omp_driver::bridges::{AgentGoalControl, InferenceBridge};
 use omp_inference::{
-	Client,
+	Client, Registry,
 	call::{CallMeta, DiscoveryRequest, Target},
 	discovery::{DiscoveryCacheKey, DiscoveryStore},
 	id::RequestId,
@@ -22,6 +22,155 @@ use omp_inference::{
 };
 
 use crate::cli::{InvocationExtensionMode, LaunchExtensions, ModelRole, ModelsArgs, ModelsCommand};
+
+const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Returns a provider's current account-verified model selectors from the
+/// discovery cache. Embedded catalog rows are intentionally excluded.
+pub(crate) fn fresh_provider_models(
+	data_dir: &Path,
+	provider: &ProviderId<str>,
+) -> miette::Result<Option<Vec<String>>> {
+	let path = data_dir.join("models.db");
+	if !path.exists() {
+		return Ok(None);
+	}
+	let store = DiscoveryStore::open(&path).into_diagnostic()?;
+	let Some(cached) = store
+		.load_fresh(&DiscoveryCacheKey::provider(provider.to_owned()), discovery_now_ms()?)
+		.into_diagnostic()?
+	else {
+		return Ok(None);
+	};
+	// Cached rows outlive the binary that decoded them. Older Anthropic
+	// bootstrap decoders preserved the model identity but did not record the
+	// endpoint's implicit Chat capability. Treat those rows as stale so the
+	// current decoder can replace them before a caller exposes the selector.
+	if provider.as_str() == "anthropic"
+		&& cached.rows.iter().any(|row| {
+			!discovered_model_supports_chat(row) || row.wire_model.as_str().ends_with("[1m]")
+		}) {
+		return Ok(None);
+	}
+	Ok(Some(discovered_selectors(&cached.rows)))
+}
+
+/// Discovers and atomically caches the models advertised by a provider's
+/// authenticated discovery endpoint. Some providers return only additions to
+/// their client-owned base catalog rather than a complete model list.
+pub(crate) async fn refresh_provider(
+	registry: &Registry,
+	data_dir: &Path,
+	provider: &ProviderId<str>,
+) -> miette::Result<Vec<String>> {
+	let routes = provider_discovery_routes(registry.catalog(), provider);
+	if routes.is_empty() {
+		return Err(miette!("provider `{provider}` does not expose model discovery"));
+	}
+
+	let now_ms = discovery_now_ms()?;
+	let mut rows = Vec::new();
+	for route in routes {
+		let planner = router::Router::new(registry.clone(), Duration::from_secs(30));
+		let meta = CallMeta {
+			id:             RequestId::from(format!("omp-model-refresh-{}", provider.as_str())),
+			target:         Target::RouteService(route.clone()),
+			deadline:       None,
+			budget:         ExecutionBudget::default(),
+			session:        None,
+			response_hooks: Default::default(),
+		};
+		let mut cursor = None;
+		loop {
+			let page = Client::new(registry.service(), planner.clone(), meta.clone())
+				.execute(DiscoveryRequest {
+					provider:  Some(provider.to_owned()),
+					route:     Some(route.clone()),
+					cursor:    cursor.clone(),
+					page_size: 500,
+					operation: None,
+				})
+				.await
+				.map_err(|error| miette!("{provider} model discovery failed: {error}"))?;
+			rows.extend(
+				page
+					.models
+					.iter()
+					.filter_map(|model| discovered(model, provider, &route, now_ms)),
+			);
+			cursor = page.next_cursor;
+			if cursor.is_none() {
+				break;
+			}
+		}
+	}
+	if rows.is_empty() {
+		return Err(miette!("{provider} model discovery returned no models"));
+	}
+
+	fs::create_dir_all(data_dir).into_diagnostic()?;
+	DiscoveryStore::open(&data_dir.join("models.db"))
+		.into_diagnostic()?
+		.publish(
+			&DiscoveryCacheKey::provider(provider.to_owned()),
+			&rows,
+			now_ms,
+			DISCOVERY_CACHE_TTL,
+		)
+		.into_diagnostic()?;
+	Ok(discovered_selectors(&rows))
+}
+
+fn provider_discovery_routes(
+	catalog: &Catalog,
+	provider: &ProviderId<str>,
+) -> Vec<omp_catalog::RouteId> {
+	let mut seen_specs = BTreeSet::new();
+	catalog
+		.routes()
+		.iter()
+		.filter(|route| route.provider == *provider)
+		.filter_map(|route| {
+			let discovery = route.discovery.as_ref()?;
+			seen_specs
+				.insert(discovery.clone())
+				.then(|| route.id.clone())
+		})
+		.collect()
+}
+
+fn discovered_selectors(rows: &[DiscoveredModel]) -> Vec<String> {
+	let mut selectors = rows
+		.iter()
+		.filter(|row| discovered_model_supports_chat(row))
+		.map(|row| format!("{}/{}", row.provider, row.wire_model))
+		.collect::<Vec<_>>();
+	selectors.sort();
+	selectors.dedup();
+	selectors
+}
+
+fn discovered_model_supports_chat(row: &DiscoveredModel) -> bool {
+	row.declared_operations
+		.contains_kind(omp_catalog::OperationKind::Chat)
+		|| row
+			.declared_capabilities
+			.as_ref()
+			.is_some_and(|capabilities| {
+				capabilities
+					.operations
+					.contains_kind(omp_catalog::OperationKind::Chat)
+			})
+}
+
+fn discovery_now_ms() -> miette::Result<u64> {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.into_diagnostic()?
+		.as_millis()
+		.try_into()
+		.map_err(|_| miette!("system clock exceeds discovery timestamp range"))
+}
 
 /// Runs a model catalog operation. Refresh travels through the same inference
 /// routes and credentials used at call time, then atomically updates only the
@@ -167,15 +316,11 @@ async fn refresh() -> miette::Result<()> {
 		.into_diagnostic()?;
 	let catalog = registry.catalog();
 	let mut routes = BTreeMap::<ProviderId, Vec<_>>::new();
-	for route in catalog
-		.routes()
-		.iter()
-		.filter(|route| route.discovery.is_some())
-	{
-		routes
-			.entry(route.provider.clone())
-			.or_default()
-			.push(route.id.clone());
+	for provider in catalog.providers() {
+		let provider_routes = provider_discovery_routes(catalog, &provider.id);
+		if !provider_routes.is_empty() {
+			routes.insert(provider.id.clone(), provider_routes);
+		}
 	}
 	let store = DiscoveryStore::open(&data_dir.join("models.db")).into_diagnostic()?;
 	let now_ms = SystemTime::now()
@@ -192,7 +337,7 @@ async fn refresh() -> miette::Result<()> {
 			let planner = router::Router::new(registry.clone(), Duration::from_secs(30));
 			let meta = CallMeta {
 				id:             RequestId::from(format!("omp-model-refresh-{}", provider.as_str())),
-				target:         Target::ProviderService(provider.clone()),
+				target:         Target::RouteService(route.clone()),
 				deadline:       None,
 				budget:         ExecutionBudget::default(),
 				session:        None,
@@ -263,6 +408,14 @@ fn discovered(
 		.wire_ids
 		.iter()
 		.find_map(|(candidate, wire)| (candidate == route).then(|| wire.clone()))?;
+	let mut declared_operations = model.capabilities.operations;
+	// The Claude subscription bootstrap endpoint is itself an authoritative
+	// list of chat-selectable models. The mixed discovery projector may replace
+	// a compact response row with conservative catalog metadata, so retain this
+	// endpoint-level fact when materializing the durable cache row.
+	if provider.as_str() == "anthropic" {
+		declared_operations.insert_kind(omp_catalog::OperationKind::Chat);
+	}
 	Some(DiscoveredModel {
 		provider: provider.to_owned(),
 		route: route.to_owned(),
@@ -270,7 +423,7 @@ fn discovered(
 		aliases: Box::new([]),
 		display_name: Some(model.display_name.clone()),
 		declared_class: Some(model.class.clone()),
-		declared_operations: OperationBits::empty(),
+		declared_operations,
 		declared_capabilities: Some(model.capabilities.clone()),
 		declared_limits: Some(model.limits.clone()),
 		extended_context_mode: None,
@@ -355,6 +508,102 @@ fn print_rows(rows: &[&ModelSpec], json: bool) -> miette::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn cached_model(provider: &ProviderId<str>) -> DiscoveredModel {
+		DiscoveredModel {
+			provider:              provider.to_owned(),
+			route:                 omp_catalog::RouteId::from("anthropic/primary"),
+			wire_model:            omp_catalog::WireModelId::from("claude-fable-5-1[1m]"),
+			aliases:               Box::new([]),
+			display_name:          Some(Str::new_static("Claude Fable 5.1")),
+			declared_class:        None,
+			declared_operations:   omp_catalog::OperationBits::empty(),
+			declared_capabilities: None,
+			declared_limits:       None,
+			extended_context_mode: None,
+			availability:          None,
+			source:                Str::new_static("test"),
+			observed_at_ms:        None,
+			updated_at_ms:         None,
+			deprecated:            None,
+		}
+	}
+
+	#[test]
+	fn anthropic_cache_rows_without_chat_evidence_are_refreshed() {
+		let directory = tempfile::tempdir().expect("temporary profile");
+		let provider = ProviderId::from("anthropic");
+		let store = DiscoveryStore::open(&directory.path().join("models.db")).expect("cache");
+		let now_ms = discovery_now_ms().expect("clock");
+		let mut row = cached_model(&provider);
+		store
+			.publish(
+				&DiscoveryCacheKey::provider(provider.clone()),
+				&[row.clone()],
+				now_ms,
+				DISCOVERY_CACHE_TTL,
+			)
+			.expect("stale generation");
+		assert_eq!(fresh_provider_models(directory.path(), &provider).expect("stale lookup"), None,);
+
+		row.wire_model = omp_catalog::WireModelId::from("claude-fable-5-1");
+		row.declared_operations
+			.insert_kind(omp_catalog::OperationKind::Chat);
+		store
+			.publish(
+				&DiscoveryCacheKey::provider(provider.clone()),
+				&[row],
+				now_ms,
+				DISCOVERY_CACHE_TTL,
+			)
+			.expect("current generation");
+		assert_eq!(
+			fresh_provider_models(directory.path(), &provider).expect("fresh lookup"),
+			Some(vec!["anthropic/claude-fable-5-1".to_owned()]),
+		);
+	}
+
+	#[test]
+	fn anthropic_cache_rows_with_decorated_wire_ids_are_refreshed() {
+		let directory = tempfile::tempdir().expect("temporary profile");
+		let provider = ProviderId::from("anthropic");
+		let store = DiscoveryStore::open(&directory.path().join("models.db")).expect("cache");
+		let now_ms = discovery_now_ms().expect("clock");
+		let mut row = cached_model(&provider);
+		row.declared_operations
+			.insert_kind(omp_catalog::OperationKind::Chat);
+		store
+			.publish(
+				&DiscoveryCacheKey::provider(provider.clone()),
+				&[row],
+				now_ms,
+				DISCOVERY_CACHE_TTL,
+			)
+			.expect("decorated generation");
+		assert_eq!(fresh_provider_models(directory.path(), &provider).expect("stale lookup"), None,);
+	}
+
+	#[test]
+	fn anthropic_cache_projection_retains_endpoint_chat_capability() {
+		let catalog = Catalog::embedded();
+		let provider = ProviderId::from("anthropic");
+		let route = omp_catalog::RouteId::from("anthropic/primary");
+		let mut model = catalog
+			.model(omp_catalog::ModelKey::from_ref("anthropic/claude-fable-5"))
+			.expect("bundled Anthropic model")
+			.clone();
+		model.capabilities = omp_catalog::unknown_capabilities();
+		let row = discovered(&model, &provider, &route, 1).expect("primary route wire id");
+		assert!(discovered_model_supports_chat(&row));
+	}
+
+	#[test]
+	fn provider_discovery_routes_deduplicate_shared_specs() {
+		let catalog = Catalog::embedded();
+		let routes = provider_discovery_routes(catalog, ProviderId::from_ref("anthropic"));
+		assert_eq!(routes, [omp_catalog::RouteId::from("anthropic/primary")]);
+	}
+
 	#[test]
 	fn finds_a_model_by_case_insensitive_key_or_display_name() {
 		let catalog = Catalog::embedded();

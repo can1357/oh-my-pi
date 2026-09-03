@@ -478,15 +478,21 @@ pub enum SourceMapping {
 #[serde(deny_unknown_fields)]
 pub struct SourceDiscovery {
 	/// Discovery schema kind.
-	pub kind:          Str,
+	pub kind:             Str,
 	/// Human-readable label.
-	pub label:         Str,
+	pub label:            Str,
+	/// Endpoint path relative to the provider base URL.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub path:             Option<Str>,
+	/// Query parameter used to send the next response cursor.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub cursor_parameter: Option<Str>,
 	/// Whether absence proves unavailability.
 	#[serde(default)]
-	pub authoritative: bool,
+	pub authoritative:    bool,
 	/// Requested periodic polling interval in milliseconds.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub interval_ms:   Option<u64>,
+	pub interval_ms:      Option<u64>,
 }
 
 /// Sparse typed provider/model wire-policy source.
@@ -5144,8 +5150,13 @@ fn compile_discovery(source: &SourceDiscovery) -> Result<DiscoverySpec, CompileE
 		id: DiscoverySpecId::new(content_id("discovery", &canonical)),
 		kind,
 		label: source.label.clone(),
-		path: sf!("/models"),
-		pagination: DiscoveryPagination::SinglePage,
+		path: source.path.clone().unwrap_or_else(|| sf!("/models")),
+		pagination: source
+			.cursor_parameter
+			.clone()
+			.map_or(DiscoveryPagination::SinglePage, |query_parameter| DiscoveryPagination::Cursor {
+				query_parameter,
+			}),
 		authoritative: source.authoritative,
 		interval: source.interval_ms.map(time::Duration::from_millis),
 	})
@@ -5462,6 +5473,40 @@ mod tests {
 			.as_ref()
 			.expect("coreweave discovery source");
 		assert!(discovery.authoritative, "coreweave dynamic discovery must be authoritative");
+	}
+
+	#[test]
+	fn anthropic_discovery_uses_subscription_bootstrap_endpoint() {
+		let providers = include_str!("../../../fixtures/llm-oracle/catalog/providers.toml");
+		let models = zstd::stream::encode_all(&br"{}"[..], 1).expect("fixture compression");
+		let source = parse_oracle(providers, &models).expect("fixture providers parse");
+		let discovery = source
+			.providers
+			.get("anthropic")
+			.and_then(|provider| provider.discovery.as_ref())
+			.expect("anthropic discovery source");
+		assert_eq!(discovery.kind.as_str(), "account-models");
+		assert_eq!(
+			discovery.path.as_deref(),
+			Some("/api/claude_cli/bootstrap?model=claude-sonnet-5"),
+		);
+		assert_eq!(discovery.cursor_parameter, None);
+
+		let compiled = compile(source).expect("catalog compilation");
+		let route = compiled
+			.routes
+			.iter()
+			.find(|route| route.provider.as_str() == "anthropic")
+			.expect("anthropic route");
+		let discovery_id = route.discovery.as_ref().expect("compiled discovery id");
+		let discovery = compiled
+			.discovery_specs
+			.iter()
+			.find(|discovery| discovery.id == *discovery_id)
+			.expect("compiled discovery");
+		assert_eq!(discovery.kind, DiscoveryKind::AccountModels);
+		assert_eq!(discovery.path.as_str(), "/api/claude_cli/bootstrap?model=claude-sonnet-5",);
+		assert_eq!(discovery.pagination, DiscoveryPagination::SinglePage);
 	}
 
 	#[test]

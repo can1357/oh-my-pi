@@ -384,8 +384,9 @@ struct HostUriCancellation {
 
 /// Filtered typed subscription over the client's event broadcast.
 pub struct EventStream {
-	receiver: Receiver<RpcEvent>,
-	category: Option<EventCategory>,
+	receiver:     Receiver<RpcEvent>,
+	category:     Option<EventCategory>,
+	disconnected: watch::Receiver<Option<String>>,
 }
 
 impl EventStream {
@@ -394,7 +395,37 @@ impl EventStream {
 		use tokio::sync::broadcast::error;
 
 		loop {
-			match self.receiver.recv().await {
+			match self.receiver.try_recv() {
+				Ok(event)
+					if self
+						.category
+						.is_none_or(|category| event.category() == category) =>
+				{
+					return Ok(event);
+				},
+				Ok(_) | Err(error::TryRecvError::Empty) => {},
+				Err(error::TryRecvError::Closed) => {
+					return Err(ClientError::Disconnected("event stream closed".into()));
+				},
+				Err(error::TryRecvError::Lagged(count)) => {
+					return Err(ClientError::EventLagged(count));
+				},
+			}
+			let disconnected = self.disconnected.borrow().clone();
+			if let Some(reason) = disconnected {
+				return Err(ClientError::Disconnected(reason));
+			}
+			let event = tokio::select! {
+				biased;
+				event = self.receiver.recv() => event,
+				changed = self.disconnected.changed() => {
+					if changed.is_err() {
+						return Err(ClientError::Disconnected("transport monitor stopped".into()));
+					}
+					continue;
+				},
+			};
+			match event {
 				Ok(event)
 					if self
 						.category
@@ -420,6 +451,7 @@ struct ClientState {
 	writer:             Mutex<Option<flume::Sender<Vec<u8>>>>,
 	pending:            Mutex<HashMap<RequestId, PendingSender>>,
 	events:             broadcast::Sender<RpcEvent>,
+	disconnected:       watch::Sender<Option<String>>,
 	extension_ui:       broadcast::Sender<ExtensionUiRequest>,
 	host_tools:         RwLock<HashMap<String, Arc<dyn HostToolHandler>>>,
 	host_cancellations: Mutex<HashMap<String, watch::Sender<bool>>>,
@@ -670,6 +702,7 @@ impl ClientState {
 
 	async fn fail_all(&self, reason: impl Into<String>) {
 		let reason = reason.into();
+		self.disconnected.send_replace(Some(reason.clone()));
 		self.ready.lock().await.take();
 		let pending = mem::take(&mut *self.pending.lock().await);
 		for (_, sender) in pending {
@@ -744,12 +777,14 @@ impl RpcClient {
 			.ok_or_else(|| ClientError::Disconnected("child stderr was not piped".into()))?;
 		let (writer_tx, writer_rx) = flume::unbounded();
 		let (event_tx, _) = broadcast::channel(1024);
+		let (disconnected_tx, _) = watch::channel(None);
 		let (extension_ui_tx, _) = broadcast::channel(64);
 		let (ready_tx, ready_rx) = oneshot::channel();
 		let state = Arc::new(ClientState {
 			writer:             Mutex::new(Some(writer_tx)),
 			pending:            Mutex::new(HashMap::new()),
 			events:             event_tx,
+			disconnected:       disconnected_tx,
 			extension_ui:       extension_ui_tx,
 			host_tools:         RwLock::new(HashMap::new()),
 			host_cancellations: Mutex::new(HashMap::new()),
@@ -1486,12 +1521,20 @@ impl RpcClient {
 
 	/// Subscribes to all event frames.
 	pub fn events(&self) -> EventStream {
-		EventStream { receiver: self.state.events.subscribe(), category: None }
+		EventStream {
+			receiver:     self.state.events.subscribe(),
+			category:     None,
+			disconnected: self.state.disconnected.subscribe(),
+		}
 	}
 
 	/// Subscribes to one typed event category.
 	pub fn events_by_category(&self, category: EventCategory) -> EventStream {
-		EventStream { receiver: self.state.events.subscribe(), category: Some(category) }
+		EventStream {
+			receiver:     self.state.events.subscribe(),
+			category:     Some(category),
+			disconnected: self.state.disconnected.subscribe(),
+		}
 	}
 
 	/// Subscribes to extension UI requests, including the OAuth `open_url` seam.
@@ -1584,6 +1627,7 @@ mod tests {
 			writer: Mutex::new(Some(writer)),
 			pending: Mutex::new(HashMap::new()),
 			events,
+			disconnected: watch::channel(None).0,
 			extension_ui,
 			host_tools: RwLock::new(HashMap::new()),
 			host_cancellations: Mutex::new(HashMap::new()),
@@ -1593,6 +1637,44 @@ mod tests {
 			protocol: AtomicU8::new(PROTOCOL_V2),
 			sequence: AtomicU64::new(1),
 		})
+	}
+
+	#[tokio::test]
+	async fn event_stream_reports_transport_disconnect() {
+		let state = in_memory_state();
+		let mut events = EventStream {
+			receiver:     state.events.subscribe(),
+			category:     None,
+			disconnected: state.disconnected.subscribe(),
+		};
+
+		state.fail_all("stdout closed").await;
+
+		match events.recv().await {
+			Err(ClientError::Disconnected(reason)) => assert_eq!(reason, "stdout closed"),
+			other => panic!("expected transport disconnection, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn event_stream_drains_queued_events_before_disconnect() {
+		let state = in_memory_state();
+		let mut events = EventStream {
+			receiver:     state.events.subscribe(),
+			category:     None,
+			disconnected: state.disconnected.subscribe(),
+		};
+		state
+			.dispatch(json!({"type":"message_update","delta":"last"}))
+			.await
+			.unwrap();
+		state.fail_all("stdout closed").await;
+
+		assert_eq!(events.recv().await.unwrap().kind, "message_update");
+		assert!(matches!(
+			events.recv().await,
+			Err(ClientError::Disconnected(reason)) if reason == "stdout closed"
+		));
 	}
 
 	#[tokio::test]

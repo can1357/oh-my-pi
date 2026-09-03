@@ -85,6 +85,13 @@ const MAX_PAGE_MESSAGES: usize = 256;
 const MAX_PAGE_BYTES: usize = 768 * 1024;
 const MAX_SUBAGENT_TRANSCRIPTS: usize = 256;
 const SUBAGENT_READ_BYTES: usize = 768 * 1024;
+const ACCOUNT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const ANTHROPIC_PROVIDER: &str = "anthropic";
+// Claude Code carries its normal subscription tiers in the client and lets the
+// authenticated bootstrap response add account-specific options. The
+// bootstrap endpoint is deliberately not a complete model catalog.
+const ANTHROPIC_SUBSCRIPTION_MODELS: [&str; 3] =
+	["anthropic/claude-fable-5", "anthropic/claude-opus-5", "anthropic/claude-sonnet-5"];
 const ORCHESTRATE_NOTICE: &str = "The user explicitly requested orchestration. Treat this as a \
                                   hidden system instruction: delegate independent work to \
                                   available subagents, coordinate their results, and retain \
@@ -187,9 +194,9 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	};
 	let catalog_owner =
 		omp_driver::registry::production_catalog(&data).map_err(|error| miette!(error))?;
-	let catalog = catalog_owner.as_ref();
+	let launch_catalog = catalog_owner.as_ref();
 	let roles = omp_driver::discovery::roles::resolve_launch_roles(
-		catalog,
+		launch_catalog,
 		&model_settings,
 		None,
 		args.smol.as_deref(),
@@ -212,17 +219,69 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	)
 	.await
 	.into_diagnostic()?;
+	let authenticated = match auth
+		.execute(AuthRequest::ListAccounts { provider: None })
+		.await
+	{
+		Ok(AuthAnswer::Accounts(accounts)) => accounts
+			.into_iter()
+			.filter(|account| account.state == AccountState::Active)
+			.map(|account| account.provider.as_str().to_owned())
+			.collect::<HashSet<_>>(),
+		_ => HashSet::new(),
+	};
+	let anthropic = ProviderId::from(ANTHROPIC_PROVIDER);
+	let discovered_anthropic_models = if authenticated.contains(ANTHROPIC_PROVIDER) {
+		match crate::models_cmd::fresh_provider_models(&data, &anthropic)? {
+			Some(models) => models,
+			None => match time::timeout(
+				ACCOUNT_MODEL_DISCOVERY_TIMEOUT,
+				crate::models_cmd::refresh_provider(&registry, &data, &anthropic),
+			)
+			.await
+			{
+				Ok(Ok(models)) => models,
+				Ok(Err(error)) => {
+					eprintln!("warning: Anthropic account model discovery failed: {error}");
+					Vec::new()
+				},
+				Err(_) => {
+					eprintln!(
+						"warning: Anthropic account model discovery exceeded {} seconds",
+						ACCOUNT_MODEL_DISCOVERY_TIMEOUT.as_secs()
+					);
+					Vec::new()
+				},
+			},
+		}
+	} else {
+		Vec::new()
+	};
+	let available_anthropic_models = authenticated
+		.contains(ANTHROPIC_PROVIDER)
+		.then(|| anthropic_subscription_models(discovered_anthropic_models))
+		.unwrap_or_default();
 	let mut models = registry
 		.catalog()
 		.models()
 		.iter()
 		.filter_map(|entry| {
-			let (provider, model) = entry.key.as_str().split_once('/')?;
+			let selector = entry.key.as_str();
+			let (provider, model) = selector.split_once('/')?;
+			if provider == ANTHROPIC_PROVIDER && !available_anthropic_models.contains(selector) {
+				return None;
+			}
 			model_settings
 				.model_allowed(provider, model)
-				.then(|| entry.key.as_str().to_owned())
+				.then(|| selector.to_owned())
 		})
 		.collect::<Vec<_>>();
+	models.extend(available_anthropic_models.iter().filter_map(|selector| {
+		let (provider, model) = selector.split_once('/')?;
+		model_settings
+			.model_allowed(provider, model)
+			.then(|| selector.clone())
+	}));
 	models.sort_by_key(|selector| {
 		let (provider, model) = selector.split_once('/').unwrap_or(("", selector.as_str()));
 		(
@@ -245,26 +304,19 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	let mut cycle_models = cycle_selectors
 		.iter()
 		.filter_map(|selector| {
-			omp_driver::discovery::roles::resolve_role_selector(catalog, &model_settings, selector)
-				.ok()
-				.map(|selected| selected.model.as_str().to_owned())
+			omp_driver::discovery::roles::resolve_role_selector(
+				registry.catalog(),
+				&model_settings,
+				selector,
+			)
+			.ok()
+			.map(|selected| selected.model.as_str().to_owned())
 		})
 		.collect::<Vec<_>>();
 	cycle_models.extend(models);
 	let mut seen_models = HashSet::new();
 	cycle_models.retain(|model| seen_models.insert(model.clone()));
 	let models = cycle_models;
-	let authenticated = match auth
-		.execute(AuthRequest::ListAccounts { provider: None })
-		.await
-	{
-		Ok(AuthAnswer::Accounts(accounts)) => accounts
-			.into_iter()
-			.filter(|account| account.state == AccountState::Active)
-			.map(|account| account.provider.as_str().to_owned())
-			.collect::<HashSet<_>>(),
-		_ => HashSet::new(),
-	};
 	let providers = registry
 		.catalog()
 		.providers()
@@ -349,7 +401,9 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 		.expect("RPC headless session owns its lossless event stream");
 	let negotiated = Arc::new(AtomicU8::new(PROTOCOL_V1));
 	let (output_tx, output_rx) = flume::unbounded();
-	let writer = tokio::spawn(write_frames(stdout(), output_rx, negotiated.clone()));
+	let output_shutdown = CancellationToken::new();
+	let writer =
+		tokio::spawn(write_frames(stdout(), output_rx, negotiated.clone(), output_shutdown.clone()));
 	let ready = serde_json::to_value(ReadyFrame::v2_capable(MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES))
 		.into_diagnostic()?;
 	emit(&output_tx, ready)?;
@@ -418,13 +472,30 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 	runtime.host_resources.shutdown("RPC client disconnected")?;
 	host::unbind(&host_resources_authority);
 	runtime.shutdown.shutdown().await;
+	{
+		let mut headless = runtime.headless.lock().await;
+		headless.session.dispose().await;
+	}
 	let read_result = reader.await.into_diagnostic()?;
 	drop(runtime);
 	drop(output_tx);
+	// Output producers can be retained by environment-owned tool resolvers after
+	// the client disconnects. The lifecycle signal lets the protocol writer drain
+	// frames already queued and finish without relying on every producer clone
+	// being dropped first.
+	output_shutdown.cancel();
 	let write_result = writer.await.into_diagnostic()?;
 	dispatch_result?;
 	read_result?;
 	write_result
+}
+
+fn anthropic_subscription_models(discovered: Vec<String>) -> HashSet<String> {
+	ANTHROPIC_SUBSCRIPTION_MODELS
+		.into_iter()
+		.map(str::to_owned)
+		.chain(discovered)
+		.collect()
 }
 
 #[must_use]
@@ -496,13 +567,21 @@ async fn write_frames<W>(
 	mut output: W,
 	receiver: Receiver<Value>,
 	negotiated: Arc<AtomicU8>,
+	shutdown: CancellationToken,
 ) -> miette::Result<()>
 where
 	W: AsyncWrite + Unpin,
 {
 	let mut sequence = 0_u64;
 	let streamed = HashSet::new();
-	while let Ok(value) = receiver.recv_async().await {
+	loop {
+		let value = tokio::select! {
+			value = receiver.recv_async() => match value {
+				Ok(value) => value,
+				Err(_) => break,
+			},
+			() = shutdown.cancelled() => break,
+		};
 		let frames = if negotiated.load(Ordering::Acquire) >= PROTOCOL_V2 {
 			sequence = sequence.wrapping_add(1);
 			encode_json_v2(&value, &format!("server-{sequence}"))
@@ -515,6 +594,25 @@ where
 		}
 		output.flush().await.into_diagnostic()?;
 	}
+	// Preserve the frames queued at shutdown without letting a racing producer
+	// extend teardown indefinitely.
+	let queued = receiver.len();
+	for _ in 0..queued {
+		let Ok(value) = receiver.try_recv() else {
+			break;
+		};
+		let frames = if negotiated.load(Ordering::Acquire) >= PROTOCOL_V2 {
+			sequence = sequence.wrapping_add(1);
+			encode_json_v2(&value, &format!("server-{sequence}"))
+				.map_err(|error| miette!(error.to_string()))?
+		} else {
+			vec![encode_json_v1(&value, &streamed)]
+		};
+		for frame in frames {
+			output.write_all(&frame).await.into_diagnostic()?;
+		}
+	}
+	output.flush().await.into_diagnostic()?;
 	Ok(())
 }
 
@@ -1369,23 +1467,10 @@ impl Runtime {
 				let state = self.state.lock();
 				Ok(json!({ "models": state.models, "active": state.config.model }))
 			},
-			"cycle_model" => self.cycle_model(),
+			"cycle_model" => self.cycle_model().await,
 			"set_model" => {
 				let params = parse_params::<SetModelParams>(params)?;
-				let result = self.set_model(&params.provider, &params.model_id)?;
-				let selector = result
-					.get("model")
-					.and_then(Value::as_str)
-					.expect("set_model returns its validated selector");
-				self
-					.headless
-					.lock()
-					.await
-					.session
-					.set_model(selector)
-					.await
-					.map_err(|error| CommandError::new("model_not_found", error.to_string()))?;
-				Ok(result)
+				self.change_model(&params.provider, &params.model_id).await
 			},
 			"set_fast_mode" => {
 				let enabled = boolean(params, "enabled")?;
@@ -2111,15 +2196,6 @@ impl Runtime {
 	fn set_string_config(&self, key: &str, value: &str) -> Result<Value, CommandError> {
 		let mut state = self.state.lock();
 		match key {
-			"model" => {
-				if !state.models.iter().any(|candidate| candidate == value) {
-					return Err(CommandError::new(
-						"model_not_found",
-						format!("unknown model `{value}`"),
-					));
-				}
-				state.config.model = value.to_owned();
-			},
 			"thinkingLevel" => state.config.thinking_level = value.to_owned(),
 			"steeringMode" => state.config.steering_mode = value.to_owned(),
 			"followUpMode" => state.config.follow_up_mode = value.to_owned(),
@@ -2134,7 +2210,11 @@ impl Runtime {
 		Ok(json!({ "key": key, "value": value }))
 	}
 
-	fn set_model(&self, provider: &str, model_id: &str) -> Result<Value, CommandError> {
+	fn validated_model_selector(
+		&self,
+		provider: &str,
+		model_id: &str,
+	) -> Result<String, CommandError> {
 		if provider.is_empty() || model_id.is_empty() {
 			return Err(CommandError::new("invalid_params", "provider and modelId must not be empty"));
 		}
@@ -2143,7 +2223,7 @@ impl Runtime {
 		} else {
 			format!("{provider}/{model_id}")
 		};
-		let mut state = self.state.lock();
+		let state = self.state.lock();
 		if !state
 			.providers
 			.iter()
@@ -2157,6 +2237,22 @@ impl Runtime {
 		if !state.models.iter().any(|candidate| candidate == &key) {
 			return Err(CommandError::new("model_not_found", format!("unknown model `{key}`")));
 		}
+		Ok(key)
+	}
+
+	async fn change_model(&self, provider: &str, model_id: &str) -> Result<Value, CommandError> {
+		let key = self.validated_model_selector(provider, model_id)?;
+		// The live session owns inference truth. Do not publish a configuration
+		// change until that owner has accepted and durably recorded the model.
+		self
+			.headless
+			.lock()
+			.await
+			.session
+			.set_model(&key)
+			.await
+			.map_err(|error| CommandError::new("model_not_found", error.to_string()))?;
+		let mut state = self.state.lock();
 		state.config.model = key.clone();
 		state.config.provider = Some(provider.to_owned());
 		let config = serde_json::to_value(&state.config).map_err(CommandError::json)?;
@@ -2183,7 +2279,7 @@ impl Runtime {
 		Ok(json!({ "enabled": value, "active": value }))
 	}
 
-	fn cycle_model(&self) -> Result<Value, CommandError> {
+	async fn cycle_model(&self) -> Result<Value, CommandError> {
 		let next = {
 			let state = self.state.lock();
 			let index = state
@@ -2197,7 +2293,11 @@ impl Runtime {
 				.cloned()
 		}
 		.ok_or_else(|| CommandError::new("model_not_found", "no models are available"))?;
-		self.set_string_config("model", &next)
+		let (provider, model_id) = next.split_once('/').ok_or_else(|| {
+			CommandError::new("model_not_found", format!("model selector `{next}` has no provider"))
+		})?;
+		let changed = self.change_model(provider, model_id).await?;
+		Ok(json!({ "key": "model", "value": changed["model"] }))
 	}
 
 	fn cycle_thinking(&self) -> Result<Value, CommandError> {
@@ -3336,8 +3436,12 @@ impl ModelCommandHost for RpcCommandHost {
 		};
 		let runtime = self.runtime.clone();
 		Box::pin(async move {
+			let (provider, model_id) = selector
+				.split_once('/')
+				.ok_or_else(|| miette!("model selector `{selector}` must include its provider"))?;
 			runtime
-				.set_string_config("model", selector.as_str())
+				.change_model(provider, model_id)
+				.await
 				.map_err(|error| miette!(error.message))?;
 			command_status("Model updated.").await
 		})
@@ -4752,6 +4856,23 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn anthropic_subscription_models_combine_client_baseline_and_account_additions() {
+		let models = anthropic_subscription_models(vec![
+			"anthropic/claude-fable-5-1[1m]".to_owned(),
+			"anthropic/claude-opus-5".to_owned(),
+		]);
+		assert_eq!(models.len(), 4);
+		for expected in [
+			"anthropic/claude-fable-5",
+			"anthropic/claude-opus-5",
+			"anthropic/claude-sonnet-5",
+			"anthropic/claude-fable-5-1[1m]",
+		] {
+			assert!(models.contains(expected), "missing {expected}");
+		}
+	}
+
+	#[test]
 	fn detects_only_standalone_lowercase_orchestrate_in_prose() {
 		assert!(contains_orchestrate("please orchestrate this work"));
 		assert!(contains_orchestrate("(orchestrate)"));
@@ -4794,6 +4915,29 @@ mod tests {
 			observed.push(value);
 		}
 		assert_eq!(observed, (0..64).collect::<Vec<_>>());
+	}
+
+	#[tokio::test]
+	async fn rpc_output_writer_shutdown_does_not_wait_for_producer_drop() {
+		let (sender, receiver) = flume::unbounded();
+		let shutdown = CancellationToken::new();
+		sender
+			.send(json!({ "type": "event" }))
+			.expect("frame queued");
+		let writer = tokio::spawn(write_frames(
+			tokio::io::sink(),
+			receiver,
+			Arc::new(AtomicU8::new(PROTOCOL_V1)),
+			shutdown.clone(),
+		));
+
+		shutdown.cancel();
+		time::timeout(Duration::from_millis(100), writer)
+			.await
+			.expect("writer exits while a producer clone remains")
+			.expect("writer task joins")
+			.expect("writer drains queued frames");
+		assert!(sender.send(json!({ "type": "late" })).is_err());
 	}
 
 	#[test]

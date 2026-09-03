@@ -7,9 +7,9 @@ provider = "anthropic"
 credential_provider = "anthropic"
 kind = "custom-exchange"
 client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-authorize_url = "https://claude.ai/oauth/authorize"
-token_url = "https://api.anthropic.com/v1/oauth/token"
-refresh_url = "https://api.anthropic.com/v1/oauth/token"
+authorize_url = "https://claude.com/cai/oauth/authorize"
+token_url = "https://platform.claude.com/v1/oauth/token"
+refresh_url = "https://platform.claude.com/v1/oauth/token"
 scopes = [
 	"org:create_api_key",
 	"user:profile",
@@ -19,7 +19,7 @@ scopes = [
 	"user:file_upload",
 ]
 exchange = "anthropic-pkce"
-custom_params = { bootstrap_url = "https://api.anthropic.com/api/oauth/claude_cli/bootstrap?entrypoint=cli&model=claude-opus-4-8", code = "true", redirect_uri = "http://localhost:54545/callback" }
+custom_params = { bootstrap_url = "https://api.anthropic.com/api/claude_cli/bootstrap", code = "true", redirect_uri = "http://localhost:54545/callback" }
 principal_resolution = { kind = "token-response-field", pointer = "/account/email_address" }
 
 [[provider]]

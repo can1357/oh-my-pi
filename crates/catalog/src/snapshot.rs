@@ -869,6 +869,26 @@ mod tests {
 	}
 
 	#[test]
+	fn embedded_anthropic_route_uses_subscription_bootstrap_discovery() {
+		let catalog = Catalog::embedded();
+		let route = catalog
+			.routes()
+			.iter()
+			.find(|route| {
+				route.provider.as_str() == "anthropic" && route.id.as_str() == "anthropic/primary"
+			})
+			.expect("embedded Anthropic route");
+		let discovery = route
+			.discovery
+			.as_ref()
+			.and_then(|id| catalog.discovery_spec(id))
+			.expect("embedded Anthropic discovery specification");
+
+		assert_eq!(discovery.kind, crate::DiscoveryKind::AccountModels);
+		assert_eq!(discovery.path.as_str(), "/api/claude_cli/bootstrap?model=claude-sonnet-5");
+	}
+
+	#[test]
 	fn discovery_defaults_are_borrowed_from_exact_provider_records() {
 		let catalog = Catalog::embedded();
 		for provider in catalog.providers() {

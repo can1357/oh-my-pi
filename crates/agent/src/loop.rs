@@ -1395,6 +1395,16 @@ impl<C: TurnClient + Clone> Agent<C> {
 		self.journal.append_child_lifecycle(ts, entry)
 	}
 
+	/// Appends one host-selected session model override through the live agent's
+	/// sole mutable journal authority.
+	pub fn record_model_override(
+		&mut self,
+		ts: u64,
+		model: omp_storage::transcript::ModelChange,
+	) -> Result<u64, JournalError> {
+		self.journal.model_override(ts, model)
+	}
+
 	/// Installs the app-owned content-addressed store used by durable bitmap
 	/// compaction. The app is the DI boundary; agent code never opens host
 	/// paths.

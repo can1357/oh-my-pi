@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "source_digest": "ab3c692a2a93bec98ce90e16ca9bea160c826bd98dafec1692a084bdc1818cda",
+  "source_digest": "d142ea40c0d668044364dee0d2844815c010c50e7f98dbecdf33bc981a6f27ac",
   "inputs": [
     {
       "id": "catalog.models.compressed.v1",
@@ -11,7 +11,7 @@
     {
       "id": "catalog.oauth.source.v1",
       "path": "fixtures/llm-oracle/catalog/oauth.toml",
-      "sha256": "61c7c07eeb1e1f141c5b8ffdb87a4b508cfb202b79302fabdede415cbdd25491",
+      "sha256": "aad2179645b7d2d24a0931da6ca6c4667d04880c3847675ce7b5599179287454",
       "source": "oracle:catalog.oauth.source.v1"
     },
     {
@@ -71,7 +71,7 @@
     {
       "id": "catalog.providers.source.v1",
       "path": "fixtures/llm-oracle/catalog/providers.toml",
-      "sha256": "f377f0f3ad0c5b9fa5d64dbcecaf130cfc51c4adcdb9a413ce4e47b96b0807f6",
+      "sha256": "47ddd5e3757f044487ac778a0bf522034c975ad9c7b746d55a8e7320b15297f9",
       "source": "oracle:catalog.providers.source.v1"
     },
     {
@@ -125,7 +125,7 @@
     {
       "id": "compat.cascade.classes.glm.v1",
       "path": "crates/catalog/compat/classes/glm.kdl",
-      "sha256": "b22fdd362b283a13488edc960124b2d092a4f88f457b43c068f5dff8bdec7f14",
+      "sha256": "967ac6cd69aa16e6691b33a20a32a8f3961269542fb2274c31d53067bb515852",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
@@ -173,7 +173,7 @@
     {
       "id": "compat.cascade.classes.qwen.v1",
       "path": "crates/catalog/compat/classes/qwen.kdl",
-      "sha256": "cf5fd165e4ce77a82a816e5f50203da14cf8e67b09336be9a39a83a18ef3e620",
+      "sha256": "984cdc953eb04128ac9639eb00d4c257b6330f1a9ae81c39a7cd9ce09ea6cb4f",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
@@ -317,7 +317,7 @@
     {
       "id": "compat.cascade.providers.github-copilot.v1",
       "path": "crates/catalog/compat/providers/github-copilot.kdl",
-      "sha256": "6c3635a2c5d1f10c44c1ecb372274366cbae520819fe5b49123fda304202d30e",
+      "sha256": "62de41105d50b376f0e937510e9b671fc6ae7c0dcaef26faf29912fa95bfc110",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
@@ -437,7 +437,7 @@
     {
       "id": "compat.cascade.providers.openai-codex.v1",
       "path": "crates/catalog/compat/providers/openai-codex.kdl",
-      "sha256": "014fd7f16a0424d4efea3f99805bbd165bfe10ba4183f15af8b551af3dcea655",
+      "sha256": "d62fe4009cd30b64d79d1450fd7656ed2728e0621fbc774bec4f2e31022cb3fa",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
@@ -557,13 +557,13 @@
     {
       "id": "compat.cascade.providers.xai-oauth.v1",
       "path": "crates/catalog/compat/providers/xai-oauth.kdl",
-      "sha256": "ec40b873b8f7837e99fe4a032708480ffbf95f2bc6a8a4d62e979d40fd358d33",
+      "sha256": "422d86ea1808e69671963c8828e575069f628b96e82b4cfa77b1ee34bc2e2ae8",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
       "id": "compat.cascade.providers.xai.v1",
       "path": "crates/catalog/compat/providers/xai.kdl",
-      "sha256": "15e38266130964a985064fc28ba76162cc1038dbb180d5d3260bf3fecc5f3522",
+      "sha256": "d130e7d6fedeb33ba76444b271be88196ead693fb460ebd8ce361397176d7e04",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
@@ -623,19 +623,19 @@
     {
       "id": "compat.cascade.runtime.behavior.v1",
       "path": "crates/catalog/compat/runtime/behavior.kdl",
-      "sha256": "021fa8d71194967b96d12bad1b2a28898428bdb672975525b66055e23201e15f",
+      "sha256": "c20400d338c3d792defaa5916ea22e9e65b153914108e78467376e47d2aab7c9",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
       "id": "compat.cascade.taxonomy._collapse.v1",
       "path": "crates/catalog/compat/taxonomy/_collapse.kdl",
-      "sha256": "d0f379d74e495acdd78360287f68a4aecc7a379d2f4d650220864c849b4a43e5",
+      "sha256": "9e114d7519ee7237ff044bf282118df873c36efdb1c87923cd6d3b08653dca84",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
       "id": "compat.cascade.taxonomy._discovery.v1",
       "path": "crates/catalog/compat/taxonomy/_discovery.kdl",
-      "sha256": "daad238b2dba3963342fa4766ae24b52b06c74e731fff02e9411d1ceb9b33cf3",
+      "sha256": "219ad4949210cd1175c28b3bed58852afc607152de32ee164ff4c9a6f7f8f2da",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {

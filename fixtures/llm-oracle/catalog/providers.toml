@@ -28,7 +28,7 @@ base_url = "https://api.anthropic.com"
 auth = { type = "header", name = "x-api-key", env = ["OMP_ANTHROPIC_FOUNDRY_API_KEY", "OMP_ANTHROPIC_API_KEY"] }
 oauth_flow = "anthropic"
 oauth_auth = { type = "bearer", env = ["OMP_ANTHROPIC_OAUTH_TOKEN"] }
-discovery = { kind = "open-ai-models", label = "Anthropic", authoritative = false }
+discovery = { kind = "account-models", label = "Claude subscription", path = "/api/claude_cli/bootstrap?model=claude-sonnet-5", authoritative = false }
 facets = ["chat"]
 headers = { "anthropic-version" = "2023-06-01" }
 compat = { "multiple_system_messages" = false, "max_tokens_field" = "max_tokens", "tool_strict_mode" = "none", "reasoning_wire_format" = "anthropic", "cache_control_format" = "anthropic", "image_encoding_format" = "anthropic_source", "tool_schema_flavor" = "anthropic", "stream_protocol" = "sse_events" }

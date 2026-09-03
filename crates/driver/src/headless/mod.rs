@@ -1571,7 +1571,7 @@ impl HeadlessSession {
 			.and_then(|route| catalog.route(route))
 			.ok_or_else(|| HeadlessError::MissingRoute(Str::new(selector)))?;
 		self
-			.control
+			.session
 			.model_override(now_ms(), JournalModelChange {
 				role:     sf!("temporary"),
 				model:    JournalModelRef {
@@ -1583,9 +1583,24 @@ impl HeadlessSession {
 			})
 			.await
 			.map_err(composition)?;
-		self
-			.state
-			.update(|snapshot| snapshot.turn.params.model = model.to_string());
+		self.state.update(|snapshot| {
+			snapshot.turn.params.model = model.to_string();
+			let mut fields = match snapshot.props.get(omp_agent::prompt_keys::MODEL) {
+				Some(omp_scribe::Value::Map(fields)) => fields.clone(),
+				_ => Default::default(),
+			};
+			fields.insert(
+				Str::new_static(omp_agent::prompt_keys::IDENTIFIER),
+				omp_scribe::Value::from(Str::new(selector)),
+			);
+			fields.insert(
+				Str::new_static("codex_task_policy"),
+				omp_scribe::Value::from(crate::task::prompt_policy::uses_codex_task_prompt(selector)),
+			);
+			snapshot
+				.props
+				.set(omp_agent::prompt_keys::MODEL, omp_scribe::Value::Map(fields));
+		});
 		Ok(())
 	}
 
@@ -1709,11 +1724,11 @@ impl HeadlessSession {
 	}
 
 	/// Disposes the live session without running mode-specific finalizers.
-	pub(crate) async fn dispose(&mut self) {
-		let _ = self.session.dispose().await;
+	pub async fn dispose(&mut self) {
 		if let Some(worker) = self._memory_extraction.as_mut() {
 			worker.shutdown().await;
 		}
+		let _ = self.session.dispose().await;
 	}
 
 	/// Runs ordered bounded finalization. Dropping this session afterward
@@ -1725,10 +1740,10 @@ impl HeadlessSession {
 		let report = mem::take(&mut self.finalizer)
 			.finalize(stdout, budget)
 			.await;
-		let _ = self.session.dispose().await;
 		if let Some(worker) = self._memory_extraction.as_mut() {
 			worker.shutdown().await;
 		}
+		let _ = self.session.dispose().await;
 		report
 	}
 

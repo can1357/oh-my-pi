@@ -11,11 +11,12 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
+	auth::AuthScheme,
 	body::BodySource,
 	call::{DiscoveryRequest, OperationCall},
 	codec::{
 		Codec, DecodeContext, Decoder, DecoderState, EncodeContext, EncodedRequest, RawEvent,
-		RequestMethod, SizeBounds, ollama,
+		RequestHeader, RequestMethod, SizeBounds, ollama,
 	},
 	error::{Error, ErrorKind, ErrorPhase, RetryAction},
 	receipt::ExecutionReceipt,
@@ -24,6 +25,10 @@ use crate::{
 
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
+const ANTHROPIC_PROVIDER: &str = "anthropic";
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+const CLAUDE_CODE_USER_AGENT: &str = "claude-code/2.1.258";
+const CLAUDE_CODE_UPDATE_SENTINEL_PREFIX: &str = "cc-update-required-";
 
 /// Standalone OpenAI-compatible `{ "data": [...] }` model discovery codec.
 #[derive(Clone, Debug)]
@@ -131,7 +136,7 @@ impl DiscoveryCore {
 			OperationKind::DiscoverModels,
 			RequestMethod::Get,
 			uri,
-			Box::new([]),
+			discovery_headers(&context.route.provider, context.auth_scheme),
 			BodySource::Bytes(Bytes::new()),
 			FramingProtocol::Raw,
 			SizeBounds {
@@ -165,6 +170,21 @@ impl DiscoveryCore {
 			done: false,
 		}))
 	}
+}
+
+fn discovery_headers(
+	provider: &ProviderId<str>,
+	auth_scheme: Option<AuthScheme>,
+) -> Box<[RequestHeader]> {
+	if provider.as_str() == ANTHROPIC_PROVIDER && auth_scheme == Some(AuthScheme::OAuth) {
+		return Box::new([
+			RequestHeader::new_static("accept", "application/json, text/plain, */*"),
+			RequestHeader::new_static("content-type", "application/json"),
+			RequestHeader::new_static("anthropic-beta", ANTHROPIC_OAUTH_BETA),
+			RequestHeader::new_static("user-agent", CLAUDE_CODE_USER_AGENT),
+		]);
+	}
+	Box::new([])
 }
 
 fn discovery_uri(
@@ -379,18 +399,32 @@ impl DiscoveryDecoder {
 		let cursor = envelope.cursor();
 		let mut rows = Vec::with_capacity(envelope.models.len());
 		for model in envelope.models {
-			let wire_model = model.slug.or(model.id).ok_or_else(protocol_error)?;
+			let advertised_model = model
+				.model
+				.or(model.slug)
+				.or(model.id)
+				.ok_or_else(protocol_error)?;
+			if advertised_model.starts_with(CLAUDE_CODE_UPDATE_SENTINEL_PREFIX) {
+				continue;
+			}
+			let (wire_model, advertised_alias) = account_wire_model(&self.provider, advertised_model);
 			let availability = match model.visibility.as_ref().map(Str::as_str) {
 				Some("visible" | "available") => Some(ModelAvailability::Available),
 				Some("hide" | "hidden" | "disabled") => Some(ModelAvailability::Disabled),
 				_ => None,
 			};
-			rows.push(self.row(
-				wire_model,
-				model.display_name,
-				model.family.map(ClassId::from),
-				availability,
-			));
+			let mut row =
+				self.row(wire_model, model.display_name, model.family.map(ClassId::from), availability);
+			if let Some(alias) = advertised_alias {
+				row.aliases = vec![alias].into_boxed_slice();
+			}
+			// Anthropic's compact bootstrap rows describe models selectable by
+			// Claude's chat client but omit capability metadata. Absence there is
+			// not evidence that the model cannot chat.
+			if self.provider.as_str() == ANTHROPIC_PROVIDER {
+				row.declared_operations.insert_kind(OperationKind::Chat);
+			}
+			rows.push(row);
 		}
 		Ok((rows, cursor))
 	}
@@ -581,6 +615,7 @@ struct GoogleModel {
 
 #[derive(Deserialize)]
 struct AccountEnvelope {
+	#[serde(default, alias = "additional_model_options")]
 	models:      Vec<AccountModel>,
 	#[serde(default)]
 	next:        Option<Str>,
@@ -605,15 +640,30 @@ impl AccountEnvelope {
 #[derive(Deserialize)]
 struct AccountModel {
 	#[serde(default)]
+	model:        Option<Str>,
+	#[serde(default)]
 	slug:         Option<Str>,
 	#[serde(default)]
 	id:           Option<Str>,
-	#[serde(default)]
+	#[serde(default, alias = "name")]
 	display_name: Option<Str>,
 	#[serde(default)]
 	family:       Option<Str>,
 	#[serde(default)]
 	visibility:   Option<Str>,
+}
+
+fn account_wire_model(
+	provider: &ProviderId<str>,
+	advertised_model: Str,
+) -> (Str, Option<WireModelId>) {
+	if provider.as_str() == ANTHROPIC_PROVIDER
+		&& let Some(base_model) = advertised_model.as_str().strip_suffix("[1m]")
+		&& !base_model.is_empty()
+	{
+		return (Str::new(base_model), Some(WireModelId::from(advertised_model)));
+	}
+	(advertised_model, None)
 }
 
 fn invalid_request() -> Error {
@@ -670,7 +720,17 @@ mod tests {
 		pagination: DiscoveryPagination,
 		fixture: &'static [u8],
 	) -> (Vec<DiscoveredModel>, Option<Str>) {
+		discovered_for_provider("provider", flavor, pagination, fixture)
+	}
+
+	fn discovered_for_provider(
+		provider: &str,
+		flavor: DiscoveryFlavor,
+		pagination: DiscoveryPagination,
+		fixture: &'static [u8],
+	) -> (Vec<DiscoveredModel>, Option<Str>) {
 		let mut decoder = decoder(flavor, pagination);
+		decoder.provider = ProviderId::from(provider);
 		let mut output = None;
 		decoder
 			.push(Frame::Raw(Bytes::from_static(fixture)), &mut |event| {
@@ -711,6 +771,21 @@ mod tests {
 				.kind,
 			ErrorKind::InvalidRequest,
 		);
+	}
+
+	#[test]
+	fn anthropic_oauth_discovery_uses_claude_code_request_headers() {
+		let headers = discovery_headers(&ProviderId::from("anthropic"), Some(AuthScheme::OAuth));
+		assert_eq!(headers.as_ref(), &[
+			RequestHeader::new_static("accept", "application/json, text/plain, */*"),
+			RequestHeader::new_static("content-type", "application/json"),
+			RequestHeader::new_static("anthropic-beta", "oauth-2025-04-20"),
+			RequestHeader::new_static("user-agent", "claude-code/2.1.258"),
+		]);
+		assert!(
+			discovery_headers(&ProviderId::from("anthropic"), Some(AuthScheme::ApiKey)).is_empty()
+		);
+		assert!(discovery_headers(&ProviderId::from("openai"), Some(AuthScheme::OAuth)).is_empty());
 	}
 
 	#[test]
@@ -870,7 +945,8 @@ mod tests {
 
 	#[test]
 	fn account_models_fixture_preserves_provider_fields_and_cursor() {
-		let (rows, next) = discovered(
+		let (rows, next) = discovered_for_provider(
+			"anthropic",
 			DiscoveryFlavor::Account,
 			DiscoveryPagination::Cursor { query_parameter: sf!("after") },
 			include_bytes!("../../../../fixtures/llm-oracle/openai/chat/response.account_models.json"),
@@ -926,6 +1002,62 @@ mod tests {
 		)
 		.expect_err("single-page discovery rejects a cursor");
 		assert_eq!(error.kind, ErrorKind::InvalidRequest);
+	}
+
+	#[test]
+	fn anthropic_bootstrap_models_use_server_ids_and_names() {
+		let uri = discovery_uri(
+			"https://api.anthropic.com",
+			"/api/claude_cli/bootstrap?model=claude-sonnet-5",
+			&DiscoveryPagination::SinglePage,
+			&request(None),
+		)
+		.expect("Anthropic bootstrap URI");
+		assert_eq!(
+			uri.as_str(),
+			"https://api.anthropic.com/api/claude_cli/bootstrap?model=claude-sonnet-5",
+		);
+		let (rows, next) = discovered_for_provider(
+			"anthropic",
+			DiscoveryFlavor::Account,
+			DiscoveryPagination::SinglePage,
+			br#"{
+				"client_data": {"opaque": true},
+				"additional_model_options": [
+					{"model":"claude-fable-5-1","name":"Claude Fable 5.1","description":""},
+					{"model":"claude-opus-5","name":"Claude Opus 5","description":""}
+				]
+			}"#,
+		);
+		assert_eq!(next, None);
+		assert_eq!(rows.len(), 2);
+		assert_eq!(rows[0].wire_model.as_str(), "claude-fable-5-1");
+		assert_eq!(rows[0].display_name.as_ref().map(Str::as_str), Some("Claude Fable 5.1"),);
+		assert!(
+			rows[0]
+				.declared_operations
+				.contains_kind(OperationKind::Chat)
+		);
+		assert_eq!(rows[1].wire_model.as_str(), "claude-opus-5");
+	}
+
+	#[test]
+	fn anthropic_bootstrap_omits_client_update_control_rows() {
+		let (rows, next) = discovered_for_provider(
+			"anthropic",
+			DiscoveryFlavor::Account,
+			DiscoveryPagination::SinglePage,
+			br#"{
+				"additional_model_options": [
+					{"model":"claude-fable-5-1[1m]","name":"Fable 5.1"},
+					{"model":"cc-update-required-1","name":"Update Claude Code"}
+				]
+			}"#,
+		);
+		assert_eq!(next, None);
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].wire_model.as_str(), "claude-fable-5-1");
+		assert_eq!(rows[0].aliases.as_ref(), &[WireModelId::from("claude-fable-5-1[1m]")]);
 	}
 
 	#[test]

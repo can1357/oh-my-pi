@@ -475,20 +475,30 @@ impl DiscoveryNormalizer {
 			confidence:     EvidenceConfidence::Inferred,
 			observed_at_ms: row.observed_at_ms,
 		};
-		let aliases = row
-			.aliases
-			.iter()
-			.filter(|alias| *alias != &row.wire_model)
-			.flat_map(|alias| {
-				[Str::new(alias.as_str()), sf!("{}/{}", row.provider, alias)]
-					.into_iter()
-					.map(|alias| CatalogAlias {
-						alias,
-						target: ModelKey::new(classification.logical_model.clone()),
-						rationale: sf!("provider discovery declared an alternate wire model identifier",),
-						provenance: row.source.clone(),
-					})
-			})
+		let primary_alias = CatalogAlias {
+			alias:      sf!("{}/{}", row.provider, row.wire_model),
+			target:     ModelKey::new(classification.logical_model.clone()),
+			rationale:  sf!("provider discovery retained the primary wire model identifier"),
+			provenance: row.source.clone(),
+		};
+		let aliases = std::iter::once(primary_alias)
+			.chain(
+				row.aliases
+					.iter()
+					.filter(|alias| *alias != &row.wire_model)
+					.flat_map(|alias| {
+						[Str::new(alias.as_str()), sf!("{}/{}", row.provider, alias)]
+							.into_iter()
+							.map(|alias| CatalogAlias {
+								alias,
+								target: ModelKey::new(classification.logical_model.clone()),
+								rationale: sf!(
+									"provider discovery declared an alternate wire model identifier",
+								),
+								provenance: row.source.clone(),
+							})
+					}),
+			)
 			.collect::<Vec<_>>()
 			.into_boxed_slice();
 		Ok(NormalizedDiscovery {
@@ -1047,7 +1057,14 @@ mod tests {
 				.iter()
 				.map(|alias| alias.definition.alias.as_str())
 				.collect::<Vec<_>>(),
-			["a-alias", "provider/a-alias", "provider/z-alias", "z-alias"]
+			[
+				"a-alias",
+				"provider/a-alias",
+				"provider/a-model",
+				"provider/z-alias",
+				"provider/z-model",
+				"z-alias",
+			]
 		);
 		assert_eq!(page.continuation, DiscoveryContinuation::Cursor {
 			query_parameter: sf!("after"),

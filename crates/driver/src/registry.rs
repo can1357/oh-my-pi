@@ -1216,11 +1216,16 @@ maxTokens = 1024
 			)
 			.expect("cache generation");
 		let catalog = production_catalog(directory.path()).expect("composed catalog");
-		assert!(
+		let model = catalog
+			.models()
+			.iter()
+			.find(|model| model.display_name == "Cached Driver Composition Test")
+			.expect("cached model");
+		assert_eq!(
 			catalog
-				.models()
-				.iter()
-				.any(|model| model.display_name == "Cached Driver Composition Test")
+				.resolve_alias(&format!("{}/cached-driver-composition-test", route.provider))
+				.map(|resolved| &resolved.key),
+			Some(&model.key),
 		);
 	}
 

@@ -172,7 +172,7 @@ fn claude_headers(access_token: &str) -> Result<HeaderMap, UsageFetchError> {
 	headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, compress, deflate, br"));
 	headers.insert("anthropic-beta", HeaderValue::from_static(ANTHROPIC_BETA));
 	headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-	headers.insert(USER_AGENT, HeaderValue::from_static("claude-cli/2.1.220 (external, cli)"));
+	headers.insert(USER_AGENT, HeaderValue::from_static("claude-cli/2.1.258 (external, cli)"));
 	headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
 	headers.insert(AUTHORIZATION, bearer_header(access_token)?);
 	Ok(headers)
@@ -711,7 +711,7 @@ mod tests {
 		assert_eq!(requests[0].url, "https://api.anthropic.com/api/oauth/usage");
 		assert_eq!(requests[1].url, "https://api.anthropic.com/api/oauth/profile");
 		assert_eq!(requests[0].headers["authorization"], "Bearer oauth-secret");
-		assert_eq!(requests[0].headers["user-agent"], "claude-cli/2.1.220 (external, cli)");
+		assert_eq!(requests[0].headers["user-agent"], "claude-cli/2.1.258 (external, cli)");
 		assert_eq!(requests[0].headers["anthropic-beta"], ANTHROPIC_BETA);
 	}
 

@@ -136,6 +136,8 @@ use self::{
 };
 use crate::eval::{BridgeHostError, ParentSessionHost};
 
+const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Owned configuration for one project environment daemon.
 #[derive(Clone, Debug)]
 pub struct EnvdConfig {
@@ -1284,9 +1286,7 @@ async fn hello_with_approval_mode(
 	client: &EnvClient,
 	approval_mode: Option<ApprovalMode>,
 ) -> Result<ServerHello, EnvdError> {
-	Ok(client
-		.hello(client_hello(approval_mode, false, None))
-		.await?)
+	hello_with_deadline(client, client_hello(approval_mode, false, None), CLIENT_HELLO_TIMEOUT).await
 }
 
 async fn hello_attached_session(
@@ -1295,9 +1295,25 @@ async fn hello_attached_session(
 	edit_repair: bool,
 	edit_model: Option<&Str>,
 ) -> Result<ServerHello, EnvdError> {
-	Ok(client
-		.hello(client_hello(approval_mode, edit_repair, edit_model))
-		.await?)
+	hello_with_deadline(
+		client,
+		client_hello(approval_mode, edit_repair, edit_model),
+		CLIENT_HELLO_TIMEOUT,
+	)
+	.await
+}
+
+async fn hello_with_deadline(
+	client: &EnvClient,
+	hello: ClientHello,
+	deadline: Duration,
+) -> Result<ServerHello, EnvdError> {
+	match time::timeout(deadline, client.hello(hello)).await {
+		Ok(result) => Ok(result?),
+		Err(_) => Err(
+			io::Error::new(io::ErrorKind::TimedOut, "environment hello handshake timed out").into(),
+		),
+	}
 }
 
 fn client_hello(
@@ -2091,6 +2107,19 @@ mod tests {
 			.remove("edit-model")
 			.expect("typed model property");
 		assert_eq!(model.kind, Some(value::Kind::String("smol".to_owned())));
+	}
+
+	#[tokio::test]
+	async fn client_hello_stops_waiting_for_an_unresponsive_transport() {
+		let (client, _transport) = EnvClient::in_process(1);
+		let error =
+			hello_with_deadline(&client, client_hello(None, false, None), Duration::from_millis(10))
+				.await
+				.expect_err("an unresponsive environment must hit its hello deadline");
+		let EnvdError::Io(error) = error else {
+			panic!("hello deadline returned the wrong error: {error}");
+		};
+		assert_eq!(error.kind(), io::ErrorKind::TimedOut);
 	}
 
 	#[test]
