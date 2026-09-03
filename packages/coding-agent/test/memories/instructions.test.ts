@@ -25,8 +25,11 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 
 			const instructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
 			expect(instructions).toBeDefined();
-			expect(instructions).toContain("memory://root/memory_summary.md");
-			expect(instructions).toContain("memory://root/skills/<name>/SKILL.md");
+			expect(instructions).toContain("Read `memory://root` first.");
+			expect(instructions).toContain(
+				"If it is unavailable or more detail is needed, inspect `memory://root/MEMORY.md`",
+			);
+			expect(instructions).not.toContain("memory://root/memory_summary.md");
 			expect(instructions).not.toContain(memoryRoot);
 		});
 	});
