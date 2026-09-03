@@ -44,6 +44,8 @@ export interface LoadContext {
 	 * sessions carry their value explicitly (or via the invocation scope).
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
+	/** Provider IDs explicitly requested by caller in LoadOptions */
+	explicitProviders?: Set<string>;
 }
 
 /**

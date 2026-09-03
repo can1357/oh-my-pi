@@ -8,7 +8,7 @@
  */
 import * as path from "node:path";
 import { logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
-import { registerProvider } from "../capability";
+import { isUserSourceEnabled, registerProvider } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import { contextFileCapability } from "../capability/context-file";
 import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
@@ -46,6 +46,11 @@ function getProjectCodexDir(ctx: LoadContext): string {
 	return path.join(ctx.cwd, ".codex");
 }
 
+function getUserCodexDir(ctx: LoadContext): string | null {
+	if (!isUserSourceEnabled("codex", ctx)) return null;
+	return path.join(ctx.home, SOURCE_PATHS.codex.userBase);
+}
+
 // =============================================================================
 // Context Files (AGENTS.md)
 // =============================================================================
@@ -54,8 +59,11 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	const items: ContextFile[] = [];
 	const warnings: string[] = [];
 
+	const userDir = getUserCodexDir(ctx);
+	if (!userDir) return { items, warnings };
+
 	// User level only: ~/.codex/AGENTS.md
-	const agentsMd = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "AGENTS.md");
+	const agentsMd = path.join(userDir, "AGENTS.md");
 	const agentsContent = await readFile(agentsMd);
 	if (agentsContent) {
 		items.push({
@@ -76,12 +84,13 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const warnings: string[] = [];
 
-	const userConfigPath = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "config.toml");
+	const userDir = getUserCodexDir(ctx);
+	const userConfigPath = userDir ? path.join(userDir, "config.toml") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectConfigPath = path.join(codexDir, "config.toml");
 
 	const [userConfig, projectConfig] = await Promise.all([
-		loadTomlConfig(ctx, userConfigPath),
+		userConfigPath ? loadTomlConfig(ctx, userConfigPath) : Promise.resolve(null),
 		loadTomlConfig(ctx, projectConfigPath),
 	]);
 
@@ -100,7 +109,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			});
 		}
 	}
-	if (userConfig) {
+	if (userConfig && userConfigPath) {
 		const servers = extractMCPServersFromToml(userConfig, path.dirname(userConfigPath));
 		for (const name in servers) {
 			const config = servers[name];
@@ -234,16 +243,19 @@ function extractMCPServersFromToml(
 // =============================================================================
 
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	const userSkillsDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "skills");
+	const userDir = getUserCodexDir(ctx);
+	const userSkillsDir = userDir ? path.join(userDir, "skills") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectSkillsDir = path.join(codexDir, "skills");
 
 	const results = await Promise.all([
-		scanSkillsFromDir(ctx, {
-			dir: userSkillsDir,
-			providerId: PROVIDER_ID,
-			level: "user",
-		}),
+		userSkillsDir
+			? scanSkillsFromDir(ctx, {
+					dir: userSkillsDir,
+					providerId: PROVIDER_ID,
+					level: "user",
+				})
+			: Promise.resolve({ items: [] as Skill[], warnings: [] as string[] }),
 		scanSkillsFromDir(ctx, {
 			dir: projectSkillsDir,
 			providerId: PROVIDER_ID,
@@ -264,12 +276,13 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<ExtensionModule>> {
 	const warnings: string[] = [];
 
-	const userExtensionsDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "extensions");
+	const userDir = getUserCodexDir(ctx);
+	const userExtensionsDir = userDir ? path.join(userDir, "extensions") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectExtensionsDir = path.join(codexDir, "extensions");
 
 	const [userPaths, projectPaths] = await Promise.all([
-		discoverExtensionModulePaths(ctx, userExtensionsDir),
+		userExtensionsDir ? discoverExtensionModulePaths(ctx, userExtensionsDir) : Promise.resolve([]),
 		discoverExtensionModulePaths(ctx, projectExtensionsDir),
 	]);
 
@@ -283,7 +296,8 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 // =============================================================================
 
 async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashCommand>> {
-	const userCommandsDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "commands");
+	const userDir = getUserCodexDir(ctx);
+	const userCommandsDir = userDir ? path.join(userDir, "commands") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectCommandsDir = path.join(codexDir, "commands");
 
@@ -302,10 +316,12 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 		};
 
 	const results = await Promise.all([
-		loadFilesFromDir(ctx, userCommandsDir, PROVIDER_ID, "user", {
-			extensions: ["md"],
-			transform: transformCommand("user"),
-		}),
+		userCommandsDir
+			? loadFilesFromDir(ctx, userCommandsDir, PROVIDER_ID, "user", {
+					extensions: ["md"],
+					transform: transformCommand("user"),
+				})
+			: Promise.resolve({ items: [] as SlashCommand[], warnings: [] as string[] }),
 		loadFilesFromDir(ctx, projectCommandsDir, PROVIDER_ID, "project", {
 			extensions: ["md"],
 			transform: transformCommand("project"),
@@ -323,7 +339,8 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 // =============================================================================
 
 async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
-	const userPromptsDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "prompts");
+	const userDir = getUserCodexDir(ctx);
+	const userPromptsDir = userDir ? path.join(userDir, "prompts") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectPromptsDir = path.join(codexDir, "prompts");
 
@@ -340,10 +357,12 @@ async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
 	};
 
 	const results = await Promise.all([
-		loadFilesFromDir(ctx, userPromptsDir, PROVIDER_ID, "user", {
-			extensions: ["md"],
-			transform: transformPrompt,
-		}),
+		userPromptsDir
+			? loadFilesFromDir(ctx, userPromptsDir, PROVIDER_ID, "user", {
+					extensions: ["md"],
+					transform: transformPrompt,
+				})
+			: Promise.resolve({ items: [] as Prompt[], warnings: [] as string[] }),
 		loadFilesFromDir(ctx, projectPromptsDir, PROVIDER_ID, "project", {
 			extensions: ["md"],
 			transform: transformPrompt,
@@ -361,7 +380,8 @@ async function loadPrompts(ctx: LoadContext): Promise<LoadResult<Prompt>> {
 // =============================================================================
 
 async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
-	const userHooksDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "hooks");
+	const userDir = getUserCodexDir(ctx);
+	const userHooksDir = userDir ? path.join(userDir, "hooks") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectHooksDir = path.join(codexDir, "hooks");
 
@@ -390,10 +410,12 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 		};
 
 	const results = await Promise.all([
-		loadFilesFromDir<Hook>(ctx, userHooksDir, PROVIDER_ID, "user", {
-			extensions: ["ts", "js"],
-			transform: transformHook("user"),
-		}),
+		userHooksDir
+			? loadFilesFromDir<Hook>(ctx, userHooksDir, PROVIDER_ID, "user", {
+					extensions: ["ts", "js"],
+					transform: transformHook("user"),
+				})
+			: Promise.resolve({ items: [] as Hook[], warnings: [] as string[] }),
 		loadFilesFromDir<Hook>(ctx, projectHooksDir, PROVIDER_ID, "project", {
 			extensions: ["ts", "js"],
 			transform: transformHook("project"),
@@ -411,7 +433,8 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 // =============================================================================
 
 async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const userToolsDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "tools");
+	const userDir = getUserCodexDir(ctx);
+	const userToolsDir = userDir ? path.join(userDir, "tools") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectToolsDir = path.join(codexDir, "tools");
 
@@ -427,10 +450,12 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 		};
 
 	const results = await Promise.all([
-		loadFilesFromDir(ctx, userToolsDir, PROVIDER_ID, "user", {
-			extensions: ["ts", "js"],
-			transform: transformTool("user"),
-		}),
+		userToolsDir
+			? loadFilesFromDir(ctx, userToolsDir, PROVIDER_ID, "user", {
+					extensions: ["ts", "js"],
+					transform: transformTool("user"),
+				})
+			: Promise.resolve({ items: [] as CustomTool[], warnings: [] as string[] }),
 		loadFilesFromDir(ctx, projectToolsDir, PROVIDER_ID, "project", {
 			extensions: ["ts", "js"],
 			transform: transformTool("project"),
@@ -450,17 +475,18 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const warnings: string[] = [];
 
-	const userConfigPath = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "config.toml");
+	const userDir = getUserCodexDir(ctx);
+	const userConfigPath = userDir ? path.join(userDir, "config.toml") : null;
 	const codexDir = getProjectCodexDir(ctx);
 	const projectConfigPath = path.join(codexDir, "config.toml");
 
 	const [userConfig, projectConfig] = await Promise.all([
-		loadTomlConfig(ctx, userConfigPath),
+		userConfigPath ? loadTomlConfig(ctx, userConfigPath) : Promise.resolve(null),
 		loadTomlConfig(ctx, projectConfigPath),
 	]);
 
 	const items: Settings[] = [];
-	if (userConfig) {
+	if (userConfig && userConfigPath) {
 		items.push({
 			...userConfig,
 			_source: createSourceMeta(PROVIDER_ID, userConfigPath, "user"),

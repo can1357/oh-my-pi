@@ -52,17 +52,21 @@ export {
 	getCapability,
 	getCapabilityInfo,
 	getDisabledProviders,
+	getEnabledProviders,
 	getProviderInfo,
 	// Initialization
 	initializeWithSettings,
 	invalidate,
 	isProviderEnabled,
+	isUserSourceEnabled,
 	listCapabilities,
 	// Loading API
 	loadCapability,
 	// Cache management
 	reset,
+	resetCapabilityForTests,
 	setDisabledProviders,
+	setEnabledProviders,
 } from "../capability";
 export type { ContextFile } from "../capability/context-file";
 export type { Extension, ExtensionManifest } from "../capability/extension";

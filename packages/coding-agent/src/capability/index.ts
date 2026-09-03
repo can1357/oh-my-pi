@@ -39,6 +39,21 @@ const providerMeta = new Map<string, { displayName: string; description: string 
 /** Disabled providers (by ID) */
 const disabledProviders = new Set<string>();
 
+/** Enabled providers (by ID) */
+const enabledProviders = new Set<string>();
+
+/** Foreign tools whose user-level (~/...) configs are opt-in */
+const FOREIGN_USER_PROVIDERS: Record<string, true> = {
+	cursor: true,
+	codex: true,
+	claude: true,
+	"claude-plugins": true,
+	gemini: true,
+	opencode: true,
+	windsurf: true,
+	github: true,
+};
+
 /** Settings manager for persistence (if set) */
 let settings: Settings | null = null;
 
@@ -266,6 +281,7 @@ export async function loadCapability<T>(
 	const home = os.homedir();
 	const repoRoot = await findRepoRoot(cwd);
 	const ctx: LoadContext = { cwd, home, repoRoot };
+	if (options.providers) ctx.explicitProviders = new Set(options.providers);
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
 	const providers = filterProviders(capability, options);
 
@@ -275,6 +291,33 @@ export async function loadCapability<T>(
 // =============================================================================
 // Provider Enable/Disable API
 // =============================================================================
+
+/**
+ * Check whether a user-level (~/...) config source is enabled.
+ * Native (.omp) and .agents directories are enabled by default.
+ * Foreign tool directories (~/.cursor, ~/.codex, ~/.claude, etc.) are opt-in.
+ */
+export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean {
+	const id = source.replace(/^\./, "");
+	if (disabledProviders.has(id)) return false;
+	if (FOREIGN_USER_PROVIDERS[id] !== true) return true;
+	if (ctx?.explicitProviders?.has(id)) return true;
+	if (enabledProviders.has(id) || enabledProviders.has("*") || enabledProviders.has("all")) return true;
+	if (id === "claude-plugins" && enabledProviders.has("claude")) return true;
+	if (id === "claude" && typeof process !== "undefined" && process.env.CLAUDE_CONFIG_DIR?.trim()) return true;
+	if (settings) {
+		const configured = settings.get("enabledProviders");
+		if (Array.isArray(configured)) {
+			if (configured.includes(id) || configured.includes("*") || configured.includes("all")) return true;
+			if (id === "claude-plugins" && configured.includes("claude")) return true;
+		}
+		if (id === "claude" && settings.get("skills.enableClaudeUser") === true) return true;
+		if (id === "codex" && settings.get("skills.enableCodexUser") === true) return true;
+		if (id === "claude" && settings.get("commands.enableClaudeUser") === true) return true;
+		if (id === "opencode" && settings.get("commands.enableOpencodeUser") === true) return true;
+	}
+	return false;
+}
 
 /**
  * Initialize capability system with settings manager for persistence.
@@ -288,6 +331,12 @@ export function initializeWithSettings(activeSettings: Settings): void {
 	for (const id of disabled) {
 		disabledProviders.add(id);
 	}
+	// Load enabled providers from settings
+	const enabled = settings.get("enabledProviders");
+	enabledProviders.clear();
+	for (const id of enabled) {
+		enabledProviders.add(id);
+	}
 }
 
 /**
@@ -300,11 +349,22 @@ function persistDisabledProviders(): void {
 }
 
 /**
+ * Persist current enabled providers to settings.
+ */
+function persistEnabledProviders(): void {
+	if (settings) {
+		settings.set("enabledProviders", Array.from(enabledProviders));
+	}
+}
+
+/**
  * Disable a provider globally (across all capabilities).
  */
 export function disableProvider(providerId: string): void {
 	disabledProviders.add(providerId);
+	enabledProviders.delete(providerId);
 	persistDisabledProviders();
+	persistEnabledProviders();
 }
 
 /**
@@ -312,14 +372,23 @@ export function disableProvider(providerId: string): void {
  */
 export function enableProvider(providerId: string): void {
 	disabledProviders.delete(providerId);
+	if (FOREIGN_USER_PROVIDERS[providerId] === true) {
+		enabledProviders.add(providerId);
+		persistEnabledProviders();
+	}
 	persistDisabledProviders();
 }
 
 /**
  * Check if a provider is enabled.
+ * For foreign user providers, reflects whether they have been opted in.
  */
 export function isProviderEnabled(providerId: string): boolean {
-	return !disabledProviders.has(providerId);
+	if (disabledProviders.has(providerId)) return false;
+	if (FOREIGN_USER_PROVIDERS[providerId] === true) {
+		return isUserSourceEnabled(providerId);
+	}
+	return true;
 }
 
 /**
@@ -338,6 +407,24 @@ export function setDisabledProviders(providerIds: string[]): void {
 		disabledProviders.add(id);
 	}
 	persistDisabledProviders();
+}
+
+/**
+ * Get list of all explicitly enabled provider IDs.
+ */
+export function getEnabledProviders(): string[] {
+	return Array.from(enabledProviders);
+}
+
+/**
+ * Set enabled providers from a list (replaces current set).
+ */
+export function setEnabledProviders(providerIds: string[]): void {
+	enabledProviders.clear();
+	for (const id of providerIds) {
+		enabledProviders.add(id);
+	}
+	persistEnabledProviders();
 }
 
 // =============================================================================
@@ -442,6 +529,16 @@ export function getAllProvidersInfo(): ProviderInfo[] {
  * Reset all caches. Call after chdir or filesystem changes.
  */
 export function reset(): void {
+	clearFsCache();
+}
+
+/**
+ * Reset capability registry settings and provider state. Test-only.
+ */
+export function resetCapabilityForTests(): void {
+	settings = null;
+	disabledProviders.clear();
+	enabledProviders.clear();
 	clearFsCache();
 }
 

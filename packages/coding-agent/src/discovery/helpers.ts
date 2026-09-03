@@ -11,6 +11,7 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
@@ -91,6 +92,7 @@ export type SourceId = keyof typeof SOURCE_PATHS;
  * Get user-level path for a source.
  */
 export function getUserPath(ctx: LoadContext, source: SourceId, subpath: string): string | null {
+	if (!isUserSourceEnabled(source, ctx)) return null;
 	// Native user config is profile-scoped via getAgentDir() (the active profile's
 	// agent dir), matching builtin.ts and getMCPConfigPath("user").
 	if (source === "native") return path.join(getAgentDir(), subpath);
