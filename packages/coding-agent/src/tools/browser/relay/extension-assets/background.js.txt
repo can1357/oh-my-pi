@@ -10,17 +10,21 @@ class AttachmentGuard {
   }
   track(tabId) {
     this.#attached.add(tabId);
+    this.#cancelRetry(tabId);
     this.#scheduleSweep();
   }
   untrack(tabId) {
     this.#attached.delete(tabId);
+    this.#cancelRetry(tabId);
+    if (this.#attached.size === 0)
+      this.#cancel();
+  }
+  #cancelRetry(tabId) {
     const retry = this.#targetedRetries.get(tabId);
     if (retry !== undefined) {
       this.options.clearTimer(retry);
       this.#targetedRetries.delete(tabId);
     }
-    if (this.#attached.size === 0)
-      this.#cancel();
   }
   retry(tabId, isFresh = () => true) {
     this.#attached.add(tabId);
