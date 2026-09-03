@@ -43,6 +43,7 @@
 ### Fixed
 
 - Active sessions now keep memory proportional to truncated raw SSE and tool outputs instead of retaining complete oversized backing strings ([#10547](https://github.com/can1357/oh-my-pi/issues/10547)).
+- Sloppy edit recovery no longer silently misapplies marker-less payloads: the missing-separator split now requires the recovered MATCH prefix and REWRITE remainder to be structurally similar, so desired-state blocks fall through to the gated closest-block path or fail closed instead of replacing only a matching prefix line; every recovery path (missing separator, alternating blocks, bracket pairs, non-consecutive lines, echo retries) also now surfaces an explanatory note ([#10527](https://github.com/can1357/oh-my-pi/pull/10527) by [@CaiJingLong](https://github.com/CaiJingLong), fixes [#9717](https://github.com/can1357/oh-my-pi/issues/9717)).
 - Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.
 - TypeScript code intelligence now works on TypeScript 7 projects: the built-in `typescript-native` server runs `tsc --lsp --stdio` when the resolved TypeScript install no longer ships `tsserver.js`, replacing `typescript-language-server` for that project.
 - Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).

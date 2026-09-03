@@ -3997,6 +3997,13 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 			throw error;
 		}
 		const operation = located.operation;
+		// Echo/non-consecutive/punctuation recoveries attach their note to the
+		// operation they return from `locateWithEchoRecovery`; the parse-time
+		// note was already collected above, so pick up any note the locate
+		// recovery added (it is never identical to the parse-time one).
+		if (operation.recoveryNote !== undefined && operation.recoveryNote !== parsedNote) {
+			recoveryNotes.push(operation.recoveryNote);
+		}
 		if (operation.whitespaceMatched) {
 			recoveryNotes.push(
 				`Note: operation ${operationNumber}'s <SM:FIND> differed from the file in whitespace only and was matched leniently. Inserted lines are written exactly as authored — verify their indentation.`,
