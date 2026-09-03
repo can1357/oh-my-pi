@@ -734,18 +734,19 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		// Check if we're completing a file attachment (prefix starts with "@")
 		if (prefix.startsWith("@")) {
 			const liveAtPrefix = this.#extractAtPrefix(textBeforeCursor);
-			if (liveAtPrefix) {
-				beforePrefix = currentLine.slice(0, cursorCol - liveAtPrefix.length);
-			}
-			// This is a file attachment completion
-			const newLine = `${beforePrefix + item.value} ${afterCursor}`;
+			const completedPath = item.value;
+			const liveSuffix =
+				liveAtPrefix?.startsWith(completedPath) === true ? liveAtPrefix.slice(completedPath.length) : "";
+			beforePrefix = liveAtPrefix ? currentLine.slice(0, cursorCol - liveAtPrefix.length) : beforePrefix;
+			const insert = `${completedPath}${liveSuffix} `;
+			const newLine = `${beforePrefix}${insert}${afterCursor}`;
 			const newLines = [...lines];
 			newLines[cursorLine] = newLine;
 
 			return {
 				lines: newLines,
 				cursorLine,
-				cursorCol: beforePrefix.length + item.value.length + 1, // +1 for space
+				cursorCol: beforePrefix.length + insert.length,
 			};
 		}
 

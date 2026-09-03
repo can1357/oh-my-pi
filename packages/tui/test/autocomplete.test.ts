@@ -628,6 +628,20 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("fix bug /skill:security-scan ".length);
 		});
 
+		it("preserves a typed range suffix when applying a stale file completion", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const line = "@src/config.ts:10-20";
+			const result = provider.applyCompletion(
+				[line],
+				0,
+				line.length,
+				{ value: "@src/config.ts", label: "src/config.ts" },
+				"@src/con",
+			);
+
+			expect(result.lines[0]).toBe("@src/config.ts:10-20 ");
+		});
+
 		it("preserves earlier slash command arguments when completing a path inside the last argument", () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const result = provider.applyCompletion(

@@ -25,7 +25,12 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 } from "../session/streaming-output";
-import { resolveReadPath } from "../tools/path-utils";
+import {
+	type LineRange,
+	parseLineRanges,
+	resolveReadPath,
+	splitPathAndSelPreferringLiteral,
+} from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
 
 /** Regex to match @filepath patterns in text */
@@ -69,6 +74,53 @@ async function resolveMentionPath(filePath: string, cwd: string): Promise<string
 	// files; that disambiguation belongs to the selector's display, not post-send.
 	const absolutePath = resolveReadPath(filePath, cwd);
 	return (await pathExists(absolutePath)) ? filePath : null;
+}
+
+interface ResolvedMentionPath {
+	displayPath: string;
+	filePath: string;
+	ranges?: [LineRange, ...LineRange[]];
+}
+
+async function resolveMention(filePath: string, cwd: string): Promise<ResolvedMentionPath | null> {
+	const split = await splitPathAndSelPreferringLiteral(filePath, cwd);
+	const resolvedPath = await resolveMentionPath(split.path, cwd);
+	if (!resolvedPath) return null;
+	const ranges = split.sel ? parseLineRanges(normalizeMentionSelector(split.sel)) : null;
+	return {
+		displayPath: filePath,
+		filePath: resolvedPath,
+		ranges: ranges ?? undefined,
+	};
+}
+
+function selectTextRanges(text: string, ranges: readonly LineRange[]): string {
+	const lines = splitAddressableFileLines(text);
+	return ranges
+		.flatMap(range => {
+			if (range.startLine > lines.length) return [];
+			const endLine = Math.min(range.endLine ?? lines.length, lines.length);
+			return lines.slice(range.startLine - 1, endLine).map((line, index) => `${range.startLine + index}|${line}`);
+		})
+		.join("\n");
+}
+
+/**
+ * Normalize bare line numbers (`15`) into closed single-line ranges (`15-15`)
+ * before handing a mention selector to the shared read-tool parser. In the
+ * read tool a bare `N` means "from N to EOF" (documented `:50` semantics), so
+ * `1,5-8,15` would merge into `1-EOF` and inject the whole file. For mentions
+ * the intuitive reading is exact lines; open-ended forms keep their explicit
+ * dash (`15-`) when everything to EOF is wanted.
+ */
+function normalizeMentionSelector(sel: string): string {
+	return sel
+		.split(",")
+		.map(chunk => {
+			const bare = /^L?(\d+)$/i.exec(chunk);
+			return bare ? `${bare[1]}-${bare[1]}` : chunk;
+		})
+		.join(",");
 }
 
 function buildTextOutput(textContent: string): { output: string; lineCount: number } {
@@ -201,16 +253,17 @@ export async function generateFileMentionMessages(
 	const files: FileMentionMessage["files"] = [];
 
 	for (const filePath of filePaths) {
-		const resolvedPath = await resolveMentionPath(filePath, cwd);
-		if (!resolvedPath) {
+		const resolved = await resolveMention(filePath, cwd);
+		if (!resolved) {
 			continue;
 		}
-		const absolutePath = resolveReadPath(resolvedPath, cwd);
+		const absolutePath = resolveReadPath(resolved.filePath, cwd);
 		try {
 			const stat = await Bun.file(absolutePath).stat();
 			if (stat.isDirectory()) {
+				if (resolved.ranges) continue;
 				const { output, lineCount } = await buildDirectoryListing(absolutePath);
-				files.push({ path: resolvedPath, content: output, lineCount });
+				files.push({ path: resolved.displayPath, content: output, lineCount });
 				continue;
 			}
 
@@ -219,7 +272,7 @@ export async function generateFileMentionMessages(
 			if (mimeType) {
 				if (stat.size > MAX_AUTO_READ_IMAGE_BYTES) {
 					files.push({
-						path: resolvedPath,
+						path: resolved.displayPath,
 						content: `(skipped auto-read: too large, ${formatBytes(stat.size)})`,
 						byteSize: stat.size,
 						skippedReason: "tooLarge",
@@ -249,13 +302,13 @@ export async function generateFileMentionMessages(
 					}
 				}
 
-				files.push({ path: resolvedPath, content: dimensionNote ?? "", image });
+				files.push({ path: resolved.displayPath, content: dimensionNote ?? "", image });
 				continue;
 			}
 
 			if (stat.size > MAX_AUTO_READ_TEXT_BYTES) {
 				files.push({
-					path: resolvedPath,
+					path: resolved.displayPath,
 					content: `(skipped auto-read: too large, ${formatBytes(stat.size)})`,
 					byteSize: stat.size,
 					skippedReason: "tooLarge",
@@ -264,7 +317,7 @@ export async function generateFileMentionMessages(
 			}
 			if (await isProbablyBinary(absolutePath)) {
 				files.push({
-					path: resolvedPath,
+					path: resolved.displayPath,
 					content: `(skipped auto-read: binary file, ${formatBytes(stat.size)})`,
 					byteSize: stat.size,
 					skippedReason: "binary",
@@ -275,15 +328,20 @@ export async function generateFileMentionMessages(
 			const content = await Bun.file(absolutePath).text();
 			const snapshotStore = options?.useHashLines ? options.snapshotStore : undefined;
 			const normalized = snapshotStore ? normalizeToLF(content) : content;
-			const displayText = snapshotStore ? splitAddressableFileLines(normalized).join("\n") : normalized;
+			const displayText = resolved.ranges
+				? selectTextRanges(normalized, resolved.ranges)
+				: snapshotStore
+					? splitAddressableFileLines(normalized).join("\n")
+					: normalized;
+			if (resolved.ranges && displayText.length === 0) continue;
 			const textOutput = buildTextOutput(displayText);
 			let { output } = textOutput;
-			const { lineCount } = textOutput;
+			const lineCount = resolved.ranges ? displayText.split("\n").length : textOutput.lineCount;
 			if (snapshotStore) {
 				const tag = snapshotStore.record(canonicalSnapshotKey(absolutePath), normalized);
-				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(output)}`;
+				output = `${formatHashlineHeader(resolved.filePath, tag)}\n${resolved.ranges ? output : formatNumberedLines(output)}`;
 			}
-			files.push({ path: resolvedPath, content: output, lineCount });
+			files.push({ path: resolved.displayPath, content: output, lineCount });
 		} catch {
 			// File doesn't exist or isn't readable - skip silently
 		}
