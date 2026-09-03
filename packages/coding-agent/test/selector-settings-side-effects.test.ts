@@ -7,6 +7,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { getKnownRoleIds, getRoleInfo } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
@@ -371,7 +372,11 @@ describe("selector setting side effects", () => {
 		try {
 			hub.handleInput("\x1b[A"); // All models → Roles.
 			hub.handleInput("\n"); // Enter the role rows.
-			for (let i = 0; i < 8; i++) hub.handleInput("\x1b[B"); // Default → task.
+			const taskRoleIndex = getKnownRoleIds(settings)
+				.filter(role => !getRoleInfo(role, settings).hidden)
+				.indexOf("task");
+			if (taskRoleIndex < 0) throw new Error("Expected task role in model selector");
+			for (let i = 0; i < taskRoleIndex; i++) hub.handleInput("\x1b[B");
 			hub.handleInput("t");
 
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(taskModel)];
