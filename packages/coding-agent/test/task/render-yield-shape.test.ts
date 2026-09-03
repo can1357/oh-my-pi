@@ -184,4 +184,34 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 		expect(text).toContain("Findings:");
 		expect(text).toContain("Handle null response");
 	});
+
+	it("reconstructs reviewer results when a section resolves from bound last-turn text", async () => {
+		// The `explanation` section is data-less (useLastTurn); its prose lives in
+		// `lastTurnText`. The renderer must carry that field through normalization
+		// so the review verdict reconstructs instead of the output being suppressed.
+		const text = await renderResultText({
+			yield: [
+				{
+					type: ["findings"],
+					data: {
+						title: "Handle null response",
+						body: "Null response reaches the formatter and crashes rendering.",
+						priority: 1,
+						confidence: 0.8,
+						file_path: "src/review.ts",
+						line_start: 42,
+						line_end: 42,
+					},
+					status: "success",
+				},
+				{ type: ["overall_correctness"], data: "incorrect", status: "success" },
+				{ type: ["explanation"], useLastTurn: true, lastTurnText: "One bug blocks approval.", status: "success" },
+				{ type: ["confidence"], data: 0.8, status: "success" },
+			],
+		});
+
+		expect(text).toContain("Patch is incorrect");
+		expect(text).toContain("One bug blocks approval");
+		expect(text).toContain("Handle null response");
+	});
 });
