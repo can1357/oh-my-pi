@@ -829,10 +829,9 @@ describe("Settings", () => {
 			expect(segments).toEqual(["managed", "final.yml"]);
 			// A UNC target seeds at the `\\server\share\` root, which must likewise
 			// be stripped rather than re-walked as `server` / `share` segments.
-			const uncSegments = physicalTargetSegments(
-				"\\\\server\\share\\managed\\final.yml",
-				path.win32,
-			).filter(segment => segment !== "" && segment !== ".");
+			const uncSegments = physicalTargetSegments("\\\\server\\share\\managed\\final.yml", path.win32).filter(
+				segment => segment !== "" && segment !== ".",
+			);
 			expect(uncSegments).toEqual(["managed", "final.yml"]);
 			// A relative Windows target seeds at the link's real parent, so every
 			// segment is preserved unchanged.

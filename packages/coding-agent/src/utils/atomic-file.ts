@@ -143,9 +143,7 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 							// dropping the segment and writing a regular file there
 							// mislocates and falsely reports success while the logical
 							// config path stays unusable with ENOTDIR. Surface it.
-							throw enotDir(
-								`symlink target requires an unresolved component to be a directory for ${filePath}`,
-							);
+							throw enotDir(`symlink target requires an unresolved component to be a directory for ${filePath}`);
 						}
 						// The walk is not frozen, so `acc` was resolved by realpath()
 						// and exists on disk — but existence is not enough. A trailing
@@ -177,7 +175,9 @@ export async function resolveSymlinkWriteTarget(filePath: string): Promise<strin
 							// mislocated path and land a regular file there while
 							// reporting success. Surface the ENOTDIR the filesystem
 							// raises instead.
-							throw enotDir(`cannot resolve '..' past an unresolved component in symlink target for ${filePath}`);
+							throw enotDir(
+								`cannot resolve '..' past an unresolved component in symlink target for ${filePath}`,
+							);
 						}
 						// `acc` was resolved by realpath() and exists on disk, but a
 						// `..` demands it be a traversable directory to pop its parent.
