@@ -55,6 +55,10 @@ export interface MessageStats {
  */
 export interface MessageStatsInput extends Omit<MessageStats, "usage" | "costUnpriced"> {
 	usage: Omit<Usage, "cost"> & { cost?: Partial<Usage["cost"]> };
+	pricingIdentity?: {
+		provider: string;
+		model: string;
+	};
 }
 
 /**
