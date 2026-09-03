@@ -317,6 +317,24 @@ describe("Settings", () => {
 			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 2 });
 		});
 
+		it("migrates legacy settings through a dangling config.yml symlink, preserving the link", async () => {
+			// First run with config.yml symlinked into a dotfiles checkout that
+			// has not been created yet, plus legacy settings.json to migrate.
+			// The migration's atomic rename must land on the referent — staging
+			// it at the logical path would replace the user's link with a
+			// regular file and leave the referent missing.
+			const managedDir = tempDir.join("managed");
+			const managedConfigPath = path.join(managedDir, "config.yml");
+			await fs.promises.symlink(managedConfigPath, getConfigPath(), "file");
+			await Bun.write(path.join(agentDir, "settings.json"), JSON.stringify({ setupVersion: 7 }));
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.lstatSync(getConfigPath()).isSymbolicLink()).toBe(true);
+			expect(YAML.parse(await Bun.file(managedConfigPath).text())).toEqual({ setupVersion: 7 });
+			expect(settings.get("setupVersion")).toBe(7);
+		});
+
 		it("writes through a dangling symlink chain to the final target, preserving every link", async () => {
 			// config.yml -> mid.yml -> final.yml where final.yml does not exist yet
 			// (first-run into a dotfiles/managed checkout). realpath throws ENOENT at

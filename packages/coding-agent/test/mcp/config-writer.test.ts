@@ -41,3 +41,56 @@ describe("config-writer concurrent mutations", () => {
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
 });
+
+// rename() over a symlink path replaces the LINK with a regular file, so a
+// config managed via symlink (e.g. a dotfiles checkout) must be written at its
+// referent. These contracts pin that behavior; skipped on Windows where
+// unprivileged symlink creation is unavailable.
+describe.skipIf(process.platform === "win32")("config-writer symlinked configs", () => {
+	let dir: string;
+
+	beforeEach(async () => {
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-symlink-"));
+	});
+
+	afterEach(async () => {
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it("writes to the referent and keeps the mcp.json symlink intact", async () => {
+		const target = path.join(dir, "real-mcp.json");
+		await fs.writeFile(target, JSON.stringify({ mcpServers: {} }));
+		const link = path.join(dir, "mcp.json");
+		await fs.symlink(target, link);
+
+		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		const config = await readMCPConfigFile(link);
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+
+	it("recreates the referent of a dangling mcp.json symlink", async () => {
+		const target = path.join(dir, "shared", "real-mcp.json");
+		const link = path.join(dir, "mcp.json");
+		await fs.symlink(target, link);
+
+		await addMCPServer(link, "alpha", { type: "stdio", command: "a" });
+
+		expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+		const config = await readMCPConfigFile(link);
+		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
+	});
+
+	it("preserves the referent's file mode through the write", async () => {
+		const target = path.join(dir, "real-mcp.json");
+		await fs.writeFile(target, JSON.stringify({ mcpServers: {} }), { mode: 0o640 });
+		await fs.chmod(target, 0o640);
+		const link = path.join(dir, "mcp.json");
+		await fs.symlink(target, link);
+
+		await setServerDisabled(link, "alpha", true);
+
+		expect((await fs.stat(target)).mode & 0o777).toBe(0o640);
+	});
+});

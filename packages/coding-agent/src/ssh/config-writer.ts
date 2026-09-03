@@ -6,6 +6,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { resolveSymlinkWriteTarget } from "../utils/atomic-file";
 
 export interface SSHHostConfig {
 	host: string;
@@ -46,17 +47,35 @@ export async function readSSHConfigFile(filePath: string): Promise<SSHConfigFile
  * Creates parent directories if they don't exist.
  */
 export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile): Promise<void> {
-	// Ensure parent directory exists
-	const dir = path.dirname(filePath);
+	// Stage the temp and the rename against the symlink referent so a
+	// user-managed link (dotfiles checkout) is preserved, and temp and target
+	// share a directory so the rename cannot fail with EXDEV across mounts.
+	const writePath = await resolveSymlinkWriteTarget(filePath);
+	const dir = path.dirname(writePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	// Write to temp file first (atomic write)
-	const tmpPath = `${filePath}.tmp`;
-	const content = JSON.stringify(config, null, 2);
-	await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+	// Keep the referent's current mode so writing through a link cannot
+	// tighten its permissions; fall back to the private default.
+	let mode = 0o600;
+	try {
+		mode = (await fs.promises.stat(writePath)).mode & 0o777;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
 
-	// Rename to final path (atomic on most systems)
-	await fs.promises.rename(tmpPath, filePath);
+	// Write to temp file first (atomic write)
+	const tmpPath = `${writePath}.tmp`;
+	const content = JSON.stringify(config, null, 2);
+	try {
+		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		// Creation modes pass through umask; restore the preserved mode.
+		await fs.promises.chmod(tmpPath, mode);
+		// Rename to final path (atomic on most systems)
+		await fs.promises.rename(tmpPath, writePath);
+	} catch (error) {
+		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+		throw error;
+	}
 }
 
 /**

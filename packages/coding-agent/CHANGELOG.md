@@ -14,6 +14,7 @@
 - Fixed `/usage` freezing the TUI for several seconds while it loaded the activity heatmap on a large stats database; the dashboard now opens immediately and the heatmap plus session sync load from a background subprocess.
 - Fixed the status line missing from the first frame at startup and appearing only after the session loaded; the last run's status row is cached per project and painted immediately, then replaced in place by the live one.
 - Fixed Bash builtins (`cut`, `sed`, `ls`, `sort`, `uniq`, `cat`, and the rest) printing `<name>: Broken pipe (os error 32)` / `write error` and exiting 1 when a downstream stage quit early (`cut f | head`, `cut f | sed 'bad'`); they now die silently with status 141 like standalone utilities under SIGPIPE.
+- Fixed atomic config writes (`mcp.json`, `ssh.json`, legacy `settings.json` migration) replacing a user-managed symlink with a regular file; writes now land on the link's target, recreate a dangling referent, and preserve the target's file mode ([#10644](https://github.com/can1357/oh-my-pi/pull/10644) by [@chuzui](https://github.com/chuzui)).
 
 ## [18.1.5] - 2026-09-03
 

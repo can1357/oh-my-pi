@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
+import { resolveSymlinkWriteTarget } from "../utils/atomic-file";
 
 import { validateServerConfig } from "./config";
 import { MCP_CONFIG_SCHEMA_URL, type MCPConfigFile, type MCPServerConfig } from "./types";
@@ -57,26 +58,44 @@ export async function readMCPConfigFile(filePath: string): Promise<MCPConfigFile
  * Creates parent directories if they don't exist.
  */
 export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile): Promise<void> {
-	// Ensure parent directory exists
-	const dir = path.dirname(filePath);
+	// Stage the temp file and the rename against the symlink referent: besides
+	// preserving the link, keeping temp and target in the same directory means
+	// the rename can never cross a filesystem boundary (EXDEV) when the link
+	// points outside this directory.
+	const writePath = await resolveSymlinkWriteTarget(filePath);
+	const dir = path.dirname(writePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+
+	// Writing through a user-managed link must not tighten the target's
+	// permissions (e.g. a shared 0644 config suddenly becoming 0600); keep the
+	// referent's current mode, falling back to the private default.
+	let mode = 0o600;
+	try {
+		mode = (await fs.promises.stat(writePath)).mode & 0o777;
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
 
 	// Write to a per-writer temp file, then atomically rename into place. The
 	// temp name is unique (pid + random) so two concurrent writers to the same
 	// config never share one `.tmp` path and rename each other's file out from
 	// under them (which surfaced as ENOENT or a clobbered final file).
-	const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+	const tmpPath = `${writePath}.${process.pid}.${randomUUID()}.tmp`;
 	const content = JSON.stringify(withSchema(config), null, 2);
 	try {
 		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+		// Creation modes pass through umask, so restore the preserved mode
+		// explicitly — a rename would otherwise publish a umask-filtered mode.
+		await fs.promises.chmod(tmpPath, mode);
 		// Rename to final path (atomic on most systems)
-		await fs.promises.rename(tmpPath, filePath);
+		await fs.promises.rename(tmpPath, writePath);
 	} catch (error) {
 		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
 		throw error;
 	}
 	// Invalidate the capability fs cache so subsequent reads see the new content
 	invalidateFsCache(filePath);
+	if (writePath !== filePath) invalidateFsCache(writePath);
 }
 
 /**

@@ -1696,6 +1696,10 @@ export class Settings {
 
 	async #withYamlWriteLock<T>(filePath: string, fn: (writePath: string) => Promise<T>): Promise<T> {
 		const writePath = await this.#resolveYamlWritePath(filePath);
+		// A symlinked config can dangle into a directory that does not exist
+		// yet; both the lock directory and the atomic temp file live next to
+		// the referent, so materialize it before either is created.
+		await fs.promises.mkdir(path.dirname(writePath), { recursive: true });
 		return await withFileLock(writePath, async () => fn(writePath));
 	}
 
@@ -1906,10 +1910,15 @@ export class Settings {
 			}
 		} catch {}
 
-		// 3. Write merged settings
+		// 3. Write merged settings. Route through the symlink-resolving write lock
+		// so a config.yml managed as a symlink (live or dangling) keeps its link —
+		// writing the atomic rename straight at the logical path would replace the
+		// link with a regular file.
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
-				await this.#writeYamlAtomically(this.#configPath, settings);
+				await this.#withYamlWriteLock(this.#configPath, writePath =>
+					this.#writeYamlAtomically(writePath, settings),
+				);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
 			} catch {}
 		}
