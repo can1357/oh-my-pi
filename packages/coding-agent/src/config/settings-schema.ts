@@ -601,6 +601,8 @@ export const SETTINGS_SCHEMA = {
 
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 
+	enabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
+
 	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	"providers.maxInFlightRequests": {
@@ -5204,9 +5206,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"skills.enableCodexUser": { type: "boolean", default: true },
+	"skills.enableCodexUser": { type: "boolean", default: false },
 
-	"skills.enableClaudeUser": { type: "boolean", default: true },
+	"skills.enableClaudeUser": { type: "boolean", default: false },
 
 	"skills.enableClaudeProject": { type: "boolean", default: true },
 
@@ -5227,7 +5229,7 @@ export const SETTINGS_SCHEMA = {
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",
@@ -5249,7 +5251,7 @@ export const SETTINGS_SCHEMA = {
 
 	"commands.enableOpencodeUser": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",

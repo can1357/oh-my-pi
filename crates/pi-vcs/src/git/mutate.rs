@@ -1473,13 +1473,13 @@ fn collect_clone_reconciliation_paths(
 		};
 		use gix::status::index_worktree;
 		match change {
-			index_worktree::Item::Modification { rela_path, status, .. } => {
+			index_worktree::Item::Modification { rela_path, status, .. }
 				if !matches!(
 					status,
 					gix::status::plumbing::index_as_worktree::EntryStatus::NeedsUpdate(_)
-				) {
-					dirty_tracked.insert(rela_path);
-				}
+				) =>
+			{
+				dirty_tracked.insert(rela_path);
 			},
 			index_worktree::Item::DirectoryContents { entry, .. }
 				if entry.status == gix::dir::entry::Status::Untracked =>
@@ -1950,11 +1950,10 @@ mod tests {
 		assert_eq!(fs::read_to_string(linked.join("c")).unwrap(), "added\n");
 		assert!(!linked.join("b").exists());
 		assert!(!linked.join("untracked").exists());
-		assert_eq!(
+		assert!(
 			fs::read_to_string(linked.join(".git"))
 				.unwrap()
-				.starts_with("gitdir: "),
-			true
+				.starts_with("gitdir: ")
 		);
 		let linked_repo = GitRepo::require(&linked).unwrap();
 		assert_eq!(

@@ -16,6 +16,7 @@
 
 ### Changed
 
+- Foreign user-level configuration sources (`~/.cursor`, `~/.codex`, `~/.claude`, `~/.gemini`, `~/.config/opencode`, `~/.codeium/windsurf`) are now opt-in via `enabledProviders`, while project-level configurations in CWD and `.agents` continue to load by default.
 - Split subagent isolation configuration into `task.isolation.enabled` and `isolation.backend`; existing `task.isolation.mode` settings are migrated automatically.
 - Updated the built-in `smol` and `slow` model priority chains to favor newer recommended models and remove older model generations.
 - Improved unsupported-model error messages by removing retry guidance that does not apply.
