@@ -46,4 +46,24 @@ describe("github pr_create session tracking", () => {
 			},
 		]);
 	});
+
+	test("returns a successful creation when optional tracker persistence fails", async () => {
+		const sessionManager = {
+			getBranch: (): SessionEntry[] => [],
+			ensureOnDisk: async (): Promise<void> => {
+				throw new Error("session storage unavailable");
+			},
+			appendCustomEntry: (_customType: string, _data?: unknown) => "unused",
+		};
+		vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/owner/repo/pull/43\n");
+		vi.spyOn(git.github, "json").mockRejectedValue(new Error("optional PR detail unavailable"));
+
+		await expect(
+			executePrCreate(
+				{ cwd: "/repo", sessionManager } as ToolSession,
+				{ op: "pr_create", title: "Keep successful creation" },
+				undefined,
+			),
+		).resolves.toBeDefined();
+	});
 });

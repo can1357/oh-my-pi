@@ -2,7 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { getTrackedPullRequestStatus, registerTrackedPullRequest } from "../session/pr-tracker";
-import { parsePullRequestUrl } from "../tools/gh-common";
+import { parsePullRequestUrl, repoFromUrl } from "../tools/gh-common";
 import { getOrFetchPr } from "../tools/gh-view";
 import {
 	getChangelogPath,
@@ -163,8 +163,9 @@ async function handlePrAdoptCommand(
 			await runtime.output(`Cannot track PR #${prNumber}: it is already ${status.label}.`);
 			return;
 		}
+		const trackedRepo = repoFromUrl(result.payload.url ?? arg) ?? repo;
 		const registered = await registerTrackedPullRequest(runtime.sessionManager, {
-			repo,
+			repo: trackedRepo,
 			number: prNumber,
 			url: result.payload.url ?? arg,
 			title: result.payload.title,

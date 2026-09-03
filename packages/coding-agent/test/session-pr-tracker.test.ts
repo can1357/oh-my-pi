@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import {
-	fitTrackedPullRequests,
 	getTrackedPullRequestStatus,
 	getTrackedPullRequests,
 	recordTrackedPullRequestTerminal,
@@ -86,18 +84,5 @@ describe("session PR tracker status rendering", () => {
 			terminal: true,
 			terminalState: "MERGED",
 		});
-	});
-
-	test("is in the default right layout and compacts tracked PRs to the available width", () => {
-		expect(STATUS_LINE_PRESETS.default.rightSegments).toContain("tracked_prs");
-		expect(
-			fitTrackedPullRequests(
-				[
-					{ number: 42, status: "changes" },
-					{ number: 43, status: "approved" },
-				],
-				42,
-			),
-		).toEqual({ visibleCount: 1, omittedCount: 1 });
 	});
 });

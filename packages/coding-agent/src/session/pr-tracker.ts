@@ -143,26 +143,3 @@ export function getTrackedPullRequestStatus(
 	}
 	return { label: "open", terminal: false };
 }
-
-export interface TrackedPullRequestDisplay {
-	number: number;
-	status: string;
-}
-
-/** Select a compact leading subset that fits the status line's PR allocation. */
-export function fitTrackedPullRequests(
-	pullRequests: readonly TrackedPullRequestDisplay[],
-	width: number,
-): { visibleCount: number; omittedCount: number } {
-	const widthBudget = Math.max(14, Math.floor(width / 3));
-	let usedWidth = 0;
-	let visibleCount = 0;
-	for (const pullRequest of pullRequests) {
-		const labelWidth = Bun.stringWidth(`#${pullRequest.number} ${pullRequest.status}`);
-		const separatorWidth = visibleCount > 0 ? Bun.stringWidth(" · ") : 0;
-		if (visibleCount > 0 && usedWidth + separatorWidth + labelWidth > widthBudget) break;
-		usedWidth += separatorWidth + labelWidth;
-		visibleCount += 1;
-	}
-	return { visibleCount, omittedCount: pullRequests.length - visibleCount };
-}

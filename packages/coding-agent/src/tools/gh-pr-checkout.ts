@@ -632,13 +632,18 @@ export async function executePrCreate(
 		}
 
 		if (session.sessionManager && resolvedRepo && parsed.prNumber !== undefined) {
-			await registerTrackedPullRequest(session.sessionManager, {
-				repo: resolvedRepo,
-				number: parsed.prNumber,
-				url: prView?.url ?? url,
-				title: prView?.title ?? title,
-				source: "github",
-			});
+			try {
+				await registerTrackedPullRequest(session.sessionManager, {
+					repo: resolvedRepo,
+					number: parsed.prNumber,
+					url: prView?.url ?? url,
+					title: prView?.title ?? title,
+					source: "github",
+				});
+			} catch {
+				// PR creation succeeded; status tracking must never turn it into an
+				// error that could prompt the caller to create a duplicate PR.
+			}
 		}
 		const text = formatPrCreateResult({
 			url,

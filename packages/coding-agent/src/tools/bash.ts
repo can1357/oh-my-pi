@@ -523,10 +523,15 @@ async function registerBashCreatedPullRequest(
 	if (!session.sessionManager) return;
 	const pullRequest = detectSuccessfulBashCreatedPullRequest(command, result.output, result.exitCode);
 	if (!pullRequest) return;
-	await registerTrackedPullRequest(session.sessionManager, {
-		...pullRequest,
-		source: "github",
-	});
+	try {
+		await registerTrackedPullRequest(session.sessionManager, {
+			...pullRequest,
+			source: "github",
+		});
+	} catch {
+		// The shell command has already created the PR. Tracking is optional and
+		// must not make its successful result look like a failed creation.
+	}
 }
 
 /**

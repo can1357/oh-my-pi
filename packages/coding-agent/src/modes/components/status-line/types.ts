@@ -126,11 +126,6 @@ export interface SegmentContext {
 		status: { staged: number; unstaged: number; untracked: number } | null;
 		pr: { number: number; url: string } | null;
 	};
-	trackedPullRequests?: Array<{
-		number: number;
-		url: string;
-		status: string;
-	}>;
 	/**
 	 * Set when the path cwd is a *linked* git worktree, naming the shared
 	 * primary checkout (the project). Lets the path segment collapse the

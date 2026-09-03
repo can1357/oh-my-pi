@@ -338,9 +338,6 @@ function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 function hasPrSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("pr");
 }
-function hasTrackedPullRequestsSegment(segments: readonly StatusLineSegmentId[]): boolean {
-	return segments.includes("tracked_prs");
-}
 function hasPathSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("path");
 }
@@ -458,6 +455,7 @@ export class StatusLineComponent implements Component {
 	#defaultBranch?: string;
 	#trackedPullRequestStatuses = new Map<string, { status: string; refreshedAt: number }>();
 	#trackedPullRequestRefreshes = new Set<string>();
+	#trackedPullRequestRefreshTimer: NodeJS.Timeout | undefined;
 	#defaultBranchCwd: string | undefined = undefined;
 	#lastTokensPerSecond: number | null = null;
 	#lastTokensPerSecondTimestamp: number | null = null;
@@ -769,6 +767,10 @@ export class StatusLineComponent implements Component {
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#clearUsageStartTimer();
+		if (this.#trackedPullRequestRefreshTimer) {
+			clearTimeout(this.#trackedPullRequestRefreshTimer);
+			this.#trackedPullRequestRefreshTimer = undefined;
+		}
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
 		this.#retireGitWatcher();
@@ -1671,6 +1673,40 @@ export class StatusLineComponent implements Component {
 		};
 		return { usedTokens, contextWindow };
 	}
+	getTrackedPullRequests(): Array<{ number: number; url: string; status: string }> {
+		return this.#trackedPullRequests();
+	}
+
+	#scheduleTrackedPullRequestRefresh(): void {
+		if (this.#trackedPullRequestRefreshTimer) {
+			clearTimeout(this.#trackedPullRequestRefreshTimer);
+			this.#trackedPullRequestRefreshTimer = undefined;
+		}
+		if (this.#disposed) return;
+
+		const sessionManager = this.session.sessionManager;
+		if (typeof sessionManager.getBranch !== "function") return;
+
+		const now = Date.now();
+		let nextRefreshAt = Number.POSITIVE_INFINITY;
+		for (const pullRequest of getTrackedPullRequests(sessionManager.getBranch())) {
+			const key = `${pullRequest.repo.toLowerCase()}#${pullRequest.number}`;
+			const cached = this.#trackedPullRequestStatuses.get(key);
+			if (!cached || this.#trackedPullRequestRefreshes.has(key)) continue;
+			nextRefreshAt = Math.min(nextRefreshAt, cached.refreshedAt + TRACKED_PR_REFRESH_TTL_MS);
+		}
+		if (!Number.isFinite(nextRefreshAt)) return;
+
+		this.#trackedPullRequestRefreshTimer = setTimeout(
+			() => {
+				this.#trackedPullRequestRefreshTimer = undefined;
+				if (!this.#disposed) this.#onBranchChange?.();
+			},
+			Math.max(1, nextRefreshAt - now),
+		);
+		this.#trackedPullRequestRefreshTimer.unref?.();
+	}
+
 	#trackedPullRequests(): Array<{ number: number; url: string; status: string }> {
 		const sessionManager = this.session.sessionManager;
 		if (typeof sessionManager.getBranch !== "function") return [];
@@ -1698,6 +1734,7 @@ export class StatusLineComponent implements Component {
 						number: pullRequest.number,
 						includeComments: false,
 						settings: this.session.settings,
+						cacheAuthKey: null,
 						signal: AbortSignal.timeout(git.GIT_COMMAND_TIMEOUT_MS),
 					});
 					if (this.#disposed) return;
@@ -1721,10 +1758,12 @@ export class StatusLineComponent implements Component {
 					});
 				} finally {
 					this.#trackedPullRequestRefreshes.delete(key);
+					this.#scheduleTrackedPullRequestRefresh();
 					if (!this.#disposed) this.#onBranchChange?.();
 				}
 			})();
 		}
+		this.#scheduleTrackedPullRequestRefresh();
 		return tracked.map(pullRequest => ({
 			number: pullRequest.number,
 			url: pullRequest.url,
@@ -1740,7 +1779,6 @@ export class StatusLineComponent implements Component {
 		includePath: boolean,
 		includeGit: boolean,
 		includePr: boolean,
-		includeTrackedPullRequests: boolean,
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
@@ -1803,7 +1841,6 @@ export class StatusLineComponent implements Component {
 				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
 			: null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
-		const trackedPullRequests = includeTrackedPullRequests ? this.#trackedPullRequests() : [];
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
 		return {
@@ -1838,7 +1875,6 @@ export class StatusLineComponent implements Component {
 				status: gitStatus,
 				pr: gitPr,
 			},
-			trackedPullRequests,
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
 		};
@@ -1919,16 +1955,12 @@ export class StatusLineComponent implements Component {
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
-		const includeTrackedPullRequests =
-			hasTrackedPullRequestsSegment(effectiveSettings.leftSegments) ||
-			hasTrackedPullRequestsSegment(effectiveSettings.rightSegments);
 		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
 			includeGit,
 			includePr,
-			includeTrackedPullRequests,
 			previewTitle,
 		);
 		const separatorDef = plain

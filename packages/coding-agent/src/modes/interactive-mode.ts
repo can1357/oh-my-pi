@@ -432,6 +432,9 @@ export interface InteractiveModeOptions {
 }
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
+const TRACKED_PR_HUD_VISIBLE_LIMIT = 5;
+const PERSISTENT_HUD_COLUMN_GAP = 4;
+const PERSISTENT_HUD_MIN_LEFT_WIDTH = 24;
 
 /** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
 class AnchoredLiveContainer extends Container {}
@@ -445,8 +448,53 @@ class TodoHudContainer extends AnchoredLiveContainer {
 		if (this.mode.isCompactTodoMode()) {
 			return [];
 		}
-		return super.render(width);
+
+		const trackedLines = this.mode.renderTrackedPullRequestsHud();
+		if (trackedLines.length === 0) {
+			return super.render(width);
+		}
+
+		const rightWidth = Math.max(...trackedLines.map(line => visibleWidth(line)));
+		const leftWidth = width - rightWidth - PERSISTENT_HUD_COLUMN_GAP;
+		if (leftWidth < PERSISTENT_HUD_MIN_LEFT_WIDTH) {
+			return [...super.render(width), ...trackedLines];
+		}
+
+		return composePersistentHudColumns(width, super.render(leftWidth), trackedLines);
 	}
+}
+
+export function composePersistentHudColumns(
+	width: number,
+	leftLines: readonly string[],
+	rightLines: readonly string[],
+): string[] {
+	if (rightLines.length === 0) return [...leftLines];
+
+	const rightWidth = Math.max(...rightLines.map(line => visibleWidth(line)));
+	if (leftLines.length === 0) {
+		return rightLines.map(line => (line ? `${" ".repeat(Math.max(0, width - visibleWidth(line)))}${line}` : line));
+	}
+
+	const leftBudget = Math.max(0, width - rightWidth - PERSISTENT_HUD_COLUMN_GAP);
+	const lineCount = Math.max(leftLines.length, rightLines.length);
+	const lines: string[] = [];
+	for (let index = 0; index < lineCount; index += 1) {
+		const left = leftLines[index] ?? "";
+		const right = rightLines[index] ?? "";
+		if (!right) {
+			lines.push(left);
+			continue;
+		}
+		if (!left) {
+			lines.push(`${" ".repeat(Math.max(0, width - visibleWidth(right)))}${right}`);
+			continue;
+		}
+		const clippedLeft = truncateToWidth(left, leftBudget);
+		const gap = Math.max(PERSISTENT_HUD_COLUMN_GAP, width - visibleWidth(clippedLeft) - visibleWidth(right));
+		lines.push(`${clippedLeft}${" ".repeat(gap)}${right}`);
+	}
+	return lines;
 }
 
 class StatusHudContainer extends AnchoredLiveContainer {
@@ -2645,6 +2693,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	isCompactTodoMode(): boolean {
 		const rows = this.ui?.terminal?.rows ?? process.stdout.rows ?? 24;
 		return rows < TODO_COMPACT_TERMINAL_ROWS_THRESHOLD;
+	}
+
+	renderTrackedPullRequestsHud(): readonly string[] {
+		const tracked = this.statusLine.getTrackedPullRequests();
+		if (tracked.length === 0) return [];
+
+		const visible = tracked.slice(0, TRACKED_PR_HUD_VISIBLE_LIMIT);
+		const lines = ["", theme.bold(theme.fg("accent", "PULL REQUESTS"))];
+		for (const pullRequest of visible) {
+			const label = `${theme.icon.pr ? `${theme.icon.pr} ` : ""}#${pullRequest.number} ${pullRequest.status}`;
+			const content = TERMINAL.hyperlinks ? `\x1b]8;;${pullRequest.url}\x07${label}\x1b]8;;\x07` : label;
+			const color =
+				pullRequest.status === "approved"
+					? "success"
+					: pullRequest.status === "blocked" ||
+							pullRequest.status === "changes" ||
+							pullRequest.status === "conflict"
+						? "warning"
+						: "accent";
+			lines.push(` ${theme.fg(color, content)}`);
+		}
+		const omitted = tracked.length - visible.length;
+		if (omitted > 0) lines.push(` ${theme.fg("muted", formatMoreItems(omitted, "pull request"))}`);
+		return lines;
 	}
 
 	renderCompactStatusLine(width: number, childLines: readonly string[]): readonly string[] {
