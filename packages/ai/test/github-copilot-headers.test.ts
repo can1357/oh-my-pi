@@ -215,6 +215,7 @@ describe("buildCopilotDynamicHeaders", () => {
 			"Openai-Intent": "conversation-agent",
 			"X-Initiator": "user",
 			"X-Interaction-Type": "conversation-user",
+			"X-GitHub-Api-Version": "2026-08-01",
 		});
 		expect(premiumRequests).toBe(0.33);
 	});
@@ -308,5 +309,36 @@ describe("buildCopilotDynamicHeaders", () => {
 			hasImages: false,
 		});
 		expect(premiumRequests).toBe(1);
+	});
+
+	it("uses VS Code mode identity when headers request it", () => {
+		const { headers } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			headers: { "Copilot-Integration-Id": "vscode-chat" },
+		});
+		expect(headers["Editor-Version"]).toBe("vscode/1.136.0");
+		expect(headers["Editor-Plugin-Version"]).toBe("copilot-chat/0.64.0");
+		expect(headers["Copilot-Integration-Id"]).toBe("vscode-chat");
+		expect(headers["Openai-Intent"]).toBe("conversation-panel");
+		expect(headers["User-Agent"]).toBe("GitHubCopilotChat/0.64.0");
+
+		const modeHeaderResult = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			headers: { "Copilot-Mode": "vscode" },
+		});
+		expect(modeHeaderResult.headers["Copilot-Integration-Id"]).toBe("vscode-chat");
+		expect(modeHeaderResult.headers["Editor-Version"]).toBe("vscode/1.136.0");
+
+		// Also verify that model.headers (cli) does not clobber Copilot-Mode: vscode
+		const model = getBundledModel("github-copilot", "gpt-5.6-sol");
+		const envResult = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			headers: { ...model?.headers, "Copilot-Mode": "vscode" },
+		});
+		expect(envResult.headers["Copilot-Integration-Id"]).toBe("vscode-chat");
+		expect(envResult.headers["Editor-Version"]).toBe("vscode/1.136.0");
 	});
 });

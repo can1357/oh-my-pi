@@ -12,6 +12,7 @@ import {
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
+	isTransientCopilotForbidden,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
@@ -455,11 +456,13 @@ function classifyText(
 		) {
 			kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 		}
-		if (isAuthFailureText(errorMessage)) kinds |= Flag.AuthFailed;
 
 		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 		const cleanMessage = errorMessage;
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
+		const isTransientCopilot = isTransientCopilotForbidden(statusClean, cleanMessage);
+
+		if (isAuthFailureText(errorMessage) && !isTransientCopilot) kinds |= Flag.AuthFailed;
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
 		const reason = parseRateLimitReason(cleanMessage);
@@ -488,6 +491,7 @@ function classifyText(
 		// not match TRANSIENT_TRANSPORT_PATTERN, so flag it explicitly to keep
 		// AIError.retriable from treating the temporary cap as terminal.
 		if (reason === "CONCURRENT_LIMIT") kinds |= Flag.Transient;
+		if (isTransientCopilot) kinds |= Flag.Transient;
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
@@ -556,6 +560,7 @@ export function classify(error: unknown, api?: Api): number {
 		} else if (link instanceof ProviderHttpError) {
 			let linkKinds = 0;
 			const { status: codeStatus, code } = link;
+			const isTransientCopilot = isTransientCopilotForbidden(codeStatus, link.message);
 			if (
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
@@ -569,7 +574,7 @@ export function classify(error: unknown, api?: Api): number {
 			}
 			if (
 				(codeStatus === 401 || codeStatus === 403) &&
-				!(codeStatus === 403 && parseRateLimitReason(link.message) === "CONCURRENT_LIMIT")
+				!(codeStatus === 403 && (parseRateLimitReason(link.message) === "CONCURRENT_LIMIT" || isTransientCopilot))
 			) {
 				linkKinds |= Flag.AuthFailed;
 			} else if (codeStatus === 429) {

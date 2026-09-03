@@ -24,6 +24,54 @@ export const COPILOT_CAPI_IDENTITY_HEADERS = {
 	"Openai-Intent": "conversation-agent",
 } as const;
 
+/** Copilot VS Code identity sent to the Copilot API when in VS Code compatibility mode. */
+export const COPILOT_VSCODE_IDENTITY_HEADERS = {
+	"User-Agent": "GitHubCopilotChat/0.64.0",
+	"Editor-Version": "vscode/1.136.0",
+	"Editor-Plugin-Version": "copilot-chat/0.64.0",
+	"Copilot-Integration-Id": "vscode-chat",
+	"Openai-Intent": "conversation-panel",
+} as const;
+
+/**
+ * Returns whether VS Code compatibility mode is active for Copilot headers.
+ * 1. Checks explicit `Copilot-Mode: vscode|cli` setting/header.
+ * 2. Checks explicit caller `Copilot-Integration-Id: vscode-chat` or `Editor-Version: vscode/...`.
+ * Defaults to false (standard Copilot CLI identity).
+ */
+export function isCopilotVscodeMode(headers?: Readonly<Record<string, string>>): boolean {
+	if (headers) {
+		for (const key of Object.keys(headers)) {
+			if (key.toLowerCase() === "copilot-mode") {
+				const val = headers[key]?.toLowerCase();
+				if (val === "vscode") return true;
+				if (val === "cli") return false;
+			}
+		}
+		for (const key of Object.keys(headers)) {
+			const lower = key.toLowerCase();
+			if (lower === "copilot-integration-id" && headers[key]?.toLowerCase() === "vscode-chat") {
+				return true;
+			}
+			if (lower === "editor-version" && headers[key]?.toLowerCase().startsWith("vscode/")) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/**
+ * Return a fresh managed Copilot identity header map (CLI or VS Code mode)
+ * selected from the caller-supplied headers.
+ */
+export function getCopilotCapiIdentityHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
+	if (isCopilotVscodeMode(headers)) {
+		return { ...COPILOT_VSCODE_IDENTITY_HEADERS };
+	}
+	return { ...COPILOT_CAPI_IDENTITY_HEADERS };
+}
+
 /**
  * Copilot API version sent on `api.githubcopilot.com` requests (`/models`,
  * chat endpoints). Newer versions unlock tiered context metadata: `/models`
@@ -47,29 +95,37 @@ export const COPILOT_DISCOVERY_HEADERS = {
 	"X-Initiator": "user",
 } as const;
 
-const MANAGED_COPILOT_HEADER_NAMES: Record<string, true> = {
+export const MANAGED_COPILOT_HEADER_NAMES: Record<string, true> = {
 	"user-agent": true,
 	"editor-version": true,
+	"editor-plugin-version": true,
 	"copilot-integration-id": true,
 	"copilot-harness-id": true,
+	"copilot-mode": true,
 	"openai-intent": true,
 	"x-github-api-version": true,
 	"x-initiator": true,
 	"x-interaction-type": true,
 };
 
-/** Preserve model-specific headers while enforcing the current Copilot API identity. */
-export function mergeCopilotApiHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
-	const merged: Record<string, string> = {};
+/** Strip managed Copilot identity and control headers, preserving custom caller headers. */
+export function sanitizeCopilotHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
+	const result: Record<string, string> = {};
 	if (headers) {
-		for (const name in headers) {
-			const value = headers[name];
-			if (value !== undefined && !MANAGED_COPILOT_HEADER_NAMES[name.toLowerCase()]) {
-				merged[name] = value;
+		for (const [key, value] of Object.entries(headers)) {
+			if (value !== undefined && !MANAGED_COPILOT_HEADER_NAMES[key.toLowerCase()]) {
+				result[key] = value;
 			}
 		}
 	}
-	return { ...merged, ...COPILOT_API_HEADERS };
+	return result;
+}
+
+/** Preserve model-specific headers while enforcing the current Copilot API identity. */
+export function mergeCopilotApiHeaders(headers?: Readonly<Record<string, string>>): Record<string, string> {
+	const baseIdentity = getCopilotCapiIdentityHeaders(headers);
+	const custom = sanitizeCopilotHeaders(headers);
+	return { ...custom, ...baseIdentity, "X-GitHub-Api-Version": COPILOT_API_VERSION };
 }
 
 type GitHubCopilotApiKeyPayload = {

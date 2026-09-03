@@ -246,4 +246,43 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-sonnet-5" }]);
 		});
 	});
+
+	describe("providers.copilot.mode", () => {
+		const stubCopilotModel = {
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			provider: "github-copilot",
+			api: "openai-responses",
+			baseUrl: "https://api.githubcopilot.com",
+			contextWindow: 128_000,
+			maxTokens: 4096,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		} as unknown as Model<"openai-responses">;
+
+		it("injects Copilot-Mode header when providers.copilot.mode is set", () => {
+			const settings = Settings.isolated({ "providers.copilot.mode": "vscode" });
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubCopilotModel, stubContext, { apiKey: "k" });
+
+			expect(calls[0]?.options?.headers?.["Copilot-Mode"]).toBe("vscode");
+		});
+
+		it("caller-supplied Copilot-Mode wins over the setting", () => {
+			const settings = Settings.isolated({ "providers.copilot.mode": "vscode" });
+			const { fn: base, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, base);
+
+			wrapped(stubCopilotModel, stubContext, {
+				apiKey: "k",
+				headers: { "copilot-mode": "cli" },
+			});
+
+			expect(calls[0]?.options?.headers?.["copilot-mode"]).toBe("cli");
+			expect(calls[0]?.options?.headers?.["Copilot-Mode"]).toBeUndefined();
+		});
+	});
 });

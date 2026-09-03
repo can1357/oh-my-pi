@@ -425,3 +425,13 @@ export function isAccountScopedCapText(message: string): boolean {
 export function isConcurrencyCapExclusion(status: number | undefined, message: string | undefined): boolean {
 	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && status !== 402;
 }
+
+/**
+ * Detect transient GitHub Copilot proxy 403 rejections ("unauthorized: not authorized to use this Copilot feature")
+ * caused by edge proxy routing to pods with stale authorization caches.
+ * These are transient route-level errors that should back off and retry, NOT hard credential failures that burn/rotate accounts.
+ */
+export function isTransientCopilotForbidden(status: number | undefined, message: string | undefined): boolean {
+	if (status !== 403 || !message) return false;
+	return /not authorized to use this copilot feature/i.test(message);
+}

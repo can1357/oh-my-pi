@@ -788,6 +788,14 @@ const streamOpenAICompletionsOnce = (
 				}
 				try {
 					const headersWithTimeout = { ...headers };
+					if (model.provider === "github-copilot") {
+						const copilotMode = Object.entries(options?.headers ?? {}).find(
+							([k]) => k.toLowerCase() === "copilot-mode",
+						)?.[1];
+						if (copilotMode) {
+							headersWithTimeout["Copilot-Mode"] = copilotMode;
+						}
+					}
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}

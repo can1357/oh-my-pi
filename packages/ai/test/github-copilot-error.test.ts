@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { isTransientCopilotForbidden } from "@oh-my-pi/pi-ai/error/rate-limit";
 import { rewriteCopilotError } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 function errorWithStatus(
@@ -48,5 +49,17 @@ describe("rewriteCopilotError", () => {
 		expect(result).toContain("GitHub Copilot access denied (HTTP 403)");
 		expect(result).not.toContain("GitHub Copilot authentication failed");
 		expect(result).not.toContain("/login github-copilot");
+	});
+});
+
+describe("isTransientCopilotForbidden", () => {
+	it("identifies transient proxy 403 not-authorized messages", () => {
+		expect(isTransientCopilotForbidden(403, "unauthorized: not authorized to use this Copilot feature")).toBe(true);
+		expect(
+			isTransientCopilotForbidden(403, "HTTP 403 - unauthorized: not authorized to use this Copilot feature\n"),
+		).toBe(true);
+		expect(isTransientCopilotForbidden(403, "403 Forbidden")).toBe(false);
+		expect(isTransientCopilotForbidden(401, "unauthorized: not authorized to use this Copilot feature")).toBe(false);
+		expect(isTransientCopilotForbidden(403, undefined)).toBe(false);
 	});
 });

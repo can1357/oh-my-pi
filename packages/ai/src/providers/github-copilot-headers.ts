@@ -1,6 +1,6 @@
 import {
-	COPILOT_CAPI_IDENTITY_HEADERS,
 	getGitHubCopilotBaseUrl,
+	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { Message } from "../types";
@@ -112,7 +112,7 @@ export function getCopilotPremiumRequests(params: {
 
 /**
  * Build dynamic Copilot headers that vary per-request.
- * Static headers (User-Agent, Editor-Version, etc.) come from model.headers.
+ * Uses mergeCopilotApiHeaders to preserve identity and prevent clobbering by bundled model headers.
  */
 export function buildCopilotDynamicHeaders(params: {
 	messages: unknown[];
@@ -124,11 +124,9 @@ export function buildCopilotDynamicHeaders(params: {
 }): CopilotDynamicHeaders {
 	const initiator =
 		params.initiatorOverride ?? getCopilotInitiatorOverride(params.headers) ?? inferCopilotInitiator(params.messages);
-	const headers: Record<string, string> = {
-		...COPILOT_CAPI_IDENTITY_HEADERS,
-		"X-Initiator": initiator,
-		"X-Interaction-Type": `conversation-${initiator}`,
-	};
+	const headers = mergeCopilotApiHeaders(params.headers);
+	headers["X-Initiator"] = initiator;
+	headers["X-Interaction-Type"] = `conversation-${initiator}`;
 
 	if (params.hasImages) {
 		headers["Copilot-Vision-Request"] = "true";

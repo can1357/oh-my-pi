@@ -14,9 +14,15 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, isRetryableStatus, logger, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import {
+	COPILOT_API_VERSION,
+	COPILOT_VSCODE_IDENTITY_HEADERS,
+	sanitizeCopilotHeaders,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
+import { isTransientCopilotForbidden } from "../error/rate-limit";
 
 export { OpenAIHttpError };
 
@@ -70,6 +76,8 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
 	onSseEvent?: SseEventObserver;
+	/** Maximum attempts override (defaults to DEFAULT_MAX_ATTEMPTS = 6). */
+	maxAttempts?: number;
 }
 
 export interface OpenAIStreamHandle<TEvent> {
@@ -87,22 +95,100 @@ export interface OpenAIStreamHandle<TEvent> {
  * `signal` propagate from `fetchWithRetry`/`readSseJson`; callers own the
  * watchdog timers and abort-reason bookkeeping.
  */
+function stripControlHeaders(headers?: Record<string, string>): Record<string, string> {
+	if (!headers) return {};
+	const result: Record<string, string> = {};
+	for (const [k, v] of Object.entries(headers)) {
+		if (k.toLowerCase() !== "copilot-mode") {
+			result[k] = v;
+		}
+	}
+	return result;
+}
+
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	let currentHeaders = { ...init.headers };
+	const initialIntegrationId = Object.entries(init.headers)
+		.find(([k]) => k.toLowerCase() === "copilot-integration-id")?.[1]
+		?.toLowerCase();
+	const explicitCopilotMode = Object.entries(init.headers)
+		.find(([k]) => k.toLowerCase() === "copilot-mode")?.[1]
+		?.toLowerCase();
+	const isCopilotRequest = initialIntegrationId !== undefined || explicitCopilotMode !== undefined;
+	const isCliIdentity = initialIntegrationId === "copilot-developer-cli" || explicitCopilotMode === "cli";
+	const allowVscodeFallback = isCopilotRequest && explicitCopilotMode !== "cli" && isCliIdentity;
+	let hasFallenBackToVscode = false;
+	logger.debug("postOpenAIStream: starting request", {
+		url: init.url,
+		isCopilotRequest,
+		isCliIdentity,
+		allowVscodeFallback,
+		headers: init.headers,
+	});
+
 	const response = await fetchWithRetry(init.url, {
 		method: "POST",
-		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
+		headers: {
+			"Content-Type": "application/json",
+			Accept: "text/event-stream",
+			...stripControlHeaders(init.headers),
+		},
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
-		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+		isRetryableStatus: status => isRetryableStatus(status) || (isCopilotRequest && status === 403),
+		prepareInit: attempt => {
+			logger.debug("postOpenAIStream: prepareInit", { attempt, hasFallenBackToVscode });
+			if (attempt > 0 && hasFallenBackToVscode) {
+				return {
+					headers: {
+						"Content-Type": "application/json",
+						Accept: "text/event-stream",
+						...stripControlHeaders(currentHeaders),
+						"Copilot-Harness-Id": "",
+					},
+				};
+			}
+			return {};
+		},
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).
-		shouldRetryResponse: (response, bodyText) => !isConcurrencyAdmissionRejection(response, bodyText),
-		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
-		// Cold large-context streams legitimately exceed it; the caller's
-		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
-		timeout: false,
+		// Transient Copilot 403 ("unauthorized: not authorized to use this Copilot feature")
+		// is retried across cluster pods. In auto mode, an initial CLI 403 triggers a
+		// bounded single-attempt fallback to VS Code wire identity.
+		shouldRetryResponse: (response, bodyText) => {
+			logger.debug("postOpenAIStream: response", {
+				status: response.status,
+				body: bodyText.slice(0, 100),
+				hasFallenBackToVscode,
+			});
+			if (isConcurrencyAdmissionRejection(response, bodyText)) return false;
+			if (response.status === 403 && isCopilotRequest) {
+				const isFeatureForbidden = isTransientCopilotForbidden(response.status, bodyText);
+				if (!isFeatureForbidden) return false;
+				if (!hasFallenBackToVscode && allowVscodeFallback) {
+					hasFallenBackToVscode = true;
+					currentHeaders = {
+						...sanitizeCopilotHeaders(currentHeaders),
+						...COPILOT_VSCODE_IDENTITY_HEADERS,
+						"X-GitHub-Api-Version": COPILOT_API_VERSION,
+					};
+					logger.debug("postOpenAIStream: triggered fallback to VS Code mode");
+					return true;
+				}
+				if (hasFallenBackToVscode || !isCliIdentity) {
+					return true;
+				}
+				return false;
+			}
+			return true;
+		},
+		// For Copilot requests, bound the pre-response header wait to 15s so stuck/dead
+		// cluster pods in Ashburn fail fast and let fetchWithRetry hit a healthy
+		// replica, rather than hanging for 120s until GitHub's edge proxy cuts the socket.
+		timeout: isCopilotRequest ? 15_000 : false,
 	});
 	if (!response.ok) {
 		throw await captureOpenAIHttpError(response);

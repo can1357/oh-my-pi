@@ -1,3 +1,4 @@
+import * as logger from "./logger";
 import { scheduler } from "node:timers/promises";
 
 // "reset after 1h2m3s" / "10m15s" / "39s"
@@ -189,6 +190,11 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 	/**
+	 * Optional custom predicate to determine whether an HTTP status is retryable.
+	 * When omitted, defaults to `isRetryableStatus` (5xx, 408, 429).
+	 */
+	isRetryableStatus?: (status: number, response?: Response) => boolean;
+	/**
 	 * Optional retry gate for HTTP responses whose status is retryable. Receives a
 	 * cloned body string so callers can fail fast on deterministic provider
 	 * failures that happen to use a 5xx status.
@@ -225,6 +231,7 @@ export async function fetchWithRetry(
 		maxDelayMs = DEFAULT_MAX_DELAY_MS,
 		defaultDelayMs,
 		prepareInit,
+		isRetryableStatus: isRetryableStatusOption,
 		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
 		timeout = false,
@@ -233,6 +240,7 @@ export async function fetchWithRetry(
 	const signal = baseInit.signal as AbortSignal | undefined;
 
 	for (let attempt = 0; ; attempt++) {
+		logger.debug("fetchWithRetry: starting attempt", { attempt, url: typeof url === "string" ? url : "dynamic" });
 		if (signal?.aborted) throw new Error("Request was aborted");
 		const requestUrl = typeof url === "function" ? url(attempt) : url;
 		// `timeout` is destructured out of `baseInit`, so forward it to the underlying
@@ -258,8 +266,12 @@ export async function fetchWithRetry(
 			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
 			continue;
 		}
+		logger.debug("fetchWithRetry: received response", { attempt, status: response.status });
 
-		if (!isRetryableStatus(response.status)) return response;
+		const isRetryable = isRetryableStatusOption
+			? isRetryableStatusOption(response.status, response)
+			: isRetryableStatus(response.status);
+		if (!isRetryable) return response;
 		if (attempt + 1 >= maxAttempts) return response;
 
 		const retryBody = await response.clone().text();
@@ -269,6 +281,7 @@ export async function fetchWithRetry(
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
+		logger.debug("fetchWithRetry: waiting before next attempt", { attempt, delayMs, hint });
 		await waitForRetry(delayMs, signal);
 	}
 }
@@ -279,7 +292,11 @@ function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | fa
 		const baseHeaders = new Headers(base.headers ?? undefined);
 		const overlayHeaders = new Headers(overlay.headers ?? undefined);
 		overlayHeaders.forEach((value, key) => {
-			baseHeaders.set(key, value);
+			if (!value) {
+				baseHeaders.delete(key);
+			} else {
+				baseHeaders.set(key, value);
+			}
 		});
 		merged.headers = baseHeaders;
 	}

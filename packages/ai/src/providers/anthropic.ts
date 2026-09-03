@@ -7,7 +7,11 @@ import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/host
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import {
+	mergeCopilotApiHeaders,
+	parseGitHubCopilotApiKey,
+	sanitizeCopilotHeaders,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
 	getInstallId,
@@ -2018,7 +2022,7 @@ const streamAnthropicOnce = (
 			// Built inside the try so a copilot credential/header failure surfaces as
 			// an error event instead of an unhandled rejection that leaves the stream
 			// (and any consumer awaiting `result()`) hanging forever.
-			const copilotDynamicHeaders =
+			let copilotDynamicHeaders =
 				model.provider === "github-copilot"
 					? buildCopilotDynamicHeaders({
 							messages: context.messages,
@@ -2028,6 +2032,12 @@ const streamAnthropicOnce = (
 							initiatorOverride: options?.initiatorOverride,
 						})
 					: undefined;
+			let hasFallenBackToCopilotVscode = false;
+			const initialCopilotMode = Object.entries(options?.headers ?? {})
+				.find(([k]) => k.toLowerCase() === "copilot-mode")?.[1]
+				?.toLowerCase();
+			const allowCopilotVscodeFallback =
+				model.provider === "github-copilot" && initialCopilotMode !== "cli" && initialCopilotMode !== "vscode";
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {
 				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 			}
@@ -2073,12 +2083,13 @@ const streamAnthropicOnce = (
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
+			let extraBetas: string[] = [];
 
 			if (options?.client) {
 				client = options.client;
 				isOAuthToken = false;
 			} else {
-				const extraBetas = normalizeExtraBetas(options?.betas);
+				extraBetas = normalizeExtraBetas(options?.betas);
 				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
@@ -3041,6 +3052,57 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
+					if (
+						allowCopilotVscodeFallback &&
+						!hasFallenBackToCopilotVscode &&
+						firstTokenTime === undefined &&
+						AIError.isTransientCopilotForbidden(AIError.status(streamFailure), streamFailureMessage)
+					) {
+						hasFallenBackToCopilotVscode = true;
+						logger.debug(
+							"copilot anthropic: CLI identity forbidden in auto mode, falling back to VS Code identity",
+						);
+						copilotDynamicHeaders = buildCopilotDynamicHeaders({
+							messages: context.messages,
+							hasImages: hasCopilotVisionInput(context.messages),
+							premiumMultiplier: model.premiumMultiplier,
+							headers: { ...model.headers, ...options?.headers, "Copilot-Mode": "vscode" },
+							initiatorOverride: options?.initiatorOverride,
+						});
+						if (!options?.client) {
+							const created = createClient(model, {
+								model,
+								apiKey,
+								extraBetas,
+								stream: !zeroOutputCacheRefresh,
+								interleavedThinking: options?.interleavedThinking ?? true,
+								headers: options?.headers,
+								dynamicHeaders: copilotDynamicHeaders?.headers,
+								isOAuth: options?.isOAuth,
+								hasTools: !!context.tools?.length,
+								thinkingEnabled: options?.thinkingEnabled,
+								thinkingDisplay: options?.thinkingDisplay,
+								fetch: options?.fetch,
+								maxRetryDelayMs: options?.maxRetryDelayMs,
+								sessionId:
+									options?.sessionId ??
+									extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
+									options?.promptCacheKey,
+								disableStrictTools,
+							});
+							client = created.client;
+						}
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);
 					const isLocalIdleTimeout =
@@ -3254,6 +3316,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
 		// features. Forward only caller-supplied betas.
 		const betaFeatures = [...extraBetas];
+		const copilotIdentity = mergeCopilotApiHeaders({ ...model.headers, ...headers, ...dynamicHeaders });
 		const defaultHeaders = mergeHeaders(
 			{
 				Accept: stream ? "text/event-stream" : "application/json",
@@ -3263,9 +3326,10 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				Authorization: `Bearer ${copilotApiKey}`,
 				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
 			},
-			model.headers,
+			sanitizeCopilotHeaders(model.headers),
+			sanitizeCopilotHeaders(headers),
+			copilotIdentity,
 			dynamicHeaders,
-			headers,
 		);
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,
@@ -3282,7 +3346,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			maxRetryDelayMs,
 			defaultHeaders,
 			fetch: cchFetch,
-			fetchOptions,
+			fetchOptions: { ...fetchOptions, timeout: 15_000 },
 		};
 	}
 

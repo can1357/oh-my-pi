@@ -108,6 +108,38 @@ describe("fetchWithRetry", () => {
 			message: "Request was aborted",
 		});
 	});
+
+	it("allows prepareInit to delete headers by specifying an empty string value", async () => {
+		const observedHeaders: Array<Headers | undefined> = [];
+		let attempt = 0;
+		const customFetch = async (_url: unknown, init?: RequestInit) => {
+			attempt += 1;
+			observedHeaders.push(init?.headers as Headers);
+			if (attempt === 1) return new Response("retry me", { status: 503 });
+			return new Response("ok", { status: 200 });
+		};
+
+		await fetchWithRetry("https://example.invalid/delete-header", {
+			headers: { "X-Keep": "1", "X-Remove": "bad" },
+			prepareInit: currentAttempt => {
+				if (currentAttempt > 0) {
+					return { headers: { "X-Remove": "", "X-Add": "new" } };
+				}
+				return {};
+			},
+			fetch: customFetch,
+			defaultDelayMs: 1,
+			maxAttempts: 2,
+		});
+
+		expect(observedHeaders[0]?.get("x-keep")).toBe("1");
+		expect(observedHeaders[0]?.get("x-remove")).toBe("bad");
+		expect(observedHeaders[0]?.get("x-add")).toBeNull();
+
+		expect(observedHeaders[1]?.get("x-keep")).toBe("1");
+		expect(observedHeaders[1]?.get("x-remove")).toBeNull();
+		expect(observedHeaders[1]?.get("x-add")).toBe("new");
+	});
 });
 
 describe("extractRetryHint", () => {
