@@ -58,11 +58,21 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		{
 			sendMessage: (message, sendOptions) => {
 				const sendTask = session.sendCustomMessage(message, sendOptions);
-				if (sendOptions?.triggerTurn) {
+				if (sendOptions?.triggerTurn || sendOptions?.deliverAs === "aside") {
+					// sendCustomMessage resolves `false` for outcomes that provably start no turn
+					// (streaming queue, idle plan-mode fold, deferred ACP turn) — only a `true`
+					// result should mark this send as agent-invoking, so downstream trackers (RPC's
+					// hasAgentMessageTask) don't wait on agent events that will never arrive.
+					const invokingTask = sendTask.then(started => {
+						if (!started) throw new Error("send did not invoke the agent");
+					});
 					if (trackAgentInvokingMessage) {
-						trackAgentInvokingMessage(sendTask);
+						trackAgentInvokingMessage(invokingTask);
 					} else {
-						markAgentInvokingMessage?.();
+						invokingTask.then(
+							() => markAgentInvokingMessage?.(),
+							() => {},
+						);
 					}
 				}
 				sendTask.catch(e => {

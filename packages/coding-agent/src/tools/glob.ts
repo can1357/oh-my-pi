@@ -227,6 +227,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						sessionFile: this.session.getSessionFile() ?? undefined,
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
+						rules: this.session.activeRules,
 						pathOnly: true,
 					});
 					if (!resource.sourcePath) {
@@ -244,6 +245,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					sessionFile: this.session.getSessionFile() ?? undefined,
 					localProtocolOptions: this.session.localProtocolOptions,
 					skills: this.session.skills,
+					rules: this.session.activeRules,
 					pathOnly: true,
 				});
 				if (!resource.sourcePath) {

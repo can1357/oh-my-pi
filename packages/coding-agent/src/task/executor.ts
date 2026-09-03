@@ -50,7 +50,7 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -72,6 +72,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -454,6 +455,10 @@ export interface ExecutorOptions {
 	 * process-global MCP manager. Defaults to `true`.
 	 */
 	enableMCP?: boolean;
+	/** Kernel-defined tools explicitly exposed by the parent eval session. */
+	customTools?: CustomTool[];
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 	/**
 	 * Limit the child to its explicit host tool names and the required yield
 	 * tool, suppressing discovered and always-included capabilities.
@@ -1440,9 +1445,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		existing.push(data);
 		progress.extractedToolData[toolName] = existing;
 		if (toolName === "yield") {
-			yieldCalled = true;
+			const item = isRecord(data) ? data : undefined;
+			const incremental = Array.isArray(item?.type) && item.type.length > 0;
+			yieldCalled = !incremental || item?.complete === true || item?.status === "aborted";
 			yieldCallPending = false;
-			yieldInvalidatedByAsync = false;
+			if (yieldCalled) yieldInvalidatedByAsync = false;
 		}
 	};
 
@@ -2384,9 +2391,10 @@ interface WakeSource {
 	messageId?: string;
 }
 
-function wakeSources(records: CustomMessage[], selfId: string): WakeSource[] {
+function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 	const sources: WakeSource[] = [];
 	for (const record of records) {
+		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
@@ -2407,7 +2415,7 @@ function wakeSources(records: CustomMessage[], selfId: string): WakeSource[] {
  */
 async function relayWakeTurnOutput(args: {
 	id: string;
-	records: CustomMessage[];
+	records: AgentMessage[];
 	turnStartTime: number;
 	yielded: boolean;
 	result: SingleResult;
@@ -2444,6 +2452,16 @@ async function relayWakeTurnOutput(args: {
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
  */
+/** Extracts display text from an IRC/aside record's content, shared by the custom-role and
+ *  user-role branches below (both fields share the same string | text-part-array shape). */
+function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	if (typeof content === "string") return content;
+	return content
+		.filter(part => part.type === "text")
+		.map(part => part.text ?? "")
+		.join("\n");
+}
+
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
@@ -2452,11 +2470,16 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const ircTask =
 			records
 				.map(record => {
-					const body =
-						record.details && typeof record.details === "object"
-							? Reflect.get(record.details, "message")
-							: undefined;
-					return typeof body === "string" ? body : record.content;
+					if (record.role === "custom") {
+						const body =
+							record.details && typeof record.details === "object"
+								? Reflect.get(record.details, "message")
+								: undefined;
+						if (typeof body === "string") return body;
+						return extractIrcRecordText(record.content);
+					}
+					if (record.role === "user") return extractIrcRecordText(record.content);
+					return "";
 				})
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
@@ -2712,6 +2735,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
 /**
@@ -2730,6 +2755,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const index = options.index ?? 0;
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
+	session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -2926,7 +2952,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
 		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
+		if (backends.python || backends.js) expanded.push("eval");
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
@@ -3181,6 +3207,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const sessionCustomTools = [...mcpProxyTools, ...(options.customTools ?? [])];
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -3271,6 +3298,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+						workPoolYieldItems: options.workPoolYieldItems ?? [],
 						ircPeers: ircRoster?.peers ?? [],
 						ircParkedCount: ircRoster?.parkedCount ?? 0,
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -3295,13 +3323,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentAgentId: options.parentAgentId,
 				agentId: id,
 				agentDisplayName: agent.name,
+				agentName: agent.name,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
 				skipPythonPreflight,
 				enableMCP,
 				mcpManager,
-				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
@@ -3405,6 +3434,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
+			if (options.workPoolYieldItems) session.setWorkPoolYieldItems(options.workPoolYieldItems);
 			const enabledSubagentTools = session.getEnabledToolNames();
 			// The enabled set includes the synthetic write transport injected for
 			// explicit tool lists that omitted write. `session_init.tools` is later

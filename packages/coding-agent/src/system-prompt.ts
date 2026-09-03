@@ -652,6 +652,8 @@ export interface BuildSystemPromptOptions {
 	includeWorkspaceTree?: boolean;
 	/** Whether Mermaid fenced blocks render as terminal ASCII diagrams. Default: true */
 	renderMermaid?: boolean;
+	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
+	reactions?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
 	activeRepoContext?: ActiveRepoContext | null;
 	/** Tools mounted under `xd://`; renders the protocol section when non-empty. `dynamic` marks external devices whose summary is third-party metadata. */
@@ -717,6 +719,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
+		reactions = false,
 		xdevTools = [],
 		xdevDocs = "",
 		autoQaEnabled = false,
@@ -1012,6 +1015,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,
 		renderMermaid,
+		reactions,
 		xdevTools,
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,

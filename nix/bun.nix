@@ -655,7 +655,6 @@
   };
   "@oh-my-pi/browser-relay" = copyPathToStore ../packages/browser-relay;
   "@oh-my-pi/collab-web" = copyPathToStore ../packages/collab-web;
-  "@oh-my-pi/hashline" = copyPathToStore ../packages/hashline;
   "@oh-my-pi/omp-stats" = copyPathToStore ../packages/stats;
   "@oh-my-pi/omptype" = copyPathToStore ../packages/omptype;
   "@oh-my-pi/pi-agent-core" = copyPathToStore ../packages/agent;
@@ -1482,9 +1481,9 @@
     url = "https://registry.npmjs.org/diff/-/diff-9.0.0.tgz";
     hash = "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==";
   };
-  "electron-to-chromium@1.5.416" = fetchurl {
-    url = "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.416.tgz";
-    hash = "sha512-K6bvB2BjnNrugtIih6ewlbBI9DXa976jIdiIlRLHhBoEI9a4JaQjjHyF+A1IQI543aQYR4LnmOrT/K5fZj0aPA==";
+  "electron-to-chromium@1.5.417" = fetchurl {
+    url = "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.417.tgz";
+    hash = "sha512-4T+DTDWuMPM4aHlHwWdAVCVWwp7LDilnhzkj+c/Lbj91XSQrLuOmZSLtS9Q4iIqjlPUbPOnC624zDVVHCHaolQ==";
   };
   "emnapi@1.11.3" = fetchurl {
     url = "https://registry.npmjs.org/emnapi/-/emnapi-1.11.3.tgz";
@@ -1802,9 +1801,9 @@
     url = "https://registry.npmjs.org/lru-cache/-/lru-cache-5.1.1.tgz";
     hash = "sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==";
   };
-  "lucide-react@1.34.0" = fetchurl {
-    url = "https://registry.npmjs.org/lucide-react/-/lucide-react-1.34.0.tgz";
-    hash = "sha512-vnjGJNI7Htk5+oWW8gXGuaLgwgAb0T6/iZbBrp9JCfRFwdNWZ0YTm3eyxjOLgwN6r8iyAf3UA70zNmBRBNv7yg==";
+  "lucide-react@1.38.0" = fetchurl {
+    url = "https://registry.npmjs.org/lucide-react/-/lucide-react-1.38.0.tgz";
+    hash = "sha512-xZCyBd/wiVUDactoCc+42TjL0aB7EBOXsuX+tjz+W/sGzw2KhHpL1NOH3FIaVUcpimvUBpIYfz34Ofj9S5JEzQ==";
   };
   "magic-string@0.30.21" = fetchurl {
     url = "https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz";

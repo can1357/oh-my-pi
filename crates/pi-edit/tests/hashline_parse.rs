@@ -16,7 +16,7 @@ use pi_edit::modes::hashline::{
 	types::{BlockMode, Cursor, Edit, FileOp, PasteTarget},
 };
 
-fn options<'a>() -> SplitOptions<'a> {
+const fn options<'a>() -> SplitOptions<'a> {
 	SplitOptions { cwd: None, path: None }
 }
 
@@ -555,6 +555,49 @@ fn input_recovers_apply_patch_header_noise_and_spaces() {
 }
 
 #[test]
+fn input_recovers_headers_nested_in_apply_patch_envelope_markers() {
+	// Observed in an edit-benchmark trace: the model wrapped the section
+	// header in apply_patch framing. The bracketed sentinel must be consumed
+	// like a bare `*** Begin Patch` row, not salvaged as the file name.
+	let patch =
+		Patch::parse("[*** Begin Patch] [migrations.ts#5275]\nCUT 33.=38", &options()).unwrap();
+	assert_eq!(patch.sections.len(), 1);
+	assert_eq!(patch.sections[0].path, "migrations.ts");
+	assert_eq!(patch.sections[0].file_hash.as_deref(), Some("5275"));
+	assert_eq!(patch.sections[0].diff, "CUT 33.=38");
+
+	// Bracketed markers on their own rows: begin is skipped, end terminates.
+	let patch = Patch::parse(
+		"[*** Begin Patch]\n[a.ts#1a2b]\nPUT 2.=2:\n+B\n[*** End Patch]\n[b.ts#3c4d]\nCUT 1",
+		&options(),
+	)
+	.unwrap();
+	assert_eq!(patch.sections.len(), 1);
+	assert_eq!(patch.sections[0].path, "a.ts");
+	assert_eq!(patch.sections[0].diff, "PUT 2.=2:\n+B");
+}
+
+#[test]
+fn input_rejects_multi_group_headers_instead_of_inventing_a_path() {
+	// Recovery must decline any bracket residue it cannot explain, so the
+	// caller sees the malformed header rather than an edit aimed at a file
+	// named after the noise.
+	for header in ["[Foo] [bar.ts#1A2B]", "[a.ts] [b.ts#1A2B]", "[x] [y]"] {
+		let error = Patch::parse(&format!("{header}\nCUT 1"), &options())
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("Input header must be"), "{header}: {error}");
+	}
+
+	// Brackets inside a path stay addressable — dynamic-route files are real.
+	let patch = Patch::parse("[app/[slug]/page.tsx#1A2B]\nCUT 1", &options()).unwrap();
+	assert_eq!(patch.sections[0].path, "app/[slug]/page.tsx");
+	assert_eq!(patch.sections[0].file_hash.as_deref(), Some("1A2B"));
+	let patch = Patch::parse("[app/[slug]/page.tsx]\nCUT 1", &options()).unwrap();
+	assert_eq!(patch.sections[0].path, "app/[slug]/page.tsx");
+}
+
+#[test]
 fn input_rejects_malformed_tags_and_missing_headers() {
 	for header in ["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#1A2B copied]"] {
 		assert!(
@@ -618,7 +661,7 @@ fn prefix_helpers_strip_read_and_diff_shapes() {
 	assert_eq!(strip_one_leading_hashline_prefix(" >>> + 42:hello"), "hello");
 	let lines = vec!["[a.ts#1A2B]".into(), "1:one".into(), "2:two".into()];
 	assert_eq!(strip_hashline_prefixes(&lines), ["one", "two"]);
-	assert_eq!(strip_new_line_prefixes(&vec!["+one".into(), "+two".into()]), ["one", "two"]);
+	assert_eq!(strip_new_line_prefixes(&["+one".into(), "+two".into()]), ["one", "two"]);
 	assert_eq!(hashline_parse_text(Some("1:one\r\n2:two\n")), ["one", "two"]);
 	assert!(is_read_metadata_line("[Showing lines 1-2 of 8. Use :3 to continue]"));
 	assert!(is_read_metadata_line("2-4: omitted …"));

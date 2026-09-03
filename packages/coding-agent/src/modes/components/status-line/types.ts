@@ -76,6 +76,8 @@ export interface SegmentContext {
 	options: StatusLineSegmentOptions;
 	/** Render the model segment's thinking level as a compact leading glyph. */
 	compactThinkingLevel: boolean;
+	/** Key-sorted extension/hook status values. Segment renderers sanitize before display. */
+	hookStatuses?: readonly string[];
 	planMode: {
 		enabled: boolean;
 		paused: boolean;

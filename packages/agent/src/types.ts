@@ -245,8 +245,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
-	 * Called after each tool execution (unless interruptMode is "wait") to decide
-	 * whether to skip the remaining tool calls in the batch. The queue keeps
+	 * Polled while a tool batch runs (unless interruptMode is "wait") to decide
+	 * whether to abort in-flight and skip not-yet-started *interruptible* waits;
+	 * every other already-emitted call still executes and the message injects
+	 * at the batch boundary. The queue keeps
 	 * owning its messages until the loop reaches the next injection boundary and
 	 * dequeues via {@link getSteeringMessages} — so callers can still cancel or
 	 * restore queued messages while in-flight tools settle, and an external
@@ -807,14 +809,15 @@ export interface AgentTool<
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
 	/**
-	 * Whether the agent loop may abort this tool mid-execution to deliver a
-	 * queued steering message. A function resolves this per call from the raw,
-	 * pre-validation arguments.
+	 * Whether the agent loop may abort this tool mid-execution — or skip it
+	 * before it starts — to deliver a queued steering message. A function
+	 * resolves this per call from the raw, pre-validation arguments.
 	 *
 	 * Enable only for calls that purely *wait* and observe their abort signal
 	 * cleanly (e.g. `job` poll), so the abort surfaces the tool's current
-	 * snapshot rather than corrupting a side effect. Honored only when
-	 * `interruptMode` is "immediate".
+	 * snapshot rather than corrupting a side effect. Every other call runs to
+	 * completion even when steering is queued; the message lands at the next
+	 * batch boundary. Honored only when `interruptMode` is "immediate".
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
 	/**

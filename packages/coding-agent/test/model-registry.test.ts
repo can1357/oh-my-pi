@@ -1845,6 +1845,7 @@ describe("ModelRegistry", () => {
 						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
 						guardrailVersion: "1",
 						guardrailTrace: "enabled",
+						requestMetadata: { team: "growth", environment: "prod" },
 					},
 					"custom-bedrock": {
 						baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -1853,6 +1854,7 @@ describe("ModelRegistry", () => {
 						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
 						guardrailVersion: "1",
 						guardrailTrace: "enabled",
+						requestMetadata: { team: "growth", environment: "prod" },
 						models: [
 							{
 								id: "custom-bedrock-model",
@@ -1876,6 +1878,7 @@ describe("ModelRegistry", () => {
 				expect(model.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 				expect(model.guardrailVersion).toBe("1");
 				expect(model.guardrailTrace).toBe("enabled");
+				expect(model.requestMetadata).toEqual({ team: "growth", environment: "prod" });
 			}
 		});
 
@@ -1885,6 +1888,7 @@ describe("ModelRegistry", () => {
 			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 			expect(model?.guardrailVersion).toBe("1");
 			expect(model?.guardrailTrace).toBe("enabled");
+			expect(model?.requestMetadata).toEqual({ team: "growth", environment: "prod" });
 		});
 
 		test("guardrail fields are absent on built-in bedrock models without override", () => {
@@ -1894,6 +1898,7 @@ describe("ModelRegistry", () => {
 				expect(model.guardrailIdentifier).toBeUndefined();
 				expect(model.guardrailVersion).toBeUndefined();
 				expect(model.guardrailTrace).toBeUndefined();
+				expect(model.requestMetadata).toBeUndefined();
 			}
 		});
 

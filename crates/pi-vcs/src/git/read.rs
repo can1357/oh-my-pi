@@ -706,15 +706,32 @@ impl GitRepo {
 
 	/// List index paths, or untracked paths when `others` is true.
 	pub fn ls_files(&self, others: bool, exclude_standard: bool) -> Result<Vec<String>> {
+		self.ls_files_at_paths(others, exclude_standard, &BTreeSet::new())
+	}
+
+	pub(crate) fn ls_files_at_paths(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+		paths: &BTreeSet<String>,
+	) -> Result<Vec<String>> {
 		if self.is_reftable() {
-			let mut args = vec!["ls-files"];
+			let mut args = vec!["ls-files".to_owned()];
 			if others {
-				args.push("--others");
+				args.push("--others".to_owned());
 			}
 			if exclude_standard {
-				args.push("--exclude-standard");
+				args.push("--exclude-standard".to_owned());
 			}
-			return cli_lines(self.root(), &args);
+			if !paths.is_empty() {
+				args.push("--".to_owned());
+				args.extend(paths.iter().map(|path| literal_pathspec(path)));
+			}
+			return Ok(cli_text_owned(self.root(), &args, super::cli::SYNC_TIMEOUT)?
+				.lines()
+				.filter(|line| !line.is_empty())
+				.map(str::to_owned)
+				.collect());
 		}
 		if !others {
 			let repo = self.gix()?;
@@ -724,6 +741,9 @@ impl GitRepo {
 				.iter()
 				.filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
 				.map(|e| bytes_to_path(e.path(&index)))
+				.filter(|path| {
+					paths.is_empty() || paths.iter().any(|wanted| path_matches(path, wanted))
+				})
 				.collect();
 			out.sort();
 			out.dedup();
@@ -738,7 +758,11 @@ impl GitRepo {
 			});
 		}
 		let iter = platform
-			.into_index_worktree_iter(std::iter::empty::<gix::bstr::BString>())
+			.into_index_worktree_iter(
+				paths
+					.iter()
+					.map(|path| literal_pathspec(path).into_bytes().into()),
+			)
 			.map_err(|e| Error::backend("git ls-files", e))?;
 		let mut out = Vec::new();
 		for item in iter {
@@ -1166,6 +1190,10 @@ fn parse_commit_details(raw: &str) -> CommitDetails {
 		.to_owned();
 	CommitDetails { sha, parents, author: CommitAuthor { name, email, date }, message }
 }
+fn literal_pathspec(path: &str) -> String {
+	format!(":(literal){path}")
+}
+
 fn path_matches(path: &str, wanted: &str) -> bool {
 	let wanted = wanted.trim_end_matches('/');
 	path == wanted

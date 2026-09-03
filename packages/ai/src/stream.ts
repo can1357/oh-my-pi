@@ -76,7 +76,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
-import { resolveCacheRetention } from "./utils";
+import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
 import { applyGlyphCodec } from "./utils/glyph-codec";
@@ -1474,6 +1474,26 @@ export function streamSimple<TApi extends Api>(
 	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
 }
 
+/**
+ * Forward a model-configured `User-Agent` override across the pi-native wire.
+ * The model itself never crosses the wire — the client sends only `modelId`
+ * and the gateway resolves its own model — so without this the gateway's
+ * resolved Bedrock model always sends the default `omp/<version>` UA even
+ * when the client's local model config set an override. Only the single
+ * header is forwarded, not the rest of `model.headers` (which may carry
+ * unrelated local config), and only when the caller hasn't already set their
+ * own `User-Agent` — a per-call header still wins, matching `streamBedrock`'s
+ * own caller-headers precedence.
+ */
+function forwardBedrockUserAgent(
+	modelHeaders: Record<string, string> | undefined,
+	callerHeaders: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+	if (getHeaderCaseInsensitive(callerHeaders, "user-agent") !== undefined) return callerHeaders;
+	const modelUserAgent = getHeaderCaseInsensitive(modelHeaders, "user-agent");
+	return modelUserAgent === undefined ? callerHeaders : { ...callerHeaders, "User-Agent": modelUserAgent };
+}
+
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1617,6 +1637,16 @@ function streamSimpleRequest<TApi extends Api>(
 								guardrailIdentifier: model.guardrailIdentifier ?? opts?.guardrailIdentifier,
 								guardrailVersion: model.guardrailVersion ?? opts?.guardrailVersion,
 								guardrailTrace: model.guardrailTrace ?? opts?.guardrailTrace,
+								// The model itself never crosses the wire — the client sends only
+								// `modelId` and the gateway resolves its own model — so the model's
+								// tags must be flattened in here or they are lost entirely. Per-call
+								// entries win per key; the merged map then wins per key over the
+								// gateway-resolved model's own tags in its `streamBedrock`.
+								requestMetadata:
+									model.requestMetadata || opts?.requestMetadata
+										? { ...model.requestMetadata, ...opts?.requestMetadata }
+										: undefined,
+								headers: forwardBedrockUserAgent(model.headers, opts?.headers),
 							}
 						: opts;
 				return streamPiNative(model, context, nativeOptions);
@@ -2114,6 +2144,7 @@ function mapOptionsForApi<TApi extends Api>(
 				guardrailIdentifier: model.guardrailIdentifier ?? options?.guardrailIdentifier,
 				guardrailVersion: model.guardrailVersion ?? options?.guardrailVersion,
 				guardrailTrace: model.guardrailTrace ?? options?.guardrailTrace,
+				requestMetadata: options?.requestMetadata,
 			};
 			// Effort modes send effort directly, no budget_tokens — skip budget inflation.
 			if (model.thinking?.mode === "effort" || model.thinking?.mode === "anthropic-adaptive") {
