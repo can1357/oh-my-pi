@@ -220,6 +220,15 @@ fn heartbeat(cancel_token: &CancelToken) -> std::result::Result<(), AtomicWriteE
 	})
 }
 
+fn owned_fd(fd: RawFd) -> io::Result<OwnedFd> {
+	if fd < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	// SAFETY: a nonnegative descriptor returned by the caller's open operation has
+	// one owner; `OwnedFd` takes that ownership and closes it exactly once on drop.
+	Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 fn open_root() -> io::Result<OwnedFd> {
 	// SAFETY: the byte string is a static, NUL-terminated POSIX root path.
 	let root = unsafe { CStr::from_bytes_with_nul_unchecked(b"/\0") };
@@ -440,7 +449,7 @@ fn try_create_tmpfile_stage(
 			parent.as_raw_fd(),
 			dot.as_ptr(),
 			libc::O_WRONLY | libc::O_TMPFILE | libc::O_CLOEXEC,
-			PRIVATE_STAGE_MODE,
+			PRIVATE_STAGE_MODE as libc::c_uint,
 		)
 	};
 	if fd < 0 {
@@ -520,7 +529,7 @@ fn create_named_stage(
 				parent.as_raw_fd(),
 				name.as_ptr(),
 				libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-				PRIVATE_STAGE_MODE,
+				PRIVATE_STAGE_MODE as libc::c_uint,
 			)
 		};
 		if fd >= 0 {
