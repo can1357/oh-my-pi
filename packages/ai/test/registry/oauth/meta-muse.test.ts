@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as AIError from "../../../src/error";
 import { loginMetaMuse, mintMuseCodeApiKey, refreshMetaMuseToken } from "../../../src/registry/oauth/meta-muse";
 import type { FetchImpl } from "../../../src/types";
 
@@ -111,11 +112,12 @@ describe("Muse Code OAuth", () => {
 			const request = { url: String(input), init };
 			requests.push(request);
 			if (request.url.endsWith("/oidc/device/token/")) {
-				return Promise.resolve(response({ access_token: "new-oauth-access", expires_in: 7200 }));
+				return Promise.resolve(response({ access_token: "new-oauth-access", expires_in: 60 }));
 			}
 			return Promise.resolve(response({ api_key: "LLM|new-subscription-key" }));
 		};
 
+		const beforeRefresh = Date.now();
 		const refreshed = await refreshMetaMuseToken(
 			{
 				access: "old-access",
@@ -131,6 +133,8 @@ describe("Muse Code OAuth", () => {
 		expect(refreshed.refresh).toBe("durable-refresh");
 		expect(refreshed.apiKey).toBe("LLM|new-subscription-key");
 		expect(refreshed.accountId).toBe("meta-account");
+		expect(refreshed.expires).toBeGreaterThanOrEqual(beforeRefresh + 60_000);
+		expect(refreshed.expires).toBeLessThanOrEqual(Date.now() + 60_000);
 		const refreshForm = requestForm(requests[0]!);
 		expect(refreshForm.get("grant_type")).toBe("refresh_token");
 		expect(refreshForm.get("refresh_token")).toBe("durable-refresh");
@@ -168,6 +172,40 @@ describe("Muse Code OAuth", () => {
 		expect(refreshed.refresh).toBe("rotated-refresh");
 		expect(refreshed.apiKey).toBe("LLM|still-valid-key");
 		expect(refreshed.accountId).toBe("meta-account");
+		expect(calls).toBe(2);
+	});
+
+	test("preserves a rotated grant when Muse key minting is transiently forbidden", async () => {
+		let calls = 0;
+		const fetchImpl: FetchImpl = () => {
+			calls++;
+			if (calls === 1) {
+				return Promise.resolve(
+					response({
+						access_token: "rotated-oauth-access",
+						refresh_token: "rotated-refresh",
+						expires_in: 60,
+					}),
+				);
+			}
+			return Promise.resolve(response({ error: "Cloudflare captcha temporarily unavailable" }, 403));
+		};
+
+		const refreshed = await refreshMetaMuseToken(
+			{
+				access: "expired-access",
+				refresh: "old-refresh",
+				expires: 0,
+				apiKey: "LLM|still-valid-key",
+				accountId: "meta-account",
+			},
+			fetchImpl,
+		);
+
+		expect(refreshed.access).toBe("rotated-oauth-access");
+		expect(refreshed.refresh).toBe("rotated-refresh");
+		expect(refreshed.apiKey).toBe("LLM|still-valid-key");
+		expect(refreshed.expires).toBeGreaterThan(Date.now());
 		expect(calls).toBe(2);
 	});
 
@@ -212,6 +250,27 @@ describe("Muse Code OAuth", () => {
 		});
 	});
 
+	test("keeps transient markers from non-JSON forbidden responses", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				new Response(`<html>Cloudflare captcha forbidden ${"x".repeat(10_000)} tail-marker</html>`, {
+					status: 403,
+					headers: { "content-type": "text/html" },
+				}),
+			);
+
+		const error = await refreshMetaMuseToken(
+			{ access: "expired-access", refresh: "durable-refresh", expires: 0, apiKey: "LLM|old-key" },
+			fetchImpl,
+		).catch(error => error);
+
+		if (!(error instanceof Error)) throw error;
+		expect(error.message).toContain("Cloudflare captcha forbidden");
+		expect(error.message.length).toBeLessThan(600);
+		expect(error.message).not.toContain("tail-marker");
+		expect(AIError.isDefinitiveOAuthFailure(error)).toBe(false);
+	});
+
 	test("preserves a forbidden status when token JSON violates the OAuth schema", async () => {
 		const fetchImpl: FetchImpl = () =>
 			Promise.resolve(
@@ -233,5 +292,26 @@ describe("Muse Code OAuth", () => {
 			provider: "meta",
 			status: 403,
 		});
+	});
+
+	test("bounds malformed token response details", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				response(
+					{
+						error: { code: "invalid_token", message: `revoked-${"x".repeat(10_000)}-tail-marker` },
+					},
+					403,
+				),
+			);
+
+		const error = await refreshMetaMuseToken(
+			{ access: "expired-access", refresh: "revoked-refresh", expires: 0, apiKey: "LLM|old-key" },
+			fetchImpl,
+		).catch(error => error);
+
+		if (!(error instanceof Error)) throw error;
+		expect(error.message.length).toBeLessThan(600);
+		expect(error.message).not.toContain("tail-marker");
 	});
 });

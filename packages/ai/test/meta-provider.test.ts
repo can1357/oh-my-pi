@@ -228,6 +228,39 @@ describe("Meta login", () => {
 				}),
 			).toBe(true);
 			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
+			expect(storage.describeCredentialSource("meta", sessionId)).toContain("api_key");
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("attributes a transient Muse refresh fallback to its external API key", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+			refreshOAuthCredential: () => Promise.reject(new Error("fetch failed: ECONNRESET")),
+		});
+		storage.setFallbackResolver(provider => (provider === "meta" ? "LLM|fallback-key" : undefined));
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "oauth",
+					access: "meta-account-access",
+					refresh: "meta-account-refresh",
+					expires: 0,
+					apiKey: "LLM|subscription-key",
+				},
+			]);
+			const sessionId = "muse-external-fallback";
+			expect(storage.isUsingOAuth("meta", sessionId)).toBe(true);
+
+			const resolvedKey = await storage.getApiKey("meta", sessionId);
+			expect(resolvedKey).not.toBe("LLM|subscription-key");
+			expect(storage.getCredentialOrigin("meta")).toEqual({ kind: "oauth" });
+			expect(storage.isUsingOAuth("meta", sessionId)).toBe(false);
+			expect(storage.describeCredentialSource("meta", sessionId)).toBe(
+				resolvedKey === "LLM|fallback-key" ? "fallback resolver" : "env (over local store)",
+			);
 		} finally {
 			storage.close();
 		}

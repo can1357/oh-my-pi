@@ -1346,6 +1346,8 @@ export class AuthStorage {
 		string,
 		Map<string, { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number }>
 	> = new Map();
+	/** External credential source selected for a provider/session after stored credentials were unavailable. */
+	#sessionExternalApiKeySelection: Map<string, Map<string, CredentialOrigin>> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
@@ -2035,6 +2037,7 @@ export class AuthStorage {
 		lastUsedAtMs?: number,
 	): void {
 		if (!sessionId) return;
+		this.#sessionExternalApiKeySelection.get(provider)?.delete(sessionId);
 		const nowMs = lastUsedAtMs ?? Date.now();
 		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map();
 		sessionMap.set(sessionId, { type, index, lastUsedAtMs: nowMs });
@@ -2112,6 +2115,17 @@ export class AuthStorage {
 		return undefined;
 	}
 
+	#recordSessionExternalApiKeySelection(
+		provider: string,
+		sessionId: string | undefined,
+		origin: CredentialOrigin,
+	): void {
+		if (!sessionId) return;
+		const sessions = this.#sessionExternalApiKeySelection.get(provider) ?? new Map<string, CredentialOrigin>();
+		sessions.set(sessionId, origin);
+		this.#sessionExternalApiKeySelection.set(provider, sessions);
+	}
+
 	/** Clears the last credential used by a session for a provider. */
 	#clearSessionCredential(provider: string, sessionId: string | undefined): void {
 		if (!sessionId) return;
@@ -2121,6 +2135,11 @@ export class AuthStorage {
 			if (sessionMap.size === 0) {
 				this.#sessionLastCredential.delete(provider);
 			}
+		}
+		const externalSessions = this.#sessionExternalApiKeySelection.get(provider);
+		if (externalSessions) {
+			externalSessions.delete(sessionId);
+			if (externalSessions.size === 0) this.#sessionExternalApiKeySelection.delete(provider);
 		}
 		try {
 			const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
@@ -2347,6 +2366,7 @@ export class AuthStorage {
 			}
 		}
 		this.#sessionLastCredential.delete(provider);
+		this.#sessionExternalApiKeySelection.delete(provider);
 		this.#clearProviderSessionCredentialCache(provider);
 		for (const key of this.#credentialBackoff.keys()) {
 			if (key.startsWith(`${provider}:`)) {
@@ -2970,6 +2990,7 @@ export class AuthStorage {
 	 */
 	isUsingOAuth(provider: string, sessionId?: string): boolean {
 		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) return false;
+		if (sessionId && this.#sessionExternalApiKeySelection.get(provider)?.has(sessionId)) return false;
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		if (sessionCredential) return sessionCredential.type === "oauth";
 		return this.getCredentialOrigin(provider)?.kind === "oauth";
@@ -5951,7 +5972,13 @@ export class AuthStorage {
 		if (sessionId) this.#sessionLastCredential.get(provider)?.delete(sessionId);
 
 		const envKey = getEnvApiKey(provider);
-		if (envKey) return envKey;
+		if (envKey) {
+			this.#recordSessionExternalApiKeySelection(provider, sessionId, {
+				kind: "env",
+				envVar: getEnvApiKeyName(provider),
+			});
+			return envKey;
+		}
 		const apiKeySelection = await this.#selectApiKeyCredential(
 			provider,
 			sessionId,
@@ -5964,7 +5991,9 @@ export class AuthStorage {
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
-		return this.#fallbackResolver?.(provider) ?? undefined;
+		const fallbackKey = this.#fallbackResolver?.(provider);
+		if (fallbackKey) this.#recordSessionExternalApiKeySelection(provider, sessionId, { kind: "fallback" });
+		return fallbackKey ?? undefined;
 	}
 
 	/**
@@ -7342,24 +7371,27 @@ export class AuthStorage {
 		}
 
 		const baseLabel = this.#sourceLabel ?? "local store";
+		const externalOrigin = sessionId ? this.#sessionExternalApiKeySelection.get(provider)?.get(sessionId) : undefined;
+		if (externalOrigin?.kind === "env") return `env (over ${baseLabel})`;
+		if (externalOrigin?.kind === "fallback") return "fallback resolver";
 		const stored = this.#getStoredCredentials(provider);
 		const session = sessionId ? this.#sessionLastCredential.get(provider)?.get(sessionId) : undefined;
-		const describeStored = (
-			type: AuthCredential["type"],
-			filter?: (credential: AuthCredential) => boolean,
-		): string | undefined => {
-			const typed = stored
-				.map((entry, index) => ({ entry, index }))
-				.filter(({ entry }) => entry.credential.type === type && (filter?.(entry.credential) ?? true));
-			if (typed.length === 0) return undefined;
-			const sticky = session?.type === type ? typed.find(entry => entry.index === session.index) : undefined;
-			const chosen = sticky?.entry ?? typed[0].entry;
+		const describeEntry = (chosen: StoredCredential): string => {
 			const credential = chosen.credential;
 			const identity =
 				credential.type === "oauth"
 					? (credential.email ?? credential.accountId ?? credential.projectId ?? `cred ${chosen.id}`)
 					: `cred ${chosen.id}`;
-			return `${baseLabel} · ${type} #${chosen.id} (${identity})`;
+			return `${baseLabel} · ${credential.type} #${chosen.id} (${identity})`;
+		};
+		const sessionEntry = session ? stored[session.index] : undefined;
+		if (sessionEntry && sessionEntry.credential.type === session?.type) return describeEntry(sessionEntry);
+		const describeStored = (
+			type: AuthCredential["type"],
+			filter?: (credential: AuthCredential) => boolean,
+		): string | undefined => {
+			const chosen = stored.find(entry => entry.credential.type === type && (filter?.(entry.credential) ?? true));
+			return chosen ? describeEntry(chosen) : undefined;
 		};
 
 		// Deliberate login credentials win; then an explicit env var; then a stored static api_key.

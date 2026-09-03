@@ -7,6 +7,25 @@ import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
+const kDynamicModelsAuthoritative = Symbol("dynamicModelsAuthoritative");
+
+type DynamicModelList<TApi extends Api> = readonly ModelSpec<TApi>[] & {
+	[kDynamicModelsAuthoritative]?: false;
+};
+
+interface FetchedDynamicModels<TApi extends Api> {
+	models: Model<TApi>[];
+	authoritative: boolean;
+}
+
+/** Marks a successful partial discovery result so cached models are retained and the endpoint is retried. */
+export function markDynamicModelsNonAuthoritative<TApi extends Api>(
+	models: readonly ModelSpec<TApi>[],
+): readonly ModelSpec<TApi>[] {
+	const tagged = [...models] as DynamicModelList<TApi>;
+	tagged[kDynamicModelsAuthoritative] = false;
+	return tagged;
+}
 
 /**
  * Controls when dynamic endpoint models should be fetched.
@@ -271,6 +290,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
 		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
 		: [null, null];
+	const fetchedDynamicModelList = fetchedDynamicModels?.models ?? null;
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
 	const normalizedModelsDevModels = normalizeModelList<TApi>(fetchedModelsDevModels ?? []);
 	const modelsDevModels = additiveStaticModelIds
@@ -279,13 +299,17 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
+	const dynamicFetchAuthoritative =
+		dynamicFetchSucceeded && dynamicModelsAuthoritative && fetchedDynamicModels.authoritative;
+	const dynamicFetchComplete = !dynamicFetchSucceeded || fetchedDynamicModels.authoritative;
 	const anyRemoteFetchSucceeded = modelsDevFetchSucceeded || dynamicFetchSucceeded;
 	const allConfiguredRemoteFetchesSucceeded =
 		hasRemoteFetcher &&
 		(!hasModelsDevFetcher || modelsDevFetchSucceeded) &&
 		(!hasDynamicFetcher || dynamicFetchSucceeded);
-	const authoritativeDynamicFetchSucceeded = dynamicModelsAuthoritative && dynamicFetchSucceeded;
-	const remoteResolutionComplete = authoritativeDynamicFetchSucceeded || allConfiguredRemoteFetchesSucceeded;
+	const authoritativeDynamicFetchSucceeded = dynamicFetchAuthoritative;
+	const remoteResolutionComplete =
+		dynamicFetchComplete && (authoritativeDynamicFetchSucceeded || allConfiguredRemoteFetchesSucceeded);
 	const preparedCacheModels = remoteResolutionComplete
 		? []
 		: prepareCacheModelsForStaticMismatch(
@@ -299,7 +323,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const cacheModels = additiveStaticModelIds
 		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 		: preparedCacheModels;
-	const dynamicModels = fetchedDynamicModels ?? [];
+	const dynamicModels = fetchedDynamicModelList ?? [];
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an
 	// intentional catalog emptying still prunes removed models downstream), but
 	// is NOT pinned into the cache as authoritative — that would suppress the
@@ -307,6 +331,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// models.dev snapshots may be empty for one provider and remain authoritative.
 	const cacheAuthoritative = hasDynamicFetcher
 		? dynamicFetchSucceeded &&
+			fetchedDynamicModels.authoritative &&
 			dynamicModels.length > 0 &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
@@ -314,7 +339,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const mergedWithModelsDev = mergeDynamicModels(mergedWithCache, modelsDevModels);
 	const mergedModels = mergeDynamicModels(mergedWithModelsDev, dynamicModels);
 	const models = collapseBuiltVariants(
-		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		dynamicFetchAuthoritative ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
@@ -406,13 +431,15 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 
 async function fetchDynamicModels<TApi extends Api>(
 	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<Model<TApi>[] | null> {
+): Promise<FetchedDynamicModels<TApi> | null> {
 	try {
 		const models = await fetcher();
-		if (models === null) {
-			return null;
-		}
-		return normalizeModelList<TApi>(models);
+		if (models === null) return null;
+		const tagged = models as DynamicModelList<TApi>;
+		return {
+			models: normalizeModelList<TApi>(models),
+			authoritative: tagged[kDynamicModelsAuthoritative] !== false,
+		};
 	} catch {
 		return null;
 	}

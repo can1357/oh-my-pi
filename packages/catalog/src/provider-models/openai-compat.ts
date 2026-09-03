@@ -23,7 +23,7 @@ import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { resolveModelReference } from "../identity/reference";
-import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
+import { markDynamicModelsNonAuthoritative, type ModelManagerOptions, type ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig, TokenCost } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
@@ -4586,12 +4586,14 @@ export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelM
 				const available = rosters.filter(
 					(roster): roster is readonly ModelSpec<"openai-responses">[] => roster != null,
 				);
-				if (available.length !== optionsByKey.length) return null;
 				const union = new Map<string, ModelSpec<"openai-responses">>();
 				for (const roster of available) {
 					for (const model of roster) union.set(model.id, model);
 				}
-				return [...union.values()];
+				const models = [...union.values()];
+				return config?.apiKeysComplete === false || available.length !== optionsByKey.length
+					? markDynamicModelsNonAuthoritative(models)
+					: models;
 			},
 		}),
 		staticModels: META_MUSE_STATIC_MODELS,

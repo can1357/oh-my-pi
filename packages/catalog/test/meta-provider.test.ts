@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { META_MUSE_STATIC_MODELS, metaModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 
@@ -134,17 +135,45 @@ describe("Meta Model API provider", () => {
 		expect(models?.map(model => model.id).sort()).toEqual(["muse-spark-1.3", "muse-spark-1.3-contributor"]);
 	});
 
-	test("does not treat a partial Meta account roster as authoritative", async () => {
+	test("preserves successful account discovery when another Meta account is unavailable", async () => {
 		const options = metaModelManagerOptions({
 			apiKeys: ["LLM|catalog-a", "LLM|catalog-b"],
 			fetch: (_input, init) =>
 				Promise.resolve(
 					new Headers(init?.headers).get("Authorization") === "Bearer LLM|catalog-a"
-						? modelListResponse(["muse-spark-1.3"])
+						? modelListResponse(["muse-spark-1.4"])
 						: new Response("unavailable", { status: 503 }),
 				),
 		});
 
-		expect(await options.fetchDynamicModels?.()).toBeNull();
+		const result = await resolveProviderModels({ ...options, cacheDbPath: ":memory:" }, "online");
+
+		expect(result.source).toBe("provider");
+		expect(result.stale).toBe(true);
+		expect(result.models.map(model => model.id).sort()).toEqual(
+			[...META_MUSE_STATIC_MODELS.map(model => model.id), "muse-spark-1.4"].sort(),
+		);
+	});
+
+	test("keeps incomplete credential enumeration non-authoritative", async () => {
+		const options = metaModelManagerOptions({
+			apiKeys: ["LLM|catalog-a", "LLM|catalog-b"],
+			apiKeysComplete: false,
+			fetch: (_input, init) =>
+				Promise.resolve(
+					modelListResponse(
+						new Headers(init?.headers).get("Authorization") === "Bearer LLM|catalog-a"
+							? ["muse-spark-1.4"]
+							: ["muse-spark-1.4-contributor"],
+					),
+				),
+		});
+
+		const result = await resolveProviderModels({ ...options, cacheDbPath: ":memory:" }, "online");
+
+		expect(result.stale).toBe(true);
+		expect(result.models.map(model => model.id)).toEqual(
+			expect.arrayContaining(["muse-spark-1.4", "muse-spark-1.4-contributor"]),
+		);
 	});
 });

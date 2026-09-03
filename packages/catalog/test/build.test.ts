@@ -8,7 +8,7 @@ import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { markDynamicModelsNonAuthoritative, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -1145,6 +1145,36 @@ describe("model cache spec round trip", () => {
 			const cacheOnly = offline.models.find(candidate => candidate.id === cachedOnly.id);
 			expect(cacheOnly?.contextWindow).toBe(96_000);
 			expect(cacheOnly?.maxTokens).toBe(6_000);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("retains cached models when dynamic discovery reports a partial success", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-partial-discovery-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const cachedOnly = completionsSpec({ id: "cached-only", provider: "partial-discovery-test" });
+		const stillAvailable = completionsSpec({ id: "still-available", provider: "partial-discovery-test" });
+		let partial = false;
+		const options = {
+			providerId: "partial-discovery-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			fetchDynamicModels: async () =>
+				partial
+					? markDynamicModelsNonAuthoritative([{ ...stillAvailable, name: "Still Available v2" }])
+					: [cachedOnly, stillAvailable],
+		};
+		try {
+			const initial = await resolveProviderModels(options, "online");
+			expect(initial.models.map(model => model.id).sort()).toEqual(["cached-only", "still-available"]);
+			expect(initial.stale).toBe(false);
+
+			partial = true;
+			const refreshed = await resolveProviderModels(options, "online");
+			expect(refreshed.models.map(model => model.id).sort()).toEqual(["cached-only", "still-available"]);
+			expect(refreshed.models.find(model => model.id === "still-available")?.name).toBe("Still Available v2");
+			expect(refreshed.stale).toBe(true);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

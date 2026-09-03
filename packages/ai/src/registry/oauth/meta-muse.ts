@@ -14,7 +14,7 @@ const MUSE_KEY_URL = "https://api.meta.ai/muse-code/key";
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 const API_VERSION = "1.0.0";
 const REQUEST_TIMEOUT_MS = 20_000;
-const ACCESS_TOKEN_CLIENT_SKEW_MS = 5 * 60 * 1000;
+const ERROR_BODY_EXCERPT_LENGTH = 500;
 
 interface DeviceAuthorization {
 	deviceCode: string;
@@ -86,15 +86,20 @@ function requestSignal(signal?: AbortSignal): AbortSignal {
 }
 
 async function readJson(response: Response, label: string): Promise<unknown> {
+	let text = "";
 	try {
-		return await response.json();
+		text = await response.text();
+		return JSON.parse(text);
 	} catch (error) {
-		throw new AIError.OAuthError(`${label} returned invalid JSON`, {
-			kind: "validation",
-			provider: PROVIDER,
-			status: response.status,
-			cause: error,
-		});
+		throw new AIError.OAuthError(
+			`${label} returned invalid JSON${text ? `: ${text.slice(0, ERROR_BODY_EXCERPT_LENGTH)}` : ""}`,
+			{
+				kind: "validation",
+				provider: PROVIDER,
+				status: response.status,
+				cause: error,
+			},
+		);
 	}
 }
 
@@ -151,11 +156,14 @@ function parseDeviceAuthorization(payload: unknown): DeviceAuthorization {
 function parseTokenResponse(payload: unknown, status?: number): TokenResponse {
 	const parsed = tokenResponseSchema(payload);
 	if (parsed instanceof type.errors) {
-		throw new AIError.OAuthError(`Invalid Meta token response: ${parsed.summary}`, {
-			kind: "validation",
-			provider: PROVIDER,
-			status,
-		});
+		throw new AIError.OAuthError(
+			`Invalid Meta token response: ${(JSON.stringify(payload) ?? "").slice(0, ERROR_BODY_EXCERPT_LENGTH)}`,
+			{
+				kind: "validation",
+				provider: PROVIDER,
+				status,
+			},
+		);
 	}
 	return parsed;
 }
@@ -280,14 +288,16 @@ export async function requestMuseCodeKey(
 		redirect: "error",
 		signal: requestSignal(signal),
 	});
+	const payload = await readJson(response, "Muse Code key exchange");
 	if (!response.ok) {
-		throw new AIError.OAuthError(`Muse Code key exchange failed: ${response.status}`, {
+		const excerpt = (JSON.stringify(payload) ?? "").slice(0, ERROR_BODY_EXCERPT_LENGTH);
+		throw new AIError.OAuthError(`Muse Code key exchange failed: ${response.status}${excerpt ? ` ${excerpt}` : ""}`, {
 			kind: "token-exchange",
 			provider: PROVIDER,
 			status: response.status,
 		});
 	}
-	const parsed = museCodeKeyResponseSchema(await readJson(response, "Muse Code key exchange"));
+	const parsed = museCodeKeyResponseSchema(payload);
 	if (parsed instanceof type.errors) {
 		throw new AIError.OAuthError(`Invalid Muse Code key response: ${parsed.summary}`, {
 			kind: "validation",
@@ -310,7 +320,7 @@ function credentialsFromGrant(grant: TokenGrant, minted: MintedMuseKey): OAuthCr
 	return {
 		access: grant.accessToken,
 		refresh: grant.refreshToken,
-		expires: Date.now() + grant.expiresInSeconds * 1000 - ACCESS_TOKEN_CLIENT_SKEW_MS,
+		expires: Date.now() + grant.expiresInSeconds * 1000,
 		apiKey: minted.apiKey,
 		email: minted.email,
 		accountId: minted.accountId,
@@ -372,9 +382,15 @@ export async function refreshMetaMuseToken(
 		const transientNetworkFailure =
 			error instanceof TypeError ||
 			(error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError"));
+		const transientAuthFailure =
+			error instanceof AIError.OAuthError &&
+			(error.status === 401 || error.status === 403) &&
+			!AIError.isDefinitiveOAuthFailure(error);
 		const transient =
 			!signal?.aborted &&
-			(error instanceof AIError.OAuthError ? AIError.isTransientStatus(error.status) : transientNetworkFailure);
+			(error instanceof AIError.OAuthError
+				? AIError.isTransientStatus(error.status) || transientAuthFailure
+				: transientNetworkFailure);
 		if (!existingApiKey || !transient) throw error;
 		return credentialsFromGrant(grant, {
 			apiKey: existingApiKey,
