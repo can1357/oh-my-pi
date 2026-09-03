@@ -60,6 +60,10 @@ const PROMPT_TITLE_CHROME_COLUMNS = 4;
  *  or multi-line question cannot push the option list off-screen. Mirrors the
  *  row-cap pattern used by boundPromptTitle for the prompt editor overlay. */
 const MAX_HEADER_ROWS = 4;
+/** Maximum number of wrapped lines shown for an option description before
+ *  Ctrl+O expansion. Mirrors the header row-cap above so long descriptions
+ *  cannot push later options off-screen. */
+const MAX_DESC_ROWS = 2;
 
 function promptTitleContentWidth(): number {
 	const cols = process.stdout.columns ?? 80;
@@ -157,6 +161,22 @@ function renderQuestionTitle(question: ExtensionAskDialogQuestion, width: number
 		...wrapped.slice(0, maxRows - 1),
 		truncateToWidth(wrapped.slice(maxRows - 1).join(" "), Math.max(1, width), Ellipsis.Unicode),
 	];
+}
+/** Wrap an option description exactly as the option list renders it, so
+ *  overflow detection and expanded rendering stay in sync with the row. */
+function wrapOptionDescription(description: string, contentWidth: number): string[] {
+	const mdTheme = getMarkdownTheme();
+	const rendered = renderInlineMarkdown(description.trim(), mdTheme, t => theme.fg("muted", t));
+	return wrapTextWithAnsi(rendered, Math.max(1, contentWidth - 6));
+}
+
+/** True when any option description of the question wraps past the collapsed
+ *  row-cap at the given content width. */
+function questionDescriptionsOverflow(question: ExtensionAskDialogQuestion, contentWidth: number): boolean {
+	return question.options.some(option => {
+		if (!option?.description?.trim()) return false;
+		return wrapOptionDescription(option.description, contentWidth).length > MAX_DESC_ROWS;
+	});
 }
 
 function splitPreviewSegments(preview: string): PreviewSegment[] {
@@ -307,6 +327,7 @@ function renderRowLabel(
 	mdTheme: MarkdownTheme,
 	previewCache: PreviewRenderCache,
 	width: number,
+	expanded = false,
 ): string[] {
 	const isOption = rowItem.kind === "option";
 	const isOther = rowItem.kind === "other";
@@ -333,9 +354,9 @@ function renderRowLabel(
 	if (rowItem.kind === "option") {
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (option?.description?.trim()) {
-			const description = renderInlineMarkdown(option.description.trim(), mdTheme, t => theme.fg("muted", t));
-			const wrapped = wrapTextWithAnsi(description, Math.max(1, width - 6));
-			for (const line of wrapped.slice(0, 2)) {
+			const wrapped = wrapOptionDescription(option.description, width);
+			const shown = expanded ? wrapped : wrapped.slice(0, MAX_DESC_ROWS);
+			for (const line of shown) {
 				lines.push(`      ${truncateToWidth(line, Math.max(1, width - 6), Ellipsis.Unicode)}`);
 			}
 		}
@@ -408,6 +429,7 @@ export class AskDialogComponent implements Component {
 	#expanded = false;
 	#contentWidth = 76;
 	#headerExpandable = false;
+	#descExpandable = false;
 	readonly #questions: ExtensionAskDialogQuestion[];
 
 	constructor(
@@ -453,17 +475,18 @@ export class AskDialogComponent implements Component {
 		this.#closed = true;
 		this.#countdown?.dispose();
 	}
-
 	/**
-	 * Toggle a truncated question header. Returns false when there is nothing
-	 * to expand so the global Ctrl+O listener can still expand transcript tools.
+	 * Toggle truncated question headers and option descriptions. Returns false
+	 * when there is nothing to expand so the global Ctrl+O listener can still
+	 * expand transcript tools.
 	 */
 	toggleQuestionExpansion(): boolean {
 		if (this.#closed || this.#isSubmitTab()) return false;
 		const question = this.#questions[this.#currentQuestionIndex()];
 		if (!question) return false;
-		const overflows = wrapQuestionTitle(question, this.#contentWidth).length > MAX_HEADER_ROWS;
-		if (!overflows) return false;
+		const headerOverflows = wrapQuestionTitle(question, this.#contentWidth).length > MAX_HEADER_ROWS;
+		const descOverflows = questionDescriptionsOverflow(question, this.#contentWidth);
+		if (!headerOverflows && !descOverflows && !this.#expanded) return false;
 		this.#expanded = !this.#expanded;
 		this.invalidate();
 		this.#requestRender();
@@ -568,7 +591,7 @@ export class AskDialogComponent implements Component {
 			const listRows = (listWidth: number): number => {
 				let total = 0;
 				for (const rowItem of rowItems) {
-					total += renderRowLabel(rowItem, question, state, false, mdTheme, this.#previewCache, listWidth).length;
+					total += renderRowLabel(rowItem, question, state, false, mdTheme, this.#previewCache, listWidth, this.#expanded).length;
 				}
 				return total;
 			};
@@ -627,6 +650,7 @@ export class AskDialogComponent implements Component {
 		}
 		if (this.#isSubmitTab()) {
 			this.#headerExpandable = false;
+			this.#descExpandable = false;
 			lines.push(theme.bold(theme.fg("accent", "Review answers")));
 			return lines;
 		}
@@ -634,17 +658,19 @@ export class AskDialogComponent implements Component {
 		const question = this.#questions[questionIndex];
 		if (!question) {
 			this.#headerExpandable = false;
+			this.#descExpandable = false;
 			return lines;
 		}
 		const wrapped = wrapQuestionTitle(question, width);
 		this.#headerExpandable = wrapped.length > MAX_HEADER_ROWS;
+		this.#descExpandable = questionDescriptionsOverflow(question, width);
 		const maxRows = this.#expanded ? maxTitleRows : MAX_HEADER_ROWS;
 		lines.push(...renderQuestionTitle(question, width, maxRows));
 		return lines;
 	}
 
 	#expandHint(): string {
-		if (!this.#headerExpandable) return "";
+		if (!this.#headerExpandable && !this.#descExpandable) return "";
 		return ` · ${expandKeyHint()} ${this.#expanded ? "collapse" : "expand"}`;
 	}
 
@@ -881,6 +907,7 @@ export class AskDialogComponent implements Component {
 						mdTheme,
 						this.#previewCache,
 						contentWidth,
+						this.#expanded,
 					),
 				);
 			}

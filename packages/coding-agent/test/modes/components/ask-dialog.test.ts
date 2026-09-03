@@ -1421,6 +1421,53 @@ describe("AskDialogComponent", () => {
 		expect(component.toggleQuestionExpansion()).toBe(false);
 		expect(render(component)).toBe(before);
 	});
+	it("expands truncated option descriptions on Ctrl+O and collapses on a second press", () => {
+		const longDescription = "This is a very long description ".repeat(30);
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					options: [{ label: "Option A", description: longDescription }, { label: "Option B" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const collapsed = render(component);
+		const collapsedCount = collapsed.match(/This is a very long description/g)?.length ?? 0;
+		expect(collapsedCount).toBeLessThan(10);
+		expect(collapsed).toContain("Ctrl+O expand");
+		expect(component.toggleQuestionExpansion()).toBe(true);
+
+		const expanded = render(component);
+		const expandedCount = expanded.match(/This is a very long description/g)?.length ?? 0;
+		expect(expandedCount).toBeGreaterThan(collapsedCount);
+		expect(expandedCount).toBeGreaterThanOrEqual(10);
+		expect(expanded).toContain("Ctrl+O collapse");
+
+		component.handleInput("\x0f");
+		const recollapsed = render(component);
+		expect(recollapsed.match(/This is a very long description/g)?.length ?? 0).toBe(collapsedCount);
+		expect(recollapsed).toContain("Ctrl+O expand");
+	});
+
+	it("does not advertise expand for short option descriptions", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose one?",
+					options: [{ label: "Option A", description: "Short description." }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+		const before = render(component);
+		expect(before).not.toContain("Ctrl+O expand");
+		expect(component.toggleQuestionExpansion()).toBe(false);
+		expect(render(component)).toBe(before);
+	});
 
 	it("wraps long option labels onto indented continuation lines instead of truncating", () => {
 		const onSubmit = vi.fn();
