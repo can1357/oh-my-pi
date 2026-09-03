@@ -229,10 +229,10 @@ function extractStats(
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
+	modelProvider: ModelProvider | undefined,
 ): MessageStatsInput | null {
 	const msg = entry.message as AssistantMessage;
-	if (msg?.role !== "assistant") return null;
-	if (typeof msg.model !== "string" || typeof msg.provider !== "string" || typeof msg.api !== "string") return null;
+	if (msg?.role !== "assistant" || !modelProvider || typeof msg.api !== "string") return null;
 	const rawUsage = msg.usage as Partial<Usage> | undefined;
 	if (!rawUsage || typeof rawUsage !== "object") return null;
 
@@ -275,12 +275,14 @@ function extractStats(
 					premiumRequests: derived,
 				};
 
+	const { model: servedModel, provider } = modelProvider;
 	return {
 		sessionFile,
 		entryId: entry.id,
 		folder,
-		model: msg.model,
-		provider: msg.provider,
+		model: servedModel,
+		provider,
+		...(provider !== msg.provider && { pricingIdentity: { provider: msg.provider, model: servedModel } }),
 		api: msg.api,
 		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		duration: msg.duration ?? null,
@@ -301,28 +303,24 @@ function extractModelUsageStats(
 	agentType: AgentType,
 ): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
+	const message: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: entry.api,
+		provider: entry.provider,
+		model: entry.model,
+		usage: entry.usage,
+		stopReason: entry.stopReason ?? "stop",
+		errorMessage: entry.errorMessage,
+		timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+	};
 	return extractStats(
 		sessionFile,
 		folder,
-		{
-			type: "message",
-			id: entry.id,
-			parentId: entry.parentId,
-			timestamp: entry.timestamp,
-			message: {
-				role: "assistant",
-				content: [],
-				api: entry.api,
-				provider: entry.provider,
-				model: entry.model,
-				usage: entry.usage,
-				stopReason: entry.stopReason ?? "stop",
-				errorMessage: entry.errorMessage,
-				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
-			},
-		},
+		{ type: "message", id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp, message },
 		undefined,
 		agentType,
+		resolveUpstreamModelProvider(message),
 	);
 }
 
@@ -335,6 +333,26 @@ function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessa
 	return Number.isFinite(ts) ? ts : 0;
 }
 
+interface ModelProvider {
+	model: string;
+	provider: string;
+}
+
+/**
+ * Use the model and provider the router reports it used, when available.
+ * Example: an `openrouter/auto` request served by `anthropic/claude-sonnet-5`.
+ */
+function resolveUpstreamModelProvider(msg: AssistantMessage): ModelProvider | undefined {
+	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return undefined;
+	return {
+		model: typeof msg.upstreamModel === "string" && msg.upstreamModel.length > 0 ? msg.upstreamModel : msg.model,
+		provider:
+			typeof msg.upstreamProvider === "string" && msg.upstreamProvider.length > 0
+				? msg.upstreamProvider
+				: msg.provider,
+	};
+}
+
 /**
  * Extract one {@link ToolCallStats} per `toolCall` content block of an
  * assistant message. Returns an empty array for turns without tool calls.
@@ -344,13 +362,11 @@ function extractToolCalls(
 	folder: string,
 	entry: SessionMessageEntry,
 	agentType: AgentType,
+	modelProvider: ModelProvider | undefined,
 ): ToolCallStats[] {
 	const msg = entry.message as AssistantMessage;
-	if (msg?.role !== "assistant" || !Array.isArray(msg.content)) return [];
-	// `tool_calls` columns are NOT NULL: skip turns that can't be attributed
-	// (malformed persisted entries — see extractStats) and blocks missing ids.
-	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return [];
-
+	if (msg?.role !== "assistant" || !modelProvider || !Array.isArray(msg.content)) return [];
+	const { model, provider } = modelProvider;
 	const blocks = msg.content.filter(
 		(block): block is ToolCall =>
 			block !== null &&
@@ -380,8 +396,8 @@ function extractToolCalls(
 			toolCallId: block.id,
 			folder,
 			toolName,
-			model: msg.model,
-			provider: msg.provider,
+			model,
+			provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
@@ -568,18 +584,18 @@ export async function parseSessionFile(
 			return;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const modelProvider = resolveUpstreamModelProvider(entry.message as AssistantMessage);
+			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType, modelProvider);
 			if (msgStats) stats.push(msgStats);
-			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
+			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType, modelProvider));
 			// Persist links even when the user entry was ingested in an earlier tail read.
 			const parentId = entry.parentId;
-			const msg = entry.message;
-			if (parentId && msg.role === "assistant" && msg.model && msg.provider) {
+			if (parentId && modelProvider) {
 				userLinks.push({
 					sessionFile: sessionPath,
 					entryId: parentId,
-					model: msg.model,
-					provider: msg.provider,
+					model: modelProvider.model,
+					provider: modelProvider.provider,
 				});
 			}
 		}

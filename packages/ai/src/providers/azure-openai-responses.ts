@@ -213,6 +213,7 @@ const streamAzureOpenAIResponsesOnce = (
 				onCompleted: () => {
 					sawTerminalResponseEvent = true;
 				},
+				requestModelId: params.model,
 			});
 
 			const firstEventTimeoutError = abortTracker.getLocalAbortReason();
