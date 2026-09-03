@@ -576,8 +576,26 @@ export function extractAndStoreFacts(
 		const rawUnit = match[2] ?? "";
 		let unit = rawUnit.toLowerCase();
 		if (unit.endsWith("s") && !unit.endsWith("ms")) unit = unit.slice(0, -1);
-		const prefixWords = text
-			.slice(Math.max(0, (match.index ?? 0) - 50), match.index ?? 0)
+		// The naive fixed 50-char lookbehind can cross a markdown table cell, a code fence, or
+		// a sentence boundary and glue unrelated words into one underscore-joined key (e.g.
+		// "iam-role_smrx/sm-secrets_ssm-parameters_api" -> "2api" from a table row, or
+		// "cadence_90/60/5_30-_second" from a run-on list). Clamping the window to start after
+		// the nearest preceding structural boundary -- newline, table pipe, sentence-ending
+		// punctuation, or a backtick -- keeps the phrase within one cell/sentence/line, matching
+		// what a human would read as "the words right before this number" rather than 50 raw
+		// characters regardless of what they cross.
+		//
+		// A bare `.` is NOT always a sentence boundary: "v1.2", "3.14", "18.0.8" all contain
+		// dots that are part of a version/decimal number, not sentence punctuation. Only count
+		// `.`/`!`/`?` as a boundary when followed by whitespace or the end of the window -- i.e.
+		// it actually ends a sentence.
+		const windowStart = Math.max(0, (match.index ?? 0) - 50);
+		let window = text.slice(windowStart, match.index ?? 0);
+		const boundaryMatch = /\n|\||`|[.!?](?=\s|$)|;/g;
+		let lastBoundary = -1;
+		for (let m = boundaryMatch.exec(window); m; m = boundaryMatch.exec(window)) lastBoundary = m.index;
+		if (lastBoundary !== -1) window = window.slice(lastBoundary + 1);
+		const prefixWords = window
 			.replace(/`[^`]*`/g, " ")
 			.split(/\s+/)
 			.map(w => w.replace(/[.,:;!?()[\]"'`*_]/g, ""))
