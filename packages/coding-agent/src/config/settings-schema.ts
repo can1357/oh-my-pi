@@ -5784,6 +5784,32 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"providers.copilot.mode": {
+		type: "enum",
+		values: ["auto", "vscode", "cli"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Copilot Wire Identity",
+			description:
+				"Wire identity headers sent to GitHub Copilot API. 'auto' uses caller headers with automatic fallback from CLI to VS Code identity on policy denial, 'vscode' forces VS Code Copilot Chat identity (required for enterprise accounts where Copilot CLI is disabled), 'cli' forces official Copilot CLI identity.",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Caller headers with automatic CLI-to-VS Code fallback on policy rejection",
+				},
+				{
+					value: "vscode",
+					label: "VS Code",
+					description: "VS Code Copilot Chat identity (works with enterprise CLI-disabled seats)",
+				},
+				{ value: "cli", label: "CLI", description: "Official Copilot CLI identity" },
+			],
+		},
+	},
+
 	"providers.fetch": {
 		type: "enum",
 		values: ["auto", "native", "trafilatura", "lynx", "parallel", "firecrawl", "jina"] as const,

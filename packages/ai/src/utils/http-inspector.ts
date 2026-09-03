@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
+import { isTransientCopilotForbidden } from "../error/rate-limit";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
@@ -108,6 +109,9 @@ export function rewriteCopilotError(errorMessage: string, error: unknown, provid
 		return `GitHub Copilot authentication failed (HTTP 401). Your token may have been revoked. Please re-login with /login github-copilot`;
 	}
 	if (status === 403) {
+		if (isTransientCopilotForbidden(status, errorMessage)) {
+			return errorMessage;
+		}
 		return `GitHub Copilot access denied (HTTP 403). Your account may not have access to this model or feature. Check your Copilot plan or model policy settings.`;
 	}
 	return errorMessage;

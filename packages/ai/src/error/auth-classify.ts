@@ -1,7 +1,7 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import { isAccountPolicyError, isClinePassSurfaceGateMessage, isOAuthExpiry, isUsageLimit } from "./flags";
 import { OAuthError } from "./oauth";
-import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
+import { isConcurrencyCapExclusion, isTransientCopilotForbidden, isUsageLimitOutcome } from "./rate-limit";
 
 /**
  * Whether an OAuth refresh failure is definitive (the credential must be
@@ -49,6 +49,7 @@ export function isAuthRetryableError(error: unknown): boolean {
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.
 	if (isClinePassSurfaceGateMessage(message)) return false;
+	if (isTransientCopilotForbidden(status, message)) return false;
 	if (status === 401 || status === 403) return true;
 	return isUsageLimitOutcome(status, message);
 }

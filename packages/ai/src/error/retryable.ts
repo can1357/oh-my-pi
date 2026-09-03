@@ -6,6 +6,7 @@ import {
 	status,
 	TRANSIENT_TRANSPORT_PATTERN,
 } from "./flags";
+import { isTransientCopilotForbidden } from "./rate-limit";
 
 /**
  * Whether a numeric HTTP status is in the canonical transient/retryable set:
@@ -44,6 +45,9 @@ export function isProviderRetryableError(error: unknown): boolean {
 	if (isUsageLimit(error)) return false;
 	const httpStatus = status(error);
 	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
+		if (isTransientCopilotForbidden(httpStatus, error.message)) {
+			return true;
+		}
 		return false;
 	}
 	const msg = error.message.toLowerCase();

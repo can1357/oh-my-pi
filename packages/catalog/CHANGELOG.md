@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `COPILOT_VSCODE_IDENTITY_HEADERS`, `isCopilotVscodeMode()`, and `sanitizeCopilotHeaders()` to support VS Code Copilot Chat wire identity for enterprise accounts where Copilot CLI is disabled.
+
 ## [18.1.8] - 2026-09-03
 
 ### Added

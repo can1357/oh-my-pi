@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `providers.copilot.mode` setting (`auto`, `vscode`, `cli`) to configure the wire identity headers sent on GitHub Copilot requests.
+
 ## [18.1.8] - 2026-09-03
 
 ### Fixed
