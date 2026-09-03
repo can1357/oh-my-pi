@@ -46,8 +46,11 @@ async function mintMetaApiKey(oauthAccessToken: string, fetchImpl: FetchImpl, si
 			headers: {
 				Accept: "application/json",
 				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
 				"x-api-version": META_MUSE_API_VERSION,
 			},
+			// The endpoint requires a (possibly empty) JSON body.
+			body: "{}",
 			redirect: "error",
 			signal: signal
 				? AbortSignal.any([signal, AbortSignal.timeout(META_MUSE_TIMEOUT_MS)])
@@ -81,7 +84,11 @@ async function mintMetaApiKey(oauthAccessToken: string, fetchImpl: FetchImpl, si
 	}
 	const apiKey = isRecord(payload) ? trimmedString(payload.api_key) : undefined;
 	if (!apiKey) {
-		throw new AIError.OAuthError("Meta key mint returned no API key", {
+		const setup =
+			isRecord(payload) && typeof payload.action_url === "string" && payload.action_url.trim()
+				? ` Complete setup at ${payload.action_url.trim()}.`
+				: "";
+		throw new AIError.OAuthError(`Meta key mint returned no API key.${setup}`, {
 			kind: "token-exchange",
 			provider: "meta-oauth",
 			status: response.status,

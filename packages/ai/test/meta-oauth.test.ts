@@ -106,6 +106,9 @@ describe("metaMintKeyHook", () => {
 		const headers = new Headers(mint?.init?.headers);
 		expect(headers.get("Authorization")).toBe("Bearer oauth-access-token");
 		expect(headers.get("x-api-version")).toBe("1.0.0");
+		// The mint endpoint 400s on an empty body; it requires a JSON object.
+		expect(headers.get("Content-Type")).toBe("application/json");
+		expect(mint?.init?.body).toBe("{}");
 	});
 
 	it("surfaces mint HTTP failures as token-exchange errors", async () => {
@@ -130,6 +133,21 @@ describe("metaMintKeyHook", () => {
 				fetch: fetchImpl,
 			}),
 		).rejects.toThrow(/no API key/);
+	});
+
+	it("surfaces the setup URL when Meta issues no key", async () => {
+		const { fetchImpl } = createMetaFlowFetch([], {
+			require_payment: true,
+			action_url: "https://auth.meta.com/setup",
+		});
+		await expect(
+			metaMintKeyHook(storedCredentials(), {
+				provider: "meta-oauth",
+				phase: "login",
+				raw: {},
+				fetch: fetchImpl,
+			}),
+		).rejects.toThrow(/https:\/\/auth\.meta\.com\/setup/);
 	});
 });
 
