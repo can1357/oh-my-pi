@@ -294,11 +294,35 @@ describe("auth-broker wire surface", () => {
 		expect(
 			legacyCredentials.map(credential => {
 				if (credential.type !== "api_key") throw new Error("expected legacy Meta API-key credential");
-				return { key: credential.key, authorizedAt: credential.authorizedAt };
+				return {
+					key: credential.key,
+					source: credential.source,
+					authorizedAt: credential.authorizedAt,
+				};
 			}),
 		).toEqual([
-			{ key: "meta-payg-key", authorizedAt: undefined },
-			{ key: "LLM|subscription-key", authorizedAt: undefined },
+			{ key: "meta-payg-key", source: undefined, authorizedAt: undefined },
+			{ key: "LLM|subscription-key", source: "login", authorizedAt: undefined },
+		]);
+
+		storage!.upsertCredential("meta", {
+			type: "api_key",
+			key: "meta-payg-key",
+			source: "login",
+			authorizedAt: Number.MAX_SAFE_INTEGER,
+		});
+		const paygPreferredResult = await legacyClient.fetchSnapshot();
+		if (paygPreferredResult.status !== 200) throw new Error("expected updated legacy-client snapshot");
+		expect(
+			paygPreferredResult.snapshot.credentials
+				.filter(entry => entry.provider === "meta")
+				.map(entry => {
+					if (entry.credential.type !== "api_key") throw new Error("expected projected Meta API key");
+					return { key: entry.credential.key, source: entry.credential.source };
+				}),
+		).toEqual([
+			{ key: "meta-payg-key", source: "login" },
+			{ key: "LLM|subscription-key", source: undefined },
 		]);
 	});
 
