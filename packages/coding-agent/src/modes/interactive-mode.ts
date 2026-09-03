@@ -2086,9 +2086,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...builtinCommands, ...hookCommands, ...customCommands, ...skillCommandList];
 	}
 
-	/** Rebuilds the pending slash commands, including `/skill:<name>` entries, from live session state. */
+	/**
+	 * Rebuilds the pending slash commands, including `/skill:<name>` entries, from
+	 * live session state and re-points the editor's autocomplete provider at the
+	 * result. The provider snapshots `#pendingSlashCommands` when
+	 * `refreshSlashCommandState` builds it, and `init:slashCommands` runs before
+	 * the startup `resources_discover` pass — so without the rebuild, skills an
+	 * extension contributes at startup are invocable but never offered in
+	 * autocomplete until the next reload. Reuses the session's already
+	 * discovered file commands, so this never re-walks the providers.
+	 */
 	#syncSkillSlashCommands(): void {
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
+		if (this.#baseAutocompleteProvider) {
+			this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
+		}
 	}
 
 	/** Reload session skills and the `/skill:<name>` command list. */
