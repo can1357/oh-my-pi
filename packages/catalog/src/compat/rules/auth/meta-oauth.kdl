@@ -1,0 +1,23 @@
+// Device authorization + key mint mirror Meta's official Muse Code launcher
+// (public client; endpoint provenance: code_puppy#707).
+auth "meta-oauth" {
+	name "Meta Muse (Muse Spark subscription)"
+	login "device-code" {
+		client-id "1031625952748946"
+		device url="https://auth.meta.com/oidc/device/authorization/" body="form" timeout-ms=30000 {
+			headers { Accept "application/json" }
+		}
+		token url="https://auth.meta.com/oidc/device/token/" body="form" timeout-ms=30000 {
+			headers { Accept "application/json" }
+		}
+		response user-code="user_code" device-code="device_code" verification-uri="verification_uri" verification-uri-complete="verification_uri_complete" interval="interval" expires-in="expires_in"
+		instructions "Enter code: {user_code}"
+		credential {
+			access "access_token"
+			expires "never"
+		}
+		after-exchange hook="meta-mint-key"
+	}
+	store-as "meta"
+	refresh "none"
+}

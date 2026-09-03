@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Meta Muse OAuth (`meta-oauth`) auth policy: Meta account device-code login stored as `meta`.
+
 ## [18.1.6] - 2026-09-03
 
 ### Added
