@@ -296,9 +296,10 @@ export interface UsageDashboardOptions {
 	/**
 	 * Stream daily activity into the heatmap: push cached DB rows immediately,
 	 * then push again after an incremental session sync. Resolves when the sync
-	 * settles; rejection renders as a dim unavailable note.
+	 * settles; rejection renders as a dim unavailable note. `signal` aborts when
+	 * the dashboard closes so an in-flight sync can stop early.
 	 */
-	loadActivity: (push: (points: DailyActivityPoint[]) => void) => Promise<void>;
+	loadActivity: (push: (points: DailyActivityPoint[]) => void, signal: AbortSignal) => Promise<void>;
 	requestRender: () => void;
 	onClose: () => void;
 }
@@ -319,6 +320,7 @@ export class UsageDashboardComponent implements Component {
 	#detailCache: { width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
+	readonly #closeController = new AbortController();
 
 	constructor(options: UsageDashboardOptions) {
 		this.#options = options;
@@ -333,7 +335,7 @@ export class UsageDashboardComponent implements Component {
 				if (this.#closed) return;
 				this.#activity = points;
 				this.#options.requestRender();
-			});
+			}, this.#closeController.signal);
 		} catch {
 			this.#activityError = true;
 		} finally {
@@ -344,6 +346,7 @@ export class UsageDashboardComponent implements Component {
 
 	dispose(): void {
 		this.#closed = true;
+		this.#closeController.abort();
 	}
 
 	// ---------------------------------------------------------------------------

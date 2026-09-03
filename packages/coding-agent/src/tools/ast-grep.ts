@@ -21,6 +21,7 @@ import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } fro
 import { formatMatchLine } from "./match-line-format";
 import type { OutputMeta } from "./output-meta";
 import { resolveToolSearchScope, toPathList } from "./path-utils";
+import { isRawSelector } from "./read-selector";
 import {
 	appendParseErrorsBulletList,
 	capParseErrors,
@@ -221,7 +222,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 					if (!target) return undefined;
 					const materialized = await materializeReadUrlToFile(
 						this.session,
-						{ path: target.path, raw: target.raw },
+						{ path: target.path, raw: isRawSelector(target.sel) },
 						signal,
 					);
 					return { sourcePath: materialized.path, immutable: true };

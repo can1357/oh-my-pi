@@ -2534,6 +2534,37 @@ mod tests {
 		assert!(!output.contains("Broken pipe"), "{output:?}");
 	}
 
+	/// Regression: every ported utility upstream of a stage that quits early
+	/// printed `<name>: Broken pipe (os error 32)` (and `write error`
+	/// variants) and exited 1 — `cut f | sed 'bad'` when sed died at parse
+	/// time, `sed … | head`, `ls | head`. SIGPIPE emulation lives in the host
+	/// boundary, so ports that know nothing about broken pipes must still die
+	/// silently with 141.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtins_upstream_of_closed_pipe_are_silent_and_exit_141() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let file = dir.path().join("big.txt");
+		let file = file.display();
+		// Large enough that the writer is still producing when the reader exits.
+		let cases = [
+			format!("cut -c1-5 '{file}' | sed -n 1-30p"),
+			format!("sed -n p '{file}' | head -n 1 > /dev/null"),
+			format!("sort -n '{file}' | head -n 1 > /dev/null"),
+			format!("uniq '{file}' | head -n 1 > /dev/null"),
+			format!("cat '{file}' | head -n 1 > /dev/null"),
+			format!("tr a-z A-Z < '{file}' | head -n 1 > /dev/null"),
+		];
+		for case in cases {
+			let command =
+				format!("seq 1 200000 > '{file}'; set -o pipefail; {case}; echo rc=${{PIPESTATUS[0]}}");
+			let (result, output) = execute_captured(command).await;
+			assert_eq!(result.exit_code, Some(0), "{case}: {output:?}");
+			assert!(output.contains("rc=141"), "{case}: {output:?}");
+			assert!(!output.contains("Broken pipe"), "{case}: {output:?}");
+			assert!(!output.contains("write error"), "{case}: {output:?}");
+		}
+	}
+
 	/// The kill builtin accepts a numeric signal and applies it to every process
 	/// operand.
 	#[cfg(unix)]

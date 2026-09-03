@@ -15,6 +15,7 @@ import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
@@ -44,10 +45,16 @@ type IrcWakeObserver = (records: CustomMessage[]) => ((error?: unknown) => void 
 interface RevivedSessionHandle {
 	session: AgentSession;
 	observer: () => IrcWakeObserver | undefined;
+	/** Reply obligations the wake monitor registered via `trackIrcReply`. */
+	trackedReplies: Promise<void>[];
+	/** Text the stubbed session reports as its last assistant message. */
+	setLastAssistantText: (text: string) => void;
 }
 
 function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
+	let lastAssistantText: string | undefined;
+	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
@@ -57,11 +64,24 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
+		trackIrcReply: (pending: Promise<void>) => {
+			trackedReplies.push(pending);
+		},
 		subscribeRunState: () => () => {},
-		getLastAssistantMessage: () => undefined,
+		getLastAssistantMessage: () =>
+			lastAssistantText === undefined
+				? undefined
+				: { role: "assistant", content: [{ type: "text", text: lastAssistantText }], stopReason: "stop" },
 		extensionRunner,
 	} as unknown as AgentSession;
-	return { session, observer: () => observer };
+	return {
+		session,
+		observer: () => observer,
+		trackedReplies,
+		setLastAssistantText: text => {
+			lastAssistantText = text;
+		},
+	};
 }
 
 async function createPersistedSession(
@@ -430,5 +450,94 @@ describe("persisted subagent revival", () => {
 		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	describe("wake-turn relay", () => {
+		async function reviveWithWaker(cwd: string): Promise<{ ref: AgentRef; handle: RevivedSessionHandle }> {
+			AgentRegistry.resetGlobalForTests();
+			AgentLifecycleManager.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+			const sessionFile = await createPersistedSession(cwd);
+			MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+			let handle: RevivedSessionHandle | undefined;
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+				handle = createRevivedSession([]);
+				return { session: handle.session } as CreateAgentSessionResult;
+			});
+			const ref = createRef(sessionFile);
+			const registry = AgentRegistry.global();
+			registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
+			registry.register({
+				id: ref.id,
+				displayName: ref.displayName,
+				kind: "sub",
+				session: null,
+				sessionFile,
+				status: "parked",
+			});
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+			if (!handle) throw new Error("Expected a revived session");
+			return { ref, handle };
+		}
+
+		const wakeRecord = (from: string): CustomMessage => ({
+			role: "custom",
+			customType: "irc:incoming",
+			content: "send me the full table",
+			display: true,
+			details: { id: "irc-42", from, message: "send me the full table" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+
+		it("delivers the turn's final text to the waker when the agent never replied itself", async () => {
+			// A read-only scout has no `hub` tool: without the relay its answer to a
+			// wake message is stranded in its own transcript.
+			const cwd = makeTempDir("@pi-revive-relay-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const finish = observer?.([wakeRecord("Main")]);
+			expect(handle.trackedReplies).toHaveLength(1);
+			handle.setLastAssistantText("# Full table\n\n| tool | file |\n|---|---|\n| read | read.ts |");
+			const reply = IrcBus.global().wait("Main", { from: ref.id }, 5000);
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			expect(await reply).toMatchObject({
+				from: ref.id,
+				to: "Main",
+				replyTo: "irc-42",
+				body: "# Full table\n\n| tool | file |\n|---|---|\n| read | read.ts |",
+			});
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+
+		it("stays silent when the agent already answered its waker during the turn", async () => {
+			const cwd = makeTempDir("@pi-revive-relay-answered-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			const finish = observer?.([wakeRecord("Main")]);
+			const bus = IrcBus.global();
+			const answered = bus.wait("Main", { from: ref.id }, 5000);
+			await bus.send({ from: ref.id, to: "Main", body: "here you go" });
+			expect((await answered)?.body).toBe("here you go");
+			handle.setLastAssistantText("Sent the table via hub.");
+			const duplicate = bus.wait("Main", { from: ref.id }, 200);
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			expect(await duplicate).toBeNull();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
 	});
 });
