@@ -3160,6 +3160,19 @@ export async function processResponsesStream<TApi extends Api>(
 
 	for await (const event of openaiStream) {
 		const terminalEvent = getOpenAIResponsesTerminalEvent(event);
+		const eventResponse = (event as { response?: { model?: string; provider?: string } }).response;
+		if (!output.upstreamModel && typeof eventResponse?.model === "string" && eventResponse.model.length > 0) {
+			if (eventResponse.model !== model.id) {
+				output.upstreamModel = eventResponse.model;
+			}
+		}
+		if (
+			!output.upstreamProvider &&
+			typeof eventResponse?.provider === "string" &&
+			eventResponse.provider.length > 0
+		) {
+			output.upstreamProvider = eventResponse.provider;
+		}
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
@@ -3495,6 +3508,11 @@ export async function processResponsesStream<TApi extends Api>(
 			finalizePendingResponsesToolCalls(output);
 			if (response?.id) {
 				output.responseId = response.id;
+			}
+			if (!output.upstreamModel && typeof response?.model === "string" && response.model.length > 0) {
+				if (response.model !== model.id) {
+					output.upstreamModel = response.model;
+				}
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage, output.timestamp);
