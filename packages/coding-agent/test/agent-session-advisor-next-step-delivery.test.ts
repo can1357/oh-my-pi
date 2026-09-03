@@ -6,19 +6,24 @@
  * queue is left empty and no extra model turn runs.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { AdvisorMessageDetails } from "@oh-my-pi/pi-coding-agent/advisor/advise-tool";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { isAdvisorCard } from "@oh-my-pi/pi-coding-agent/session/queued-messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const ADVISOR_TYPE = "advisor";
+/** The one concern the advisor raises against the first (mid-turn) delta. */
+const MID_TURN_CONCERN = "the fixture edit looks incomplete; double-check the second step";
 
 interface CompletedAdvisorHarness {
 	session: AgentSession;
@@ -134,6 +139,101 @@ describe("AgentSession advisor next-step delivery", () => {
 		return { session, sessionManager, mock, advisorMock, streamStarted: started.promise };
 	}
 
+	/**
+	 * The advisor only sees the primary through turn-end deltas, so a concern it
+	 * raises while the primary is mid-turn can only travel as a YieldQueue aside:
+	 * the primary script issues a tool call, then a second tool call the test
+	 * holds open, then a final answer, and the advisor raises one concern
+	 * against the first (in-progress) delta while that second tool call is parked.
+	 */
+	interface MidTurnConcernHarness {
+		session: AgentSession;
+		mock: MockModel;
+		advisorMock: MockModel;
+		/** Resolves with the held tool call's abort signal once that call starts. */
+		heldToolStarted: Promise<AbortSignal>;
+		/** Releases the held tool call. */
+		releaseHeldTool: () => void;
+	}
+
+	async function createMidTurnConcernSession(): Promise<MidTurnConcernHarness> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const stepCall = (input: string): MockResponse => ({
+			content: [{ type: "toolCall", name: "fixture_step", arguments: { input } }],
+		});
+		const mock = createMockModel({
+			responses: [stepCall("first"), stepCall("second"), { content: ["DONE"], stopReason: "stop" }],
+		});
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					// Small delay so the concern cannot race the loop's aside poll that
+					// runs immediately after the first turn end; it must arrive while
+					// the second tool call is in flight.
+					delayMs: 5,
+					content: [
+						{ type: "toolCall", name: "advise", arguments: { note: MID_TURN_CONCERN, severity: "concern" } },
+					],
+				},
+				{ content: [], stopReason: "stop" },
+			],
+			// Later deltas (second turn end, final answer) must not error the advisor.
+			handler: () => ({ content: [], stopReason: "stop" }),
+		});
+
+		const fixtureStepParams = type({ input: "string" });
+		let invocations = 0;
+		const heldToolStarted = Promise.withResolvers<AbortSignal>();
+		const gate = Promise.withResolvers<void>();
+		const fixtureStep: AgentTool<typeof fixtureStepParams> = {
+			name: "fixture_step",
+			label: "Fixture Step",
+			description: "Deterministic two-step test tool",
+			parameters: fixtureStepParams,
+			execute: async (_toolCallId, _params, signal) => {
+				invocations++;
+				if (invocations === 2) {
+					if (!signal) throw new Error("expected the loop to pass an abort signal to the tool");
+					heldToolStarted.resolve(signal);
+					await gate.promise;
+				}
+				return { content: [{ type: "text", text: `step ${invocations} ran` }] };
+			},
+		};
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [fixtureStep] },
+			streamFn: mock.stream,
+			// Production wires the session converter at the agent boundary
+			// (sdk.ts); without it a bare test agent drops the custom advisor
+			// card from the provider request instead of folding it in.
+			convertToLlm,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		return {
+			session,
+			mock,
+			advisorMock,
+			heldToolStarted: heldToolStarted.promise,
+			releaseHeldTool: () => gate.resolve(),
+		};
+	}
+
 	/** Records the transcript content of every persisted advisor card. */
 	function capturePersistedAdvisorCards(sessionManager: SessionManager): string[] {
 		const persisted: string[] = [];
@@ -200,5 +300,92 @@ describe("AgentSession advisor next-step delivery", () => {
 		expect(harness.yieldQueue.has("advisor")).toBe(false);
 		// The parked turn's tail response was never consumed: no resume ran.
 		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("delivers a mid-turn advisor concern to the primary at its next model step without aborting the running tool", async () => {
+		const {
+			session: harness,
+			mock,
+			advisorMock,
+			heldToolStarted,
+			releaseHeldTool,
+		} = await createMidTurnConcernSession();
+
+		expect(harness.setAdvisorEnabled(true)).toBe(true);
+		const running = harness.prompt("run the fixture steps");
+		const heldSignal = await heldToolStarted;
+
+		// The advisor reviews the first (in-progress) delta while the second tool
+		// call is parked. Its advise call runs inside that review prompt, so once
+		// the advisor catches up the concern is on the aside queue; the loop only
+		// polls asides again after the held tool resolves.
+		expect(await harness.waitForAdvisorCatchup(10_000)).toBe(true);
+		expect(harness.yieldQueue.has("advisor")).toBe(true);
+
+		// Non-interrupting: the concern bypasses the steering queue entirely.
+		expect(harness.agent.peekSteeringQueue().filter(isAdvisorCard)).toHaveLength(0);
+
+		// The running tool is not aborted to make room for the aside.
+		expect(heldSignal.aborted).toBe(false);
+		releaseHeldTool();
+
+		await running;
+		await harness.waitForIdle();
+		expect(await harness.waitForAdvisorCatchup(10_000)).toBe(true);
+
+		// The concern reached the primary at its next model step (request three).
+		expect(mock.calls).toHaveLength(3);
+		const thirdRequestAsides: string[] = [];
+		for (const message of mock.calls[2].context.messages) {
+			if (message.role !== "developer") continue;
+			const blocks =
+				typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+			for (const part of blocks) {
+				if (part.type === "text") thirdRequestAsides.push(part.text);
+			}
+		}
+		const asideText = thirdRequestAsides.join("\n");
+		expect(asideText).toContain("<advisory");
+		expect(asideText).toContain('severity="concern"');
+		expect(asideText).toContain(MID_TURN_CONCERN);
+
+		// And it exists as a proper advisor card in the transcript (not a steer).
+		const messageLog = harness.agent.state.messages;
+		const cards = messageLog.filter(isAdvisorCard);
+		expect(cards).toHaveLength(1);
+		const details = cards[0].details as AdvisorMessageDetails;
+		expect(details.notes).toHaveLength(1);
+		expect(details.notes[0].note).toBe(MID_TURN_CONCERN);
+		expect(details.notes[0].severity).toBe("concern");
+
+		// The card landed mid-run: after the held tool's result, before the
+		// final assistant answer — not parked to the end of the transcript.
+		const cardIndex = messageLog.findIndex(isAdvisorCard);
+		const lastToolResultIndex = messageLog.findLastIndex(message => message.role === "toolResult");
+		const finalAssistantIndex = messageLog.findLastIndex(message => message.role === "assistant");
+		expect(cardIndex).toBeGreaterThan(lastToolResultIndex);
+		expect(cardIndex).toBeLessThan(finalAssistantIndex);
+
+		// No tool call was skipped to make room for the advisory.
+		const toolResults: ToolResultMessage[] = [];
+		for (const message of messageLog) {
+			if (message.role === "toolResult") toolResults.push(message);
+		}
+		expect(toolResults.length).toBeGreaterThan(0);
+		for (const result of toolResults) {
+			expect(JSON.stringify(result.content)).not.toContain("Skipped due to pending system advisory");
+		}
+
+		// The advisor was not told to defer: its advise call got `Recorded.`.
+		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(2);
+		const adviseResults: ToolResultMessage[] = [];
+		for (const message of advisorMock.calls[1].context.messages) {
+			if (message.role === "toolResult" && message.toolName === "advise") adviseResults.push(message);
+		}
+		expect(adviseResults).toHaveLength(1);
+		expect(adviseResults[0].content.some(part => part.type === "text" && part.text === "Recorded.")).toBe(true);
+
+		// The loop consumed the aside: nothing stranded at settle.
+		expect(harness.yieldQueue.has("advisor")).toBe(false);
 	});
 });
