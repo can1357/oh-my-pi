@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the opt-in `lsp.requireShared` setting to fail closed when broker-shared LSP is unavailable.
+
+### Changed
+
+- Shared LSP broker and mux startup/handshake failures now retain their causes and log at warning level before the default private fallback.
+
+### Fixed
+
+- Strict shared-LSP failures no longer leave a rejected client-creation lock that blocks retries.
+
 ## [18.1.6] - 2026-09-03
 
 ### Breaking Changes
