@@ -40,6 +40,10 @@
 
 - Fixed `omp models refresh` so revoked ChatGPT account tokens no longer prevent the remaining OpenAI Codex models from being discovered.
 
+### Fixed
+
+- Raised Cursor context windows to Cursor's documented sizes (Grok 4.5/4.6 256k, Kimi K2.7 Code 262k, GPT-5.6 272k, Claude Opus 5 and Fable 300k by default) so compaction no longer fires too early, without lowering existing 1M Max-mode windows.
+
 ## [18.1.6] - 2026-09-03
 
 ### Added

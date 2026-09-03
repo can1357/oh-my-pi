@@ -429,6 +429,39 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("applies documented Cursor context-window floors at build time", () => {
+		// Rule-owned (`providers/cursor.kdl` context-window-floor): baked at
+		// build time. createSpec defaults to the 200k discovery fallback.
+		const windows: Array<[string, number]> = [
+			["cursor-grok-4.5", 256_000],
+			["cursor-grok-4.6", 256_000],
+			["kimi-k2.7-code", 262_000],
+			["claude-opus-5-preview", 300_000],
+			["claude-fable-5-preview", 300_000],
+			["gpt-5.6-sol-fast", 272_000],
+			["kimi-k3-max", 1_000_000],
+			["composer-2.5", 200_000],
+			["cursor-grok-5", 200_000],
+			["k3-256k", 200_000],
+		];
+		for (const [id, contextWindow] of windows) {
+			expect(buildGenerated(createSpec({ id, api: "cursor-agent", provider: "cursor" })).contextWindow).toBe(
+				contextWindow,
+			);
+		}
+
+		expect(
+			buildGenerated(
+				createSpec({
+					id: "cursor-grok-4.6",
+					api: "cursor-agent",
+					provider: "cursor",
+					contextWindow: 1_000_000,
+				}),
+			).contextWindow,
+		).toBe(1_000_000);
+	});
+
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
 		const models = [
 			createSpec({
