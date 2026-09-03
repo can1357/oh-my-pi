@@ -279,14 +279,27 @@ export class CollabHost {
 		this.#startedAt = Date.now();
 		// Publish to the local host registry only after the relay connection
 		// succeeded. Publication failure warns but never breaks hosting (#6099).
+		let publication: CollabHostPublication | null = null;
 		try {
-			this.#registryPublication = await publishCollabHost(mode => this.#registrySnapshot(mode));
+			publication = await publishCollabHost(mode => this.#registrySnapshot(mode));
 		} catch (err) {
 			logger.warn("Collab host registry publication failed", { error: String(err) });
 			this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
 				dim: true,
 			});
 		}
+		if (this.#stopped) {
+			// The relay closed fatally while publication was in flight: #teardown
+			// ran with nothing to withdraw, so withdraw here and refuse to finish
+			// startup instead of installing a dead host that stays discoverable.
+			if (publication) {
+				await publication
+					.close()
+					.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+			}
+			throw new Error("relay connection closed during startup");
+		}
+		this.#registryPublication = publication;
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
 			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });

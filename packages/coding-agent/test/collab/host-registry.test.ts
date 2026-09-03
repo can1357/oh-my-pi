@@ -207,6 +207,34 @@ describe("collab host registry lifecycle (#6099)", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
+	it("withdraws a publication that completes after a fatal relay close during startup", async () => {
+		const { ctx } = makeHostContext();
+		// Hold publication open so the relay can die while start() awaits it;
+		// `publishing` resolves once the host actually entered that await.
+		const redirected = publishSpy.getMockImplementation();
+		if (!redirected) throw new Error("publish spy has no implementation");
+		const publishing = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		publishSpy.mockImplementation(async provider => {
+			publishing.resolve();
+			await gate.promise;
+			return redirected(provider);
+		});
+		host = new CollabHost(ctx);
+		const started = host.start(RELAY_URL, WEB_URL);
+		await publishing.promise;
+
+		const hostSocket = capturedSockets.find(s => s.role === "host");
+		if (!hostSocket) throw new Error("host transport socket was never created");
+		hostSocket.onclose?.({ code: 4001, reason: "room closed" });
+		gate.resolve();
+
+		// Startup fails instead of handing back a dead host, and the late
+		// publication is withdrawn rather than left discoverable.
+		await expect(started).rejects.toThrow(/closed during startup/);
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
+	});
+
 	it("keeps hosting when publication fails, surfacing a discovery warning", async () => {
 		const { ctx, state } = makeHostContext();
 		// Publication rejects; start() must still resolve and hosting continue.
