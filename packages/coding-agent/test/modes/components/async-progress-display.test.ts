@@ -80,7 +80,7 @@ describe("async progress transcript display sanitization", () => {
 		const builder = new ChatTranscriptBuilder({
 			ui: {} as TUI,
 			cwd: "/workspace",
-			requestRender: () => {},
+			requestRender: vi.fn(),
 		});
 		const entry: SessionMessageEntry = {
 			type: "message",
@@ -145,7 +145,7 @@ describe("async progress transcript display sanitization", () => {
 		expect(displayMessage.content).toContain("space: ~ next");
 		expect(displayMessage.content).toContain("period: ~.");
 		expect(displayMessage.content).toContain("backtick: `~`");
-		expect(displayMessage.content).toContain("{&quot;cwd&quot;:&quot;~&quot;,&quot;next&quot;:1}");
+		expect(displayMessage.content).toContain('{"cwd":"~","next":1}');
 		expect(displayMessage.content).toContain(`longer: ${longerComponent}`);
 		for (const sibling of punctuationSiblings) expect(displayMessage.content).toContain(`sibling: ${sibling}`);
 		expect(displayMessage.content).toContain(`embedded: ${embeddedPath}`);
