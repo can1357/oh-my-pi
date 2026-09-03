@@ -560,7 +560,8 @@ const costSegment: StatusLineSegment = {
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
-		const costPrefix = sanitizeStatusText(settings.get("statusLine.costPrefix") ?? "$");
+		let costPrefix = "$";
+		try { costPrefix = sanitizeStatusText(settings.get("statusLine.costPrefix") ?? "$"); } catch { /* settings not initialized */ }
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
