@@ -27,11 +27,13 @@ export function isFilesystemSourcePath(value: string): boolean {
 // `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
 const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
 const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
+// A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
+const TAIL_CHUNK_SRC = String.raw`-\d+`;
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
-// plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
+// plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
 // selector chain off before dispatching to a protocol handler.
 const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
@@ -298,6 +300,20 @@ export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null
 	return merged as [LineRange, ...LineRange[]];
 }
 
+const TAIL_SELECTOR_RE = /^-(\d+)$/;
+
+/**
+ * Parse a `-N` tail selector into its line count (`:-60` → 60 last lines).
+ * Returns `null` when `sel` is not tail-shaped; throws {@link ToolError} for `-0`.
+ */
+export function parseTailCount(sel: string): number | null {
+	const match = TAIL_SELECTOR_RE.exec(sel);
+	if (!match) return null;
+	const count = Number.parseInt(match[1]!, 10);
+	if (count < 1) throw new ToolError("Tail selector -0 is invalid; use :-N with N >= 1 to read the last N lines.");
+	return count;
+}
+
 /**
  * Extract the line-range component from a read-tool selector that may also
  * carry a verbatim/index display mode (`raw`, `conflicts`) — alone or compounded
@@ -338,8 +354,9 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
 	let basePath = rawPath.slice(0, colon);
 	let sel = candidate;
 
-	// Allow a compound trailing selector: `path:1-50:raw` or `path:raw:1-50`.
-	// The two chunks must be one line-range plus one `raw`, in either order.
+	// Allow a compound trailing selector: `path:1-50:raw`, `path:raw:1-50`, or
+	// `path:raw:-60`. The two chunks must be one line-range (or tail) plus one
+	// `raw`, in either order.
 	const innerColon = basePath.lastIndexOf(":");
 	if (innerColon > 0) {
 		const innerCandidate = basePath.slice(innerColon + 1);
@@ -441,10 +458,10 @@ export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: strin
  * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
  * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
  * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100`).
+ * `artifact://3:raw:-100-5`).
  *
  * This function iteratively peels selector-shaped chunks (well-formed plus
- * common malformed shapes like `:-N`) so the rest of the read tool can pass a
+ * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
  * clean URL to the protocol handler and surface selector errors via parseSel
  * instead of as misleading "host invalid" errors from the handler. Schemes
  * whose resource URIs may legitimately contain colons (`mcp://`) are skipped.

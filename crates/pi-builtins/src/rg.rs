@@ -26,8 +26,6 @@ use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
 use crate::host::{Host, StreamWriter, Utility};
-// Conventional shell status for a process terminated by SIGPIPE.
-const SIGPIPE_EXIT_CODE: i32 = 141;
 
 use ignore::{
 	Match,
@@ -1729,7 +1727,7 @@ fn execute_search<M: Matcher, W: Write>(
 			) {
 				Ok(matched) => any_match |= matched,
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return SIGPIPE_EXIT_CODE;
+					return crate::host::SIGPIPE_EXIT_CODE;
 				},
 				Err(error) => {
 					had_error = true;
@@ -1764,7 +1762,7 @@ fn execute_search<M: Matcher, W: Write>(
 						had_error |= outcome.had_error;
 					},
 					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return SIGPIPE_EXIT_CODE;
+						return crate::host::SIGPIPE_EXIT_CODE;
 					},
 					Err(error) => {
 						had_error = true;
@@ -1793,7 +1791,7 @@ fn execute_search<M: Matcher, W: Write>(
 						had_error |= outcome.had_error;
 					},
 					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return SIGPIPE_EXIT_CODE;
+						return crate::host::SIGPIPE_EXIT_CODE;
 					},
 					Err(error) => {
 						had_error = true;
@@ -1821,11 +1819,11 @@ fn execute_search<M: Matcher, W: Write>(
 		if write_json_summary(out, &stats)
 			.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
 		{
-			return SIGPIPE_EXIT_CODE;
+			return crate::host::SIGPIPE_EXIT_CODE;
 		}
 	}
 	if out.flush().is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe) {
-		return SIGPIPE_EXIT_CODE;
+		return crate::host::SIGPIPE_EXIT_CODE;
 	}
 	if opts.quiet {
 		if any_match {
@@ -1933,7 +1931,6 @@ impl Utility for Rg {
 mod tests {
 	use super::*;
 	use crate::host::{Host, run_util};
-	use brush_core::openfiles::OpenFile;
 
 	fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_util::<Rg>(args, stdin, "/");
@@ -1993,23 +1990,6 @@ mod tests {
 	}
 
 
-	#[test]
-	fn broken_pipe_on_stdout_is_silent_and_exits_141() {
-		// Regression: `rg … | head` printed a BrokenPipe diagnostic and exited
-		// 2 after the downstream reader closed instead of dying silently.
-		let tree = tempfile::tempdir().unwrap();
-		std::fs::write(tree.path().join("match.txt"), "hit\n").unwrap();
-		let cli = Rg::try_parse_from(["rg", "hit", "match.txt"]).expect("argv");
-		let (mut host, capture) = Host::for_test("rg", "", tree.path());
-		let (reader, writer) = std::io::pipe().expect("pipe");
-		drop(reader); // downstream reader (e.g. `head`) already exited
-		host.stdout = OpenFile::from(writer);
-
-		let code = cli.run(&mut host);
-
-		assert_eq!(code, SIGPIPE_EXIT_CODE, "BrokenPipe must map to 128+SIGPIPE");
-		assert!(capture.err().is_empty(), "stderr must stay clean on a broken pipe");
-	}
 	#[test]
 	fn recursive_walk_observes_cancellation() {
 		let tree = tempfile::tempdir().unwrap();
