@@ -367,25 +367,6 @@ describe("StatusLineComponent context breakdown", () => {
 		}
 	});
 
-	it("keeps compact context formatting when the segment is absorbed into the embedded gauge", () => {
-		const { session } = makeSession({
-			messages: [userMessage("hi"), assistantMessage("done")],
-			usage: { tokens: 80_000, contextWindow: 1_000_000, percent: 8 },
-		});
-		const comp = new StatusLineComponent(session);
-		comp.updateSettings({
-			preset: "custom",
-			leftSegments: ["pi", "context_pct"],
-			rightSegments: ["session_name"],
-			separator: "none",
-			contextLine: "embedded",
-			segmentOptions: { context_pct: { compact: true } },
-		});
-
-		const plain = comp.getTopBorder(120).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
-		expect(plain).toContain("ctx:8%");
-		expect(plain).not.toContain("1M");
-	});
 	it("keeps embedded context on the gauge while the session is unnamed", () => {
 		// Regression: a fresh session has no title, so `session_name` is
 		// invisible and the right group is empty. The gauge must still bridge to

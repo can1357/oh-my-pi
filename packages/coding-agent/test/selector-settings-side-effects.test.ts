@@ -124,8 +124,13 @@ describe("selector setting side effects", () => {
 		selector.handleInput("n");
 		selector.handleInput("t");
 		selector.handleInput("\n");
+		// The first Escape leaves search mode; the second closes settings and
+		// restores the saved status-line configuration.
+		selector.handleInput("\x1b");
+		updateSettings.mockClear();
 		selector.handleInput("\x1b");
 
+		expect(updateSettings).toHaveBeenCalledTimes(1);
 		expect(updateSettings).toHaveBeenCalledWith(
 			expect.objectContaining({
 				segmentOptions: {
