@@ -45,6 +45,7 @@ import {
 	withCors,
 } from "./http";
 import type {
+	AuthGatewayParsedRequestOptions,
 	AuthGatewayServerHandle,
 	AuthGatewayServerOptions,
 	AuthGatewayFormatModule as FormatModule,
@@ -186,30 +187,22 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		};
 		opts.reasoning ??= effort;
 	}
-	// Fields that don't yet have a matching pi-ai `SimpleStreamOptions` slot.
-	// Surfaced once in debug logs so they show up when wiring a new provider,
-	// but NEVER widened into `options.extra` — every consumer would have to
-	// re-implement the typed parse to read them back out.
-	// TODO(pi-ai): land first-class fields and replace these blocks.
-	if (
-		options.parallelToolCalls !== undefined ||
-		options.previousResponseId !== undefined ||
-		options.seed !== undefined ||
-		options.logitBias !== undefined ||
-		options.user !== undefined ||
-		options.responseFormat !== undefined
-	) {
-		logger.debug("auth-gateway dropped unsupported typed options", {
-			api,
-			parallelToolCalls: options.parallelToolCalls,
-			previousResponseId: options.previousResponseId,
-			seed: options.seed,
-			hasLogitBias: options.logitBias !== undefined,
-			user: options.user,
-			hasResponseFormat: options.responseFormat !== undefined,
-		});
-	}
+	applyParsedGatewayOptions(opts, options);
 	return opts;
+}
+
+/**
+ * Copy first-class parsed gateway fields onto {@link SimpleStreamOptions}.
+ * Previously these were debug-logged and dropped; providers that honour them
+ * (Responses continuation, parallel tool calls, …) must be able to read them.
+ */
+export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: AuthGatewayParsedRequestOptions): void {
+	if (options.parallelToolCalls !== undefined) opts.parallelToolCalls = options.parallelToolCalls;
+	if (options.previousResponseId !== undefined) opts.previousResponseId = options.previousResponseId;
+	if (options.seed !== undefined) opts.seed = options.seed;
+	if (options.logitBias !== undefined) opts.logitBias = options.logitBias;
+	if (options.user !== undefined) opts.user = options.user;
+	if (options.responseFormat !== undefined) opts.responseFormat = options.responseFormat;
 }
 
 /**

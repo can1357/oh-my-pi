@@ -428,7 +428,8 @@ function isContentBlockedText(text: string): boolean {
 	return CONTENT_FILTER_PATTERN.test(text);
 }
 
-function matchesOverflowText(text: string): boolean {
+/** String-level context-overflow evidence match for callers holding a bare message (#10133 review). */
+export function matchesOverflowText(text: string): boolean {
 	return OVERFLOW_PATTERNS.some(p => p.test(text)) || OVERFLOW_NO_BODY_PATTERN.test(text);
 }
 

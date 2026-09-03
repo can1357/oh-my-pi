@@ -616,6 +616,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
 	if (isObj(data.metadata)) options.metadata = data.metadata;
+	// Responses structured outputs arrive as `text.format` (not Chat
+	// Completions `response_format`). Forward into options.responseFormat so
+	// applyParsedGatewayOptions / providers see the schema.
+	if (isObj(data.text) && "format" in data.text && data.text.format !== undefined) {
+		options.responseFormat = data.text.format;
+	} else if (data.response_format !== undefined) {
+		options.responseFormat = data.response_format;
+	}
 	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
 	// silently accepted by the schema. No typed slot — drop.
 
