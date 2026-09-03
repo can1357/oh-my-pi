@@ -790,7 +790,9 @@ export class ModelRegistry {
 	 * of failing the whole composition; one bad extension must not empty the
 	 * registry. The failure is logged (deduped per provider) so it is not silent.
 	 * Each hook receives a deep clone because the public contract permits
-	 * mutation of both the array and its model records before returning.
+	 * mutation of both the array and its model records before returning, and the
+	 * rows it returns for its own provider are re-materialized through
+	 * `buildModel` so the registry keeps its "every model is built" invariant.
 	 */
 	#applyRuntimeModelModifiers(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeModelModifiers.size === 0) return models;
@@ -809,7 +811,25 @@ export class ModelRegistry {
 					if (cloneableModels === projected) cloneableModels = [...projected];
 					cloneableModels[index] = { ...model, headers: { ...model.headers } };
 				}
-				projected = modifyModels(structuredClone(cloneableModels), credential);
+				// A hook owns its provider's rows and may synthesize them outright
+				// (a credential-scoped catalog replacing the registered bootstrap)
+				// or respell the ones it was handed. Extensions author `ModelSpec`s
+				// — `identity`, `compat`, `thinking` and the rest of the resolved
+				// surface are `Omit`ted from that type and only `buildModel`
+				// produces them — so those rows are rebuilt rather than trusted:
+				// otherwise the registry serves half-built models whose first
+				// reader crashes, or an identity left over from a different id.
+				// Rows of other providers pass through untouched; rebuilding a
+				// full catalog on every projection costs more than it can fix.
+				projected = modifyModels(structuredClone(cloneableModels), credential).map(model => {
+					if (model.provider !== providerName) return model;
+					// `identity` exists only on built rows. Without it the hook
+					// authored a spec, where `compat` already is the sparse
+					// override `toModelSpec` would drop while reading the absent
+					// `compatConfig`; built rows keep resolving from that field
+					// instead of feeding the resolved view back in as an override.
+					return buildModel(model.identity === undefined ? (model as ModelSpec<Api>) : toModelSpec(model));
+				});
 			} catch (error) {
 				this.#warnModelModifierFailure(providerName, error instanceof Error ? error.message : String(error));
 			}
