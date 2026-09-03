@@ -269,8 +269,15 @@ for (const key of Object.keys(Bun.env)) {
 // With the opt-out active, shipped compiled binaries and explicit
 // --no-env-file launches have no pre-JS Bun dotenv values to clean. Source/npm
 // launches need one provenance-aware cleanup pass for values Bun already added.
-const projectEnvMayBePreloaded = !isCompiledBinary() && !process.execArgv.includes("--no-env-file");
+// Use the module URL rather than isCompiledBinary(): PI_COMPILED is intentionally
+// accepted by that public helper but is untrusted at this project-env boundary.
+const projectEnvMayBePreloaded = !hasCompiledModuleUrl() && !process.execArgv.includes("--no-env-file");
 if (ignoreProjectEnv && projectEnvMayBePreloaded) {
+	if (!launchEnvValues) {
+		throw new Error(
+			"PI_IGNORE_PROJECT_ENV=1 requires Bun's --no-env-file when running OMP from source or npm without an authoritative launch-environment snapshot; shipped compiled binaries support the opt-out directly.",
+		);
+	}
 	const filtered = filterChildShellEnv(Bun.env, projectDir);
 	for (const key of Object.keys(Bun.env)) {
 		if (!(key in filtered)) delete Bun.env[key];
@@ -436,6 +443,11 @@ export function getDbBusyTimeoutMs(): number {
 	return isInteractiveHost() ? 5000 : 1000;
 }
 
+function hasCompiledModuleUrl(): boolean {
+	const url = import.meta.url;
+	return url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN");
+}
+
 /**
  * True when this code is running inside a `bun build --compile` standalone
  * binary. Detects via the embedded virtual-filesystem path markers
@@ -446,8 +458,7 @@ export function getDbBusyTimeoutMs(): number {
  */
 export function isCompiledBinary(): boolean {
 	if (process.env.PI_COMPILED || Bun.env.PI_COMPILED) return true;
-	const url = import.meta.url;
-	return url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN");
+	return hasCompiledModuleUrl();
 }
 
 const TRUTHY: Dict<boolean> = {

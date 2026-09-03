@@ -33,7 +33,11 @@ Set `PI_IGNORE_PROJECT_ENV=1` in the launcher environment or an OMP-owned dotenv
 PI_IGNORE_PROJECT_ENV=1
 ```
 
-An exact `1` in the launcher, agent, config-root, or home source enables the opt-out; all other values have no effect, so a project value cannot negate an OMP-owned opt-out. Launcher variables remain available, and agent/config-root/home dotenv files retain their normal precedence. With the opt-out active, shipped compiled binaries skip the project `.env` parse entirely, while source and npm launches also remove `.env.local` and mode-specific values that Bun may have loaded before OMP code starts. In those Bun-autoloaded modes, a project-local `PI_IGNORE_PROJECT_ENV=1` may cause that same project source to discard itself, but it cannot re-enable project loading; configure the flag in the launcher or an OMP-owned file for consistent behavior. Bun's `--no-env-file` flag alone disables only Bun's loader; OMP still loads the project `.env` unless `PI_IGNORE_PROJECT_ENV=1` is also set.
+An exact `1` in the launcher, agent, config-root, or home source enables the opt-out; all other values have no effect, so a project value cannot negate an OMP-owned opt-out. Launcher variables remain available, and agent/config-root/home dotenv files retain their normal precedence.
+
+Shipped compiled binaries skip the project `.env` parse entirely. Linux source/npm launches use `/proc/self/environ` to remove Bun-preloaded `.env`, `.env.local`, and mode-specific values without deleting same-valued launcher variables. On platforms without an authoritative launch-environment snapshot, source/npm launches must also disable Bun's preload with `--no-env-file`; OMP exits with an actionable error rather than guessing variable provenance. `BUN_OPTIONS=--no-env-file` supplies that flag to an installed npm launcher.
+
+Bun's `--no-env-file` flag alone disables only Bun's loader; OMP still loads the project `.env` unless `PI_IGNORE_PROJECT_ENV=1` is also set.
 
 ---
 

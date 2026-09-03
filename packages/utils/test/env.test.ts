@@ -248,11 +248,17 @@ interface ProjectEnvProbe {
 	inherited: string | null;
 }
 
-async function runProjectEnvProbe(options: {
+interface ProjectEnvProcessResult {
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+}
+
+async function spawnProjectEnvProbe(options: {
 	launchFlag?: string;
 	configFlag?: string;
 	bunArgs?: string[];
-}): Promise<ProjectEnvProbe> {
+}): Promise<ProjectEnvProcessResult> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-project-env-"));
 	tempDirs.push(root);
 	const projectDir = path.join(root, "project");
@@ -264,7 +270,7 @@ async function runProjectEnvProbe(options: {
 	fs.mkdirSync(configDir, { recursive: true });
 	fs.writeFileSync(
 		path.join(projectDir, ".env"),
-		"PROJECT_ONLY=project\nSHARED_VALUE=project\nINHERITED_VALUE=project\n",
+		"PROJECT_ONLY=project\nSHARED_VALUE=project\nINHERITED_VALUE=same\nPI_COMPILED=1\n",
 	);
 	fs.writeFileSync(path.join(projectDir, ".env.local"), "LOCAL_ONLY=local\n");
 	fs.writeFileSync(path.join(agentDir, ".env"), "SHARED_VALUE=agent\n");
@@ -289,7 +295,7 @@ async function runProjectEnvProbe(options: {
 			OMP_PROFILE: undefined,
 			BUN_ENV: undefined,
 			HOME: homeDir,
-			INHERITED_VALUE: "launcher",
+			INHERITED_VALUE: "same",
 			LOCAL_ONLY: undefined,
 			NODE_ENV: undefined,
 			PI_CODING_AGENT_DIR: agentDir,
@@ -311,8 +317,17 @@ async function runProjectEnvProbe(options: {
 		new Response(proc.stderr).text(),
 		proc.exited,
 	]);
-	expect(exitCode, stderr).toBe(0);
-	return JSON.parse(stdout) as ProjectEnvProbe;
+	return { exitCode, stdout, stderr };
+}
+
+async function runProjectEnvProbe(options: {
+	launchFlag?: string;
+	configFlag?: string;
+	bunArgs?: string[];
+}): Promise<ProjectEnvProbe> {
+	const result = await spawnProjectEnvProbe(options);
+	expect(result.exitCode, result.stderr).toBe(0);
+	return JSON.parse(result.stdout) as ProjectEnvProbe;
 }
 
 describe("PI_IGNORE_PROJECT_ENV", () => {
@@ -320,15 +335,27 @@ describe("PI_IGNORE_PROJECT_ENV", () => {
 		project: null,
 		local: null,
 		shared: "agent",
-		inherited: "launcher",
+		inherited: "same",
 	};
 
-	it("excludes Bun-preloaded project dotenv values when inherited from the launcher", async () => {
-		expect(await runProjectEnvProbe({ launchFlag: "1" })).toEqual(withoutProject);
-	});
+	it.skipIf(process.platform !== "linux")(
+		"ignores a project PI_COMPILED spoof and preserves a same-valued launcher variable",
+		async () => {
+			expect(await runProjectEnvProbe({ launchFlag: "1" })).toEqual(withoutProject);
+		},
+	);
+
+	it.skipIf(process.platform === "linux")(
+		"rejects ambiguous source cleanup without an authoritative launch snapshot",
+		async () => {
+			const result = await spawnProjectEnvProbe({ launchFlag: "1" });
+			expect(result.exitCode).not.toBe(0);
+			expect(result.stderr).toContain("requires Bun's --no-env-file");
+		},
+	);
 
 	it("can be enabled from the OMP config-root dotenv file", async () => {
-		expect(await runProjectEnvProbe({ configFlag: "1" })).toEqual(withoutProject);
+		expect(await runProjectEnvProbe({ configFlag: "1", bunArgs: ["--no-env-file"] })).toEqual(withoutProject);
 	});
 
 	it("skips the manual project merge when Bun autoloading is disabled", async () => {
@@ -381,7 +408,7 @@ describe("PI_IGNORE_PROJECT_ENV", () => {
 			project: "project",
 			local: null,
 			shared: "project",
-			inherited: "launcher",
+			inherited: "same",
 		});
 	});
 
@@ -390,7 +417,7 @@ describe("PI_IGNORE_PROJECT_ENV", () => {
 			project: "project",
 			local: "local",
 			shared: "project",
-			inherited: "launcher",
+			inherited: "same",
 		});
 	});
 });
