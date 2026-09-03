@@ -1615,6 +1615,9 @@
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+### Added
+
+- Added a reusable confidential terminal-input helper that requires exclusive ownership of a raw-mode TTY, rejects concurrent or shared input consumers, never echoes the entered value, and restores terminal state after submission, cancellation, EOF, or stream failures.
 
 ## [17.1.8] - 2026-07-28
 
