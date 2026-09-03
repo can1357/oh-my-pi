@@ -1902,6 +1902,76 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("glob diagnostics give a project-aware server the per-file cap, not a 400ms batch cap (#10701)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-glob-cap-");
+		await initTheme();
+		try {
+			const a = path.join(tempDir.path(), "a.rs");
+			const b = path.join(tempDir.path(), "b.rs");
+			await Promise.all([Bun.write(a, "fn a() {}\n"), Bun.write(b, "fn b() {}\n")]);
+
+			// Project-aware: no createClient, no isLinter → isProjectAwareLspServer is true.
+			const server: ServerConfig = { command: "test-lsp", fileTypes: [".rs"], rootMarkers: ["Cargo.toml"] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 1,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+				// Advertise LSP 3.17 pull diagnostics so the tool issues textDocument/diagnostic.
+				serverCapabilities: { diagnosticProvider: {} },
+			} as unknown as LspClient;
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", server]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "refreshFile").mockResolvedValue(undefined);
+			// The first on-demand pull needs more budget than the old 400ms batch cap.
+			// Keyed off the per-request timeout the tool hands down (deterministic, no
+			// wall clock): under the old cap it would be 400ms and this rejects; with
+			// the per-file cap it is the project-aware budget and the pull answers.
+			const REQUIRED_PULL_BUDGET_MS = 800;
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method, _params, _signal, timeoutMs) => {
+				if (method === "textDocument/diagnostic") {
+					if (timeoutMs !== undefined && timeoutMs < REQUIRED_PULL_BUDGET_MS) {
+						throw new Error(`LSP request textDocument/diagnostic timed out after ${timeoutMs}ms`);
+					}
+					return { kind: "full", items: [] };
+				}
+				return null;
+			});
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("glob-cap", {
+				action: "diagnostics",
+				file: "*.rs",
+				timeout: 20,
+			});
+
+			// A healthy server that simply computes on demand must not render as a total
+			// failure across the batch.
+			expect(result.details?.success).toBe(true);
+			const output = textResult(result);
+			expect(output).not.toContain("all language servers failed");
+			expect(output).toContain("a.rs: no issues");
+			expect(output).toContain("b.rs: no issues");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("reports failure when every workspace-symbol server fails (#8387)", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-workspace-symbol-all-fail-");
 		try {
