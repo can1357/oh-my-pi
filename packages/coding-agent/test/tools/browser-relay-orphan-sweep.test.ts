@@ -210,9 +210,7 @@ describe("browser relay orphan sweep scheduling", () => {
 		const seeded = seedOrphanSweepDeadline(null, 31_000, 0);
 
 		expect(seeded).toEqual({ deadlineMs: 31_000, generation: 1 });
-		expect(
-			restoreOrphanSweepDeadline(null, seeded.generation === 0),
-		).toBeUndefined();
+		expect(restoreOrphanSweepDeadline(null, seeded.generation === 0)).toBeUndefined();
 		expect(seedOrphanSweepDeadline(31_000, 61_000, 1)).toEqual({
 			deadlineMs: 31_000,
 			generation: 1,

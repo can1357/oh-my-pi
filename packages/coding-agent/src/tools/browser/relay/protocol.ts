@@ -40,9 +40,7 @@ export type RelayRpcRequest =
 	| { op: "ungroup"; tabIds: number[] };
 
 /** Messages sent relay → extension. */
-export type RelayToExtMessage =
-	| ({ t: "rpc"; id: number } & RelayRpcRequest)
-	| { t: "pong" };
+export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };
 
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =

@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
-import {
-	RelayBridge,
-	type RelaySocket,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
+import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
 	RelayToExtMessage,
@@ -26,13 +23,11 @@ class FakeExtSocket implements RelaySocket {
 		this.closeCount++;
 	}
 	rpcs<Op extends RelayRpcRequest["op"]>(op: Op): Array<ExtRpc<Op>> {
-		return this.messages.filter(
-			(msg): msg is ExtRpc<Op> => msg.t === "rpc" && msg.op === op,
-		);
+		return this.messages.filter((msg): msg is ExtRpc<Op> => msg.t === "rpc" && msg.op === op);
 	}
 	/** RPC requests of `op` not yet answered through {@link ack}. */
 	pending<Op extends RelayRpcRequest["op"]>(op: Op): Array<ExtRpc<Op>> {
-		return this.rpcs(op).filter((msg) => !this.#acked.has(msg.id));
+		return this.rpcs(op).filter(msg => !this.#acked.has(msg.id));
 	}
 	markAcked(id: number): void {
 		this.#acked.add(id);
@@ -47,16 +42,9 @@ class FakeCdpSocket implements RelaySocket {
 	}
 	close(): void {}
 	sessionFor(commandId: number): string | undefined {
-		const msg = this.messages.find((m) => m.id === commandId);
-		const result =
-			msg && "result" in msg && msg.result && typeof msg.result === "object"
-				? msg.result
-				: undefined;
-		return result &&
-			"sessionId" in result &&
-			typeof result.sessionId === "string"
-			? result.sessionId
-			: undefined;
+		const msg = this.messages.find(m => m.id === commandId);
+		const result = msg && "result" in msg && msg.result && typeof msg.result === "object" ? msg.result : undefined;
+		return result && "sessionId" in result && typeof result.sessionId === "string" ? result.sessionId : undefined;
 	}
 	/** Session ids the bridge announced through `Target.attachedToTarget`. */
 	attachedSessions(): string[] {
@@ -64,12 +52,7 @@ class FakeCdpSocket implements RelaySocket {
 		for (const msg of this.messages) {
 			if (msg.method !== "Target.attachedToTarget") continue;
 			const params = msg.params;
-			if (
-				params &&
-				typeof params === "object" &&
-				"sessionId" in params &&
-				typeof params.sessionId === "string"
-			) {
+			if (params && typeof params === "object" && "sessionId" in params && typeof params.sessionId === "string") {
 				out.push(params.sessionId);
 			}
 		}
@@ -117,34 +100,18 @@ function connect(
 }
 
 /** Answer every unanswered extension RPC of `op` with `ok: true` and `result`. */
-function ack(
-	bridge: RelayBridge,
-	socket: FakeExtSocket,
-	op: RelayRpcRequest["op"],
-	result: unknown = {},
-): void {
+function ack(bridge: RelayBridge, socket: FakeExtSocket, op: RelayRpcRequest["op"], result: unknown = {}): void {
 	for (const rpc of socket.pending(op)) {
 		socket.markAcked(rpc.id);
-		bridge.extMessage(
-			socket,
-			JSON.stringify({ t: "rpcResult", id: rpc.id, ok: true, result }),
-		);
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: rpc.id, ok: true, result }));
 	}
 }
 
 /** Fail every unanswered extension RPC of `op` with `ok: false`. */
-function nack(
-	bridge: RelayBridge,
-	socket: FakeExtSocket,
-	op: RelayRpcRequest["op"],
-	error = "rpc failed",
-): void {
+function nack(bridge: RelayBridge, socket: FakeExtSocket, op: RelayRpcRequest["op"], error = "rpc failed"): void {
 	for (const rpc of socket.pending(op)) {
 		socket.markAcked(rpc.id);
-		bridge.extMessage(
-			socket,
-			JSON.stringify({ t: "rpcResult", id: rpc.id, ok: false, error }),
-		);
+		bridge.extMessage(socket, JSON.stringify({ t: "rpcResult", id: rpc.id, ok: false, error }));
 	}
 }
 
@@ -159,10 +126,7 @@ async function flush(): Promise<void> {
  * queue, but its depth varies with the scheduler, so a fixed {@link flush}
  * count is racy. Poll the observable condition instead of guessing a tick count.
  */
-async function waitFor(
-	predicate: () => boolean,
-	label = "condition",
-): Promise<void> {
+async function waitFor(predicate: () => boolean, label = "condition"): Promise<void> {
 	for (let i = 0; i < 1000; i++) {
 		if (predicate()) return;
 		await Promise.resolve();
@@ -190,21 +154,13 @@ async function attachPage(
 		}),
 	);
 	await waitFor(
-		() =>
-			ext.pending("attach").length > 0 ||
-			cdp.sessionFor(attachId) !== undefined,
+		() => ext.pending("attach").length > 0 || cdp.sessionFor(attachId) !== undefined,
 		`attach RPC or reply for tab ${tabId}`,
 	);
 	if (ext.pending("attach").length > 0) ack(bridge, ext, "attach");
-	await waitFor(
-		() => cdp.sessionFor(attachId) !== undefined,
-		`attachToTarget reply for tab ${tabId}`,
-	);
+	await waitFor(() => cdp.sessionFor(attachId) !== undefined, `attachToTarget reply for tab ${tabId}`);
 	const sessionId = cdp.sessionFor(attachId);
-	if (!sessionId)
-		throw new Error(
-			`attachToTarget for tab ${tabId} did not produce a session`,
-		);
+	if (!sessionId) throw new Error(`attachToTarget for tab ${tabId} did not produce a session`);
 	return sessionId;
 }
 
@@ -226,21 +182,13 @@ async function attachTab(
 		}),
 	);
 	await waitFor(
-		() =>
-			ext.pending("attach").length > 0 ||
-			cdp.sessionFor(attachId) !== undefined,
+		() => ext.pending("attach").length > 0 || cdp.sessionFor(attachId) !== undefined,
 		`attach RPC or reply for TAB ${tabId}`,
 	);
 	if (ext.pending("attach").length > 0) ack(bridge, ext, "attach");
-	await waitFor(
-		() => cdp.sessionFor(attachId) !== undefined,
-		`attachToTarget reply for TAB ${tabId}`,
-	);
+	await waitFor(() => cdp.sessionFor(attachId) !== undefined, `attachToTarget reply for TAB ${tabId}`);
 	const sessionId = cdp.sessionFor(attachId);
-	if (!sessionId)
-		throw new Error(
-			`attachToTarget for TAB ${tabId} did not produce a session`,
-		);
+	if (!sessionId) throw new Error(`attachToTarget for TAB ${tabId} did not produce a session`);
 	return sessionId;
 }
 
@@ -256,10 +204,7 @@ async function claimTab(
 	tabId: number,
 ): Promise<void> {
 	const sessionId = await attachPage(bridge, ext, cdp, connId, tabId);
-	bridge.cdpMessage(
-		connId,
-		JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget" }),
-	);
+	bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget" }));
 	await flush();
 }
 
@@ -267,15 +212,8 @@ describe("RelayBridge tab grouping", () => {
 	it("groups nothing on hello or tab lifecycle events — only claimed tabs join the omp group", () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const socket = new FakeExtSocket();
-		connect(bridge, socket, [
-			tab({ tabId: 1 }),
-			tab({ tabId: 2 }),
-			tab({ tabId: 3, url: "about:blank" }),
-		]);
-		bridge.extMessage(
-			socket,
-			JSON.stringify({ t: "tabCreated", tab: tab({ tabId: 9 }) }),
-		);
+		connect(bridge, socket, [tab({ tabId: 1 }), tab({ tabId: 2 }), tab({ tabId: 3, url: "about:blank" })]);
+		bridge.extMessage(socket, JSON.stringify({ t: "tabCreated", tab: tab({ tabId: 9 }) }));
 		expect(socket.rpcs("group")).toHaveLength(0);
 	});
 
@@ -289,10 +227,7 @@ describe("RelayBridge tab grouping", () => {
 		// puppeteer send Page.enable/Page.getFrameTree to all of them.
 		for (const tabId of [1, 2]) {
 			const sessionId = await attachPage(bridge, ext, cdp, connId, tabId);
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id: ++msgSeq, sessionId, method: "Page.enable" }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Page.enable" }));
 			bridge.cdpMessage(
 				connId,
 				JSON.stringify({
@@ -323,10 +258,7 @@ describe("RelayBridge tab grouping", () => {
 	it("never groups pinned tabs or tabs in a user group, even when claimed", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
-		connect(bridge, ext, [
-			tab({ tabId: 3, pinned: true }),
-			tab({ tabId: 4, groupId: 77 }),
-		]);
+		connect(bridge, ext, [tab({ tabId: 3, pinned: true }), tab({ tabId: 4, groupId: 77 })]);
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		await claimTab(bridge, ext, cdp, connId, 3);
@@ -375,15 +307,9 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
 		// Chrome reports the grouping we just made — no opt-out.
-		bridge.extMessage(
-			ext,
-			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }),
-		);
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
 		// The user drags the tab out of the group.
-		bridge.extMessage(
-			ext,
-			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: -1 }) }),
-		);
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: -1 }) }));
 		// A later navigation on the still-claimed tab must not re-group it.
 		bridge.extMessage(
 			ext,
@@ -462,14 +388,8 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const oldPageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }),
-		);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
 		await flush();
 		bridge.cdpMessage(
 			connId,
@@ -503,20 +423,14 @@ describe("RelayBridge tab grouping", () => {
 		expect(attaches).toHaveLength(1);
 		expect(attaches[0]!.tabId).toBe(1);
 		expect(ext2.rpcs("send")).toHaveLength(0);
-		expect(
-			cdp.messages.find((message) => message.id === staleCommandId)?.error,
-		).toEqual({
+		expect(cdp.messages.find(message => message.id === staleCommandId)?.error).toEqual({
 			code: -32000,
 			message: `Unknown session id ${oldPageSession}`,
 		});
 
 		ack(bridge, ext2, "attach");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.method === "Target.attachedToTarget",
-			),
-		).toHaveLength(3);
+		expect(cdp.messages.filter(message => message.method === "Target.attachedToTarget")).toHaveLength(3);
 	});
 
 	it("preserves a user's debugger detach while disconnected", async () => {
@@ -534,11 +448,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("attach")).toHaveLength(0);
-		expect(
-			cdp.messages.some(
-				(message) => message.method === "Target.detachedFromTarget",
-			),
-		).toBe(true);
+		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(true);
 	});
 
 	it("detaches an inherited debugger attachment when no downstream session holds it", async () => {
@@ -554,7 +464,7 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await flush();
 
-		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
 	it("detaches a legacy inherited debugger attachment with no downstream holders", async () => {
@@ -578,7 +488,7 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await flush();
 
-		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
 	it("releases an unattached recovery marker with no downstream holders", async () => {
@@ -591,7 +501,7 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await flush();
 
-		expect(ext.rpcs("forgetRecovery").map((rpc) => rpc.tabId)).toEqual([1]);
+		expect(ext.rpcs("forgetRecovery").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
 	it("retries inherited debugger attachment cleanup after detach RPC failure", async () => {
@@ -603,7 +513,7 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 		});
 		await flush();
-		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 
 		nack(bridge, ext, "detach", "detach failed");
 		await flush();
@@ -613,7 +523,7 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 		});
 		await flush();
-		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1, 1]);
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1, 1]);
 	});
 
 	it("retracts the recovery target when the guard-authorized reattach fails", async () => {
@@ -624,14 +534,8 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		await attachPage(bridge, ext, cdp, connId, 1);
 		// Discover + auto-attach so the reconnect path announces and re-attaches.
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }),
-		);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
 		await flush();
 
 		bridge.extClosed(ext);
@@ -644,9 +548,7 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 		});
 		await flush();
-		const created = cdp.messages.filter(
-			(m) => m.method === "Target.targetCreated",
-		).length;
+		const created = cdp.messages.filter(m => m.method === "Target.targetCreated").length;
 		const attach = ext2.pending("attach");
 		expect(attach).toHaveLength(1);
 		bridge.extMessage(
@@ -662,9 +564,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		// The failed reattach retracts the re-announced target.
-		const destroyed = cdp.messages.filter(
-			(m) => m.method === "Target.targetDestroyed",
-		).length;
+		const destroyed = cdp.messages.filter(m => m.method === "Target.targetDestroyed").length;
 		expect(destroyed).toBeGreaterThan(0);
 		expect(created).toBeGreaterThan(0);
 	});
@@ -676,14 +576,8 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		await attachPage(bridge, ext, cdp, connId, 1);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }),
-		);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
 		await flush();
 
 		bridge.extClosed(ext);
@@ -695,9 +589,7 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await flush();
 		expect(ext2.pending("attach")).toHaveLength(1);
-		const destroyedBeforeRace = cdp.messages.filter(
-			(m) => m.method === "Target.targetDestroyed",
-		).length;
+		const destroyedBeforeRace = cdp.messages.filter(m => m.method === "Target.targetDestroyed").length;
 
 		// A guard detach-refresh delivers a second hello for the same socket while
 		// that attach is unresolved. It must not clear `attaching` and start a
@@ -720,12 +612,8 @@ describe("RelayBridge tab grouping", () => {
 		// racing hello added no retract of its own.
 		ack(bridge, ext2, "attach");
 		await flush();
-		expect(
-			cdp.messages.filter((m) => m.method === "Target.targetDestroyed"),
-		).toHaveLength(destroyedBeforeRace);
-		expect(
-			cdp.messages.filter((m) => m.method === "Target.attachedToTarget").length,
-		).toBeGreaterThan(0);
+		expect(cdp.messages.filter(m => m.method === "Target.targetDestroyed")).toHaveLength(destroyedBeforeRace);
+		expect(cdp.messages.filter(m => m.method === "Target.attachedToTarget").length).toBeGreaterThan(0);
 	});
 
 	it("reattaches a recoverable tab for a session holder that never enabled auto-attach", async () => {
@@ -788,7 +676,7 @@ describe("RelayBridge tab grouping", () => {
 		);
 		ack(bridge, ext2, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
@@ -836,14 +724,13 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
 		// setAutoAttach on a live tab session mints and announces a page child.
 		const pageChild = cdp.messages.find(
-			(m) =>
+			m =>
 				m.method === "Target.attachedToTarget" &&
-				(m.params as { targetInfo?: { type?: string } })?.targetInfo?.type ===
-					"page",
+				(m.params as { targetInfo?: { type?: string } })?.targetInfo?.type === "page",
 		);
 		expect(pageChild).toBeDefined();
 
@@ -864,10 +751,7 @@ describe("RelayBridge tab grouping", () => {
 		// Discovery + manual attachToTarget, but no setAutoAttach: the holder still
 		// owns a long-lived page pseudo-session routed by tabId, and Chrome mints no
 		// replacement on recovery. Preservation must not be gated on `discover`.
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
 		await flush();
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
@@ -895,7 +779,7 @@ describe("RelayBridge tab grouping", () => {
 		);
 		ack(bridge, ext2, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
@@ -913,19 +797,12 @@ describe("RelayBridge tab grouping", () => {
 		// while still firing destroy/recreate for the same page breaks the
 		// consumer-visible page lifecycle. The recovery must suppress both the
 		// targetDestroyed and the paired targetCreated for the preserved connection.
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
 		await flush();
 		await attachPage(bridge, ext, cdp, connId, 1);
 
-		const destroyedBefore = cdp.messages.filter(
-			(m) => m.method === "Target.targetDestroyed",
-		).length;
-		const createdBefore = cdp.messages.filter(
-			(m) => m.method === "Target.targetCreated",
-		).length;
+		const destroyedBefore = cdp.messages.filter(m => m.method === "Target.targetDestroyed").length;
+		const createdBefore = cdp.messages.filter(m => m.method === "Target.targetCreated").length;
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -937,12 +814,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		// No lifecycle churn for the preserved page target on this connection.
-		expect(
-			cdp.messages.filter((m) => m.method === "Target.targetDestroyed"),
-		).toHaveLength(destroyedBefore);
-		expect(
-			cdp.messages.filter((m) => m.method === "Target.targetCreated"),
-		).toHaveLength(createdBefore);
+		expect(cdp.messages.filter(m => m.method === "Target.targetDestroyed")).toHaveLength(destroyedBefore);
+		expect(cdp.messages.filter(m => m.method === "Target.targetCreated")).toHaveLength(createdBefore);
 	});
 
 	it("holds a preserved session's command until the recovery attach acknowledges", async () => {
@@ -986,7 +859,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
-		expect(cdp.messages.find((m) => m.id === cmdId)?.error).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
 
 	it("replays preserved domain subscriptions and invalidates child sessions before forwarding", async () => {
@@ -997,23 +870,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 		await sendRootCommand("Network.enable", { maxTotalBufferSize: 4096 });
 		await sendRootCommand("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
@@ -1045,7 +908,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		expect(
 			cdp.messages.some(
-				(message) =>
+				message =>
 					message.sessionId === pageSession &&
 					message.method === "Target.detachedFromTarget" &&
 					typeof message.params === "object" &&
@@ -1057,9 +920,7 @@ describe("RelayBridge tab grouping", () => {
 
 		ack(bridge, ext2, "attach");
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ maxTotalBufferSize: 4096 });
 
 		const commandId = ++msgSeq;
@@ -1075,29 +936,20 @@ describe("RelayBridge tab grouping", () => {
 		// Fetch.enable was followed by a successful Fetch.disable, so only the
 		// still-active Network and Target subscriptions replay. The new command is
 		// held until both acknowledgements arrive.
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-			"Target.setAutoAttach",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Target.setAutoAttach"]);
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.enable",
 			"Target.setAutoAttach",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("reconnects if cleanup after a subscription replay failure also fails", async () => {
@@ -1125,20 +977,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.pending("attach").length === 1,
-			"subscription recovery attach",
-		);
+		await waitFor(() => ext2.pending("attach").length === 1, "subscription recovery attach");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.pending("send").some((rpc) => rpc.method === "Network.enable"),
-			"subscription replay RPC",
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Network.enable"), "subscription replay RPC");
 		nack(bridge, ext2, "send", "replay denied");
-		await waitFor(
-			() => ext2.pending("detach").length === 1,
-			"cleanup detach after replay failure",
-		);
+		await waitFor(() => ext2.pending("detach").length === 1, "cleanup detach after replay failure");
 		nack(bridge, ext2, "detach", "cleanup detach denied");
 		await flush();
 
@@ -1179,18 +1022,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"owner auto-attach replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Target.setAutoAttach",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "owner auto-attach replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Target.setAutoAttach"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({
 			autoAttach: true,
 			waitForDebuggerOnStart: true,
@@ -1203,14 +1038,8 @@ describe("RelayBridge tab grouping", () => {
 		// Target.setAutoAttach disable instead of erroring and retracting survivors.
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned auto-attach cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Target.setAutoAttach",
-			"Target.setAutoAttach",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned auto-attach cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Target.setAutoAttach", "Target.setAutoAttach"]);
 		expect(ext2.rpcs("send")[1]!.params).toEqual({
 			autoAttach: false,
 			waitForDebuggerOnStart: true,
@@ -1230,18 +1059,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Target.setAutoAttach",
 			"Target.setAutoAttach",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats an auto-attach disable as a tab-wide clear so a stale enable is not revived", async () => {
@@ -1297,15 +1122,12 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
 		// No auto-attach replay: the disable cleared the shared root state tab-wide.
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([]);
 
 		const commandId = ++msgSeq;
 		bridge.cdpMessage(
@@ -1317,16 +1139,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.getCookies",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.getCookies"]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			first.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats a neutral network-conditions reset as a tab-wide clear so stale throttling is not revived", async () => {
@@ -1385,15 +1201,12 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
 		// No network-conditions replay: the neutral reset cleared the shared state.
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([]);
 
 		const commandId = ++msgSeq;
 		bridge.cdpMessage(
@@ -1405,16 +1218,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.getCookies",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.getCookies"]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			first.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it('treats `connectionType: "none"` as a neutral network-conditions reset', async () => {
@@ -1471,14 +1278,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			'connectionType "none" recovery attach RPC',
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, 'connectionType "none" recovery attach RPC');
 		ack(bridge, ext2, "attach");
 		await flush();
 
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([]);
 	});
 
 	it("keeps the shared root disabled when another preserved session issued the latest disable", async () => {
@@ -1518,10 +1322,7 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"shared-root recovery attach",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "shared-root recovery attach");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -1538,16 +1339,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.getCookies",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.getCookies"]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			first.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("drops stale tab-wide toggles when another preserved session disables them before recovery", async () => {
@@ -1590,10 +1385,7 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -1608,16 +1400,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.getCookies",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.getCookies"]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			first.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("drops root subscriptions owned by retracted auto-attach sessions during recovery", async () => {
@@ -1630,19 +1416,10 @@ describe("RelayBridge tab grouping", () => {
 		const auto = new FakeCdpSocket();
 		const autoConn = bridge.cdpConnected(auto);
 		const autoAttachId = ++msgSeq;
-		bridge.cdpMessage(
-			autoConn,
-			JSON.stringify({ id: autoAttachId, method: "Target.setAutoAttach" }),
-		);
-		await waitFor(
-			() => auto.messages.some((message) => message.id === autoAttachId),
-			"browser auto-attach reply",
-		);
-		const autoTabSession = auto
-			.attachedSessions()
-			.find((sessionId) => sessionId.startsWith("ST"));
-		if (!autoTabSession)
-			throw new Error("setAutoAttach did not mint a tab session");
+		bridge.cdpMessage(autoConn, JSON.stringify({ id: autoAttachId, method: "Target.setAutoAttach" }));
+		await waitFor(() => auto.messages.some(message => message.id === autoAttachId), "browser auto-attach reply");
+		const autoTabSession = auto.attachedSessions().find(sessionId => sessionId.startsWith("ST"));
+		if (!autoTabSession) throw new Error("setAutoAttach did not mint a tab session");
 		bridge.cdpMessage(
 			autoConn,
 			JSON.stringify({
@@ -1652,11 +1429,8 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		const autoSession = auto
-			.attachedSessions()
-			.find((sessionId) => sessionId.startsWith("SP"));
-		if (!autoSession)
-			throw new Error("setAutoAttach did not mint a page session");
+		const autoSession = auto.attachedSessions().find(sessionId => sessionId.startsWith("SP"));
+		if (!autoSession) throw new Error("setAutoAttach did not mint a page session");
 
 		bridge.cdpMessage(
 			manualConn,
@@ -1688,29 +1462,19 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"manual subscription replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "manual subscription replay");
 
 		// Recovery keeps the manual page session and retracts auto-attach sessions,
 		// so only state owned by the preserved session may replay on the fresh root.
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({
 			patterns: [{ urlPattern: "https://manual.example/*" }],
 		});
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 		const commandId = ++msgSeq;
 		bridge.cdpMessage(
 			manualConn,
@@ -1721,10 +1485,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Network.getCookies",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Network.getCookies"]);
 	});
 
 	it("retries detach when preserved subscription replay and cleanup fail", async () => {
@@ -1752,20 +1513,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.pending("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.pending("send").length === 1,
-			"subscription replay RPC",
-		);
+		await waitFor(() => ext2.pending("send").length === 1, "subscription replay RPC");
 		nack(bridge, ext2, "send", "replay denied");
-		await waitFor(
-			() => ext2.pending("detach").length === 1,
-			"failed-replay cleanup detach",
-		);
+		await waitFor(() => ext2.pending("detach").length === 1, "failed-replay cleanup detach");
 		nack(bridge, ext2, "detach", "cleanup detach denied");
 		await flush();
 
@@ -1801,18 +1553,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"owner subscription replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "owner subscription replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 
 		// The owner disconnects after its subscription has been sent to the fresh
 		// Chrome root but before replay observes completion. Another holder keeps
@@ -1820,14 +1564,8 @@ describe("RelayBridge tab grouping", () => {
 		// of leaving request interception enabled with no owning client.
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned subscription cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Fetch.disable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned subscription cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable"]);
 		ack(bridge, ext2, "send");
 		await flush();
 
@@ -1841,11 +1579,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Fetch.disable",
-			"Network.getCookies",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 	});
 
 	it("retries orphaned subscription cleanup after an extension replacement", async () => {
@@ -1871,26 +1605,16 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext, "send");
-		await waitFor(
-			() => ext.pending("send").length === 1,
-			"orphaned subscription cleanup on old socket",
-		);
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => ext.pending("send").length === 1, "orphaned subscription cleanup on old socket");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 
 		const replacement = new FakeExtSocket();
 		connect(bridge, replacement, [tab({ tabId: 1 })], {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => replacement.pending("send").length === 1,
-			"retried orphaned cleanup on replacement socket",
-		);
-		expect(replacement.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => replacement.pending("send").length === 1, "retried orphaned cleanup on replacement socket");
+		expect(replacement.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 		ack(bridge, replacement, "send");
 		await flush();
 
@@ -1904,17 +1628,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(replacement.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-			"Network.getCookies",
-		]);
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
 		ack(bridge, replacement, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("reapplies the surviving subscription instead of disabling first when a replay owner disconnects", async () => {
@@ -1923,22 +1640,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const originalOwner = new FakeCdpSocket();
 		const originalOwnerConn = bridge.cdpConnected(originalOwner);
-		const originalOwnerSession = await attachPage(
-			bridge,
-			ext,
-			originalOwner,
-			originalOwnerConn,
-			1,
-		);
+		const originalOwnerSession = await attachPage(bridge, ext, originalOwner, originalOwnerConn, 1);
 		const replayOwner = new FakeCdpSocket();
 		const replayOwnerConn = bridge.cdpConnected(replayOwner);
-		const replayOwnerSession = await attachPage(
-			bridge,
-			ext,
-			replayOwner,
-			replayOwnerConn,
-			1,
-		);
+		const replayOwnerSession = await attachPage(bridge, ext, replayOwner, replayOwnerConn, 1);
 
 		bridge.cdpMessage(
 			originalOwnerConn,
@@ -1971,15 +1676,9 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"surviving fetch replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "surviving fetch replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Fetch.enable",
 			params: { patterns: [{ urlPattern: "https://replacement.example/*" }] },
@@ -1987,18 +1686,12 @@ describe("RelayBridge tab grouping", () => {
 
 		bridge.cdpClosed(replayOwnerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"surviving fetch reapply",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 2, "surviving fetch reapply");
 		expect(ext2.rpcs("send")[1]).toMatchObject({
 			method: "Fetch.enable",
 			params: { patterns: [{ urlPattern: "https://original.example/*" }] },
 		});
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Fetch.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.enable"]);
 	});
 
 	it("disables a live root subscription when its owner disconnects but another holder keeps the tab attached", async () => {
@@ -2026,14 +1719,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext.rpcs("send").length === 2,
-			"live orphaned Fetch cleanup",
-		);
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Fetch.disable",
-		]);
+		await waitFor(() => ext.rpcs("send").length === 2, "live orphaned Fetch cleanup");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable"]);
 		ack(bridge, ext, "send");
 		await flush();
 
@@ -2047,18 +1734,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Fetch.disable",
-			"Network.getCookies",
-		]);
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 		ack(bridge, ext, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("clears departed emulated-media dimensions during live owner cleanup", async () => {
@@ -2067,22 +1746,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const mediaOwner = new FakeCdpSocket();
 		const mediaOwnerConn = bridge.cdpConnected(mediaOwner);
-		const mediaOwnerSession = await attachPage(
-			bridge,
-			ext,
-			mediaOwner,
-			mediaOwnerConn,
-			1,
-		);
+		const mediaOwnerSession = await attachPage(bridge, ext, mediaOwner, mediaOwnerConn, 1);
 		const featuresOwner = new FakeCdpSocket();
 		const featuresOwnerConn = bridge.cdpConnected(featuresOwner);
-		const featuresOwnerSession = await attachPage(
-			bridge,
-			ext,
-			featuresOwner,
-			featuresOwnerConn,
-			1,
-		);
+		const featuresOwnerSession = await attachPage(bridge, ext, featuresOwner, featuresOwnerConn, 1);
 
 		bridge.cdpMessage(
 			mediaOwnerConn,
@@ -2111,10 +1778,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(mediaOwnerConn);
-		await waitFor(
-			() => ext.rpcs("send").length === 3,
-			"live emulated-media cleanup",
-		);
+		await waitFor(() => ext.rpcs("send").length === 3, "live emulated-media cleanup");
 		expect(ext.rpcs("send")[2]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -2151,26 +1815,16 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext.pending("send").length === 1,
-			"live cleanup send on the old socket",
-		);
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => ext.pending("send").length === 1, "live cleanup send on the old socket");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 
 		const replacement = new FakeExtSocket();
 		connect(bridge, replacement, [tab({ tabId: 1 })], {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => replacement.pending("send").length === 1,
-			"retried live cleanup on replacement socket",
-		);
-		expect(replacement.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => replacement.pending("send").length === 1, "retried live cleanup on replacement socket");
+		expect(replacement.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 		ack(bridge, replacement, "send");
 		await flush();
 
@@ -2184,17 +1838,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(replacement.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-			"Network.getCookies",
-		]);
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
 		ack(bridge, replacement, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("resumes queued live cleanup after replacement recovery finishes", async () => {
@@ -2224,18 +1871,10 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"first recovery attach",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "first recovery attach");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"first replayed owner subscription",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "first replayed owner subscription");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 
 		// The owner disappears after recovery replay sent its Fetch.enable but before
 		// replay finishes observing the ack. Cleanup is queued for the next socket.
@@ -2250,13 +1889,8 @@ describe("RelayBridge tab grouping", () => {
 		// The replacement replay no longer includes the departed owner's Fetch.enable,
 		// so recovery itself may finish without any send RPCs. The already-applied
 		// Fetch state on Chrome still must be cleared after that recovery completes.
-		await waitFor(
-			() => replacement.rpcs("send").length === 1,
-			"queued cleanup after replacement recovery",
-		);
-		expect(replacement.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => replacement.rpcs("send").length === 1, "queued cleanup after replacement recovery");
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 		ack(bridge, replacement, "send");
 		await flush();
 
@@ -2270,17 +1904,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(replacement.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-			"Network.getCookies",
-		]);
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
 		ack(bridge, replacement, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("retries live owner cleanup after an ordinary extension disconnect", async () => {
@@ -2308,13 +1935,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext.pending("send").length === 1,
-			"live cleanup send before disconnect",
-		);
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => ext.pending("send").length === 1, "live cleanup send before disconnect");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 
 		bridge.extClosed(ext);
 		await flush();
@@ -2324,13 +1946,8 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => reconnected.pending("send").length === 1,
-			"retried live cleanup after reconnect",
-		);
-		expect(reconnected.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-		]);
+		await waitFor(() => reconnected.pending("send").length === 1, "retried live cleanup after reconnect");
+		expect(reconnected.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
 		ack(bridge, reconnected, "send");
 		await flush();
 
@@ -2344,17 +1961,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(reconnected.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.disable",
-			"Network.getCookies",
-		]);
+		expect(reconnected.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
 		ack(bridge, reconnected, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("drains reconciliation changes queued while an earlier cleanup RPC is in flight", async () => {
@@ -2363,22 +1973,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
 		const survivingOwner = new FakeCdpSocket();
 		const survivingOwnerConn = bridge.cdpConnected(survivingOwner);
-		const survivingOwnerSession = await attachPage(
-			bridge,
-			ext,
-			survivingOwner,
-			survivingOwnerConn,
-			1,
-		);
+		const survivingOwnerSession = await attachPage(bridge, ext, survivingOwner, survivingOwnerConn, 1);
 		const orphanedOwner = new FakeCdpSocket();
 		const orphanedOwnerConn = bridge.cdpConnected(orphanedOwner);
-		const orphanedOwnerSession = await attachPage(
-			bridge,
-			ext,
-			orphanedOwner,
-			orphanedOwnerConn,
-			1,
-		);
+		const orphanedOwnerSession = await attachPage(bridge, ext, orphanedOwner, orphanedOwnerConn, 1);
 		const holder = new FakeCdpSocket();
 		const holderConn = bridge.cdpConnected(holder);
 		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
@@ -2408,24 +2006,16 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		bridge.cdpClosed(orphanedOwnerConn);
 		ack(bridge, ext, "send");
-		await waitFor(
-			() => ext.pending("send").length === 1,
-			"reapply second owner while cleanup is in flight",
-		);
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-		]);
+		await waitFor(() => ext.pending("send").length === 1, "reapply second owner while cleanup is in flight");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 		expect(ext.pending("send")[0]!.params).toEqual({
 			patterns: [{ urlPattern: "https://surviving.example/*" }],
 		});
 
 		bridge.cdpClosed(survivingOwnerConn);
 		ack(bridge, ext, "send");
-		await waitFor(
-			() => ext.rpcs("send").length === 4,
-			"queued disable after second owner disconnects",
-		);
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext.rpcs("send").length === 4, "queued disable after second owner disconnects");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Fetch.enable",
 			"Fetch.enable",
 			"Fetch.enable",
@@ -2444,7 +2034,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Fetch.enable",
 			"Fetch.enable",
 			"Fetch.enable",
@@ -2453,11 +2043,7 @@ describe("RelayBridge tab grouping", () => {
 		]);
 		ack(bridge, ext, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("retains later live subscription cleanups after one RPC fails", async () => {
@@ -2500,10 +2086,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext.pending("send")[0]).toMatchObject({ method: "Fetch.disable" });
 		nack(bridge, ext, "send", "Fetch cleanup rejected");
 
-		await waitFor(
-			() => ext.pending("send").length === 1,
-			"later live cleanup after an earlier failure",
-		);
+		await waitFor(() => ext.pending("send").length === 1, "later live cleanup after an earlier failure");
 		expect(ext.pending("send")[0]).toMatchObject({
 			method: "Page.setInterceptFileChooserDialog",
 			params: { enabled: false },
@@ -2518,22 +2101,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const survivingOwner = new FakeCdpSocket();
 		const survivingOwnerConn = bridge.cdpConnected(survivingOwner);
-		const survivingOwnerSession = await attachPage(
-			bridge,
-			ext,
-			survivingOwner,
-			survivingOwnerConn,
-			1,
-		);
+		const survivingOwnerSession = await attachPage(bridge, ext, survivingOwner, survivingOwnerConn, 1);
 		const orphanedOwner = new FakeCdpSocket();
 		const orphanedOwnerConn = bridge.cdpConnected(orphanedOwner);
-		const orphanedOwnerSession = await attachPage(
-			bridge,
-			ext,
-			orphanedOwner,
-			orphanedOwnerConn,
-			1,
-		);
+		const orphanedOwnerSession = await attachPage(bridge, ext, orphanedOwner, orphanedOwnerConn, 1);
 		const holder = new FakeCdpSocket();
 		const holderConn = bridge.cdpConnected(holder);
 		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
@@ -2563,15 +2134,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		bridge.cdpClosed(orphanedOwnerConn);
 		ack(bridge, ext, "send");
-		await waitFor(
-			() => ext.rpcs("send").length === 3,
-			"reapply surviving Fetch.enable",
-		);
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Fetch.enable",
-			"Fetch.enable",
-		]);
+		await waitFor(() => ext.rpcs("send").length === 3, "reapply surviving Fetch.enable");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.enable", "Fetch.enable"]);
 		expect(ext.rpcs("send")[2]!.params).toEqual({
 			patterns: [{ urlPattern: "https://surviving.example/*" }],
 		});
@@ -2588,7 +2152,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Fetch.enable",
 			"Fetch.enable",
 			"Fetch.enable",
@@ -2596,11 +2160,7 @@ describe("RelayBridge tab grouping", () => {
 		]);
 		ack(bridge, ext, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("cleans up an earlier replayed subscription when its owner disconnects during a later replay await", async () => {
@@ -2609,22 +2169,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const firstOwner = new FakeCdpSocket();
 		const firstOwnerConn = bridge.cdpConnected(firstOwner);
-		const firstOwnerSession = await attachPage(
-			bridge,
-			ext,
-			firstOwner,
-			firstOwnerConn,
-			1,
-		);
+		const firstOwnerSession = await attachPage(bridge, ext, firstOwner, firstOwnerConn, 1);
 		const secondOwner = new FakeCdpSocket();
 		const secondOwnerConn = bridge.cdpConnected(secondOwner);
-		const secondOwnerSession = await attachPage(
-			bridge,
-			ext,
-			secondOwner,
-			secondOwnerConn,
-			1,
-		);
+		const secondOwnerSession = await attachPage(bridge, ext, secondOwner, secondOwnerConn, 1);
 		const holder = new FakeCdpSocket();
 		const holderConn = bridge.cdpConnected(holder);
 		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
@@ -2659,36 +2207,21 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "first replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.rpcs("send").length === 2, "second replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Network.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Network.enable"]);
 
 		// The first replay already succeeded, but its owner disconnects while the
 		// second replay RPC is still in flight. Recovery must revisit earlier
 		// replayed entries and clear the now-orphaned Fetch interception.
 		bridge.cdpClosed(firstOwnerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 3,
-			"cleanup of earlier replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Fetch.enable",
-			"Network.enable",
-			"Fetch.disable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 3, "cleanup of earlier replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Network.enable", "Fetch.disable"]);
 		ack(bridge, ext2, "send");
 		await flush();
 
@@ -2702,7 +2235,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Fetch.enable",
 			"Network.enable",
 			"Fetch.disable",
@@ -2710,11 +2243,7 @@ describe("RelayBridge tab grouping", () => {
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("restores the browser user agent when a replayed override loses its owner during recovery", async () => {
@@ -2746,15 +2275,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "owner UA replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.setUserAgentOverride",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setUserAgentOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({
 			userAgent: "Mozilla/5.0 stealth",
 			platform: "Win32",
@@ -2766,11 +2290,8 @@ describe("RelayBridge tab grouping", () => {
 		// sentinel instead of guessing browser defaults.
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned user-agent cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned user-agent cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setUserAgentOverride",
 			"Network.setUserAgentOverride",
 		]);
@@ -2788,7 +2309,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setUserAgentOverride",
 			"Network.setUserAgentOverride",
 			"Network.getCookies",
@@ -2803,23 +2324,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		// The browser tool applies the stealth UA through both CDP setters (see
@@ -2836,23 +2347,15 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
 		// Recovery replays only the latest effective UA override once, even if the
 		// browser tool previously issued both alias setters. The fresh Chrome root
 		// should keep the winning stealth fingerprint without replaying a stale
 		// duplicate alias command.
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"first UA override replayed",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setUserAgentOverride",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "first UA override replayed");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setUserAgentOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(stealthUa);
 		ack(bridge, ext2, "send");
 		await flush();
@@ -2880,10 +2383,7 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
@@ -2897,25 +2397,12 @@ describe("RelayBridge tab grouping", () => {
 			userAgent: "Mozilla/5.0 emulation-owner",
 			platform: "Win32",
 		};
-		await sendRootCommand(
-			ownerAConn,
-			ownerASession,
-			"Network.setUserAgentOverride",
-			networkUa,
-		);
-		await sendRootCommand(
-			ownerBConn,
-			ownerBSession,
-			"Emulation.setUserAgentOverride",
-			emulationUa,
-		);
+		await sendRootCommand(ownerAConn, ownerASession, "Network.setUserAgentOverride", networkUa);
+		await sendRootCommand(ownerBConn, ownerBSession, "Emulation.setUserAgentOverride", emulationUa);
 
 		bridge.cdpClosed(ownerBConn);
-		await waitFor(
-			() => ext.rpcs("send").length === 3,
-			"surviving UA replay after latest alias owner closes",
-		);
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext.rpcs("send").length === 3, "surviving UA replay after latest alias owner closes");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setUserAgentOverride",
 			"Emulation.setUserAgentOverride",
 			"Network.setUserAgentOverride",
@@ -2934,7 +2421,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setUserAgentOverride",
 			"Emulation.setUserAgentOverride",
 			"Network.setUserAgentOverride",
@@ -2951,13 +2438,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -2966,40 +2447,24 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Network.setUserAgentOverride",
-			{
-				userAgent: "Mozilla/5.0 custom",
-				platform: "Win32",
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setUserAgentOverride",
-			{ userAgent: "" },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Network.setUserAgentOverride", {
+			userAgent: "Mozilla/5.0 custom",
+			platform: "Win32",
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setUserAgentOverride", { userAgent: "" });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -3014,23 +2479,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		const staleHeaders = { headers: { "x-stale": "1" } };
@@ -3050,24 +2505,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
 		await waitFor(() => ext2.rpcs("send").length === 1, "header replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.setExtraHTTPHeaders",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setExtraHTTPHeaders"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(finalHeaders);
 		ack(bridge, ext2, "send");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"device metrics replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "device metrics replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setExtraHTTPHeaders",
 			"Emulation.setDeviceMetricsOverride",
 		]);
@@ -3086,23 +2533,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		await sendRootCommand("Emulation.setAutomationOverride", {
@@ -3114,19 +2551,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"automation override replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setAutomationOverride",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "automation override replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setAutomationOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ enabled: true });
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3142,23 +2571,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		await sendRootCommand("Emulation.setAutomationOverride", {
@@ -3173,19 +2592,12 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 		await flush();
 
-		expect(
-			ext2
-				.rpcs("send")
-				.filter((rpc) => rpc.method === "Emulation.setAutomationOverride"),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Emulation.setAutomationOverride")).toHaveLength(0);
 	});
 
 	it("replays a Runtime.addBinding for a preserved session across recovery", async () => {
@@ -3196,23 +2608,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		await sendRootCommand("Runtime.addBinding", { name: "ompExposed" });
@@ -3222,16 +2624,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
 		await waitFor(() => ext2.rpcs("send").length === 1, "binding replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.addBinding",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.addBinding"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ name: "ompExposed" });
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3247,23 +2644,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		await sendRootCommand("Runtime.addBinding", { name: "ompExposed" });
@@ -3274,17 +2661,12 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 		await flush();
 
-		expect(
-			ext2.rpcs("send").filter((rpc) => rpc.method === "Runtime.addBinding"),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Runtime.addBinding")).toHaveLength(0);
 	});
 
 	it("replays preserved network throttling across recovery", async () => {
@@ -3316,30 +2698,18 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"network throttling replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.emulateNetworkConditions",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "network throttling replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.emulateNetworkConditions"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3376,27 +2746,18 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
 		await waitFor(() => ext2.rpcs("send").length === 1, "packet-loss replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.emulateNetworkConditions",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.emulateNetworkConditions"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3433,30 +2794,18 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"connection-type recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "connection-type recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"connection-type replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.emulateNetworkConditions",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "connection-type replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.emulateNetworkConditions"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3486,30 +2835,18 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"cpu throttling recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "cpu throttling recovery attach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"CPU throttling replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setCPUThrottlingRate",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "CPU throttling replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setCPUThrottlingRate"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3546,27 +2883,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"CPU throttling recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "CPU throttling recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"CPU throttling replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setCPUThrottlingRate",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "CPU throttling replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setCPUThrottlingRate"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ rate: 4 });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned CPU throttling cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned CPU throttling cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setCPUThrottlingRate",
 			"Emulation.setCPUThrottlingRate",
 		]);
@@ -3584,18 +2910,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setCPUThrottlingRate",
 			"Emulation.setCPUThrottlingRate",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("clears replayed network throttling when its owner disconnects during recovery", async () => {
@@ -3635,18 +2957,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"network throttling replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.emulateNetworkConditions",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "network throttling replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.emulateNetworkConditions"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
 
 		// The throttling owner disappears after the replayed state has been sent
@@ -3655,11 +2969,8 @@ describe("RelayBridge tab grouping", () => {
 		// network conditions instead of leaving the offline/throttled state orphaned.
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned throttling cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned throttling cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.emulateNetworkConditions",
 			"Network.emulateNetworkConditions",
 		]);
@@ -3682,18 +2993,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.emulateNetworkConditions",
 			"Network.emulateNetworkConditions",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays preserved timezone overrides across recovery", async () => {
@@ -3718,27 +3025,18 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
 		await waitFor(() => ext2.rpcs("send").length === 1, "timezone replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setTimezoneOverride",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setTimezoneOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(timezone);
 		ack(bridge, ext2, "send");
 		await flush();
@@ -3766,12 +3064,10 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await flush();
 		expect(ext.rpcs("send")).toHaveLength(1);
-		expect(ext.rpcs("send")[0]!.method).toBe(
-			"Page.addScriptToEvaluateOnNewDocument",
-		);
+		expect(ext.rpcs("send")[0]!.method).toBe("Page.addScriptToEvaluateOnNewDocument");
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
-		const addReply = cdp.messages.find((message) => message.id === addId);
+		const addReply = cdp.messages.find(message => message.id === addId);
 		const clientIdentifier =
 			addReply &&
 			"result" in addReply &&
@@ -3789,23 +3085,13 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"preload-script recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "preload-script recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(
-			() =>
-				ext2
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"preload-script replay",
 		);
-		const replay = ext2
-			.rpcs("send")
-			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
 		});
@@ -3823,27 +3109,16 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext2
-					.rpcs("send")
-					.filter(
-						(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
-					).length === 1,
+			() => ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument").length === 1,
 			"preload-script remove after recovery",
 		);
-		const removeRpc = ext2
-			.rpcs("send")
-			.find((rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
+		const removeRpc = ext2.rpcs("send").find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
 		expect(removeRpc?.params).toEqual({
 			identifier: "root-script-after-recovery",
 		});
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === removeId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === removeId && "result" in message)).toHaveLength(1);
 	});
 
 	it("does not rerun immediate preload scripts when guard recovery preserves contexts", async () => {
@@ -3866,17 +3141,11 @@ describe("RelayBridge tab grouping", () => {
 				},
 			}),
 		);
-		await waitFor(() =>
-			ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
-		await waitFor(() =>
-			ext
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
 
@@ -3885,29 +3154,17 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"preload-script runImmediately recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "preload-script runImmediately recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(() =>
-			ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
 		await waitFor(
-			() =>
-				ext2
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"preload-script runImmediately replay",
 		);
-		const replay = ext2
-			.rpcs("send")
-			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
 			runImmediately: false,
@@ -3936,17 +3193,11 @@ describe("RelayBridge tab grouping", () => {
 					},
 				}),
 			);
-			await waitFor(() =>
-				ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-			);
+			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 			ack(bridge, ext, "send", {
 				frameTree: { frame: { loaderId: "loader-before" } },
 			});
-			await waitFor(() =>
-				ext
-					.pending("send")
-					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-			);
+			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 			ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 			await flush();
 
@@ -3957,28 +3208,18 @@ describe("RelayBridge tab grouping", () => {
 			});
 			await waitFor(() => ext2.pending("attach").length === 1);
 			ack(bridge, ext2, "attach");
-			await waitFor(() =>
-				ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-			);
+			await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 			ack(bridge, ext2, "send", {
 				frameTree: { frame: { loaderId: "loader-before" } },
 			});
-			await waitFor(() =>
-				ext2
-					.pending("send")
-					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-			);
+			await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 			ack(bridge, ext2, "send", { identifier: "root-script-replayed" });
-			await waitFor(() =>
-				ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-			);
+			await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 			ack(bridge, ext2, "send", {
 				frameTree: { frame: { loaderId: "loader-after-navigation" } },
 			});
 			await waitFor(() =>
-				ext2
-					.pending("send")
-					.some((rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
+				ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
 			);
 			if (interruptedMutation === "retry") {
 				ack(bridge, ext2, "send");
@@ -3986,10 +3227,9 @@ describe("RelayBridge tab grouping", () => {
 					ext2
 						.pending("send")
 						.some(
-							(rpc) =>
+							rpc =>
 								rpc.method === "Page.addScriptToEvaluateOnNewDocument" &&
-								(rpc.params as { runImmediately?: boolean } | undefined)
-									?.runImmediately === true,
+								(rpc.params as { runImmediately?: boolean } | undefined)?.runImmediately === true,
 						),
 				);
 			}
@@ -4028,17 +3268,11 @@ describe("RelayBridge tab grouping", () => {
 				},
 			}),
 		);
-		await waitFor(() =>
-			ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
-		await waitFor(() =>
-			ext
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext, "send", { identifier: "root-script-replayed" });
 		await flush();
 
@@ -4049,26 +3283,14 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await waitFor(() => ext2.pending("attach").length === 1);
 		ack(bridge, ext2, "attach");
-		await waitFor(() =>
-			ext2
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
-		await waitFor(() =>
-			ext2
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send", { identifier: "root-script-after-recovery" });
 
-		await waitFor(() =>
-			ext2
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		bridge.extMessage(
 			ext2,
 			JSON.stringify({
@@ -4083,18 +3305,10 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await flush();
 
-		expect(
-			ext2
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
-				),
-		).toHaveLength(0);
-		expect(
-			ext2
-				.rpcs("send")
-				.filter((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		).toHaveLength(1);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
+			0,
+		);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 	});
 
 	it("observes preload navigation without client Page or Runtime domains", async () => {
@@ -4117,17 +3331,11 @@ describe("RelayBridge tab grouping", () => {
 				},
 			}),
 		);
-		await waitFor(() =>
-			ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
-		await waitFor(() =>
-			ext
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
 
@@ -4138,25 +3346,15 @@ describe("RelayBridge tab grouping", () => {
 		});
 		await waitFor(() => ext2.pending("attach").length === 1);
 		ack(bridge, ext2, "attach");
-		await waitFor(() =>
-			ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
-		expect(
-			ext2.pending("send").some((rpc) => rpc.method === "Page.enable"),
-		).toBe(true);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		expect(ext2.pending("send").some(rpc => rpc.method === "Page.enable")).toBe(true);
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
-		await waitFor(() =>
-			ext2
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext2, "send", { identifier: "root-script-after-recovery" });
 
-		await waitFor(() =>
-			ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		bridge.extMessage(
 			ext2,
 			JSON.stringify({
@@ -4171,27 +3369,15 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-after-navigation" } },
 		});
-		await waitFor(() =>
-			ext2.pending("send").some((rpc) => rpc.method === "Page.disable"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.disable"));
 		ack(bridge, ext2, "send");
 		await flush();
 
-		expect(
-			ext2
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
-				),
-		).toHaveLength(0);
-		expect(
-			ext2
-				.rpcs("send")
-				.filter((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		).toHaveLength(1);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toContain(
-			"Page.disable",
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")).toHaveLength(
+			0,
 		);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toContain("Page.disable");
 	});
 
 	it("reruns immediate preload scripts on a forced fresh root", async () => {
@@ -4214,17 +3400,11 @@ describe("RelayBridge tab grouping", () => {
 				},
 			}),
 		);
-		await waitFor(() =>
-			ext.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
-		await waitFor(() =>
-			ext
-				.pending("send")
-				.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
 
@@ -4237,10 +3417,7 @@ describe("RelayBridge tab grouping", () => {
 				method: "Fetch.enable",
 			}),
 		);
-		await waitFor(
-			() => ext.pending("send").some((rpc) => rpc.method === "Fetch.enable"),
-			"ambiguous root mutation",
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Fetch.enable"), "ambiguous root mutation");
 		bridge.extClosed(ext);
 		await flush();
 
@@ -4254,24 +3431,15 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "detach");
 		await waitFor(() => ext2.pending("attach").length === 1);
 		ack(bridge, ext2, "attach");
-		await waitFor(() =>
-			ext2.pending("send").some((rpc) => rpc.method === "Page.getFrameTree"),
-		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext2, "send", {
 			frameTree: { frame: { loaderId: "loader-after-navigation" } },
 		});
 		await waitFor(
-			() =>
-				ext2
-					.pending("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"immediate preload replay on fresh root",
 		);
-		const replay = ext2
-			.pending("send")
-			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
 			runImmediately: true,
@@ -4299,7 +3467,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
-		const addReply = cdp.messages.find((message) => message.id === addId);
+		const addReply = cdp.messages.find(message => message.id === addId);
 		const clientIdentifier =
 			addReply &&
 			"result" in addReply &&
@@ -4316,18 +3484,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"preload-script lost-result recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "preload-script lost-result recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(
-			() =>
-				ext2
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"preload-script lost-result first replay",
 		);
 
@@ -4338,37 +3498,20 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => replacement.rpcs("detach").length === 1,
-			"fresh-root detach before retrying preload replay",
-		);
+		await waitFor(() => replacement.rpcs("detach").length === 1, "fresh-root detach before retrying preload replay");
 		ack(bridge, replacement, "detach");
-		await waitFor(
-			() => replacement.rpcs("attach").length === 1,
-			"fresh-root attach before retrying preload replay",
-		);
+		await waitFor(() => replacement.rpcs("attach").length === 1, "fresh-root attach before retrying preload replay");
 		ack(bridge, replacement, "attach");
 		await waitFor(
-			() =>
-				replacement
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => replacement.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"preload-script replay after fresh root",
 		);
-		const replay = replacement
-			.rpcs("send")
-			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const replay = replacement.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
 		});
 		expect(
-			replacement
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-				),
+			replacement.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 		).toHaveLength(1);
 		ack(bridge, replacement, "send", {
 			identifier: "root-script-after-fresh-root",
@@ -4386,17 +3529,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				replacement
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
-					),
+			() => replacement.rpcs("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
 			"preload-script remove after fresh-root replay",
 		);
-		const removeRpc = replacement
-			.rpcs("send")
-			.find((rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
+		const removeRpc = replacement.rpcs("send").find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
 		expect(removeRpc?.params).toEqual({
 			identifier: "root-script-after-fresh-root",
 		});
@@ -4434,18 +3570,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"ordinary-disconnect recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "ordinary-disconnect recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(
-			() =>
-				ext2
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"ordinary-disconnect first replay",
 		);
 		// The socket closes normally: no replacement, just a lost result. Chrome
@@ -4459,40 +3587,21 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext3.rpcs("detach").length === 1,
-			"fresh-root detach after ordinary disconnect",
-		);
+		await waitFor(() => ext3.rpcs("detach").length === 1, "fresh-root detach after ordinary disconnect");
 		ack(bridge, ext3, "detach");
-		await waitFor(
-			() => ext3.rpcs("attach").length === 1,
-			"fresh-root attach after ordinary disconnect",
-		);
+		await waitFor(() => ext3.rpcs("attach").length === 1, "fresh-root attach after ordinary disconnect");
 		ack(bridge, ext3, "attach");
 		await waitFor(
-			() =>
-				ext3
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext3.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"preload replay after fresh root following ordinary disconnect",
 		);
-		const replay = ext3
-			.rpcs("send")
-			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		const replay = ext3.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
 		expect(replay?.params).toEqual({
 			source: "window.__relayInjected = true;",
 		});
 		// Exactly one registration on the fresh root — no untracked duplicate that
 		// would run on every future document.
-		expect(
-			ext3
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-				),
-		).toHaveLength(1);
+		expect(ext3.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 		ack(bridge, ext3, "send", { identifier: "root-script-after-fresh-root" });
 		await flush();
 	});
@@ -4523,19 +3632,13 @@ describe("RelayBridge tab grouping", () => {
 				ext
 					.rpcs("send")
 					.some(
-						(rpc) =>
-							rpc.id === ext.rpcs("send")[0]?.id &&
-							rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+						rpc => rpc.id === ext.rpcs("send")[0]?.id && rpc.method === "Page.addScriptToEvaluateOnNewDocument",
 					),
 			"preload-script install",
 		);
 		ack(bridge, ext, "send", { identifier: "root-script-before-close" });
 		await flush();
-		expect(
-			owner.messages.filter(
-				(message) => message.id === addId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(owner.messages.filter(message => message.id === addId && "result" in message)).toHaveLength(1);
 
 		bridge.cdpClosed(ownerConn);
 		await waitFor(
@@ -4543,10 +3646,9 @@ describe("RelayBridge tab grouping", () => {
 				ext
 					.rpcs("send")
 					.some(
-						(rpc) =>
+						rpc =>
 							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
-							(rpc.params as { identifier?: string } | undefined)
-								?.identifier === "root-script-before-close",
+							(rpc.params as { identifier?: string } | undefined)?.identifier === "root-script-before-close",
 					),
 			"preload-script cleanup after connection close",
 		);
@@ -4603,10 +3705,9 @@ describe("RelayBridge tab grouping", () => {
 				ext
 					.rpcs("send")
 					.some(
-						(rpc) =>
+						rpc =>
 							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
-							(rpc.params as { identifier?: string } | undefined)
-								?.identifier === "stale-old-root-script",
+							(rpc.params as { identifier?: string } | undefined)?.identifier === "stale-old-root-script",
 					),
 			"first (stale) preload cleanup attempt",
 		);
@@ -4621,26 +3722,17 @@ describe("RelayBridge tab grouping", () => {
 				ext
 					.rpcs("send")
 					.some(
-						(rpc) =>
+						rpc =>
 							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
-							(rpc.params as { identifier?: string } | undefined)
-								?.identifier === "valid-fresh-root-script",
+							(rpc.params as { identifier?: string } | undefined)?.identifier === "valid-fresh-root-script",
 					),
 			"later valid preload cleanup after stale failure",
 		);
 		const removeMethods = ext
 			.rpcs("send")
-			.filter(
-				(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
-			)
-			.map(
-				(rpc) =>
-					(rpc.params as { identifier?: string } | undefined)?.identifier,
-			);
-		expect(removeMethods).toEqual([
-			"stale-old-root-script",
-			"valid-fresh-root-script",
-		]);
+			.filter(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument")
+			.map(rpc => (rpc.params as { identifier?: string } | undefined)?.identifier);
+		expect(removeMethods).toEqual(["stale-old-root-script", "valid-fresh-root-script"]);
 		ack(bridge, ext, "send");
 		await flush();
 	});
@@ -4667,18 +3759,13 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
 		await flush();
 		// The client sees the interrupted command fail.
-		expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(true);
+		expect(cdp.messages.some(m => m.id === addId && "error" in m)).toBe(true);
 
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
@@ -4688,25 +3775,13 @@ describe("RelayBridge tab grouping", () => {
 		// forceFreshRootBeforeReplay must drive a detach → attach cycle so the
 		// orphaned initial registration is dropped rather than left duplicated on
 		// the surviving root.
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"fresh-root detach after interrupted initial registration",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted initial registration");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"fresh-root attach after interrupted initial registration",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted initial registration");
 		ack(bridge, ext2, "attach");
 		await flush();
 		// Nothing was journaled, so there is no preload replay on the fresh root.
-		expect(
-			ext2
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-				),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(0);
 	});
 
 	it("forces a fresh root after an initial preload registration times out", async () => {
@@ -4730,19 +3805,12 @@ describe("RelayBridge tab grouping", () => {
 				}),
 			);
 			await waitFor(
-				() =>
-					ext
-						.rpcs("send")
-						.some(
-							(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-						),
+				() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 				"initial preload registration RPC before timeout",
 			);
 			vi.advanceTimersByTime(20_000);
 			await flush();
-			expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(
-				true,
-			);
+			expect(cdp.messages.some(m => m.id === addId && "error" in m)).toBe(true);
 			expect(ext.closeCount).toBe(1);
 
 			const ext2 = new FakeExtSocket();
@@ -4761,13 +3829,9 @@ describe("RelayBridge tab grouping", () => {
 			);
 			ack(bridge, ext2, "attach");
 			await flush();
-			expect(
-				ext2
-					.rpcs("send")
-					.filter(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
-			).toHaveLength(0);
+			expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(
+				0,
+			);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -4794,7 +3858,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send", { identifier: "root-script" });
 		await flush();
-		const addReply = cdp.messages.find((message) => message.id === addId);
+		const addReply = cdp.messages.find(message => message.id === addId);
 		const clientIdentifier =
 			addReply &&
 			"result" in addReply &&
@@ -4819,19 +3883,12 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"),
 			"interrupted preload removal RPC",
 		);
 		bridge.extClosed(ext);
 		await flush();
-		expect(cdp.messages.some((m) => m.id === removeId && "error" in m)).toBe(
-			true,
-		);
+		expect(cdp.messages.some(m => m.id === removeId && "error" in m)).toBe(true);
 
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
@@ -4839,26 +3896,14 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 		});
 		// The interrupted removal forces a fresh root: detach → attach.
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"fresh-root detach after interrupted removal",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted removal");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"fresh-root attach after interrupted removal",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted removal");
 		ack(bridge, ext2, "attach");
 		await flush();
 		// The journal entry was forgotten, so recovery must NOT resurrect the
 		// explicitly removed script by replaying it onto the fresh root.
-		expect(
-			ext2
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-				),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(0);
 	});
 
 	it("forces a fresh root after an interrupted tracked shared-root setter", async () => {
@@ -4882,16 +3927,11 @@ describe("RelayBridge tab grouping", () => {
 				params: { patterns: [{ urlPattern: "*" }] },
 			}),
 		);
-		await waitFor(
-			() => ext.rpcs("send").some((rpc) => rpc.method === "Fetch.enable"),
-			"interrupted Fetch.enable RPC",
-		);
+		await waitFor(() => ext.rpcs("send").some(rpc => rpc.method === "Fetch.enable"), "interrupted Fetch.enable RPC");
 		bridge.extClosed(ext);
 		await flush();
 		// The client sees the interrupted command fail.
-		expect(cdp.messages.some((m) => m.id === enableId && "error" in m)).toBe(
-			true,
-		);
+		expect(cdp.messages.some(m => m.id === enableId && "error" in m)).toBe(true);
 
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
@@ -4901,21 +3941,13 @@ describe("RelayBridge tab grouping", () => {
 		// The ambiguous tracked setter forces a fresh root: detach → attach, so a
 		// reconnect cannot reuse a root carrying an untracked Fetch.enable that
 		// owner cleanup can neither see nor disable.
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"fresh-root detach after interrupted tracked setter",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted tracked setter");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"fresh-root attach after interrupted tracked setter",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted tracked setter");
 		ack(bridge, ext2, "attach");
 		await flush();
 		// The enable was never journaled, so nothing replays it onto the fresh root.
-		expect(
-			ext2.rpcs("send").filter((rpc) => rpc.method === "Fetch.enable"),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Fetch.enable")).toHaveLength(0);
 	});
 
 	it("forgets and forces a fresh root after an interrupted Runtime.removeBinding", async () => {
@@ -4940,9 +3972,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(cdp.messages.some((m) => m.id === addId && "result" in m)).toBe(
-			true,
-		);
+		expect(cdp.messages.some(m => m.id === addId && "result" in m)).toBe(true);
 
 		// Issue the removal, then drop the socket ordinarily before its result
 		// arrives. Chrome may already have removed the binding.
@@ -4957,15 +3987,12 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext.rpcs("send").some((rpc) => rpc.method === "Runtime.removeBinding"),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Runtime.removeBinding"),
 			"interrupted removeBinding RPC",
 		);
 		bridge.extClosed(ext);
 		await flush();
-		expect(cdp.messages.some((m) => m.id === removeId && "error" in m)).toBe(
-			true,
-		);
+		expect(cdp.messages.some(m => m.id === removeId && "error" in m)).toBe(true);
 
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
@@ -4973,22 +4000,14 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 		});
 		// The interrupted removal forces a fresh root: detach → attach.
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"fresh-root detach after interrupted removeBinding",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted removeBinding");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"fresh-root attach after interrupted removeBinding",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted removeBinding");
 		ack(bridge, ext2, "attach");
 		await flush();
 		// The journal entry was forgotten, so recovery must NOT resurrect the
 		// explicitly removed binding by replaying it onto the fresh root.
-		expect(
-			ext2.rpcs("send").filter((rpc) => rpc.method === "Runtime.addBinding"),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Runtime.addBinding")).toHaveLength(0);
 	});
 
 	it("forgets and forces a fresh root after an interrupted shared-root clear", async () => {
@@ -5014,9 +4033,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(cdp.messages.some((m) => m.id === enableId && "result" in m)).toBe(
-			true,
-		);
+		expect(cdp.messages.some(m => m.id === enableId && "result" in m)).toBe(true);
 
 		// Issue the tab-wide clear (Fetch.disable), then drop the socket
 		// ordinarily before its result arrives. Chrome may already have disabled
@@ -5032,14 +4049,12 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() => ext.rpcs("send").some((rpc) => rpc.method === "Fetch.disable"),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Fetch.disable"),
 			"interrupted Fetch.disable RPC",
 		);
 		bridge.extClosed(ext);
 		await flush();
-		expect(cdp.messages.some((m) => m.id === disableId && "error" in m)).toBe(
-			true,
-		);
+		expect(cdp.messages.some(m => m.id === disableId && "error" in m)).toBe(true);
 
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
@@ -5047,31 +4062,19 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 		});
 		// The interrupted clear forces a fresh root: detach → attach.
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"fresh-root detach after interrupted clear",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "fresh-root detach after interrupted clear");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"fresh-root attach after interrupted clear",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "fresh-root attach after interrupted clear");
 		ack(bridge, ext2, "attach");
 		await flush();
 		// The journaled enable was forgotten, so recovery must NOT resurrect the
 		// explicitly disabled interception by replaying Fetch.enable onto the
 		// fresh root.
-		expect(
-			ext2.rpcs("send").filter((rpc) => rpc.method === "Fetch.enable"),
-		).toHaveLength(0);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Fetch.enable")).toHaveLength(0);
 	});
 
 	for (const [field, cleared, expectedReplay] of [
-		[
-			"media",
-			"",
-			{ features: [{ name: "prefers-color-scheme", value: "dark" }] },
-		],
+		["media", "", { features: [{ name: "prefers-color-scheme", value: "dark" }] }],
 		["features", [], { media: "print" }],
 	] as const) {
 		it(`preserves an interrupted emulated-media ${field} clear`, async () => {
@@ -5091,9 +4094,7 @@ describe("RelayBridge tab grouping", () => {
 					method: "Emulation.setEmulatedMedia",
 					params: {
 						media: "print",
-						features: [
-							{ name: "prefers-color-scheme", value: "dark" },
-						],
+						features: [{ name: "prefers-color-scheme", value: "dark" }],
 					},
 				}),
 			);
@@ -5111,10 +4112,7 @@ describe("RelayBridge tab grouping", () => {
 					params: { [field]: cleared },
 				}),
 			);
-			await waitFor(
-				() => ext.rpcs("send").length === 2,
-				`interrupted emulated-media ${field} clear`,
-			);
+			await waitFor(() => ext.rpcs("send").length === 2, `interrupted emulated-media ${field} clear`);
 			bridge.extClosed(ext);
 			await flush();
 
@@ -5123,20 +4121,12 @@ describe("RelayBridge tab grouping", () => {
 				attachedTabIds: [1],
 				recoverableTabIds: [1],
 			});
-			await waitFor(
-				() => ext2.rpcs("detach").length === 1,
-				`fresh-root detach after interrupted ${field} clear`,
-			);
+			await waitFor(() => ext2.rpcs("detach").length === 1, `fresh-root detach after interrupted ${field} clear`);
 			ack(bridge, ext2, "detach");
-			await waitFor(
-				() => ext2.rpcs("attach").length === 1,
-				`fresh-root attach after interrupted ${field} clear`,
-			);
+			await waitFor(() => ext2.rpcs("attach").length === 1, `fresh-root attach after interrupted ${field} clear`);
 			ack(bridge, ext2, "attach");
 			await flush();
-			const replays = ext2
-				.rpcs("send")
-				.filter((rpc) => rpc.method === "Emulation.setEmulatedMedia");
+			const replays = ext2.rpcs("send").filter(rpc => rpc.method === "Emulation.setEmulatedMedia");
 			expect(replays).toHaveLength(1);
 			expect(replays[0]).toMatchObject({ params: expectedReplay });
 		});
@@ -5163,17 +4153,12 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
 		await flush();
-		expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(true);
+		expect(cdp.messages.some(m => m.id === addId && "error" in m)).toBe(true);
 
 		// First reconnect drives the forced fresh-root detach; it goes in flight.
 		const ext2 = new FakeExtSocket();
@@ -5181,10 +4166,7 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"forced fresh-root detach in flight",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "forced fresh-root detach in flight");
 		// The extension executed the relay-initiated detach (dropping the tab from
 		// recoverableTabIds) but the socket dies before its result returns.
 		bridge.extClosed(ext2);
@@ -5219,9 +4201,9 @@ describe("RelayBridge tab grouping", () => {
 		);
 		ack(bridge, ext3, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
-		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+		expect(ext3.rpcs("send").some(rpc => rpc.tabId === 1)).toBe(true);
 	});
 
 	it("drops spent fresh-root recovery after the last holder disconnects", async () => {
@@ -5241,11 +4223,7 @@ describe("RelayBridge tab grouping", () => {
 				params: { source: "window.__relayInjected = true;" },
 			}),
 		);
-		await waitFor(() =>
-			ext.pending("send").some(
-				(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-			),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		bridge.extClosed(ext);
 		await flush();
 		bridge.cdpClosed(ownerId);
@@ -5290,12 +4268,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
@@ -5306,10 +4279,7 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.pending("detach").length === 1,
-			"forced fresh-root detach issued",
-		);
+		await waitFor(() => ext2.pending("detach").length === 1, "forced fresh-root detach issued");
 		nack(bridge, ext2, "detach", "detach denied");
 		await flush();
 
@@ -5323,9 +4293,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(
-			cdp.messages.find((message) => message.id === cmdId)?.error,
-		).toBeDefined();
+		expect(cdp.messages.find(message => message.id === cmdId)?.error).toBeDefined();
 		expect(ext2.pending("detach")).toHaveLength(1);
 		nack(bridge, ext2, "detach", "cleanup detach denied");
 		await flush();
@@ -5352,12 +4320,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
@@ -5371,10 +4334,7 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"forced fresh-root detach in flight",
-		);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "forced fresh-root detach in flight");
 		bridge.extClosed(ext2);
 		await flush();
 
@@ -5417,7 +4377,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		const reply2 = cdp.messages.find((m) => m.id === cmdId);
+		const reply2 = cdp.messages.find(m => m.id === cmdId);
 		expect(reply2?.error).toBeDefined();
 	});
 
@@ -5441,12 +4401,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
@@ -5461,15 +4416,9 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.pending("detach").length === 1,
-			"forced fresh-root detach issued",
-		);
+		await waitFor(() => ext2.pending("detach").length === 1, "forced fresh-root detach issued");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.pending("attach").length === 1,
-			"recovery reattach in flight after detach settled",
-		);
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery reattach in flight after detach settled");
 		nack(bridge, ext2, "attach", "busy");
 		await flush();
 
@@ -5494,15 +4443,10 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extClosed(ext2);
 		await flush();
 		const ext3 = new FakeExtSocket();
-		connect(
-			bridge,
-			ext3,
-			[tab({ tabId: 1, groupId: -1, url: "https://example.com/next" })],
-			{
-				attachedTabIds: [],
-				recoverableTabIds: [],
-			},
-		);
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1, url: "https://example.com/next" })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
 		await flush();
 
 		expect(ext3.rpcs("attach")).toHaveLength(0);
@@ -5516,7 +4460,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeDefined();
 	});
 
@@ -5540,12 +4484,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
@@ -5562,15 +4501,9 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.pending("detach").length === 1,
-			"forced fresh-root detach issued",
-		);
+		await waitFor(() => ext2.pending("detach").length === 1, "forced fresh-root detach issued");
 		ack(bridge, ext2, "detach");
-		await waitFor(
-			() => ext2.pending("attach").length === 1,
-			"recovery reattach in flight after detach settled",
-		);
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery reattach in flight after detach settled");
 		bridge.extClosed(ext2);
 		await flush();
 
@@ -5582,10 +4515,7 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [],
 			recoverableTabIds: [],
 		});
-		await waitFor(
-			() => ext3.rpcs("attach").length === 1,
-			"recovery reattach after the interrupted reattach",
-		);
+		await waitFor(() => ext3.rpcs("attach").length === 1, "recovery reattach after the interrupted reattach");
 		ack(bridge, ext3, "attach");
 		await flush();
 
@@ -5600,9 +4530,9 @@ describe("RelayBridge tab grouping", () => {
 		);
 		ack(bridge, ext3, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
-		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+		expect(ext3.rpcs("send").some(rpc => rpc.tabId === 1)).toBe(true);
 	});
 
 	it("honors a user detach that arrives while only a fresh-root replay is pending", async () => {
@@ -5627,17 +4557,12 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await waitFor(
-			() =>
-				ext
-					.rpcs("send")
-					.some(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					),
+			() => ext.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
 			"initial preload registration RPC",
 		);
 		bridge.extClosed(ext);
 		await flush();
-		expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(true);
+		expect(cdp.messages.some(m => m.id === addId && "error" in m)).toBe(true);
 
 		// The user clicks Cancel (or DevTools takes over) while the socket is down,
 		// so the reconnect hello omits the tab from recoverableTabIds. Because no
@@ -5663,7 +4588,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeDefined();
 	});
 
@@ -5683,10 +4608,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.pending("attach").length === 1,
-			"recovery attach in flight",
-		);
+		await waitFor(() => ext2.pending("attach").length === 1, "recovery attach in flight");
 
 		// An ORDINARY disconnect (not a replacement) rejects the in-flight attach
 		// with "relay extension disconnected": #ensureAttached bans the tab because
@@ -5700,10 +4622,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext3.pending("attach").length === 1,
-			"replacement hello re-attaches the un-banned tab",
-		);
+		await waitFor(() => ext3.pending("attach").length === 1, "replacement hello re-attaches the un-banned tab");
 		ack(bridge, ext3, "attach");
 		await flush();
 
@@ -5720,9 +4639,9 @@ describe("RelayBridge tab grouping", () => {
 		);
 		ack(bridge, ext3, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
-		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+		expect(ext3.rpcs("send").some(rpc => rpc.tabId === 1)).toBe(true);
 	});
 
 	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
@@ -5754,26 +4673,18 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "timezone replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setTimezoneOverride",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setTimezoneOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({
 			timezoneId: "Asia/Shanghai",
 		});
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned timezone cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned timezone cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setTimezoneOverride",
 			"Emulation.setTimezoneOverride",
 		]);
@@ -5791,18 +4702,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setTimezoneOverride",
 			"Emulation.setTimezoneOverride",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats an empty timezone override as a tab-wide clear before recovery", async () => {
@@ -5814,13 +4721,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -5829,39 +4730,23 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setTimezoneOverride",
-			{
-				timezoneId: "Asia/Shanghai",
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setTimezoneOverride",
-			{ timezoneId: "" },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setTimezoneOverride", {
+			timezoneId: "Asia/Shanghai",
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setTimezoneOverride", { timezoneId: "" });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -5889,30 +4774,18 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		ack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"script execution replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setScriptExecutionDisabled",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "script execution replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setScriptExecutionDisabled"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ value: true });
 		ack(bridge, ext2, "send");
 		await flush();
@@ -5949,27 +4822,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"script execution replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setScriptExecutionDisabled",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "script execution replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setScriptExecutionDisabled"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ value: true });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"script execution cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "script execution cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setScriptExecutionDisabled",
 			"Emulation.setScriptExecutionDisabled",
 		]);
@@ -5987,18 +4849,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setScriptExecutionDisabled",
 			"Emulation.setScriptExecutionDisabled",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats script-execution re-enables as a tab-wide clear before recovery", async () => {
@@ -6010,13 +4868,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -6025,37 +4877,21 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setScriptExecutionDisabled",
-			{ value: true },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setScriptExecutionDisabled",
-			{ value: false },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setScriptExecutionDisabled", { value: true });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setScriptExecutionDisabled", { value: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6091,30 +4927,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"drag interception replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Input.setInterceptDrags",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "drag interception replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Input.setInterceptDrags"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ enabled: true });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"drag interception cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Input.setInterceptDrags",
-			"Input.setInterceptDrags",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 2, "drag interception cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Input.setInterceptDrags", "Input.setInterceptDrags"]);
 		expect(ext2.rpcs("send")[1]!.params).toEqual({ enabled: false });
 		ack(bridge, ext2, "send");
 		await flush();
@@ -6129,18 +4951,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Input.setInterceptDrags",
 			"Input.setInterceptDrags",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats a drag-interception disable as a tab-wide clear so a stale enable is not revived", async () => {
@@ -6152,13 +4970,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -6167,10 +4979,7 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
@@ -6182,22 +4991,14 @@ describe("RelayBridge tab grouping", () => {
 		await sendRootCommand(ownerConn, ownerSession, "Input.setInterceptDrags", {
 			enabled: true,
 		});
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Input.setInterceptDrags",
-			{ enabled: false },
-		);
+		await sendRootCommand(clearerConn, clearerSession, "Input.setInterceptDrags", { enabled: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6233,21 +5034,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"file chooser recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "file chooser recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "file chooser replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Page.setInterceptFileChooserDialog",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Page.setInterceptFileChooserDialog"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ enabled: true });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.rpcs("send").length === 2, "file chooser cleanup");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Page.setInterceptFileChooserDialog",
 			"Page.setInterceptFileChooserDialog",
 		]);
@@ -6265,18 +5061,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Page.setInterceptFileChooserDialog",
 			"Page.setInterceptFileChooserDialog",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats a file-chooser disable as a tab-wide clear so a stale enable is not revived", async () => {
@@ -6288,13 +5080,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -6303,37 +5089,21 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Page.setInterceptFileChooserDialog",
-			{ enabled: true },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Page.setInterceptFileChooserDialog",
-			{ enabled: false },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Page.setInterceptFileChooserDialog", { enabled: true });
+		await sendRootCommand(clearerConn, clearerSession, "Page.setInterceptFileChooserDialog", { enabled: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"file chooser clear recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "file chooser clear recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6369,27 +5139,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"certificate override replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Security.setIgnoreCertificateErrors",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "certificate override replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Security.setIgnoreCertificateErrors"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ ignore: true });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"certificate override cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "certificate override cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Security.setIgnoreCertificateErrors",
 			"Security.setIgnoreCertificateErrors",
 		]);
@@ -6407,18 +5166,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Security.setIgnoreCertificateErrors",
 			"Security.setIgnoreCertificateErrors",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays preserved service-worker bypass across recovery and clears orphaned owners", async () => {
@@ -6450,27 +5205,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"service-worker bypass replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.setBypassServiceWorker",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "service-worker bypass replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setBypassServiceWorker"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ bypass: true });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"service-worker bypass cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "service-worker bypass cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setBypassServiceWorker",
 			"Network.setBypassServiceWorker",
 		]);
@@ -6488,18 +5232,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setBypassServiceWorker",
 			"Network.setBypassServiceWorker",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays default background overrides across recovery and clears orphaned owners", async () => {
@@ -6531,29 +5271,18 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"default background replay",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setDefaultBackgroundColorOverride",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "default background replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setDefaultBackgroundColorOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({
 			color: { r: 0, g: 0, b: 0, a: 0 },
 		});
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"default background cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "default background cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setDefaultBackgroundColorOverride",
 			"Emulation.setDefaultBackgroundColorOverride",
 		]);
@@ -6571,18 +5300,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setDefaultBackgroundColorOverride",
 			"Emulation.setDefaultBackgroundColorOverride",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays page-scale overrides across recovery and clears orphaned owners", async () => {
@@ -6614,21 +5339,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "page scale replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setPageScaleFactor",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setPageScaleFactor"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({ pageScaleFactor: 1.5 });
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.rpcs("send").length === 2, "page scale cleanup");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setPageScaleFactor",
 			"Emulation.resetPageScaleFactor",
 		]);
@@ -6646,18 +5366,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setPageScaleFactor",
 			"Emulation.resetPageScaleFactor",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats a page-scale reset as a tab-wide clear before recovery", async () => {
@@ -6701,10 +5417,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"page-scale reset recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "page-scale reset recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6744,7 +5457,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setPageScaleFactor",
 			"Emulation.resetPageScaleFactor",
 		]);
@@ -6763,28 +5476,21 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setPageScaleFactor",
 			"Emulation.resetPageScaleFactor",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext, "send", { cookies: [] });
 		await flush();
-		expect(
-			owner.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(owner.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"page-scale reset cleanup recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "page-scale reset cleanup recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6799,23 +5505,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		const metrics = {
@@ -6832,10 +5528,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6851,13 +5544,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -6866,10 +5553,7 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
@@ -6881,27 +5565,15 @@ describe("RelayBridge tab grouping", () => {
 			deviceScaleFactor: 1,
 			mobile: false,
 		};
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setDeviceMetricsOverride",
-			metrics,
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.clearDeviceMetricsOverride",
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setDeviceMetricsOverride", metrics);
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.clearDeviceMetricsOverride");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -6916,23 +5588,13 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-		const sendRootCommand = async (
-			method: string,
-			params?: Record<string, unknown>,
-		): Promise<void> => {
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId: pageSession, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
-			expect(
-				cdp.messages.filter(
-					(message) => message.id === id && "result" in message,
-				),
-			).toHaveLength(1);
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
 		};
 
 		await sendRootCommand("Emulation.setEmulatedMedia", { media: "print" });
@@ -6945,16 +5607,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"emulated media replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "emulated media replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -6973,13 +5629,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const updater = new FakeCdpSocket();
 		const updaterConn = bridge.cdpConnected(updater);
-		const updaterSession = await attachPage(
-			bridge,
-			ext,
-			updater,
-			updaterConn,
-			1,
-		);
+		const updaterSession = await attachPage(bridge, ext, updater, updaterConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -6988,51 +5638,27 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setEmulatedMedia",
-			{ media: "print" },
-		);
-		await sendRootCommand(
-			updaterConn,
-			updaterSession,
-			"Emulation.setEmulatedMedia",
-			{ media: "screen" },
-		);
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setEmulatedMedia",
-			{
-				features: [{ name: "prefers-color-scheme", value: "dark" }],
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(updaterConn, updaterSession, "Emulation.setEmulatedMedia", { media: "screen" });
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"interleaved emulated media replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "interleaved emulated media replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7051,13 +5677,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -7066,30 +5686,17 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setEmulatedMedia",
-			{
-				media: "print",
-				features: [{ name: "prefers-color-scheme", value: "dark" }],
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setEmulatedMedia",
-			{ media: "" },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
+			media: "print",
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setEmulatedMedia", { media: "" });
 		bridge.cdpClosed(clearerConn);
 
 		bridge.extClosed(ext);
@@ -7097,16 +5704,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"emulated media replay with media clear",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "emulated media replay with media clear");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7124,13 +5725,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const updater = new FakeCdpSocket();
 		const updaterConn = bridge.cdpConnected(updater);
-		const updaterSession = await attachPage(
-			bridge,
-			ext,
-			updater,
-			updaterConn,
-			1,
-		);
+		const updaterSession = await attachPage(bridge, ext, updater, updaterConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -7139,45 +5734,26 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setEmulatedMedia",
-			{ media: "print" },
-		);
-		await sendRootCommand(
-			updaterConn,
-			updaterSession,
-			"Emulation.setEmulatedMedia",
-			{
-				features: [{ name: "prefers-color-scheme", value: "dark" }],
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(updaterConn, updaterSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"cross-owner emulated media replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "cross-owner emulated media replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7193,22 +5769,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const mediaOwner = new FakeCdpSocket();
 		const mediaOwnerConn = bridge.cdpConnected(mediaOwner);
-		const mediaOwnerSession = await attachPage(
-			bridge,
-			ext,
-			mediaOwner,
-			mediaOwnerConn,
-			1,
-		);
+		const mediaOwnerSession = await attachPage(bridge, ext, mediaOwner, mediaOwnerConn, 1);
 		const featuresOwner = new FakeCdpSocket();
 		const featuresOwnerConn = bridge.cdpConnected(featuresOwner);
-		const featuresOwnerSession = await attachPage(
-			bridge,
-			ext,
-			featuresOwner,
-			featuresOwnerConn,
-			1,
-		);
+		const featuresOwnerSession = await attachPage(bridge, ext, featuresOwner, featuresOwnerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -7217,44 +5781,25 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			mediaOwnerConn,
-			mediaOwnerSession,
-			"Emulation.setEmulatedMedia",
-			{ media: "print" },
-		);
-		await sendRootCommand(
-			featuresOwnerConn,
-			featuresOwnerSession,
-			"Emulation.setEmulatedMedia",
-			{
-				features: [{ name: "prefers-color-scheme", value: "dark" }],
-			},
-		);
+		await sendRootCommand(mediaOwnerConn, mediaOwnerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(featuresOwnerConn, featuresOwnerSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"emulated media replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "emulated media replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7265,10 +5810,7 @@ describe("RelayBridge tab grouping", () => {
 
 		bridge.cdpClosed(mediaOwnerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"replayed emulated-media cleanup",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 2, "replayed emulated-media cleanup");
 		expect(ext2.rpcs("send")[1]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7284,22 +5826,10 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
 		const mediaOwner = new FakeCdpSocket();
 		const mediaOwnerConn = bridge.cdpConnected(mediaOwner);
-		const mediaOwnerSession = await attachPage(
-			bridge,
-			ext,
-			mediaOwner,
-			mediaOwnerConn,
-			1,
-		);
+		const mediaOwnerSession = await attachPage(bridge, ext, mediaOwner, mediaOwnerConn, 1);
 		const featuresOwner = new FakeCdpSocket();
 		const featuresOwnerConn = bridge.cdpConnected(featuresOwner);
-		const featuresOwnerSession = await attachPage(
-			bridge,
-			ext,
-			featuresOwner,
-			featuresOwnerConn,
-			1,
-		);
+		const featuresOwnerSession = await attachPage(bridge, ext, featuresOwner, featuresOwnerConn, 1);
 		const holder = new FakeCdpSocket();
 		const holderConn = bridge.cdpConnected(holder);
 		void (await attachPage(bridge, ext, holder, holderConn, 1));
@@ -7311,35 +5841,19 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			mediaOwnerConn,
-			mediaOwnerSession,
-			"Emulation.setEmulatedMedia",
-			{ media: "print" },
-		);
-		await sendRootCommand(
-			featuresOwnerConn,
-			featuresOwnerSession,
-			"Emulation.setEmulatedMedia",
-			{
-				features: [{ name: "prefers-color-scheme", value: "dark" }],
-			},
-		);
+		await sendRootCommand(mediaOwnerConn, mediaOwnerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(featuresOwnerConn, featuresOwnerSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
 
 		bridge.cdpClosed(mediaOwnerConn);
-		await waitFor(
-			() => ext.pending("send").length === 1,
-			"first queued emulated-media cleanup",
-		);
+		await waitFor(() => ext.pending("send").length === 1, "first queued emulated-media cleanup");
 		expect(ext.pending("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7350,10 +5864,7 @@ describe("RelayBridge tab grouping", () => {
 
 		bridge.cdpClosed(featuresOwnerConn);
 		ack(bridge, ext, "send");
-		await waitFor(
-			() => ext.rpcs("send").length === 4,
-			"coalesced empty emulated-media cleanup",
-		);
+		await waitFor(() => ext.rpcs("send").length === 4, "coalesced empty emulated-media cleanup");
 		expect(ext.rpcs("send")[3]).toMatchObject({
 			method: "Emulation.setEmulatedMedia",
 			params: {
@@ -7381,34 +5892,23 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setIdleOverride",
-			{
-				isUserActive: false,
-				isScreenUnlocked: false,
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setIdleOverride", {
+			isUserActive: false,
+			isScreenUnlocked: false,
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "idle override replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
@@ -7419,11 +5919,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"idle override cleanup after owner loss",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "idle override cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setIdleOverride",
 			"Emulation.clearIdleOverride",
 		]);
@@ -7440,18 +5937,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setIdleOverride",
 			"Emulation.clearIdleOverride",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("waits for an in-flight idle override before live owner-loss cleanup", async () => {
@@ -7476,23 +5969,16 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setIdleOverride",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Emulation.setIdleOverride"]);
 
 		bridge.cdpClosed(ownerConn);
 		await flush();
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Emulation.setIdleOverride",
-		]);
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setIdleOverride"]);
 
 		ack(bridge, ext, "send");
 		await flush();
-		await waitFor(
-			() => ext.rpcs("send").length === 2,
-			"idle cleanup after in-flight owner loss",
-		);
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext.rpcs("send").length === 2, "idle cleanup after in-flight owner loss");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setIdleOverride",
 			"Emulation.clearIdleOverride",
 		]);
@@ -7521,27 +6007,20 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await flush();
 		// The enable is in flight (not yet acked) when its owner disconnects.
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Page.setInterceptFileChooserDialog",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Page.setInterceptFileChooserDialog"]);
 
 		bridge.cdpClosed(ownerConn);
 		await flush();
 		// Owner-loss cleanup must wait for the in-flight enable rather than racing
 		// ahead: no clear is issued while the enable is still outstanding.
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Page.setInterceptFileChooserDialog",
-		]);
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Page.setInterceptFileChooserDialog"]);
 
 		ack(bridge, ext, "send");
 		await flush();
-		await waitFor(
-			() => ext.rpcs("send").length === 2,
-			"file-chooser cleanup after in-flight owner loss",
-		);
+		await waitFor(() => ext.rpcs("send").length === 2, "file-chooser cleanup after in-flight owner loss");
 		// The late success is reconciled: the now-orphaned interception is torn
 		// down so it does not linger enabled on the shared root.
-		expect(ext.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Page.setInterceptFileChooserDialog",
 			"Page.setInterceptFileChooserDialog",
 		]);
@@ -7557,13 +6036,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -7572,57 +6045,33 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Page.setDeviceMetricsOverride",
-			{
-				width: 1280,
-				height: 720,
-				deviceScaleFactor: 1,
-				mobile: false,
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.clearDeviceMetricsOverride",
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Page.setDeviceMetricsOverride", {
+			width: 1280,
+			height: 720,
+			deviceScaleFactor: 1,
+			mobile: false,
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.clearDeviceMetricsOverride");
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setGeolocationOverride",
-			{
-				latitude: 37.7749,
-				longitude: -122.4194,
-				accuracy: 10,
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Page.clearGeolocationOverride",
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setGeolocationOverride", {
+			latitude: 37.7749,
+			longitude: -122.4194,
+			accuracy: 10,
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Page.clearGeolocationOverride");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -7638,13 +6087,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		bridge.cdpMessage(
 			ownerConn,
@@ -7677,10 +6120,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -7696,13 +6136,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -7711,99 +6145,43 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Network.setExtraHTTPHeaders",
-			{
-				headers: { "x-owner": "1" },
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Network.setExtraHTTPHeaders",
-			{ headers: {} },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Network.setExtraHTTPHeaders", {
+			headers: { "x-owner": "1" },
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Network.setExtraHTTPHeaders", { headers: {} });
 
 		await sendRootCommand(ownerConn, ownerSession, "Network.setBlockedURLs", {
 			urls: ["https://blocked.example/*"],
 		});
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Network.setBlockedURLs",
-			{ urls: [] },
-		);
+		await sendRootCommand(clearerConn, clearerSession, "Network.setBlockedURLs", { urls: [] });
 		await sendRootCommand(ownerConn, ownerSession, "Network.setBlockedURLs", {
 			urlPatterns: [{ urlPattern: "https://pattern.example/*" }],
 		});
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Network.setBlockedURLs",
-			{ urlPatterns: [] },
-		);
+		await sendRootCommand(clearerConn, clearerSession, "Network.setBlockedURLs", { urlPatterns: [] });
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setLocaleOverride",
-			{ locale: "fr-FR" },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setLocaleOverride",
-			{},
-		);
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setLocaleOverride",
-			{ locale: "de-DE" },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setLocaleOverride",
-			{ locale: "" },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setLocaleOverride", { locale: "fr-FR" });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setLocaleOverride", {});
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setLocaleOverride", { locale: "de-DE" });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setLocaleOverride", { locale: "" });
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setEmulatedMedia",
-			{
-				media: "print",
-				features: [{ name: "prefers-color-scheme", value: "dark" }],
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setEmulatedMedia",
-			{},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
+			media: "print",
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setEmulatedMedia", {});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -7828,10 +6206,7 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
@@ -7846,10 +6221,7 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "blocked URL replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
@@ -7876,22 +6248,15 @@ describe("RelayBridge tab grouping", () => {
 				method: "Network.getCookies",
 			}),
 		);
-		await waitFor(
-			() => ext2.rpcs("send").length === 3,
-			"holder command after blocked URL cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 3, "holder command after blocked URL cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setBlockedURLs",
 			"Network.setBlockedURLs",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays accepted encodings across recovery and clears them when the owner disappears", async () => {
@@ -7912,38 +6277,24 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Network.setAcceptedEncodings",
-			{
-				encodings: ["gzip", "br"],
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Network.setAcceptedEncodings", {
+			encodings: ["gzip", "br"],
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"accepted encodings replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "accepted encodings replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Network.setAcceptedEncodings",
 			params: { encodings: ["gzip", "br"] },
@@ -7951,10 +6302,7 @@ describe("RelayBridge tab grouping", () => {
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"accepted encodings cleanup",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 2, "accepted encodings cleanup");
 		expect(ext2.rpcs("send")[1]).toMatchObject({
 			method: "Network.clearAcceptedEncodings",
 		});
@@ -7970,22 +6318,15 @@ describe("RelayBridge tab grouping", () => {
 				method: "Network.getCookies",
 			}),
 		);
-		await waitFor(
-			() => ext2.rpcs("send").length === 3,
-			"holder command after accepted encodings cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 3, "holder command after accepted encodings cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setAcceptedEncodings",
 			"Network.clearAcceptedEncodings",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("drops idle override clears before recovery", async () => {
@@ -7997,13 +6338,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -8012,39 +6347,24 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setIdleOverride",
-			{
-				isUserActive: false,
-				isScreenUnlocked: false,
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.clearIdleOverride",
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setIdleOverride", {
+			isUserActive: false,
+			isScreenUnlocked: false,
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.clearIdleOverride");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -8060,13 +6380,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -8075,37 +6389,21 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Network.setBypassServiceWorker",
-			{ bypass: true },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Network.setBypassServiceWorker",
-			{ bypass: false },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Network.setBypassServiceWorker", { bypass: true });
+		await sendRootCommand(clearerConn, clearerSession, "Network.setBypassServiceWorker", { bypass: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -8130,38 +6428,24 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setEmulatedVisionDeficiency",
-			{
-				type: "blurredVision",
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedVisionDeficiency", {
+			type: "blurredVision",
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"vision deficiency replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "vision deficiency replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setEmulatedVisionDeficiency",
 			params: { type: "blurredVision" },
@@ -8170,11 +6454,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"vision deficiency cleanup after owner loss",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "vision deficiency cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setEmulatedVisionDeficiency",
 			"Emulation.setEmulatedVisionDeficiency",
 		]);
@@ -8195,18 +6476,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setEmulatedVisionDeficiency",
 			"Emulation.setEmulatedVisionDeficiency",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays focus emulation after guard recovery and resets it when the owner disconnects", async () => {
@@ -8227,38 +6504,24 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setFocusEmulationEnabled",
-			{
-				enabled: true,
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setFocusEmulationEnabled", {
+			enabled: true,
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"focus emulation replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "focus emulation replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setFocusEmulationEnabled",
 			params: { enabled: true },
@@ -8267,11 +6530,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"focus emulation cleanup after owner loss",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "focus emulation cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setFocusEmulationEnabled",
 			"Emulation.setFocusEmulationEnabled",
 		]);
@@ -8292,18 +6552,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setFocusEmulationEnabled",
 			"Emulation.setFocusEmulationEnabled",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays hidden-scrollbar emulation after guard recovery and resets it when the owner disconnects", async () => {
@@ -8324,38 +6580,24 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setScrollbarsHidden",
-			{
-				hidden: true,
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setScrollbarsHidden", {
+			hidden: true,
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"hidden-scrollbar replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "hidden-scrollbar replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setScrollbarsHidden",
 			params: { hidden: true },
@@ -8364,11 +6606,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"hidden-scrollbar cleanup after owner loss",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "hidden-scrollbar cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setScrollbarsHidden",
 			"Emulation.setScrollbarsHidden",
 		]);
@@ -8389,18 +6628,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setScrollbarsHidden",
 			"Emulation.setScrollbarsHidden",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("replays hardware-concurrency overrides after guard recovery and resets them to the browser default when the owner disconnects", async () => {
@@ -8421,23 +6656,15 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setHardwareConcurrencyOverride",
-			{
-				hardwareConcurrency: 16,
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setHardwareConcurrencyOverride", {
+			hardwareConcurrency: 16,
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -8445,15 +6672,9 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 			hardwareConcurrency: 8,
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"hardware-concurrency recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "hardware-concurrency recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"hardware-concurrency replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "hardware-concurrency replay");
 		expect(ext2.rpcs("send")[0]).toMatchObject({
 			method: "Emulation.setHardwareConcurrencyOverride",
 			params: { hardwareConcurrency: 16 },
@@ -8462,11 +6683,8 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		bridge.cdpClosed(ownerConn);
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"hardware-concurrency cleanup after owner loss",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "hardware-concurrency cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setHardwareConcurrencyOverride",
 			"Emulation.setHardwareConcurrencyOverride",
 		]);
@@ -8487,18 +6705,14 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Emulation.setHardwareConcurrencyOverride",
 			"Emulation.setHardwareConcurrencyOverride",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
-		expect(
-			holder.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("treats resetting hardware-concurrency to the browser default as a tab-wide clear before recovery", async () => {
@@ -8510,13 +6724,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -8525,31 +6733,18 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Emulation.setHardwareConcurrencyOverride",
-			{
-				hardwareConcurrency: 16,
-			},
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setHardwareConcurrencyOverride",
-			{
-				hardwareConcurrency: 8,
-			},
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setHardwareConcurrencyOverride", {
+			hardwareConcurrency: 16,
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setHardwareConcurrencyOverride", {
+			hardwareConcurrency: 8,
+		});
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -8557,10 +6752,7 @@ describe("RelayBridge tab grouping", () => {
 			recoverableTabIds: [1],
 			hardwareConcurrency: 8,
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"hardware-concurrency clear recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "hardware-concurrency clear recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -8576,13 +6768,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -8591,37 +6777,21 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Security.setIgnoreCertificateErrors",
-			{ ignore: true },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Security.setIgnoreCertificateErrors",
-			{ ignore: false },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Security.setIgnoreCertificateErrors", { ignore: true });
+		await sendRootCommand(clearerConn, clearerSession, "Security.setIgnoreCertificateErrors", { ignore: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -8637,13 +6807,7 @@ describe("RelayBridge tab grouping", () => {
 		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
 		const clearer = new FakeCdpSocket();
 		const clearerConn = bridge.cdpConnected(clearer);
-		const clearerSession = await attachPage(
-			bridge,
-			ext,
-			clearer,
-			clearerConn,
-			1,
-		);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
 
 		const sendRootCommand = async (
 			connId: number,
@@ -8652,37 +6816,21 @@ describe("RelayBridge tab grouping", () => {
 			params?: Record<string, unknown>,
 		): Promise<void> => {
 			const id = ++msgSeq;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id, sessionId, method, params }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
 		};
 
-		await sendRootCommand(
-			ownerConn,
-			ownerSession,
-			"Page.setTouchEmulationEnabled",
-			{ enabled: true },
-		);
-		await sendRootCommand(
-			clearerConn,
-			clearerSession,
-			"Emulation.setTouchEmulationEnabled",
-			{ enabled: false },
-		);
+		await sendRootCommand(ownerConn, ownerSession, "Page.setTouchEmulationEnabled", { enabled: true });
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setTouchEmulationEnabled", { enabled: false });
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await flush();
 
@@ -8718,26 +6866,18 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "owner header replay");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.setExtraHTTPHeaders",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setExtraHTTPHeaders"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual({
 			headers: { "x-omp-session": "alive" },
 		});
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"orphaned header cleanup",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned header cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setExtraHTTPHeaders",
 			"Network.setExtraHTTPHeaders",
 		]);
@@ -8755,7 +6895,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setExtraHTTPHeaders",
 			"Network.setExtraHTTPHeaders",
 			"Network.getCookies",
@@ -8771,10 +6911,7 @@ describe("RelayBridge tab grouping", () => {
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
 		for (const method of ["Network.enable", "Page.enable"]) {
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
@@ -8783,18 +6920,10 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"first recovery attach",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "first recovery attach");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"first interrupted replay command",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "first interrupted replay command");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
 
 		// Replace the socket without acknowledging Network.enable. Chrome still
 		// reports the debugger attached, so only restorePending can trigger a retry.
@@ -8803,23 +6932,12 @@ describe("RelayBridge tab grouping", () => {
 			attachedTabIds: [1],
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext3.rpcs("send").length === 1,
-			"restarted Network replay",
-		);
+		await waitFor(() => ext3.rpcs("send").length === 1, "restarted Network replay");
 		expect(ext3.rpcs("attach")).toHaveLength(0);
-		expect(ext3.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-		]);
+		expect(ext3.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
 		ack(bridge, ext3, "send");
-		await waitFor(
-			() => ext3.rpcs("send").length === 2,
-			"restarted Page replay",
-		);
-		expect(ext3.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-			"Page.enable",
-		]);
+		await waitFor(() => ext3.rpcs("send").length === 2, "restarted Page replay");
+		expect(ext3.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable"]);
 		ack(bridge, ext3, "send");
 		await flush();
 
@@ -8833,18 +6951,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext3.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-			"Page.enable",
-			"Page.getFrameTree",
-		]);
+		expect(ext3.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable", "Page.getFrameTree"]);
 		ack(bridge, ext3, "send", { frameTree: {} });
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === commandId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("holds a preserved session's command until the reconnect hello arrives", async () => {
@@ -8898,7 +7008,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
-		expect(cdp.messages.find((m) => m.id === cmdId)?.error).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
 
 	it("rejects a queued command when recovery replaces its auto-attach page session", async () => {
@@ -8908,10 +7018,7 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const oldPageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
 		await flush();
 
 		bridge.extClosed(ext);
@@ -8941,25 +7048,17 @@ describe("RelayBridge tab grouping", () => {
 				recoverableTabIds: [1],
 			}),
 		);
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"auto-attach recovery RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "auto-attach recovery RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(
-			() =>
-				cdp.messages.some(
-					(message) => message.id === commandId && message.error !== undefined,
-				),
+			() => cdp.messages.some(message => message.id === commandId && message.error !== undefined),
 			"queued command error",
 		);
 
 		// The hello retracted oldPageSession and minted replacement auto-attach
 		// state. The queued Page.navigate must not execute against the fresh root.
 		expect(ext2.rpcs("send")).toHaveLength(0);
-		expect(
-			cdp.messages.find((message) => message.id === commandId)?.error,
-		).toEqual({
+		expect(cdp.messages.find(message => message.id === commandId)?.error).toEqual({
 			code: -32000,
 			message: `Unknown session id ${oldPageSession}`,
 		});
@@ -8972,19 +7071,10 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const firstAutoAttachId = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: firstAutoAttachId, method: "Target.setAutoAttach" }),
-		);
-		await waitFor(
-			() => ext.rpcs("attach").length === 1,
-			"initial auto-attach RPC",
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: firstAutoAttachId, method: "Target.setAutoAttach" }));
+		await waitFor(() => ext.rpcs("attach").length === 1, "initial auto-attach RPC");
 		ack(bridge, ext, "attach");
-		await waitFor(
-			() => cdp.messages.some((message) => message.id === firstAutoAttachId),
-			"initial auto-attach reply",
-		);
+		await waitFor(() => cdp.messages.some(message => message.id === firstAutoAttachId), "initial auto-attach reply");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -8998,9 +7088,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		expect(ext2.rpcs("attach")).toHaveLength(0);
-		expect(
-			cdp.messages.some((message) => message.id === reconnectAutoAttachId),
-		).toBeFalse();
+		expect(cdp.messages.some(message => message.id === reconnectAutoAttachId)).toBeFalse();
 
 		bridge.extMessage(
 			ext2,
@@ -9013,14 +7101,10 @@ describe("RelayBridge tab grouping", () => {
 				recoverableTabIds: [1],
 			}),
 		);
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		await waitFor(
-			() =>
-				cdp.messages.some((message) => message.id === reconnectAutoAttachId),
+			() => cdp.messages.some(message => message.id === reconnectAutoAttachId),
 			"reconnect auto-attach reply",
 		);
 		expect(ext2.rpcs("attach")).toHaveLength(1);
@@ -9047,7 +7131,7 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		expect(ext2.rpcs("attach")).toHaveLength(0);
-		expect(cdp.messages.some((message) => message.id === attachId)).toBeFalse();
+		expect(cdp.messages.some(message => message.id === attachId)).toBeFalse();
 
 		bridge.extMessage(
 			ext2,
@@ -9060,15 +7144,9 @@ describe("RelayBridge tab grouping", () => {
 				recoverableTabIds: [1],
 			}),
 		);
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"held-tab recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "held-tab recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => cdp.messages.some((message) => message.id === attachId),
-			"attachToTarget reply",
-		);
+		await waitFor(() => cdp.messages.some(message => message.id === attachId), "attachToTarget reply");
 		expect(ext2.rpcs("attach")).toHaveLength(1);
 		expect(cdp.sessionFor(attachId)).toBeDefined();
 	});
@@ -9127,7 +7205,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
-		expect(cdp.messages.find((m) => m.id === cmdId)?.error).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
 
 	it("re-cycles Runtime for a preserved session that re-enables before the reconnect hello", async () => {
@@ -9148,14 +7226,10 @@ describe("RelayBridge tab grouping", () => {
 			}),
 		);
 		await flush();
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext, "send");
 		await flush();
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.enable",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
 		ack(bridge, ext, "send");
 		await flush();
 
@@ -9180,7 +7254,7 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await flush();
 		expect(ext2.rpcs("send")).toHaveLength(0);
-		expect(cdp.messages.find((m) => m.id === enableId)).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === enableId)).toBeUndefined();
 
 		// Hello arrives: recovery retracts/re-announces the preserved session (resetting
 		// its runtime state) and arms the reattach.
@@ -9201,18 +7275,14 @@ describe("RelayBridge tab grouping", () => {
 
 		// The held enable now drives a real disable+enable cycle on the fresh root
 		// instead of a spurious early success.
-		expect(ext2.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		expect(ext2.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(ext2.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.enable",
-		]);
+		expect(ext2.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(cdp.messages.find((m) => m.id === enableId)?.error).toBeUndefined();
-		expect(cdp.messages.find((m) => m.id === enableId)?.result).toEqual({});
+		expect(cdp.messages.find(m => m.id === enableId)?.error).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === enableId)?.result).toEqual({});
 	});
 
 	it("holds a preserved command across a second reconnect until the latest attach settles", async () => {
@@ -9277,7 +7347,7 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		expect(ext3.rpcs("send")).toHaveLength(1);
 		expect(ext3.rpcs("send")[0]!.tabId).toBe(1);
-		expect(cdp.messages.find((m) => m.id === cmdId)?.error).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
 
 	it("does not mint auto-attach sessions when the user cancels the debugger mid-replay", async () => {
@@ -9317,25 +7387,16 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		// The replay's Network.enable is now in flight (unacknowledged).
-		await waitFor(
-			() => ext2.pending("send").length === 1,
-			"in-flight replay command",
-		);
+		await waitFor(() => ext2.pending("send").length === 1, "in-flight replay command");
 		const attachedBefore = cdp.attachedSessions().length;
 
 		// The user dismisses the debugger infobar while the replay RPC is in flight:
 		// the extension reports a user-initiated detach. This bans the tab and
 		// retracts its sessions.
-		bridge.extMessage(
-			ext2,
-			JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }),
-		);
+		bridge.extMessage(ext2, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
 		await flush();
 
 		// The replay RPC now resolves. The continuation must revalidate and NOT mint
@@ -9383,15 +7444,9 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.pending("send").length === 1,
-			"in-flight replay command",
-		);
+		await waitFor(() => ext2.pending("send").length === 1, "in-flight replay command");
 		const attachedBefore = cdp.attachedSessions().length;
 
 		bridge.extMessage(ext2, JSON.stringify({ t: "tabRemoved", tabId: 1 }));
@@ -9410,10 +7465,7 @@ describe("RelayBridge tab grouping", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 		for (const method of ["Network.enable", "Page.enable"]) {
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method }),
-			);
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method }));
 			await flush();
 			ack(bridge, ext, "send");
 			await flush();
@@ -9424,19 +7476,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery attach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
 		ack(bridge, ext2, "attach");
 		// Replay of the first journaled subscription is now in flight on ext2.
-		await waitFor(
-			() => ext2.pending("send").length === 1,
-			"first replay command in flight",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-		]);
+		await waitFor(() => ext2.pending("send").length === 1, "first replay command in flight");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
 
 		// Another tab's delayed guard detach fires a second hello on the SAME socket
 		// while this tab's replay is still in flight and reports it attached. It must
@@ -9455,27 +7499,16 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await flush();
 		// No duplicate Network.enable — still exactly one send in flight.
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
 
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"second replay command",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-			"Page.enable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 2, "second replay command");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable"]);
 		ack(bridge, ext2, "send");
 		await flush();
 		// Exactly the two journaled subscriptions replayed once each — no concurrent
 		// second task doubled them.
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Network.enable",
-			"Page.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable"]);
 	});
 
 	it("reuses recovery when a same-socket hello reports the forced detach", async () => {
@@ -9507,9 +7540,7 @@ describe("RelayBridge tab grouping", () => {
 				method: "Fetch.enable",
 			}),
 		);
-		await waitFor(() =>
-			ext.pending("send").some((rpc) => rpc.method === "Fetch.enable"),
-		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Fetch.enable"));
 		bridge.extClosed(ext);
 		await flush();
 
@@ -9549,23 +7580,12 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.pending("attach").length === 1);
 		ack(bridge, ext2, "attach");
 		await waitFor(
-			() =>
-				ext2
-					.rpcs("send")
-					.filter(
-						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-					).length === 1,
+			() => ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument").length === 1,
 			"single preload replay",
 		);
 		ack(bridge, ext2, "send", { identifier: "root-after-recovery" });
 		await flush();
-		expect(
-			ext2
-				.rpcs("send")
-				.filter(
-					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-				),
-		).toHaveLength(1);
+		expect(ext2.rpcs("send").filter(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument")).toHaveLength(1);
 	});
 });
 
@@ -9587,14 +7607,10 @@ describe("RelayBridge Runtime sessions", () => {
 			}),
 		);
 		await flush();
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext, "send");
 		await flush();
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.enable",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
 
 		const context = {
 			context: {
@@ -9633,11 +7649,9 @@ describe("RelayBridge Runtime sessions", () => {
 		expect(ext.rpcs("send")).toHaveLength(runtimeSendCount);
 
 		const contexts = second.messages.filter(
-			(message) =>
-				message.sessionId === secondSession &&
-				message.method === "Runtime.executionContextCreated",
+			message => message.sessionId === secondSession && message.method === "Runtime.executionContextCreated",
 		);
-		expect(contexts.map((message) => message.params)).toEqual([context]);
+		expect(contexts.map(message => message.params)).toEqual([context]);
 
 		bridge.cdpMessage(
 			secondConn,
@@ -9663,19 +7677,12 @@ describe("RelayBridge Runtime sessions", () => {
 			}),
 		);
 		const firstContexts = first.messages.filter(
-			(message) =>
-				message.sessionId === firstSession &&
-				message.method === "Runtime.executionContextCreated",
+			message => message.sessionId === firstSession && message.method === "Runtime.executionContextCreated",
 		);
-		expect(firstContexts.map((message) => message.params)).toEqual([
-			context,
-			nextContext,
-		]);
+		expect(firstContexts.map(message => message.params)).toEqual([context, nextContext]);
 		expect(
 			second.messages.filter(
-				(message) =>
-					message.sessionId === secondSession &&
-					message.method === "Runtime.executionContextCreated",
+				message => message.sessionId === secondSession && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual(contexts);
 	});
@@ -9688,21 +7695,13 @@ describe("RelayBridge Runtime sessions", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.enable" }));
 		await flush();
 
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.disable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.disable" }));
 		ack(bridge, ext, "send");
 		await flush();
-		expect(ext.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.enable",
-		]);
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
 
 		const context = { context: { id: 19 } };
 		bridge.extMessage(
@@ -9719,9 +7718,7 @@ describe("RelayBridge Runtime sessions", () => {
 
 		expect(
 			cdp.messages.filter(
-				(message) =>
-					message.sessionId === sessionId &&
-					message.method === "Runtime.executionContextCreated",
+				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual([]);
 	});
@@ -9732,13 +7729,7 @@ describe("RelayBridge Runtime sessions", () => {
 
 		const first = new FakeCdpSocket();
 		const firstConn = bridge.cdpConnected(first);
-		const firstSession = await attachPage(
-			bridge,
-			firstExt,
-			first,
-			firstConn,
-			1,
-		);
+		const firstSession = await attachPage(bridge, firstExt, first, firstConn, 1);
 		bridge.cdpMessage(
 			firstConn,
 			JSON.stringify({
@@ -9779,13 +7770,7 @@ describe("RelayBridge Runtime sessions", () => {
 
 		const second = new FakeCdpSocket();
 		const secondConn = bridge.cdpConnected(second);
-		const secondSession = await attachPage(
-			bridge,
-			nextExt,
-			second,
-			secondConn,
-			1,
-		);
+		const secondSession = await attachPage(bridge, nextExt, second, secondConn, 1);
 		bridge.cdpMessage(
 			secondConn,
 			JSON.stringify({
@@ -9795,14 +7780,10 @@ describe("RelayBridge Runtime sessions", () => {
 			}),
 		);
 		await flush();
-		expect(nextExt.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		expect(nextExt.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, nextExt, "send");
 		await flush();
-		expect(nextExt.pending("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.enable",
-		]);
+		expect(nextExt.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
 
 		const currentContext = { context: { id: 18 } };
 		bridge.extMessage(
@@ -9818,11 +7799,9 @@ describe("RelayBridge Runtime sessions", () => {
 		await flush();
 
 		const contexts = second.messages.filter(
-			(message) =>
-				message.sessionId === secondSession &&
-				message.method === "Runtime.executionContextCreated",
+			message => message.sessionId === secondSession && message.method === "Runtime.executionContextCreated",
 		);
-		expect(contexts.map((message) => message.params)).toEqual([currentContext]);
+		expect(contexts.map(message => message.params)).toEqual([currentContext]);
 	});
 });
 
@@ -9843,7 +7822,7 @@ describe("RelayBridge attachment release", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 
 		// Mirror Chrome: onDetach reaches the bridge before detach's RPC result.
 		// This echo is expected and must not ban/retract the live target.
@@ -9868,21 +7847,11 @@ describe("RelayBridge attachment release", () => {
 				params: { targetId: "PAGE1" },
 			}),
 		);
-		await waitFor(
-			() => ext.pending("attach").length === 1,
-			"clean reattach RPC",
-		);
+		await waitFor(() => ext.pending("attach").length === 1, "clean reattach RPC");
 		ack(bridge, ext, "attach");
-		await waitFor(
-			() => cdp.sessionFor(reattachId) !== undefined,
-			"clean reattach reply",
-		);
+		await waitFor(() => cdp.sessionFor(reattachId) !== undefined, "clean reattach reply");
 		expect(cdp.sessionFor(reattachId)).toBeDefined();
-		expect(
-			cdp.messages.some(
-				(message) => message.method === "Target.targetDestroyed",
-			),
-		).toBe(false);
+		expect(cdp.messages.some(message => message.method === "Target.targetDestroyed")).toBe(false);
 	});
 
 	it("serializes immediate reattachment behind the detach RPC and its echo", async () => {
@@ -9962,16 +7931,12 @@ describe("RelayBridge attachment release", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		// setAutoAttach mints a tab session; attachToTarget adds a page session.
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
 		ack(bridge, ext, "attach");
 		await flush();
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		const tabSession = cdp.attachedSessions().find((id) => id !== pageSession);
-		if (!tabSession)
-			throw new Error("setAutoAttach did not mint a tab session");
+		const tabSession = cdp.attachedSessions().find(id => id !== pageSession);
+		if (!tabSession) throw new Error("setAutoAttach did not mint a tab session");
 		bridge.cdpMessage(
 			connId,
 			JSON.stringify({
@@ -9992,7 +7957,7 @@ describe("RelayBridge attachment release", () => {
 			}),
 		);
 		await flush();
-		expect(ext.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
 	it("retracts held sessions when reconnect reattachment fails", async () => {
@@ -10012,7 +7977,7 @@ describe("RelayBridge attachment release", () => {
 		await flush();
 
 		const detached = cdp.messages.find(
-			(message) =>
+			message =>
 				message.method === "Target.detachedFromTarget" &&
 				message.params !== null &&
 				typeof message.params === "object" &&
@@ -10082,10 +8047,7 @@ describe("RelayBridge attachment release", () => {
 				params: { targetId: "PAGE1" },
 			}),
 		);
-		await waitFor(
-			() => ext.pending("attach").length === 1,
-			"interrupted attach RPC",
-		);
+		await waitFor(() => ext.pending("attach").length === 1, "interrupted attach RPC");
 
 		const replacement = new FakeExtSocket();
 		connect(bridge, replacement, [tab({ tabId: 1 })]);
@@ -10160,7 +8122,7 @@ describe("RelayBridge attachment release", () => {
 		);
 		await flush();
 		const replacementDetach = cdp.messages.find(
-			(message) =>
+			message =>
 				message.method === "Target.detachedFromTarget" &&
 				message.params !== null &&
 				typeof message.params === "object" &&
@@ -10171,13 +8133,10 @@ describe("RelayBridge attachment release", () => {
 
 		// A later genuine user cancellation has no relay attribution and must
 		// still retract the replacement session.
-		bridge.extMessage(
-			replacement,
-			JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }),
-		);
+		bridge.extMessage(replacement, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
 		await flush();
 		const userDetach = cdp.messages.find(
-			(message) =>
+			message =>
 				message.method === "Target.detachedFromTarget" &&
 				message.params !== null &&
 				typeof message.params === "object" &&
@@ -10210,17 +8169,12 @@ describe("RelayBridge attachment release", () => {
 		);
 
 		const received = cdp.messages.filter(
-			(message) =>
-				message.sessionId === sessionId &&
-				message.method === "Runtime.executionContextCreated",
+			message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 		);
-		expect(received.map((message) => message.params)).toEqual([context]);
+		expect(received.map(message => message.params)).toEqual([context]);
 
 		// An explicit disable silences the same session — a later re-emit is dropped.
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.disable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.disable" }));
 		await flush();
 		bridge.extMessage(
 			ext,
@@ -10233,9 +8187,7 @@ describe("RelayBridge attachment release", () => {
 		);
 		expect(
 			cdp.messages.filter(
-				(message) =>
-					message.sessionId === sessionId &&
-					message.method === "Runtime.executionContextCreated",
+				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual(received);
 	});
@@ -10268,11 +8220,7 @@ describe("RelayBridge attachment release", () => {
 			}),
 		);
 		await flush();
-		expect(
-			cdp.messages.some(
-				(message) => message.method === "Target.detachedFromTarget",
-			),
-		).toBe(true);
+		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(true);
 	});
 
 	it("holds a pipelined duplicate Runtime.enable until the in-flight enable settles", async () => {
@@ -10284,40 +8232,22 @@ describe("RelayBridge attachment release", () => {
 		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
 
 		const enable1 = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: enable1, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: enable1, sessionId, method: "Runtime.enable" }));
 		await flush();
 		const enable2 = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: enable2, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: enable2, sessionId, method: "Runtime.enable" }));
 		await flush();
 
 		// Root disable/enable cycle still pending: neither caller may be acked.
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === enable1 || message.id === enable2,
-			),
-		).toEqual([]);
+		expect(cdp.messages.filter(message => message.id === enable1 || message.id === enable2)).toEqual([]);
 
 		ack(bridge, ext, "send"); // Runtime.disable leg
 		await flush();
 		ack(bridge, ext, "send"); // Runtime.enable leg
 		await flush();
 
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === enable1 && "result" in message,
-			),
-		).toHaveLength(1);
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === enable2 && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === enable1 && "result" in message)).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === enable2 && "result" in message)).toHaveLength(1);
 	});
 
 	it("fails a pipelined duplicate Runtime.enable when the root enable fails", async () => {
@@ -10329,38 +8259,20 @@ describe("RelayBridge attachment release", () => {
 		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
 
 		const enable1 = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: enable1, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: enable1, sessionId, method: "Runtime.enable" }));
 		await flush();
 		const enable2 = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: enable2, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: enable2, sessionId, method: "Runtime.enable" }));
 		await flush();
 
 		// The first leg of the root cycle fails: both callers must observe it.
 		nack(bridge, ext, "send");
 		await flush();
 
+		expect(cdp.messages.filter(message => message.id === enable1 && "error" in message)).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === enable2 && "error" in message)).toHaveLength(1);
 		expect(
-			cdp.messages.filter(
-				(message) => message.id === enable1 && "error" in message,
-			),
-		).toHaveLength(1);
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === enable2 && "error" in message,
-			),
-		).toHaveLength(1);
-		expect(
-			cdp.messages.filter(
-				(message) =>
-					(message.id === enable1 || message.id === enable2) &&
-					"result" in message,
-			),
+			cdp.messages.filter(message => (message.id === enable1 || message.id === enable2) && "result" in message),
 		).toEqual([]);
 	});
 
@@ -10372,29 +8284,16 @@ describe("RelayBridge attachment release", () => {
 		const connId = bridge.cdpConnected(cdp);
 		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
 
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.enable" }));
 		await flush();
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.disable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Runtime.disable" }));
 		const latestEnable = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({ id: latestEnable, sessionId, method: "Runtime.enable" }),
-		);
+		bridge.cdpMessage(connId, JSON.stringify({ id: latestEnable, sessionId, method: "Runtime.enable" }));
 		await flush();
 
 		nack(bridge, ext, "send");
 		await flush();
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === latestEnable && "error" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === latestEnable && "error" in message)).toHaveLength(1);
 
 		const context = { context: { id: 91, uniqueId: "context-91" } };
 		bridge.extMessage(
@@ -10408,9 +8307,7 @@ describe("RelayBridge attachment release", () => {
 		);
 		expect(
 			cdp.messages.filter(
-				(message) =>
-					message.sessionId === sessionId &&
-					message.method === "Runtime.executionContextCreated",
+				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual([]);
 	});
@@ -10446,11 +8343,8 @@ describe("RelayBridge attachment release", () => {
 		// recheck and detach immediately so the debugger attachment (and its infobar)
 		// is not orphaned until a later relay outage.
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("detach").length === 1,
-			"unheld recovery detach",
-		);
-		expect(ext2.rpcs("detach").map((rpc) => rpc.tabId)).toEqual([1]);
+		await waitFor(() => ext2.rpcs("detach").length === 1, "unheld recovery detach");
+		expect(ext2.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 
 	it("gates a preserved session's Runtime.enable on the reconnect hello and recovery attach", async () => {
@@ -10497,38 +8391,23 @@ describe("RelayBridge attachment release", () => {
 				recoverableTabIds: [1],
 			}),
 		);
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		expect(ext2.rpcs("attach")).toHaveLength(1);
 		expect(ext2.rpcs("send")).toHaveLength(0);
 
 		// Attach acknowledges: only now does the root Runtime cycle proceed.
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "Runtime.disable leg");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send"); // Runtime.disable leg
 		await waitFor(() => ext2.rpcs("send").length === 2, "Runtime.enable leg");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-			"Runtime.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
 		ack(bridge, ext2, "send"); // Runtime.enable leg
 		await waitFor(
-			() =>
-				cdp.messages.some(
-					(message) => message.id === enableId && "result" in message,
-				),
+			() => cdp.messages.some(message => message.id === enableId && "result" in message),
 			"Runtime.enable ack to client",
 		);
-		expect(
-			cdp.messages.filter(
-				(message) => message.id === enableId && "result" in message,
-			),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(message => message.id === enableId && "result" in message)).toHaveLength(1);
 	});
 
 	it("re-cycles Runtime for a preserved session that had it enabled before recovery", async () => {
@@ -10574,11 +8453,7 @@ describe("RelayBridge attachment release", () => {
 		ack(bridge, ext, "send"); // Runtime.enable leg
 		await flush();
 		expect(
-			cdp.messages.filter(
-				(m) =>
-					m.sessionId === pageSession &&
-					m.method === "Runtime.executionContextCreated",
-			),
+			cdp.messages.filter(m => m.sessionId === pageSession && m.method === "Runtime.executionContextCreated"),
 		).toHaveLength(1);
 
 		// Recovery: the socket drops and a replacement reconnects. The tab is
@@ -10589,22 +8464,14 @@ describe("RelayBridge attachment release", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		expect(ext2.rpcs("attach")).toHaveLength(1);
 		ack(bridge, ext2, "attach");
 		await waitFor(() => ext2.rpcs("send").length === 1, "Runtime.disable leg");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send"); // Runtime.disable leg
 		await waitFor(() => ext2.rpcs("send").length === 2, "Runtime.enable leg");
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-			"Runtime.enable",
-		]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
 
 		// Runtime.enable on the fresh root re-announces contexts without requiring
 		// the preserved client to repeat its original subscription command.
@@ -10620,11 +8487,7 @@ describe("RelayBridge attachment release", () => {
 		ack(bridge, ext2, "send"); // Runtime.enable leg
 		await flush();
 		expect(
-			cdp.messages.filter(
-				(m) =>
-					m.sessionId === pageSession &&
-					m.method === "Runtime.executionContextCreated",
-			),
+			cdp.messages.filter(m => m.sessionId === pageSession && m.method === "Runtime.executionContextCreated"),
 		).toHaveLength(2);
 
 		// A repeated enable now observes the restored state and acknowledges without
@@ -10640,9 +8503,7 @@ describe("RelayBridge attachment release", () => {
 		);
 		await flush();
 		expect(ext2.rpcs("send")).toHaveLength(2);
-		expect(
-			cdp.messages.filter((m) => m.id === reEnableId && "result" in m),
-		).toHaveLength(1);
+		expect(cdp.messages.filter(m => m.id === reEnableId && "result" in m)).toHaveLength(1);
 	});
 
 	it("keeps a preserved session's Runtime.disable opt-out across recovery", async () => {
@@ -10653,13 +8514,7 @@ describe("RelayBridge attachment release", () => {
 		// A preserved bare holder that explicitly disabled Runtime.
 		const disabled = new FakeCdpSocket();
 		const disabledConn = bridge.cdpConnected(disabled);
-		const disabledSession = await attachPage(
-			bridge,
-			ext,
-			disabled,
-			disabledConn,
-			1,
-		);
+		const disabledSession = await attachPage(bridge, ext, disabled, disabledConn, 1);
 		bridge.cdpMessage(
 			disabledConn,
 			JSON.stringify({
@@ -10723,17 +8578,11 @@ describe("RelayBridge attachment release", () => {
 		// root context event, while the active session does.
 		expect(
 			disabled.messages.filter(
-				(m) =>
-					m.sessionId === disabledSession &&
-					m.method === "Runtime.executionContextCreated",
+				m => m.sessionId === disabledSession && m.method === "Runtime.executionContextCreated",
 			),
 		).toHaveLength(0);
 		expect(
-			active.messages.filter(
-				(m) =>
-					m.sessionId === activeSession &&
-					m.method === "Runtime.executionContextCreated",
-			),
+			active.messages.filter(m => m.sessionId === activeSession && m.method === "Runtime.executionContextCreated"),
 		).toHaveLength(1);
 	});
 
@@ -10744,23 +8593,11 @@ describe("RelayBridge attachment release", () => {
 
 		const defaultHolder = new FakeCdpSocket();
 		const defaultConn = bridge.cdpConnected(defaultHolder);
-		const defaultSession = await attachPage(
-			bridge,
-			ext,
-			defaultHolder,
-			defaultConn,
-			1,
-		);
+		const defaultSession = await attachPage(bridge, ext, defaultHolder, defaultConn, 1);
 
 		const disabledHolder = new FakeCdpSocket();
 		const disabledConn = bridge.cdpConnected(disabledHolder);
-		const disabledSession = await attachPage(
-			bridge,
-			ext,
-			disabledHolder,
-			disabledConn,
-			1,
-		);
+		const disabledSession = await attachPage(bridge, ext, disabledHolder, disabledConn, 1);
 		bridge.cdpMessage(
 			disabledConn,
 			JSON.stringify({
@@ -10774,10 +8611,7 @@ describe("RelayBridge attachment release", () => {
 		await waitFor(() => ext.rpcs("send").length === 2, "Runtime.enable leg");
 		ack(bridge, ext, "send");
 		await waitFor(
-			() =>
-				disabledHolder.messages.some(
-					(message) => "result" in message && message.id === msgSeq,
-				),
+			() => disabledHolder.messages.some(message => "result" in message && message.id === msgSeq),
 			"Runtime.enable ack",
 		);
 		bridge.cdpMessage(
@@ -10798,27 +8632,13 @@ describe("RelayBridge attachment release", () => {
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
 			recoverableTabIds: [1],
 		});
-		await waitFor(
-			() => ext2.rpcs("attach").length === 1,
-			"recovery reattach RPC",
-		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"Runtime.disable recovery leg",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 1, "Runtime.disable recovery leg");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"Runtime.enable recovery leg",
-		);
-		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
-			"Runtime.disable",
-			"Runtime.enable",
-		]);
+		await waitFor(() => ext2.rpcs("send").length === 2, "Runtime.enable recovery leg");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
 
 		const context = {
 			context: {
@@ -10843,16 +8663,12 @@ describe("RelayBridge attachment release", () => {
 
 		expect(
 			defaultHolder.messages.filter(
-				(message) =>
-					message.sessionId === defaultSession &&
-					message.method === "Runtime.executionContextCreated",
+				message => message.sessionId === defaultSession && message.method === "Runtime.executionContextCreated",
 			),
 		).toHaveLength(1);
 		expect(
 			disabledHolder.messages.filter(
-				(message) =>
-					message.sessionId === disabledSession &&
-					message.method === "Runtime.executionContextCreated",
+				message => message.sessionId === disabledSession && message.method === "Runtime.executionContextCreated",
 			),
 		).toHaveLength(0);
 	});
@@ -10905,9 +8721,9 @@ describe("RelayBridge attachment release", () => {
 		);
 		ack(bridge, ext3, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
-		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+		expect(ext3.rpcs("send").some(rpc => rpc.tabId === 1)).toBe(true);
 	});
 
 	it("falls back to best-effort reattach when a legacy hello omits recovery metadata", async () => {
@@ -10955,7 +8771,7 @@ describe("RelayBridge attachment release", () => {
 		);
 		ack(bridge, legacy, "send", { ok: true });
 		await flush();
-		const reply = cdp.messages.find((m) => m.id === cmdId);
+		const reply = cdp.messages.find(m => m.id === cmdId);
 		expect(reply?.error).toBeUndefined();
 	});
 });

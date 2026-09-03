@@ -109,8 +109,7 @@ export class AttachmentGuard<H> {
 		if (this.#attached.size === 0) return;
 		const tabIds = [...this.#attached];
 		this.#attached.clear();
-		for (const retry of this.#targetedRetries.values())
-			this.options.clearTimer(retry);
+		for (const retry of this.#targetedRetries.values()) this.options.clearTimer(retry);
 		this.#targetedRetries.clear();
 		this.options.detachAll(tabIds);
 	}
