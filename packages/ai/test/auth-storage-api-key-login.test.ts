@@ -37,7 +37,7 @@ function countCredentialRowsByDisabledState(dbPath: string, provider: string, di
 	}
 }
 
-describe("AuthStorage api-key login upsert", () => {
+describe("AuthStorage api-key login replace", () => {
 	let tempDir = "";
 	let dbPath = "";
 	let store: SqliteAuthCredentialStore | null = null;
@@ -94,7 +94,7 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(await authStorage.getApiKey("kagi", "session-kagi-relogin")).toBe("same-kagi-key");
 	});
 
-	it("appends a different api-key row when re-login returns a new key", async () => {
+	it("replaces the previous api-key row when re-login returns a new key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 
 		loginKagiSpy.mockResolvedValueOnce("first-kagi-key").mockResolvedValueOnce("second-kagi-key");
@@ -107,17 +107,16 @@ describe("AuthStorage api-key login upsert", () => {
 		await authStorage.login("kagi", controller);
 		await authStorage.login("kagi", controller);
 
-		expect(countCredentialRows(dbPath, "kagi")).toBe(2);
-		expect(countCredentialRowsByDisabledState(dbPath, "kagi", false)).toBe(2);
+		// A paste-key login is authoritative: the earlier key is replaced, not
+		// accumulated, so the pasted key is the only credential the runtime sees.
+		expect(countCredentialRows(dbPath, "kagi")).toBe(1);
+		expect(countCredentialRowsByDisabledState(dbPath, "kagi", false)).toBe(1);
 		expect(countCredentialRowsByDisabledState(dbPath, "kagi", true)).toBe(0);
 
 		const credentials = store.listAuthCredentials("kagi");
-		expect(credentials.map(entry => entry.credential)).toEqual([
-			{ type: "api_key", key: "first-kagi-key" },
-			{ type: "api_key", key: "second-kagi-key" },
-		]);
-		const rotatedKeys = [await authStorage.getApiKey("kagi"), await authStorage.getApiKey("kagi")].sort();
-		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
+		expect(credentials.map(entry => entry.credential)).toEqual([{ type: "api_key", key: "second-kagi-key" }]);
+		expect(store.getApiKey("kagi")).toBe("second-kagi-key");
+		expect(await authStorage.getApiKey("kagi", "session-kagi-new-key")).toBe("second-kagi-key");
 	});
 
 	it("hard-deletes superseded api-key rows when a different key replaces them", () => {

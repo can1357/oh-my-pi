@@ -9,7 +9,14 @@ import { isGlmVisionModelId, isGrokReasoningEffortCapable, isReasoningGlmModelId
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
-import { isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
@@ -826,10 +833,186 @@ export interface HuggingfaceModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * Minimal per-provider deployment entry from `router.huggingface.co/v1/models`.
+ *
+ * The router lists every partner deployment serving a model; `status` is one
+ * of `live` | `error` | `loading`. All fields are optional — the payload is
+ * external input and validated with guards.
+ */
+interface HuggingFaceRouterProviderEntry {
+	status?: unknown;
+	context_length?: unknown;
+	max_completion_tokens?: unknown;
+	is_free?: unknown;
+	supports_tools?: unknown;
+	pricing?: unknown;
+}
+
+function liveHuggingFaceProviders(raw: unknown): HuggingFaceRouterProviderEntry[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	return raw.filter((entry): entry is HuggingFaceRouterProviderEntry => isRecord(entry) && entry.status === "live");
+}
+
+/**
+ * Cheapest live per-provider price ($/MTok). A single `is_free` deployment
+ * makes the model runnable at zero cost, so it short-circuits; otherwise the
+ * lowest input price wins (ties broken by output) because the router is free
+ * to dispatch to any live provider.
+ */
+function huggingFaceCheapestLivePrice(
+	providers: readonly HuggingFaceRouterProviderEntry[],
+): { input: number; output: number } | undefined {
+	let cheapest: { input: number; output: number } | undefined;
+	for (const provider of providers) {
+		if (provider.is_free === true) {
+			return { input: 0, output: 0 };
+		}
+		const pricing = isRecord(provider.pricing) ? provider.pricing : undefined;
+		const input = toNumber(pricing?.input);
+		const output = toNumber(pricing?.output);
+		if (input === undefined || output === undefined) {
+			continue;
+		}
+		if (cheapest === undefined || input < cheapest.input || (input === cheapest.input && output < cheapest.output)) {
+			cheapest = { input, output };
+		}
+	}
+	return cheapest;
+}
+
+/** Largest live per-provider value for a token-limit field, or `null`. */
+function maxLiveHuggingFaceTokens(
+	providers: readonly HuggingFaceRouterProviderEntry[],
+	key: "context_length" | "max_completion_tokens",
+): number | null {
+	let max: number | null = null;
+	for (const provider of providers) {
+		const value = toPositiveNumberOrNull(provider[key]);
+		if (value !== null && (max === null || value > max)) {
+			max = value;
+		}
+	}
+	return max;
+}
+
+/**
+ * Map a router `/v1/models` entry into a canonical model. The router nests
+ * token limits and pricing per provider deployment (the generic
+ * OpenAI-compatible discovery only reads flat `context_length`, so it drops
+ * them); bundled references still contribute curated name/reasoning/compat
+ * metadata for ids the static catalog already knows.
+ */
+function mapHuggingFaceRouterModel(
+	entry: Record<string, unknown>,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const live = liveHuggingFaceProviders(entry.providers);
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const modalities =
+		architecture && Array.isArray(architecture.input_modalities) ? architecture.input_modalities : null;
+	const input = modalities !== null ? toInputCapabilities(modalities) : (reference?.input ?? defaults.input);
+	const cheapest = huggingFaceCheapestLivePrice(live);
+	const contextWindow = maxLiveHuggingFaceTokens(live, "context_length");
+	const maxTokens = maxLiveHuggingFaceTokens(live, "max_completion_tokens");
+	// Only refuse tools when every live deployment refuses them; the router
+	// picks the deployment, so a single tool-capable partner keeps tools on.
+	const allLiveRefuseTools = live.length > 0 && live.every(provider => provider.supports_tools === false);
+	return {
+		...(reference ?? defaults),
+		id: defaults.id,
+		name: reference?.name ?? defaults.name,
+		api: defaults.api,
+		provider: defaults.provider,
+		baseUrl: defaults.baseUrl,
+		input,
+		...(allLiveRefuseTools ? { supportsTools: false } : {}),
+		// Keep the full four-field cost shape (a bare {input, output} fails the
+		// model-like guard downstream) while live pricing overrides input/output.
+		cost: { ...(reference?.cost ?? defaults.cost), ...(cheapest ?? {}) },
+		contextWindow: contextWindow ?? reference?.contextWindow ?? null,
+		maxTokens: maxTokens ?? reference?.maxTokens ?? null,
+	};
+}
+
+/**
+ * Fetch `router.huggingface.co/v1/models` and map the full live catalog —
+ * every model the router can dispatch, not just the bundled snapshot.
+ */
+async function fetchHuggingFaceRouterModels(options: {
+	baseUrl: string;
+	apiKey?: string;
+	fetch?: FetchImpl;
+	references: Map<string, ModelSpec<"openai-completions">>;
+}): Promise<ModelSpec<"openai-completions">[] | null> {
+	const baseUrl = options.baseUrl.trim().replace(/\/+$/, "");
+	const headers: Record<string, string> = { Accept: "application/json" };
+	if (options.apiKey) {
+		headers.Authorization = `Bearer ${options.apiKey}`;
+	}
+	let response: Response;
+	try {
+		response = await (options.fetch ?? fetch)(`${baseUrl}/models`, {
+			method: "GET",
+			headers,
+		});
+	} catch {
+		return null;
+	}
+	if (!response.ok) {
+		return null;
+	}
+	let payload: unknown;
+	try {
+		payload = await response.json();
+	} catch {
+		return null;
+	}
+	if (!isRecord(payload) || !Array.isArray(payload.data)) {
+		return null;
+	}
+	const deduped = new Map<string, ModelSpec<"openai-completions">>();
+	for (const raw of payload.data) {
+		if (!isRecord(raw) || typeof raw.id !== "string" || raw.id.length === 0) {
+			continue;
+		}
+		const defaults: ModelSpec<"openai-completions"> = {
+			id: raw.id,
+			name: raw.id,
+			api: "openai-completions",
+			provider: "huggingface",
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		};
+		const mapped = mapHuggingFaceRouterModel(raw, defaults, options.references.get(raw.id));
+		deduped.set(mapped.id, mapped);
+	}
+	return [...deduped.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
 export function huggingfaceModelManagerOptions(
 	config?: HuggingfaceModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("huggingface", "https://router.huggingface.co/v1", config);
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://router.huggingface.co/v1";
+	const references = createBundledReferenceMap<"openai-completions">("huggingface");
+	return {
+		providerId: "huggingface",
+		// The router's live list is the dispatch surface itself: entries the
+		// router no longer serves 404 at request time, so a successful fetch
+		// prunes stale bundled rows instead of listing dead models.
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () => fetchHuggingFaceRouterModels({ baseUrl, apiKey, fetch: config?.fetch, references }),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -4108,6 +4291,30 @@ export function anthropicModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 25. Meta (Meta Model API)
+// ---------------------------------------------------------------------------
+
+export interface MetaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	/** Provider id override for sibling providers on the same API (meta-muse-code). */
+	providerId?: Provider;
+}
+
+export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelManagerOptions<"openai-responses"> {
+	const options = createSimpleOpenAIResponsesOptions(
+		(config?.providerId ?? "meta") as Parameters<typeof getBundledModels>[0],
+		"https://api.meta.ai/v1",
+		config,
+	);
+	return {
+		...options,
+		dynamicModelsAuthoritative: true,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Models.dev provider descriptors for generate-models.ts
 // ---------------------------------------------------------------------------
 
@@ -4463,6 +4670,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	),
 	// --- OpenAI ---
 	simpleModelsDevDescriptor("openai", "openai", "openai-responses", "https://api.openai.com/v1"),
+	// --- Meta (Meta Model API) ---
+	simpleModelsDevDescriptor("meta", "meta", "openai-responses", "https://api.meta.ai/v1"),
 	// --- Groq ---
 	openAiCompletionsDescriptor("groq", "groq", "https://api.groq.com/openai/v1"),
 	// --- Cerebras ---

@@ -1895,9 +1895,12 @@ export class AuthStorage {
 				return;
 			}
 			const newCredential: ApiKeyCredential = { type: "api_key", key: result };
-			const stored = this.#store.upsertAuthCredentialRemote
-				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
-				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
+			// A paste-key login is authoritative for the provider: overwrite any
+			// previous api_key rows rather than appending, so a freshly pasted key
+			// can't be shadowed by a stale one in round-robin selection.
+			const stored = this.#store.replaceAuthCredentialsRemote
+				? await this.#store.replaceAuthCredentialsRemote(provider, [newCredential])
+				: this.#store.replaceAuthCredentialsForProvider(provider, [newCredential]);
 			this.#setStoredCredentials(
 				provider,
 				stored.map(entry => ({ id: entry.id, credential: entry.credential })),

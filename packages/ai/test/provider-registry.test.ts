@@ -21,8 +21,9 @@ const ENV_KEYS = [
 	"EXA_API_KEY",
 	"XAI_OAUTH_TOKEN",
 	"UMANS_AI_CODING_PLAN_API_KEY",
-	"LLAMA_CPP_API_KEY",
 	"WANDB_API_KEY",
+	"MODEL_API_KEY",
+	"META_MODEL_API_KEY",
 ] as const;
 const originalEnv = new Map(ENV_KEYS.map(key => [key, Bun.env[key]]));
 
@@ -59,11 +60,20 @@ describe("provider registry auth surface", () => {
 	test("multi-var catalog env fallback picks names in order", () => {
 		Bun.env.XAI_OAUTH_TOKEN = "xai-oauth-env";
 		expect(getEnvApiKey("xai-oauth")).toBe("xai-oauth-env");
-
 		Bun.env.WANDB_API_KEY = "wandb-env";
 		expect(getEnvApiKey("coreweave")).toBe("wandb-env");
 		Bun.env.COREWEAVE_API_KEY = "coreweave-env";
 		expect(getEnvApiKey("coreweave")).toBe("coreweave-env");
+
+		// meta: first-party documented name (META_API_KEY) wins; aliases accepted.
+		delete Bun.env.META_API_KEY;
+		delete Bun.env.MODEL_API_KEY;
+		Bun.env.META_MODEL_API_KEY = "meta-alias";
+		expect(getEnvApiKey("meta")).toBe("meta-alias");
+		Bun.env.MODEL_API_KEY = "meta-secondary-alias";
+		expect(getEnvApiKey("meta")).toBe("meta-secondary-alias");
+		Bun.env.META_API_KEY = "meta-primary";
+		expect(getEnvApiKey("meta")).toBe("meta-primary");
 	});
 
 	test("login list contains loginable providers and excludes env-only model providers", () => {
@@ -76,6 +86,8 @@ describe("provider registry auth surface", () => {
 		expect(ids).toContain("cline-pass");
 		expect(providers.find(provider => provider.id === "cline-pass")).toMatchObject({ name: "ClinePass" });
 		expect(ids).toContain("llama.cpp");
+		expect(ids).toContain("meta");
+		expect(providers.find(provider => provider.id === "meta")).toMatchObject({ name: "Meta AI" });
 		// openai has no interactive login flow.
 		expect(ids).not.toContain("openai");
 	});

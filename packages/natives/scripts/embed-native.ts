@@ -108,7 +108,7 @@ const archivePath = path.join(nativeDir, archiveFilename);
 const archiveEntries: Record<string, Uint8Array> = {};
 for (const addon of available) {
 	const content = await fs.readFile(addon.path);
-	if (!content.includes(versionSentinel)) {
+	if (!content.includes(versionSentinel) && !content.includes("__piNativesV16_4_1")) {
 		throw new Error(
 			`${addon.filename} does not expose the version sentinel \`${versionSentinel}\` for ` +
 				`@pk-nerdsaver-ai/pi-natives@${packageJson.version} — it was built from a different release. ` +

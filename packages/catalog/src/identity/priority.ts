@@ -17,6 +17,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"mistral",
 	"deepseek",
 	"groq",
+	"meta",
 
 	// High-quality aggregators / hosted inference providers.
 	"fireworks",

@@ -28,6 +28,7 @@ import {
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
+	metaModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -233,6 +234,7 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "deepseek-ai/DeepSeek-R1",
 		envVars: ["HUGGINGFACE_HUB_TOKEN", "HF_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => huggingfaceModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Hugging Face" },
 	},
 	{
@@ -261,6 +263,25 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["LM_STUDIO_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => lmStudioModelManagerOptions(config),
 		allowUnauthenticated: true,
+	},
+	{
+		id: "meta",
+		defaultModel: "muse-spark-1.3",
+		// META_API_KEY is the first-party documented name (dev.meta.ai/docs/muse-code/auth).
+		// MODEL_API_KEY and META_MODEL_API_KEY are accepted aliases for compatibility.
+		envVars: ["META_API_KEY", "MODEL_API_KEY", "META_MODEL_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => metaModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Meta AI" },
+	},
+	{
+		id: "meta-muse-code",
+		defaultModel: "muse-spark-1.3",
+		envVars: ["META_API_KEY", "MODEL_API_KEY", "META_MODEL_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) =>
+			metaModelManagerOptions({ ...config, providerId: "meta-muse-code" }),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Meta Muse Code" },
 	},
 	{
 		id: "minimax",

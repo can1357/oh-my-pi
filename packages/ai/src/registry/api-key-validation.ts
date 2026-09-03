@@ -124,6 +124,44 @@ export async function validateAnthropicCompatibleApiKey(options: AnthropicCompat
 }
 
 /**
+ * Validate a Google AI Studio API key against the Generative Language models endpoint.
+ *
+ * Google uses `x-goog-api-key` header rather than Bearer token.
+ */
+export async function validateGoogleGenerativeApiKey(options: {
+	provider: string;
+	apiKey: string;
+	modelsUrl?: string;
+	signal?: AbortSignal;
+	fetch?: FetchImpl;
+}): Promise<void> {
+	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	const fetchImpl = options.fetch ?? fetch;
+	const url = options.modelsUrl ?? "https://generativelanguage.googleapis.com/v1beta/models";
+	const response = await fetchImpl(url, {
+		method: "GET",
+		headers: {
+			"x-goog-api-key": options.apiKey,
+		},
+		signal,
+	});
+	if (response.ok) {
+		return;
+	}
+	let details = "";
+	try {
+		details = (await response.text()).trim();
+	} catch {
+		// ignore body parse errors, status is enough
+	}
+	const message = details
+		? `${options.provider} API key validation failed (${response.status}): ${details}`
+		: `${options.provider} API key validation failed (${response.status})`;
+	throw new AIError.ApiKeyRequiredError(message);
+}
+
+/**
  * Validate an API key against a provider models endpoint.
  *
  * Useful for providers where access to specific models may vary by plan and
@@ -145,6 +183,13 @@ export async function validateApiKeyAgainstModelsEndpoint(options: ModelListVali
 
 	if (response.ok) {
 		return;
+	}
+
+	// A valid key on an account without billing gets a 402 before it can ever
+	// complete a request. Surface the real cause now instead of storing a key
+	// that will only fail later.
+	if (response.status === 402) {
+		throw new AIError.ApiKeyBillingError(options.provider);
 	}
 
 	let details = "";

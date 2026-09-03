@@ -36,6 +36,7 @@ tui-debug.log
 # Test & coverage
 coverage/
 .nyc_output/
+.pytest_cache/
 packages/ai/test/.temp-images/
 
 # Project specific
@@ -78,6 +79,10 @@ python/fugu/runs/
 python/fugu/distill/adapter*
 python/fugu/distill/eval_*.json
 python/fugu/**/__pycache__/
+python/fugu/harness_candidates_verifier/
+
+# Local native build scratch
+packages/natives/native/.build/
 
 # Local, machine-specific boot perf baseline (see packages/coding-agent/scripts/bench-guard.ts)
 packages/coding-agent/bench/boot-baseline.json
@@ -122,6 +127,7 @@ mcps/
 # Local review/triage scratch worktrees (agent audit workflows)
 .review-scratch/
 .triage-scratch/
+/.verify/
 
 packages/coding-agent/dist/
 

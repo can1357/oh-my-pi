@@ -556,7 +556,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
 			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		})) as {
-			system?: Array<{ type: string; text?: string; cache_control?: { type: string } }>;
+			system?: Array<{ type: string; text?: string; cache_control?: { type: string; ttl?: string } }>;
 		};
 
 		// No caller system prompt → exactly [billing header, CC instruction].

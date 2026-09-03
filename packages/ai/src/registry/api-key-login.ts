@@ -1,15 +1,8 @@
-/**
- * Shared factory for API-key-paste "login" flows.
- *
- * Several providers (Cerebras, Synthetic, Moonshot, Together, NanoGPT, ZenMux)
- * don't actually implement OAuth — they just ask the user to paste an API key,
- * optionally validate it, and return the trimmed key.
- */
-
 import * as AIError from "../error";
 import {
 	validateAnthropicCompatibleApiKey,
 	validateApiKeyAgainstModelsEndpoint,
+	validateGoogleGenerativeApiKey,
 	validateOpenAICompatibleApiKey,
 } from "./api-key-validation";
 import type { OAuthController } from "./oauth/types";
@@ -26,6 +19,12 @@ type AnthropicMessagesValidation = {
 	provider: string;
 	baseUrl: string;
 	model: string;
+};
+
+type GoogleGenerativeValidation = {
+	kind: "google-generative";
+	provider: string;
+	modelsUrl?: string;
 };
 
 type ModelsEndpointValidation = {
@@ -47,9 +46,13 @@ export type ApiKeyLoginConfig = {
 	/** Placeholder string for the prompt (e.g. "sk-...", "csk-..."). */
 	placeholder: string;
 	/** Validation strategy, or `null` to skip validation. */
-	validation: ChatCompletionsValidation | AnthropicMessagesValidation | ModelsEndpointValidation | null;
+	validation:
+		| ChatCompletionsValidation
+		| AnthropicMessagesValidation
+		| GoogleGenerativeValidation
+		| ModelsEndpointValidation
+		| null;
 };
-
 export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthController) => Promise<string> {
 	return async function login(options: OAuthController): Promise<string> {
 		if (!options.onPrompt) {
@@ -74,7 +77,6 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 		if (!trimmed) {
 			throw new AIError.ApiKeyRequiredError();
 		}
-
 		if (config.validation) {
 			options.onProgress?.("Validating API key...");
 			if (config.validation.kind === "chat-completions") {
@@ -92,6 +94,14 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					apiKey: trimmed,
 					baseUrl: config.validation.baseUrl,
 					model: config.validation.model,
+					signal: options.signal,
+					fetch: options.fetch,
+				});
+			} else if (config.validation.kind === "google-generative") {
+				await validateGoogleGenerativeApiKey({
+					provider: config.validation.provider,
+					apiKey: trimmed,
+					modelsUrl: config.validation.modelsUrl,
 					signal: options.signal,
 					fetch: options.fetch,
 				});

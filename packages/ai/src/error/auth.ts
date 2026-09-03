@@ -36,6 +36,21 @@ export class ApiKeyRequiredError extends Error {
 }
 
 /**
+ * A provider API key validated successfully but the owning account has no
+ * billing configured, so requests are rejected with HTTP 402 before any model
+ * can run. Surfaced at login time so the user fixes billing rather than
+ * storing a key that will fail on the first completion.
+ */
+export class ApiKeyBillingError extends Error {
+	constructor(provider: string) {
+		super(
+			`${provider} API key is valid, but billing is not configured. Add a payment method or subscription before use.`,
+		);
+		this.name = "ApiKeyBillingError";
+	}
+}
+
+/**
  * A user cancelled an interactive login / device flow. Classified as an abort
  * so it is never surfaced as a retryable transient failure.
  */
