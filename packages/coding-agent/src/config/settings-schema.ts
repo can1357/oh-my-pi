@@ -969,14 +969,14 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.currencySymbol": {
+	"statusLine.costPrefix": {
 		type: "string",
 		default: "$",
 		ui: {
 			tab: "appearance",
 			group: "Status Line",
-			label: "Currency Symbol",
-			description: "Symbol displayed before cost amounts (e.g. $, ¥, €, £)",
+			label: "Cost Prefix",
+			description: "Prefix displayed before cost amounts (e.g. $, ¥, €, £). Cosmetic only — does not convert values.",
 		},
 	},
 
@@ -6305,7 +6305,7 @@ export interface StatusLineSettings {
 	preset: StatusLinePreset;
 	separator: StatusLineSeparatorStyle;
 	showHookStatus: boolean;
-	currencySymbol: string;
+	costPrefix: string;
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
