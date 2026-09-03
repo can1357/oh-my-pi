@@ -43,6 +43,12 @@ import {
 	generateRoomId,
 	parseCollabLink,
 } from "./protocol";
+import {
+	type CollabAccessMode,
+	type CollabHostPublication,
+	type CollabHostSnapshot,
+	publishCollabHost,
+} from "./registry";
 import { CollabSocket } from "./relay-client";
 import { shrinkForReplication } from "./replication-shrink";
 
@@ -129,6 +135,8 @@ export class CollabHost {
 	#webViewLink = "";
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
+	#startedAt = 0;
+	#registryPublication: CollabHostPublication | null = null;
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
 	#uiReqSeq = 0;
@@ -268,6 +276,31 @@ export class CollabHost {
 			clearTimeout(timeout);
 		}
 
+		this.#startedAt = Date.now();
+		// Publish to the local host registry only after the relay connection
+		// succeeded. Publication failure warns but never breaks hosting (#6099).
+		let publication: CollabHostPublication | null = null;
+		try {
+			publication = await publishCollabHost(mode => this.#registrySnapshot(mode));
+		} catch (err) {
+			logger.warn("Collab host registry publication failed", { error: String(err) });
+			this.#ctx.showStatus("Collab host discovery unavailable (omp collab list will not show this session)", {
+				dim: true,
+			});
+		}
+		if (this.#stopped) {
+			// The relay closed fatally while publication was in flight: #teardown
+			// ran with nothing to withdraw, so withdraw here and refuse to finish
+			// startup instead of installing a dead host that stays discoverable.
+			if (publication) {
+				await publication
+					.close()
+					.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+			}
+			throw new Error("relay connection closed during startup");
+		}
+		this.#registryPublication = publication;
+
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
 			if (isWireAgentEvent(event)) this.#broadcast({ t: "event", event: shrinkForReplication(event) });
 			this.#onEventForState(event);
@@ -304,6 +337,15 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		const publication = this.#registryPublication;
+		this.#registryPublication = null;
+		if (publication) {
+			// close() removes discovery metadata synchronously before awaiting the
+			// server shutdown, so a stopped room disappears from lists immediately.
+			void publication
+				.close()
+				.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
+		}
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
@@ -325,6 +367,29 @@ export class CollabHost {
 		this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
+	}
+
+	/**
+	 * Live snapshot served over the registry IPC; `view` never sees the write
+	 * URL. Applies the same lazy session-switch guard as {@link #broadcast}: a
+	 * host that switched sessions while idle withdraws on the next discovery
+	 * query instead of serving a stale room URL against the new session.
+	 */
+	#registrySnapshot(mode: CollabAccessMode): Omit<CollabHostSnapshot, "mode"> {
+		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			void this.stop("session switched");
+			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
+			throw new Error("session switched");
+		}
+		return {
+			sessionId: this.#sessionId,
+			sessionName: this.#ctx.session.sessionName ?? null,
+			cwd: this.#ctx.sessionManager.getCwd(),
+			pid: process.pid,
+			startedAt: this.#startedAt,
+			participants: this.participants.length,
+			url: mode === "view" ? this.#webViewLink : this.#webLink,
+		};
 	}
 
 	#broadcast(frame: CollabFrame): void {

@@ -37,8 +37,26 @@ The guest's previous session is restored on `/leave` (or when the host stops).
 | `/collab view`    | Start sharing read-only (or re-print the link/QR when already hosting)              |
 | `/collab status`  | Show link + participants                                                            |
 | `/collab stop`    | Stop sharing                                                                        |
+| `/collab list`    | List every active local Collab host with its write-capable browser URL              |
+| `/collab list view` | Same hosts, view-only browser URLs                                                |
 | `/join <link>`    | Join a shared session as a guest                                                    |
 | `/leave`          | Leave (guest) or stop sharing (host)                                                |
+
+### Listing active local hosts
+
+`omp collab list` (and `/collab list` inside a TUI) enumerates every live Collab host on the local machine under the same omp configuration root — across terminals, projects, and profiles — and prints one browser URL per host:
+
+```
+omp collab list          # write-capable URLs (labeled `write`)
+omp collab list --view   # same hosts, view-only URLs (labeled `view`)
+omp collab list --json   # deterministic machine-readable output
+```
+
+Each row shows the session name/ID, working directory, PID, age, guest count, access mode, and URL. Hosts are sorted by start time, then PID. An empty result ("No active Collab hosts.") is a successful outcome, not an error.
+
+**The default output is secret-bearing**: a write URL grants full control of the host agent, and redirecting the output persists it. Use `--view` to deliberately share read-only access; `--view` changes only the link capability, never which hosts are listed.
+
+How it works: each host publishes a private per-process IPC endpoint (a Unix domain socket on macOS/Linux, a named pipe on Windows — never a TCP port) after its relay connection succeeds. Full-control and view-only URLs, the room key, and the write token stay in the host process's memory; disk holds only owner-only discovery metadata (protocol version, PID, endpoint, creation time, and a random bearer token). Listing queries every live host concurrently, skips unresponsive or foreign-version entries, and prunes metadata left behind by crashed hosts. Stopped rooms disappear immediately and cannot be recovered — the feature keeps no history, lists no guests or remote hosts, and requires no relay change.
 
 ## Link format
 

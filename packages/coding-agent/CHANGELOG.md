@@ -6,6 +6,7 @@
 
 - Added `report` field to scout agent definitions for detailed, non-summarized findings
 - Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
+- Added `omp collab list` (with `--view` and `--json`) and `/collab list [view]` to list every active local Collab host and recover its browser URL from a runtime host registry over Unix sockets/named pipes, without persisting room keys, write tokens, or URLs to disk ([#6099](https://github.com/can1357/oh-my-pi/issues/6099))
 
 ### Changed
 

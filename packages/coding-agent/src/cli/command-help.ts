@@ -27,6 +27,11 @@ export const cleanseHelp = {
 	description: "Detect and fix project diagnostics with weighted parallel subagents",
 } satisfies CommandMetadata;
 
+export const collabHelp = {
+	description:
+		"List active local Collab host sessions; default rows print write-capable URLs that grant host control (--view for view-only)",
+} satisfies CommandMetadata;
+
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
 
 export const completionsHelp = {
