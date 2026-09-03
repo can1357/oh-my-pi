@@ -8,6 +8,9 @@ import {
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
+import { resolveProviderModels } from "../src/model-manager";
+import { getBundledModel } from "../src/models";
+import { cursorModelManagerOptions } from "../src/provider-models/special";
 
 function createSpec<TApi extends Api>(overrides: {
 	id: string;
@@ -460,6 +463,31 @@ describe("generated model policies", () => {
 				}),
 			).contextWindow,
 		).toBe(1_000_000);
+	});
+
+	it("ships documented Cursor context windows in the bundled catalog", () => {
+		const windows: Array<[string, number]> = [
+			["cursor-grok-4.5", 256_000],
+			["cursor-grok-4.6", 256_000],
+			["kimi-k2.7-code", 262_000],
+			["gpt-5.6-sol-fast", 272_000],
+		];
+		for (const [id, contextWindow] of windows) {
+			expect(getBundledModel("cursor", id)?.contextWindow).toBe(contextWindow);
+		}
+	});
+
+	it("resolves documented Cursor context windows offline", async () => {
+		const windows: Array<[string, number]> = [
+			["cursor-grok-4.5", 256_000],
+			["cursor-grok-4.6", 256_000],
+			["kimi-k2.7-code", 262_000],
+			["gpt-5.6-sol-fast", 272_000],
+		];
+		const resolved = await resolveProviderModels(cursorModelManagerOptions(), "offline");
+		for (const [id, contextWindow] of windows) {
+			expect(resolved.models.find(model => model.id === id)?.contextWindow).toBe(contextWindow);
+		}
 	});
 
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
