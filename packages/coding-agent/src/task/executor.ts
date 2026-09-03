@@ -1096,6 +1096,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		tokens: 0,
 		cost: 0,
 		durationMs: 0,
+		startedAtMs: startTime,
 		modelOverride: args.modelOverride,
 		modelRole: args.modelRole,
 	};
@@ -1131,6 +1132,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	let hasUsage = false;
+	/**
+	 * When the in-flight turn's model request was dispatched (`turn_start`);
+	 * feeds `progress.generationMs` at the assistant `message_end`. Measured
+	 * from the request, not `message_start`: non-streaming providers emit
+	 * start and end back-to-back, which would make the window ~0 ms.
+	 */
+	let requestStartMs: number | undefined;
 	let budgetSteerSent = false;
 	let budgetLimitExceeded = false;
 	let budgetStopRequested = false;
@@ -1452,6 +1460,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		let flushProgress = false;
 
 		switch (event.type) {
+			case "turn_start":
+				requestStartMs = now;
+				break;
+
 			case "message_start":
 				if (event.message?.role === "assistant") {
 					resetRecentOutput();
@@ -1707,6 +1719,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							accumulatedUsage.cost.total += getNumberField(costRecord, "total") ?? 0;
 							progress.cost = accumulatedUsage.cost.total;
 						}
+						progress.inputTokens = accumulatedUsage.input;
+						progress.outputTokens = accumulatedUsage.output;
+						progress.cacheReadTokens = accumulatedUsage.cacheRead;
+						progress.cacheWriteTokens = accumulatedUsage.cacheWrite;
 					}
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
@@ -1718,6 +1734,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							progress.contextTokens = perTurnTotal;
 						}
 					}
+				}
+				if (role === "assistant" && requestStartMs !== undefined) {
+					progress.generationMs = (progress.generationMs ?? 0) + Math.max(0, now - requestStartMs);
+					requestStartMs = undefined;
 				}
 				break;
 			}
@@ -2341,6 +2361,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		requests: progress.requests,
 		contextTokens: progress.contextTokens,
 		contextWindow: progress.contextWindow,
+		generationMs: progress.generationMs,
 		modelOverride,
 		modelRole,
 		resolvedModel: progress.resolvedModel,

@@ -317,6 +317,109 @@ describe("subagent HUD lines", () => {
 		}
 		expect(out).toContain("2 more running");
 	});
+
+	it("renders a stats line per row: model, requests, volume, cache, rate, elapsed", () => {
+		const out = render(
+			[
+				makeSession({
+					id: "ExtScout",
+					agent: "scout",
+					description: "Audit the extension loader",
+					progress: makeProgress({
+						id: "ExtScout",
+						agent: "scout",
+						description: "Audit the extension loader",
+						resolvedModel: "anthropic/claude-fable-5-1:high",
+						requests: 3,
+						toolCount: 7,
+						inputTokens: 100,
+						outputTokens: 4_200,
+						cacheReadTokens: 900,
+						cacheWriteTokens: 0,
+						generationMs: 100_000,
+						durationMs: 150_000,
+						cost: 0.42,
+					}),
+				}),
+			],
+			160,
+		);
+		const lines = out.split("\n");
+		const rowIndex = lines.findIndex(line => line.includes("ExtScout ⟦scout⟧: Audit the extension loader"));
+		expect(rowIndex).toBeGreaterThan(0);
+		const stats = lines[rowIndex + 1];
+		expect(stats).toContain("claude-fable-5-1:high");
+		expect(stats).not.toContain("anthropic/");
+		expect(stats).toContain("3 req");
+		expect(stats).toContain("↑1K ↓4.2K");
+		expect(stats).toContain("cache 90%");
+		expect(stats).toContain("42 tok/s");
+		expect(stats).toContain("$0.42");
+		expect(stats).toContain("2m30s");
+		// The tool count already lives on the Task block row; the HUD stats line skips it.
+		expect(stats).not.toContain("7 ");
+		// No finished scout yet: no eta is invented.
+		expect(stats).not.toContain("eta");
+	});
+
+	it("omits the stats line until progress exists and estimates eta from finished peers", () => {
+		const bare = render([makeSession({ id: "Fresh", description: "just spawned" })]);
+		expect(bare.split("\n")).toHaveLength(3);
+
+		const finishedScout = makeSession({
+			id: "DoneScout",
+			agent: "scout",
+			status: "completed",
+			progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 120_000 }),
+		});
+		const finishedTask = makeSession({
+			id: "DoneTask",
+			agent: "task",
+			status: "completed",
+			progress: makeProgress({ id: "DoneTask", agent: "task", status: "completed", durationMs: 10_000 }),
+		});
+		const live = makeSession({
+			id: "LiveScout",
+			agent: "scout",
+			description: "still reading",
+			progress: makeProgress({ id: "LiveScout", agent: "scout", description: "still reading", durationMs: 30_000 }),
+		});
+		const out = render([finishedScout, finishedTask, live], 160);
+		expect(out).not.toContain("DoneScout");
+		expect(out).toContain("eta ~1m30s");
+
+		const overrun = render(
+			[finishedScout, makeSession({ ...live, progress: { ...live.progress!, durationMs: 200_000 } })],
+			160,
+		);
+		expect(overrun).toContain("1m20s over");
+	});
+
+	it("derives elapsed and eta from startedAtMs so a quiet agent keeps ticking", () => {
+		const finished = makeSession({
+			id: "DoneScout",
+			agent: "scout",
+			status: "completed",
+			progress: makeProgress({ id: "DoneScout", agent: "scout", status: "completed", durationMs: 60_000 }),
+		});
+		// Last progress emit said 5s, but the wall clock is 45s past the start.
+		const quiet = makeSession({
+			id: "QuietScout",
+			agent: "scout",
+			description: "stuck in a long read",
+			progress: makeProgress({
+				id: "QuietScout",
+				agent: "scout",
+				description: "stuck in a long read",
+				durationMs: 5_000,
+				startedAtMs: 1_000_000,
+			}),
+		});
+		const out = Bun.stripANSI(renderSubagentHudLines([finished, quiet], 160, 1_045_000).join("\n"));
+		expect(out).toContain("45.0s");
+		expect(out).toContain("eta ~15.0s");
+		expect(out).not.toContain("└ 5.0s");
+	});
 });
 
 describe("InteractiveMode subagent observer UI sync", () => {

@@ -424,6 +424,28 @@ export interface AgentProgress {
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. Lets the UI render `<curr>/<window>` gauges. */
 	contextWindow?: number;
+	/**
+	 * Cumulative assistant-turn usage breakdown. Absent until the first assistant
+	 * message settles. Prompt total is `inputTokens + cacheReadTokens +
+	 * cacheWriteTokens`; `cacheReadTokens / prompt total` is the cache hit rate.
+	 */
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	/**
+	 * Wall-clock ms the agent spent waiting on the model: each turn's request
+	 * dispatch (`turn_start`) to its assistant `message_end`, summed. Includes
+	 * provider latency, so `outputTokens / generationMs` is the effective
+	 * output rate as experienced; tool execution time is excluded.
+	 */
+	generationMs?: number;
+	/**
+	 * Epoch ms the run started. `durationMs` only advances on progress emits, so
+	 * a quiet agent (long tool call, awaiting yield) reads stale; live surfaces
+	 * derive elapsed from this instead.
+	 */
+	startedAtMs?: number;
 	/** Cumulative billing cost in USD, accumulated incrementally from message_end events. */
 	cost: number;
 	durationMs: number;
@@ -498,6 +520,8 @@ export interface SingleResult {
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. */
 	contextWindow?: number;
+	/** Summed model-request wall time; lets completed rows retain effective output rate. */
+	generationMs?: number;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;

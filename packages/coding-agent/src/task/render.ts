@@ -85,43 +85,147 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 	}
 }
 
+/** Stats an agent row can carry; the inline task rows and the subagent HUD share one formatter. */
+export interface AgentStatOptions {
+	toolCount?: number;
+	requests?: number;
+	/** Cumulative usage breakdown; see {@link AgentProgress.inputTokens}. */
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	generationMs?: number;
+	contextTokens?: number;
+	contextWindow?: number;
+	cost: number;
+	/** Remaining-time estimate; negative = past the estimate by that much. See {@link estimateAgentEtaMs}. */
+	etaMs?: number;
+	resolvedModel?: string;
+	showResolvedModelBadge?: boolean;
+}
+
+/** `42 tok/s` mean output rate over the agent's assistant-message wall time; undefined until measurable. */
+export function formatOutputRate(
+	outputTokens: number | undefined,
+	generationMs: number | undefined,
+): string | undefined {
+	if (!outputTokens || !generationMs || generationMs <= 0) return undefined;
+	const rate = (outputTokens / generationMs) * 1000;
+	return `${rate < 10 ? rate.toFixed(1) : Math.round(rate).toString()} tok/s`;
+}
+
+/** `cache 91%`: share of prompt tokens served from the provider cache; undefined before any prompt tokens. */
+export function formatCacheHitRate(opts: {
+	inputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+}): string | undefined {
+	const prompt = (opts.inputTokens ?? 0) + (opts.cacheReadTokens ?? 0) + (opts.cacheWriteTokens ?? 0);
+	if (prompt <= 0) return undefined;
+	return `cache ${Math.round(((opts.cacheReadTokens ?? 0) / prompt) * 100)}%`;
+}
+
 /**
- * Append tool-count, context, and cost stats to a status line string.
+ * `eta ~2m` while under the peer-derived estimate, `1m over` once past it.
+ * Undefined when no estimate exists — never a fabricated countdown.
  */
-function appendAgentStats(
-	line: string,
-	opts: {
-		toolCount?: number;
-		requests?: number;
-		tokens: number;
-		contextTokens?: number;
-		contextWindow?: number;
-		cost: number;
-		resolvedModel?: string;
-		showResolvedModelBadge?: boolean;
-	},
-	theme: Theme,
-): string {
+export function formatEta(etaMs: number | undefined): string | undefined {
+	if (etaMs === undefined || !Number.isFinite(etaMs)) return undefined;
+	if (etaMs >= 0) return `eta ~${formatDuration(Math.max(etaMs, 1000))}`;
+	return `${formatDuration(-etaMs)} over`;
+}
+
+/**
+ * Elapsed ms for a progress row at `nowMs`: live from `startedAtMs` while the
+ * agent is pending/running (the emit-driven `durationMs` stalls when the agent
+ * is quiet), the settled `durationMs` otherwise.
+ */
+export function agentElapsedMs(
+	progress: Pick<AgentProgress, "status" | "durationMs" | "startedAtMs">,
+	nowMs: number,
+): number {
+	if ((progress.status === "running" || progress.status === "pending") && progress.startedAtMs !== undefined) {
+		return Math.max(progress.durationMs, nowMs - progress.startedAtMs);
+	}
+	return progress.durationMs;
+}
+
+/**
+ * Remaining-time estimate for a live agent: median runtime of already-finished
+ * peers of the same agent type minus this agent's elapsed time. The only
+ * ground truth for "how long does a scout take" is other scouts in this
+ * session, so with no finished peer there is no estimate (undefined).
+ * Negative means the agent has outlived the peer median by that much.
+ */
+export function estimateAgentEtaMs(
+	progress: Pick<AgentProgress, "id" | "agent" | "durationMs">,
+	peers: Iterable<Pick<AgentProgress, "id" | "agent" | "status" | "durationMs">>,
+	elapsedMs: number = progress.durationMs,
+): number | undefined {
+	const durations: number[] = [];
+	for (const peer of peers) {
+		if (peer.id === progress.id || peer.agent !== progress.agent) continue;
+		if (peer.status !== "completed" || !(peer.durationMs > 0)) continue;
+		durations.push(peer.durationMs);
+	}
+	if (durations.length === 0) return undefined;
+	durations.sort((a, b) => a - b);
+	const mid = durations.length >> 1;
+	const median = durations.length % 2 === 1 ? durations[mid] : (durations[mid - 1] + durations[mid]) / 2;
+	return median - elapsedMs;
+}
+
+/** `<provider>/<id>[:level]` → `<id>[:level]`; the HUD has no room for the provider. */
+export function shortModelLabel(selector: string): string {
+	const slash = selector.indexOf("/");
+	return slash === -1 ? selector : selector.slice(slash + 1);
+}
+
+/**
+ * Styled stat fragments for an agent row, in display order: tools, requests,
+ * prompt/completion volume, cache hit rate, output rate, context gauge, cost,
+ * eta, model. Each fragment is omitted when its input is absent or zero.
+ */
+export function agentStatParts(opts: AgentStatOptions, theme: Theme): string[] {
+	const parts: string[] = [];
 	if (opts.toolCount) {
-		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.toolCount)} ${theme.icon.extensionTool}`)}`;
+		parts.push(theme.fg("dim", `${formatNumber(opts.toolCount)} ${theme.icon.extensionTool}`));
 	}
 	if (opts.requests) {
-		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.requests)} req`)}`;
+		parts.push(theme.fg("dim", `${formatNumber(opts.requests)} req`));
 	}
+	// Prompt volume is the full context sent (uncached + cached); the cache
+	// fragment right after says how much of it was a cache hit.
+	const promptTokens = (opts.inputTokens ?? 0) + (opts.cacheReadTokens ?? 0) + (opts.cacheWriteTokens ?? 0);
+	if (promptTokens > 0 || opts.outputTokens) {
+		parts.push(theme.fg("dim", `↑${formatNumber(promptTokens)} ↓${formatNumber(opts.outputTokens ?? 0)}`));
+	}
+	const cache = formatCacheHitRate(opts);
+	if (cache) parts.push(theme.fg("dim", cache));
+	const rate = formatOutputRate(opts.outputTokens, opts.generationMs);
+	if (rate) parts.push(theme.fg("dim", rate));
 	// Current per-turn context — match the status line's `<pct>%/<window>` gauge (e.g. `5.1%/1M`).
 	if (opts.contextTokens && opts.contextTokens > 0) {
 		const ctx =
 			opts.contextWindow && opts.contextWindow > 0
 				? formatContextUsage((opts.contextTokens / opts.contextWindow) * 100, opts.contextWindow)
 				: `${formatNumber(opts.contextTokens)}`;
-		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
+		parts.push(theme.fg("dim", ctx));
 	}
 	if (opts.cost > 0) {
-		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
+		parts.push(theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`));
 	}
+	const eta = formatEta(opts.etaMs);
+	if (eta) parts.push(theme.fg(opts.etaMs !== undefined && opts.etaMs < 0 ? "warning" : "dim", eta));
 	if (opts.resolvedModel && opts.showResolvedModelBadge) {
-		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30))}`;
+		parts.push(theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30)));
 	}
+	return parts;
+}
+
+/** Append {@link agentStatParts} to a status line, dot-separated. */
+function appendAgentStats(line: string, opts: AgentStatOptions, theme: Theme): string {
+	for (const part of agentStatParts(opts, theme)) line += `${theme.sep.dot}${part}`;
 	return line;
 }
 
@@ -896,6 +1000,8 @@ function renderAgentProgress(
 	seenNestedTasks?: WeakSet<object>,
 	nestedDepth = 0,
 	nowMs = Date.now(),
+	/** Sibling rows of the same call; finished peers of the same agent type feed the ETA. */
+	peers?: readonly AgentProgress[],
 ): string[] {
 	const lines: string[] = [];
 
@@ -954,7 +1060,8 @@ function renderAgentProgress(
 			const taskPreview = previewLine(sanitizeText(progress.assignment ?? progress.task), 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
-		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
+		const etaMs = peers ? estimateAgentEtaMs(progress, peers, agentElapsedMs(progress, nowMs)) : undefined;
+		statusLine = appendAgentStats(statusLine, { ...progress, etaMs, showResolvedModelBadge: showBadge }, theme);
 	} else if (progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
@@ -1257,8 +1364,12 @@ function renderAgentResult(
 	statusLine = appendAgentStats(
 		statusLine,
 		{
-			tokens: result.tokens,
 			requests: result.requests,
+			inputTokens: result.usage?.input,
+			outputTokens: result.usage?.output,
+			cacheReadTokens: result.usage?.cacheRead,
+			cacheWriteTokens: result.usage?.cacheWrite,
+			generationMs: result.generationMs,
 			contextTokens: result.contextTokens,
 			contextWindow: result.contextWindow,
 			cost: result.usage?.cost.total ?? 0,
@@ -1588,7 +1699,19 @@ export function renderResult(
 			}
 			for (const progress of visible) {
 				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+					...renderAgentProgress(
+						progress,
+						"",
+						"  ",
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						undefined,
+						0,
+						nowMs,
+						ordered,
+					),
 				);
 			}
 		} else if (details.results && details.results.length > 0) {
@@ -1615,7 +1738,19 @@ export function renderResult(
 				: [];
 			for (const progress of supplementalProgress) {
 				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+					...renderAgentProgress(
+						progress,
+						"",
+						"  ",
+						expanded,
+						theme,
+						spinnerFrame,
+						frozen,
+						undefined,
+						0,
+						nowMs,
+						supplementalProgress,
+					),
 				);
 			}
 
@@ -1804,6 +1939,7 @@ function renderNestedTaskTree(
 						seen,
 						depth + 1,
 						nowMs,
+						ordered,
 					),
 				);
 			});

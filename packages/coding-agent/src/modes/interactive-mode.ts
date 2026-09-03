@@ -121,12 +121,28 @@ import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { agentTypeBadge, formatTaskId } from "../task/render";
+import {
+	agentElapsedMs,
+	agentStatParts,
+	agentTypeBadge,
+	estimateAgentEtaMs,
+	formatEta,
+	formatTaskId,
+	shortModelLabel,
+} from "../task/render";
+import type { AgentProgress } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	formatDuration as formatElapsedDuration,
+	formatMoreItems,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -496,7 +512,11 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
- * the inline task rows use (muted task preview when no description was given).
+ * the inline task rows use (muted task preview when no description was given),
+ * each followed by one dim stats line: resolved model, requests, prompt/output
+ * volume, cache hit rate, output rate, context gauge, cost, elapsed, and a
+ * peer-derived ETA (median runtime of finished agents of the same type this
+ * session). Stats appear as soon as the first assistant turn settles.
  * Layout mirrors the Todos HUD exactly: unindented header, then
  * `renderTreeList` rows (dim connectors) shifted right by one space.
  * Only detached background spawns are listed: a sync task call blocks the
@@ -504,11 +524,20 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * eval `agent()` spawns are rendered by their own eval cell tree.
  * Returns an empty array when nothing is running so the container can clear.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+	nowMs: number = Date.now(),
+): string[] {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
 	);
 	if (running.length === 0) return [];
+	// Finished peers (any batch this session) are the ETA ground truth.
+	const peers: AgentProgress[] = [];
+	for (const session of sessions) {
+		if (session.kind === "subagent" && session.progress) peers.push(session.progress);
+	}
 
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
@@ -541,7 +570,23 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
 					}
 				}
-				return line;
+				const progress = session.progress;
+				if (!progress) return line;
+				const stats: string[] = [];
+				if (progress.resolvedModel) {
+					stats.push(theme.fg("dim", truncateToWidth(replaceTabs(shortModelLabel(progress.resolvedModel)), 32)));
+				}
+				// Tool count and model badge are covered by the row above / the model
+				// fragment; elapsed sits between the usage fragments and the eta.
+				stats.push(...agentStatParts({ ...progress, toolCount: undefined, resolvedModel: undefined }, theme));
+				const elapsedMs = agentElapsedMs(progress, nowMs);
+				if (elapsedMs > 0) stats.push(theme.fg("dim", formatElapsedDuration(elapsedMs)));
+				const etaMs = estimateAgentEtaMs(progress, peers, elapsedMs);
+				const eta = formatEta(etaMs);
+				if (eta) stats.push(theme.fg(etaMs !== undefined && etaMs < 0 ? "warning" : "dim", eta));
+				if (stats.length === 0) return line;
+				const statsLine = ` ${theme.fg("dim", theme.tree.hook)} ${stats.join(theme.fg("dim", theme.sep.dot))}`;
+				return [line, truncateToWidth(statsLine, Math.max(TRUNCATE_LENGTHS.SHORT, columns - 4))];
 			},
 		},
 		theme,
@@ -550,6 +595,19 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
 	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+}
+
+/**
+ * Dynamic HUD component. The TUI already repaints while task/job spinners are
+ * live; deriving rows here lets elapsed/eta advance on those frames without
+ * owning another timer or leaking lifecycle work.
+ */
+class SubagentHudComponent implements Component {
+	constructor(private readonly sessions: () => ObservableSession[]) {}
+
+	render(width: number): readonly string[] {
+		return renderSubagentHudLines(this.sessions(), width);
+	}
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -2797,9 +2855,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#renderSubagentList(): void {
 		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
-		if (lines.length === 0) return;
-		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		const sessions = this.#observerRegistry.getSessions();
+		if (renderSubagentHudLines(sessions, this.ui.terminal.columns).length === 0) return;
+		this.subagentContainer.addChild(new SubagentHudComponent(() => this.#observerRegistry.getSessions()));
 	}
 
 	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
