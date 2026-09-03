@@ -2,13 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+
 ## [18.1.6] - 2026-09-03
 
 ### Added
 
-- Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
-- Added `IncomingDoc` (`@oh-my-pi/pi-utils/incoming-json`): typed, path-addressed cursors over a JSON document while its text is still arriving — string chunks and lines, array elements, and keyed object values become available incrementally, with structured `IncomingJsonError` issues (`missing`, `incomplete`, `aborted`, `malformed`, `mismatch`) for failed pulls.
-- Added `Serial` to run async operations one at a time in call order.
 - Added `IncomingDoc` (`@oh-my-pi/pi-utils/incoming-json`) for incrementally reading path-addressed JSON data as text arrives, including string chunks and lines, array elements, and keyed object values, with structured errors for missing, incomplete, aborted, malformed, or mismatched data.
 - Added `Serial` for running asynchronous operations sequentially in call order.
 
