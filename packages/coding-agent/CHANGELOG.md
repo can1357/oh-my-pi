@@ -184,6 +184,10 @@
 - Fixed top-level errors overwriting the active composer before terminal restoration.
 - Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
 
+### Fixed
+
+- Reduced idle CPU while waiting on a background job: the status line no longer re-runs native git repository discovery on every rendered frame ([#10231](https://github.com/can1357/oh-my-pi/issues/10231)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
