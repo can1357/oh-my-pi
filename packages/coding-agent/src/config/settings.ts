@@ -266,7 +266,7 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	return normalized;
 }
 
-const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
+const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders", "enabledProviders"]);
 type PathScopedStringArrayEntry = {
 	path?: unknown;
 	paths?: unknown;
@@ -1321,6 +1321,20 @@ export class Settings {
 			}
 		}
 		this.#setRuntimeModelRoleOverrides(next);
+	}
+
+	/**
+	 * Get enabled providers (for compatibility with discovery system).
+	 */
+	getEnabledProviders(): string[] {
+		return this.get("enabledProviders");
+	}
+
+	/**
+	 * Set enabled providers (for compatibility with discovery system).
+	 */
+	setEnabledProviders(ids: string[]): void {
+		this.set("enabledProviders", ids);
 	}
 
 	/**

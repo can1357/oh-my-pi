@@ -1505,7 +1505,7 @@ mod tests {
 	use super::catch_panic;
 
 	/// A gix-style panic (e.g. worker-thread spawn `.expect(...)` hitting
-	/// ERROR_COMMITMENT_LIMIT) must surface as a typed backend error carrying
+	/// `ERROR_COMMITMENT_LIMIT`) must surface as a typed backend error carrying
 	/// the operation tag and panic message — never as an unwind.
 	#[test]
 	fn catch_panic_converts_native_panics_into_backend_errors() {
