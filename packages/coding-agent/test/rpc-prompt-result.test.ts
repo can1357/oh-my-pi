@@ -310,6 +310,58 @@ describe("reportLocalOnlyPromptResult", () => {
 		expect(output).toEqual([]);
 	});
 
+	test("emits prompt_result when extension message tasks are rejected by abort", async () => {
+		let extensionActions: ExtensionActions | undefined;
+		const output: object[] = [];
+		const extensionUserMessages = new RpcExtensionUserMessageTracker();
+		const session = {
+			extensionRunner: {
+				initialize: (actions: ExtensionActions) => {
+					extensionActions = actions;
+				},
+				onError: () => {},
+				emit: async () => {},
+			},
+			sendCustomMessage: async () => false,
+			sendUserMessage: async () => false,
+		} as unknown as AgentSession;
+
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+			trackAgentInvokingMessage: task => {
+				extensionUserMessages.trackAgentMessageTask(task);
+			},
+		});
+
+		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
+			if (!extensionActions) throw new Error("extensions not initialized");
+			extensionActions.sendMessage(
+				{ customType: "test", content: "context", display: false },
+				{ triggerTurn: true },
+			);
+			extensionActions.sendUserMessage("start work");
+			return Promise.resolve(false);
+		});
+		reportLocalOnlyPromptResult({
+			id: "req_aborted",
+			prompt: trackedPrompt.prompt,
+			output: frame => output.push(frame),
+			onError: error => {
+				throw error;
+			},
+			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+		});
+		await waitForTrackedPromptHandlers(trackedPrompt);
+
+		expect(output).toEqual([{ type: "prompt_result", id: "req_aborted", agentInvoked: false }]);
+	});
+
 	test("emits prompt_result when extension sendUserMessage rejects", async () => {
 		let extensionActions: ExtensionActions | undefined;
 		const output: object[] = [];

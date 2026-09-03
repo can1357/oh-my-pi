@@ -880,6 +880,7 @@ describe("Agent", () => {
 
 		const turn = agent.prompt("trigger");
 		await Bun.sleep(0);
+		expect(agent.acceptsSteering).toBe(false);
 		gate.resolve();
 		await turn;
 

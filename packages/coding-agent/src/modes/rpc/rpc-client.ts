@@ -650,7 +650,7 @@ export class RpcClient {
 	 *
 	 * `options.forInterrupt` also drops hidden non-user steers. Use
 	 * {@link abort} with `clearQueue: true` for a final interrupt; separate
-	 * `clearQueue` and `abort` calls leave an enqueue gap between commands.
+	 * `clearQueue` and `abort` calls cannot suppress work enqueued while abort waits.
 	 */
 	async clearQueue(options?: { forInterrupt?: boolean }): Promise<RpcClearQueueResult> {
 		const response = await this.#send({
@@ -670,10 +670,14 @@ export class RpcClient {
 	/**
 	 * Abort the current operation.
 	 *
-	 * `options.clearQueue` atomically drops all interrupt queues immediately
-	 * before abort starts. Requires `serverFeatures.activeTurnSteering === 1`.
+	 * `options.clearQueue` atomically drops all interrupt queues both before abort
+	 * starts and after awaited cleanup, immediately before queued work can drain.
+	 * Requires `serverFeatures.activeTurnSteering === 1`.
 	 */
 	async abort(options?: { clearQueue?: boolean }): Promise<void> {
+		if (options?.clearQueue && this.#serverFeatures.activeTurnSteering !== 1) {
+			throw new Error("RPC abort with clearQueue requires activeTurnSteering capability version 1");
+		}
 		await this.#send({ type: "abort", ...(options?.clearQueue ? { clearQueue: true } : {}) });
 	}
 

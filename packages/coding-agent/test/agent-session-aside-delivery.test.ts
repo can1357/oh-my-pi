@@ -776,6 +776,7 @@ describe("AgentSession aside delivery", () => {
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
+			isQueueClearAbortActive: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: () => {},
 			runEphemeralTurn: async () => ({ replyText: "" }),

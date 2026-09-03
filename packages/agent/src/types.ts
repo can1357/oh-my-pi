@@ -306,6 +306,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * immediately before polling follow-up messages.
 	 */
 	onBeforeYield?: () => Promise<void> | void;
+	/** Tracks whether a live run can still consume newly submitted steering. */
+	setSteeringAdmission?: (accepting: boolean) => void;
 
 	/**
 	 * Provides tool execution context, resolved per tool call.

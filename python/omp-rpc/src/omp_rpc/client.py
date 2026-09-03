@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar, cast
 
 from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
@@ -523,6 +523,9 @@ class RpcClient:
         )
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
+        self._agent_run_request_ids: list[tuple[str, str]] = []
+        self._awaited_prompt_result_ids: set[str] = set()
+        self._completed_prompt_result_ids: set[str] = set()
         self._last_schedule_async_error_index = 0
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
@@ -606,6 +609,9 @@ class RpcClient:
         self._async_errors.clear()
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
+        self._agent_run_request_ids = []
+        self._awaited_prompt_result_ids = set()
+        self._completed_prompt_result_ids = set()
         self._last_schedule_async_error_index = 0
         self._ui_requests = queue.Queue()
         with self._state_lock:
@@ -1158,14 +1164,16 @@ class RpcClient:
         *,
         images: Sequence[ImageContent] | None = None,
         streaming_behavior: StreamingBehavior | None = None,
+        _request_id_out: list[str] | None = None,
     ) -> None:
         self._request(
             "prompt",
+            _agent_run_reservation="if_idle",
+            _request_id_out=_request_id_out,
             message=message,
             images=list(images) if images is not None else None,
             streamingBehavior=streaming_behavior,
         )
-        self._mark_agent_run_scheduled()
 
     def steer(
         self,
@@ -1187,6 +1195,11 @@ class RpcClient:
         """
         payload = self._request(
             "steer",
+            _agent_run_reservation=(
+                None
+                if active_turn_only and self.server_features.active_turn_steering == 1
+                else "if_idle"
+            ),
             message=message,
             images=list(images) if images is not None else None,
             activeTurnOnly=True if active_turn_only else None,
@@ -1207,14 +1220,16 @@ class RpcClient:
 
         `for_interrupt` also drops hidden non-user steers. Use
         `abort(clear_queue=True)` for a final interrupt; separate `clear_queue()`
-        and `abort()` calls leave an enqueue gap between commands.
+        and `abort()` calls cannot suppress work enqueued while abort waits.
         """
-        return parse_clear_queue_result(
+        result = parse_clear_queue_result(
             self._request(
                 "clear_queue",
                 forInterrupt=True if for_interrupt else None,
             )
         )
+        self._cancel_pending_agent_runs(result.steering, command_types={"steer"})
+        return result
 
     def follow_up(
         self, message: str, *, images: Sequence[ImageContent] | None = None
@@ -1226,18 +1241,23 @@ class RpcClient:
         )
 
     def abort(self, *, clear_queue: bool = False) -> None:
-        """Abort, optionally clearing all interrupt queues atomically first."""
+        if clear_queue and self.server_features.active_turn_steering != 1:
+            raise RpcError(
+                "abort(clear_queue=True) requires activeTurnSteering capability version 1"
+            )
         self._request("abort", clearQueue=True if clear_queue else None)
+        if clear_queue:
+            self._cancel_pending_agent_runs()
 
     def abort_and_prompt(
         self, message: str, *, images: Sequence[ImageContent] | None = None
     ) -> None:
         self._request(
             "abort_and_prompt",
+            _agent_run_reservation="if_idle",
             message=message,
             images=list(images) if images is not None else None,
         )
-        self._mark_agent_run_scheduled()
 
     def prompt_and_wait(
         self,
@@ -1248,30 +1268,55 @@ class RpcClient:
         timeout: float | None = None,
     ) -> PromptTurn:
         operation = "prompt_and_wait"
+        request_ids: list[str] = []
         self._prompt_lifecycle.acquire(operation)
         try:
             start_index = self._current_event_index()
             start_async_error_index = self._current_async_error_index()
-            self.prompt(message, images=images, streaming_behavior=streaming_behavior)
+            self.prompt(
+                message,
+                images=images,
+                streaming_behavior=streaming_behavior,
+                _request_id_out=request_ids,
+            )
             events = self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
+                start_index,
+                start_async_error_index,
+                prompt_request_id=request_ids[0],
+                timeout=timeout,
             )
             return self._build_prompt_turn(events)
         finally:
+            if request_ids:
+                with self._event_condition:
+                    self._awaited_prompt_result_ids.discard(request_ids[0])
+                    self._completed_prompt_result_ids.discard(request_ids[0])
             self._prompt_lifecycle.release(operation)
 
     def wait_for_idle(self, timeout: float | None = None) -> None:
         operation = "wait_for_idle"
         self._prompt_lifecycle.acquire(operation)
         try:
-            if self._is_agent_idle():
-                self._check_async_errors()
-                return
-            start_index = self._current_event_index()
-            start_async_error_index = self._current_async_error_index()
-            self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
-            )
+            deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
+            with self._event_condition:
+                start_async_error_index = self._last_schedule_async_error_index
+                while True:
+                    if self._closed_error is not None:
+                        raise RpcProcessExitError(str(self._closed_error))
+                    async_errors = self._async_errors.snapshot_from(
+                        start_async_error_index
+                    )
+                    if async_errors:
+                        raise async_errors[0]
+                    if self._scheduled_agent_runs == self._completed_agent_runs:
+                        self._completed_prompt_result_ids.clear()
+                        return
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RpcTimeoutError(
+                            f"Timed out waiting for agent_end. Stderr: {self.stderr}"
+                        )
+                    self._event_condition.wait(remaining)
         finally:
             self._prompt_lifecycle.release(operation)
 
@@ -1282,7 +1327,9 @@ class RpcClient:
             start_index = self._current_event_index()
             start_async_error_index = self._current_async_error_index()
             return self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
+                start_index,
+                start_async_error_index,
+                timeout=timeout,
             )
         finally:
             self._prompt_lifecycle.release(operation)
@@ -1298,14 +1345,85 @@ class RpcClient:
         with self._event_condition:
             return self._async_errors.current_index()
 
-    def _mark_agent_run_scheduled(self) -> None:
+    def _mark_agent_run_scheduled(
+        self,
+        request_id: str | None = None,
+        command_type: str | None = None,
+        *,
+        only_if_idle: bool = False,
+    ) -> bool:
         with self._event_condition:
+            if (
+                only_if_idle
+                and self._scheduled_agent_runs != self._completed_agent_runs
+            ):
+                return False
             self._scheduled_agent_runs += 1
+            if request_id is not None and command_type is not None:
+                self._agent_run_request_ids.append((request_id, command_type))
             self._last_schedule_async_error_index = self._async_errors.current_index()
+            return True
 
-    def _mark_agent_run_completed(self) -> None:
+    def _mark_agent_run_started(self) -> None:
         with self._event_condition:
+            if self._agent_run_request_ids:
+                self._agent_run_request_ids.pop(0)
+            elif self._scheduled_agent_runs == self._completed_agent_runs:
+                self._scheduled_agent_runs += 1
+                self._last_schedule_async_error_index = (
+                    self._async_errors.current_index()
+                )
+
+    def _mark_agent_run_completed(self, request_id: str | None = None) -> bool:
+        with self._event_condition:
+            if request_id is not None:
+                matching = next(
+                    (
+                        entry
+                        for entry in self._agent_run_request_ids
+                        if entry[0] == request_id
+                    ),
+                    None,
+                )
+                if matching is None:
+                    return False
+                self._agent_run_request_ids.remove(matching)
+            elif self._completed_agent_runs >= self._scheduled_agent_runs:
+                return False
             self._completed_agent_runs += 1
+            self._event_condition.notify_all()
+            return True
+
+    def _mark_prompt_completed_without_agent(self, request_id: str) -> None:
+        self._mark_agent_run_completed(request_id)
+        with self._event_condition:
+            if request_id not in self._awaited_prompt_result_ids:
+                return
+            self._completed_prompt_result_ids.add(request_id)
+            self._event_condition.notify_all()
+
+    def _cancel_pending_agent_runs(
+        self, limit: int | None = None, *, command_types: set[str] | None = None
+    ) -> None:
+        if limit == 0:
+            return
+        with self._event_condition:
+            eligible = [
+                index
+                for index, (_, command_type) in enumerate(self._agent_run_request_ids)
+                if command_types is None or command_type in command_types
+            ]
+            if limit is not None:
+                eligible = eligible[-limit:]
+            if not eligible:
+                return
+            cancelled = set(eligible)
+            self._agent_run_request_ids = [
+                entry
+                for index, entry in enumerate(self._agent_run_request_ids)
+                if index not in cancelled
+            ]
+            self._scheduled_agent_runs -= len(cancelled)
             self._event_condition.notify_all()
 
     def _is_agent_idle(self) -> bool:
@@ -1386,6 +1504,8 @@ class RpcClient:
         self,
         start_index: int,
         start_async_error_index: int,
+        *,
+        prompt_request_id: str | None = None,
         timeout: float | None = None,
     ) -> tuple[RpcAgentEvent, ...]:
         deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
@@ -1420,7 +1540,15 @@ class RpcClient:
                         cast(RpcAgentEvent, parse_notification(payload))
                         for payload in event_payloads
                     )
+                    if prompt_request_id is not None:
+                        self._awaited_prompt_result_ids.discard(prompt_request_id)
+                        self._completed_prompt_result_ids.discard(prompt_request_id)
                     return events
+
+                if prompt_request_id in self._completed_prompt_result_ids:
+                    self._awaited_prompt_result_ids.discard(prompt_request_id)
+                    self._completed_prompt_result_ids.remove(prompt_request_id)
+                    return ()
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1429,51 +1557,81 @@ class RpcClient:
                     )
                 self._event_condition.wait(remaining)
 
-    def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
+    def _request(
+        self,
+        command_type: str,
+        *,
+        _agent_run_reservation: Literal["if_idle", "always"] | None = None,
+        _request_id_out: list[str] | None = None,
+        **payload: JsonValue,
+    ) -> JsonObject:
         process = self._require_process()
         request_id = self._next_request_id()
+        if _request_id_out is not None:
+            _request_id_out.append(request_id)
+            with self._event_condition:
+                self._awaited_prompt_result_ids.add(request_id)
         envelope: JsonObject = {"id": request_id, "type": command_type}
         for key, value in payload.items():
             if value is not None:
                 envelope[key] = value
 
-        response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(maxsize=1)
-        with self._state_lock:
-            self._pending[request_id] = _PendingRequest(
-                command=command_type, response_queue=response_queue
+        reserved_agent_run = (
+            _agent_run_reservation is not None
+            and self._mark_agent_run_scheduled(
+                request_id,
+                command_type,
+                only_if_idle=_agent_run_reservation == "if_idle",
             )
-
+        )
         try:
-            self._write_json(process, envelope)
+            response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(
+                maxsize=1
+            )
+            with self._state_lock:
+                self._pending[request_id] = _PendingRequest(
+                    command=command_type, response_queue=response_queue
+                )
+
+            try:
+                self._write_json(process, envelope)
+            except BaseException:
+                with self._state_lock:
+                    self._pending.pop(request_id, None)
+                raise
+
+            try:
+                response = response_queue.get(timeout=self._request_timeout)
+            except queue.Empty as exc:
+                with self._state_lock:
+                    self._pending.pop(request_id, None)
+                raise RpcTimeoutError(
+                    f"Timed out waiting for response to {command_type}. Stderr: {self.stderr}"
+                ) from exc
+
+            if isinstance(response, BaseException):
+                raise response
+
+            if not bool(response.get("success", False)):
+                raw_code = response.get("code")
+                raise RpcCommandError(
+                    command=str(response.get("command", command_type)),
+                    error=str(response.get("error", "")),
+                    code=raw_code if isinstance(raw_code, str) else None,
+                )
+
+            data = response.get("data")
+            result = {} if data is None else _clone_json_object(data)
+            if result.get("agentInvoked") is False:
+                self._mark_prompt_completed_without_agent(request_id)
+            return result
         except BaseException:
-            with self._state_lock:
-                self._pending.pop(request_id, None)
+            if reserved_agent_run:
+                self._mark_agent_run_completed(request_id)
+            with self._event_condition:
+                self._awaited_prompt_result_ids.discard(request_id)
+                self._completed_prompt_result_ids.discard(request_id)
             raise
-
-        try:
-            response = response_queue.get(timeout=self._request_timeout)
-        except queue.Empty as exc:
-            with self._state_lock:
-                self._pending.pop(request_id, None)
-            raise RpcTimeoutError(
-                f"Timed out waiting for response to {command_type}. Stderr: {self.stderr}"
-            ) from exc
-
-        if isinstance(response, BaseException):
-            raise response
-
-        if not bool(response.get("success", False)):
-            raw_code = response.get("code")
-            raise RpcCommandError(
-                command=str(response.get("command", command_type)),
-                error=str(response.get("error", "")),
-                code=raw_code if isinstance(raw_code, str) else None,
-            )
-
-        data = response.get("data")
-        if data is None:
-            return {}
-        return _clone_json_object(data)
 
     def _send_notification(self, payload: JsonObject) -> None:
         process = self._require_process()
@@ -1957,6 +2115,13 @@ class RpcClient:
                     continue
 
                 payload_type = payload.get("type")
+                if (
+                    payload_type == "prompt_result"
+                    and payload.get("agentInvoked") is False
+                ):
+                    request_id = payload.get("id")
+                    if isinstance(request_id, str):
+                        self._mark_prompt_completed_without_agent(request_id)
                 if payload_type in ("tool_execution_update", "tool_execution_end"):
                     self._normalize_host_tool_event(payload)
                 try:
@@ -2024,6 +2189,8 @@ class RpcClient:
                     continue
 
                 event = cast(RpcAgentEvent, notification)
+                if isinstance(event, AgentStartEvent):
+                    self._mark_agent_run_started()
                 self._append_event(payload)
                 if isinstance(event, AgentEndEvent) and event.is_terminal is not False:
                     self._mark_agent_run_completed()
@@ -2108,7 +2275,9 @@ class RpcClient:
             self._append_async_error(
                 RpcCommandError(protocol_error.command, protocol_error.remote_error)
             )
-            self._mark_agent_run_completed()
+            self._mark_agent_run_completed(
+                request_id if isinstance(request_id, str) else None
+            )
 
         self._record_protocol_error(protocol_error)
 
