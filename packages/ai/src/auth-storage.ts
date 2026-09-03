@@ -4788,43 +4788,7 @@ export class AuthStorage {
 		const targetIndex = this.#getStoredCredentials(provider).findIndex(
 			entry => entry.id === targetCredentialId && entry.credential.type === credentialType,
 		);
-		const result = this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
-		if (result.switched || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) return result;
-		const fallbackType = credentialType === "oauth" ? "api_key" : "oauth";
-		const fallbackRouting = this.#credentialBlockRouting(provider, fallbackType, options?.modelId);
-		if (
-			fallbackType === "api_key" &&
-			(this.#runtimeOverrides.get(provider) ||
-				this.#configOverrides.get(provider) ||
-				getEnvApiKey(provider) ||
-				this.#fallbackResolver?.(provider))
-		) {
-			return { switched: true };
-		}
-		let crossTypeRetryAtMs: number | undefined;
-		const credentials = this.#getCredentialsForProvider(provider);
-		for (let index = 0; index < credentials.length; index++) {
-			const credential = credentials[index];
-			if (credential?.type !== fallbackType) continue;
-			if (credential.type === "api_key" && !(await this.#configValueResolver(credential.key))) {
-				continue;
-			}
-			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
-				provider,
-				fallbackRouting.providerKey,
-				index,
-				fallbackRouting.siblingBlockScopes,
-			);
-			if (candidateBlockedUntil === undefined) return { switched: true };
-			if (crossTypeRetryAtMs === undefined || candidateBlockedUntil < crossTypeRetryAtMs) {
-				crossTypeRetryAtMs = candidateBlockedUntil;
-			}
-		}
-		if (crossTypeRetryAtMs === undefined) return result;
-		if (result.retryAtMs === undefined || crossTypeRetryAtMs < result.retryAtMs) {
-			return { switched: false, retryAtMs: crossTypeRetryAtMs };
-		}
-		return result;
+		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -5953,25 +5917,17 @@ export class AuthStorage {
 
 		// The newest interactive login wins when OAuth and direct API-key
 		// sources coexist; environment and migrated static rows remain fallbacks.
-		const storedCredentials = this.#getCredentialsForProvider(provider);
-		const dualInteractiveLogin = usesOAuthMintedApiKeyWithDirectApiKey(provider);
-		const hasOAuthLogin = dualInteractiveLogin && storedCredentials.some(credential => credential.type === "oauth");
-		const hasApiKeyAlternative =
-			dualInteractiveLogin &&
-			(storedCredentials.some(credential => credential.type === "api_key") ||
-				getEnvApiKey(provider) !== undefined ||
-				this.#fallbackResolver?.(provider) !== undefined);
 		const preferLoginApiKey = this.#preferredInteractiveCredentialType(provider) === "api_key";
 		if (preferLoginApiKey) {
-			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options, !hasOAuthLogin);
+			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options);
 			if (loginApiKey) return loginApiKey;
 		}
-		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options, !hasApiKeyAlternative);
+		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
 		if (oauthResolved) {
 			return oauthResolved.apiKey;
 		}
 		if (!preferLoginApiKey) {
-			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options, !hasOAuthLogin);
+			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options);
 			if (loginApiKey) return loginApiKey;
 		}
 

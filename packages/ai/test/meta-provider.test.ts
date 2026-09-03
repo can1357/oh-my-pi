@@ -36,18 +36,6 @@ function capturePayload(reasoning: Effort): Promise<Record<string, unknown>> {
 	return promise;
 }
 
-function clearMetaApiKeyEnv(): () => void {
-	const names = ["MODEL_API_KEY", "META_API_KEY"] as const;
-	const previous = names.map(name => [name, process.env[name]] as const);
-	for (const name of names) delete process.env[name];
-	return () => {
-		for (const [name, value] of previous) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
-	};
-}
-
 describe("Meta Model API Responses requests", () => {
 	test("sends native xhigh reasoning and requests encrypted replay state", async () => {
 		const payload = await capturePayload(Effort.XHigh);
@@ -205,7 +193,7 @@ describe("Meta login", () => {
 		}
 	});
 
-	test("falls back to a PAYG login after the preferred Muse subscription exhausts its quota", async () => {
+	test("does not cross from Muse subscription quota to a PAYG login", async () => {
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
 			usageProviderResolver: () => undefined,
 		});
@@ -227,7 +215,7 @@ describe("Meta login", () => {
 					authorizedAt: 2,
 				},
 			]);
-			const sessionId = "muse-quota-fallback";
+			const sessionId = "muse-quota-exhausted";
 			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
 
 			expect(
@@ -238,88 +226,11 @@ describe("Meta login", () => {
 						{ status: 429 },
 					),
 				}),
-			).toBe(true);
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
-			expect(storage.describeCredentialSource("meta", sessionId)).toContain("api_key");
-		} finally {
-			storage.close();
-		}
-	});
-
-	test("falls back to a configured PAYG key after the Muse subscription exhausts its quota", async () => {
-		const restoreEnv = clearMetaApiKeyEnv();
-		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
-			usageProviderResolver: () => undefined,
-		});
-		storage.setFallbackResolver(provider => (provider === "meta" ? "LLM|fallback-key" : undefined));
-		try {
-			await storage.reload();
-			await storage.set("meta", [
-				{
-					type: "oauth",
-					access: "meta-account-access",
-					refresh: "meta-account-refresh",
-					expires: Date.now() + 3_600_000,
-					apiKey: "LLM|subscription-key",
-				},
-			]);
-			const sessionId = "muse-configured-payg-fallback";
+			).toBe(false);
 			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
-
-			expect(
-				await storage.rotateSessionCredential("meta", sessionId, {
-					apiKey: "LLM|subscription-key",
-					error: Object.assign(
-						new Error('{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}'),
-						{ status: 429 },
-					),
-				}),
-			).toBe(true);
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|fallback-key");
+			expect(storage.describeCredentialSource("meta", sessionId)).toContain("oauth");
 		} finally {
 			storage.close();
-			restoreEnv();
-		}
-	});
-
-	test("falls back to a retained PAYG key after the Muse subscription exhausts its quota", async () => {
-		const restoreEnv = clearMetaApiKeyEnv();
-		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
-			usageProviderResolver: () => undefined,
-		});
-		try {
-			await storage.reload();
-			await storage.set("meta", [
-				{
-					type: "api_key",
-					key: "LLM|retained-payg-key",
-					authorizedAt: 1,
-				},
-				{
-					type: "oauth",
-					access: "meta-account-access",
-					refresh: "meta-account-refresh",
-					expires: Date.now() + 3_600_000,
-					apiKey: "LLM|subscription-key",
-					authorizedAt: 2,
-				},
-			]);
-			const sessionId = "muse-retained-payg-fallback";
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
-
-			expect(
-				await storage.rotateSessionCredential("meta", sessionId, {
-					apiKey: "LLM|subscription-key",
-					error: Object.assign(
-						new Error('{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}'),
-						{ status: 429 },
-					),
-				}),
-			).toBe(true);
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|retained-payg-key");
-		} finally {
-			storage.close();
-			restoreEnv();
 		}
 	});
 
@@ -352,92 +263,6 @@ describe("Meta login", () => {
 			);
 		} finally {
 			storage.close();
-		}
-	});
-
-	test("falls back to Muse after the preferred PAYG login exhausts its quota", async () => {
-		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
-			usageProviderResolver: () => undefined,
-		});
-		try {
-			await storage.reload();
-			await storage.set("meta", [
-				{
-					type: "oauth",
-					access: "meta-account-access",
-					refresh: "meta-account-refresh",
-					expires: Date.now() + 3_600_000,
-					apiKey: "LLM|subscription-key",
-					authorizedAt: 1,
-				},
-				{
-					type: "api_key",
-					key: "LLM|payg-key",
-					source: "login",
-					authorizedAt: 2,
-				},
-			]);
-			const sessionId = "payg-quota-fallback";
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
-
-			expect(
-				await storage.rotateSessionCredential("meta", sessionId, {
-					apiKey: "LLM|payg-key",
-					error: Object.assign(
-						new Error('{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}'),
-						{ status: 429 },
-					),
-				}),
-			).toBe(true);
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
-		} finally {
-			storage.close();
-		}
-	});
-
-	test("reports the earlier cross-type retry after both Meta login sources are blocked", async () => {
-		const restoreEnv = clearMetaApiKeyEnv();
-		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
-			usageProviderResolver: () => undefined,
-		});
-		try {
-			await storage.reload();
-			await storage.set("meta", [
-				{
-					type: "oauth",
-					access: "meta-account-access",
-					refresh: "meta-account-refresh",
-					expires: Date.now() + 3_600_000,
-					apiKey: "LLM|subscription-key",
-					authorizedAt: 1,
-				},
-				{
-					type: "api_key",
-					key: "LLM|payg-key",
-					source: "login",
-					authorizedAt: 2,
-				},
-			]);
-			const sessionId = "cross-type-retry";
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
-			const firstBlockedAt = Date.now();
-			expect(
-				await storage.markUsageLimitReached("meta", sessionId, {
-					apiKey: "LLM|payg-key",
-					retryAfterMs: 10_000,
-				}),
-			).toMatchObject({ switched: true });
-			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
-			const exhausted = await storage.markUsageLimitReached("meta", sessionId, {
-				apiKey: "LLM|subscription-key",
-				retryAfterMs: 60_000,
-			});
-			expect(exhausted.switched).toBe(false);
-			expect(exhausted.retryAtMs).toBeGreaterThanOrEqual(firstBlockedAt + 10_000);
-			expect(exhausted.retryAtMs).toBeLessThan(firstBlockedAt + 20_000);
-		} finally {
-			storage.close();
-			restoreEnv();
 		}
 	});
 
