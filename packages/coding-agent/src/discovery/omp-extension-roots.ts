@@ -269,8 +269,8 @@ async function isDirectory(p: string): Promise<boolean> {
  *    `.claude/settings.json`, and honors overlays/overrides), never re-derived
  *    from a partial `.omp` disk scan; scopeless callers read the persisted
  *    `.omp` config, which supplies its own level.
- * 3. Installed npm/link plugins under `<plugins>/node_modules/`, added only in
- *    `merge` mode. Marketplace installs load via the `claude-plugins` provider.
+ * 3. Installed npm/link plugins and OMP marketplace roots, added only in
+ *    `merge` mode. Claude marketplace roots stay with `claude-plugins`.
  *
  * `explicit-only` mode (an SDK `disableExtensionDiscovery` session) contributes
  * the explicit lane alone — no ambient `extensions:`, installed plugins, or
@@ -340,15 +340,13 @@ export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtens
 }
 
 /**
- * Enumerate every enabled npm/link plugin's package directory so its conventional
- * `skills/`, `hooks/`, `tools/`, `commands/`, `rules/`, `prompts/`, and
- * `.mcp.json` are wired into discovery — mirrors how `getAllPluginExtensionPaths`
- * already feeds the extension factory loader.
+ * Enumerate every enabled npm/link plugin package plus OMP marketplace roots
+ * so conventional `skills/`, hooks, tools, commands, rules, prompts, and
+ * `.mcp.json` resources participate in OMP discovery.
  *
- * Marketplace installs also create runtime symlinks for enable-state persistence,
- * but their resources are discovered through the `claude-plugins` provider.
- * Filtering them here prevents `/status` from showing the same plugin under both
- * "Claude Code Marketplace" and "OMP Extension Packages".
+ * OMP marketplace roots come directly from OMP's registry, even when a package
+ * has no runtime extension link. Claude marketplace roots remain owned by the
+ * `claude-plugins` provider. Matching runtime links are filtered as duplicates.
  */
 async function realpathOrResolved(p: string): Promise<string> {
 	try {
@@ -365,6 +363,9 @@ async function listInstalledPluginRoots(ctx: LoadContext): Promise<InjectedRoot[
 			getEnabledPlugins(ctx.cwd, { home: ctx.home }),
 			listClaudePluginRoots(ctx.home, ctx.cwd),
 		]);
+		const ompMarketplaceRoots = marketplaceRoots.roots
+			.filter(root => root.registry === "omp")
+			.map(({ path: p, scope }) => ({ path: p, level: scope }));
 		const marketplaceRealpaths = new Set(
 			await Promise.all(marketplaceRoots.roots.map(root => realpathOrResolved(root.path))),
 		);
@@ -375,9 +376,10 @@ async function listInstalledPluginRoots(ctx: LoadContext): Promise<InjectedRoot[
 				realpath: await realpathOrResolved(plugin.path),
 			})),
 		);
-		return installedRoots
+		const nonMarketplaceRoots = installedRoots
 			.filter(root => !marketplaceRealpaths.has(root.realpath))
 			.map(({ path: p, scope }) => ({ path: p, level: scope }));
+		return [...ompMarketplaceRoots, ...nonMarketplaceRoots];
 	} catch (err) {
 		logger.debug("listInstalledPluginRoots: enumeration failed", { error: String(err) });
 		return [];

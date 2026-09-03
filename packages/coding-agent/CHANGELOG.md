@@ -42,6 +42,7 @@
 
 ### Fixed
 
+- Fixed OMP-installed marketplace plugins not registering their bundled skills unless Claude user sources were enabled.
 - Fixed local title models receiving unsupported online examples and failing with certain tokenizer templates.
 - Fixed model picker search selection so it moves to the best matching result after results change.
 - Fixed /new sometimes reviving the previous conversation in the current process or after a restart.

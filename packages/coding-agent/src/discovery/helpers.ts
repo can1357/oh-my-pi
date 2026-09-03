@@ -948,6 +948,8 @@ export interface ClaudePluginRoot {
 	version: string;
 	/** Absolute path to plugin root */
 	path: string;
+	/** Registry or explicit input that contributed this root */
+	registry: "claude" | "omp" | "plugin-dir";
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
 }
@@ -1165,6 +1167,7 @@ export async function listClaudePluginRoots(
 					roots.push({
 						id: pluginId,
 						marketplace,
+						registry: "claude",
 						plugin: pluginName,
 						version: entry.version || "unknown",
 						path: entry.installPath,
@@ -1213,6 +1216,7 @@ export async function listClaudePluginRoots(
 					roots.push({
 						id: pluginId,
 						marketplace,
+						registry: "omp",
 						plugin: pluginName,
 						version: entry.version || "unknown",
 						path: entry.installPath,
@@ -1251,6 +1255,7 @@ export async function listClaudePluginRoots(
 						projectRoots.push({
 							id: pluginId,
 							marketplace,
+							registry: "omp",
 							plugin: pluginName,
 							version: entry.version || "unknown",
 							path: entry.installPath,
@@ -1374,7 +1379,7 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 			}
 		}
 
-		injected.push(buildPluginDirRoot(resolved, pluginName));
+		injected.push({ ...buildPluginDirRoot(resolved, pluginName), registry: "plugin-dir" });
 	}
 
 	// Set injected roots BEFORE populating cache so listClaudePluginRoots merges them.
