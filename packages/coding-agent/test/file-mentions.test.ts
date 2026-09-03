@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import { EditStore } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -98,6 +99,78 @@ describe("generateFileMentionMessages path resolution", () => {
 		await Bun.write(path.join(cwd, "notes.txt"), "one\ntwo");
 
 		expect(await generateFileMentionMessages(["notes.txt:20-30"], cwd)).toHaveLength(0);
+	});
+
+	test("silently ignores malformed range bounds instead of throwing", async () => {
+		const cwd = await createTempDir();
+		await Bun.write(path.join(cwd, "a.ts"), "one\ntwo\nthree");
+
+		expect(await generateFileMentionMessages(["a.ts:0"], cwd)).toHaveLength(0);
+		expect(await generateFileMentionMessages(["a.ts:3-1"], cwd)).toHaveLength(0);
+		expect(await generateFileMentionMessages(["a.ts:2+0"], cwd)).toHaveLength(0);
+		expect(await generateFileMentionMessages(["a.ts:-0"], cwd)).toHaveLength(0);
+	});
+
+	test("injects only the last N lines for a tail selector", async () => {
+		const cwd = await createTempDir();
+		await Bun.write(path.join(cwd, "log.txt"), "one\ntwo\nthree\nfour\nfive\nsix");
+
+		const messages = await generateFileMentionMessages(["log.txt:-2"], cwd);
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+		expect(message.files[0]?.content).toBe("5|five\n6|six");
+	});
+
+	test("renders range rows with the hashline separator and records the shown lines", async () => {
+		const cwd = await createTempDir();
+		await Bun.write(path.join(cwd, "notes.txt"), "one\ntwo\nthree\nfour\nfive\nsix");
+		const snapshotStore = new EditStore();
+
+		const messages = await generateFileMentionMessages(["notes.txt:2-3"], cwd, {
+			useHashLines: true,
+			snapshotStore,
+		});
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+		expect(message.files[0]?.content).toContain("2:two\n3:three");
+
+		const absolutePath = path.join(cwd, "notes.txt");
+		const tag = snapshotStore.headHash(absolutePath);
+		expect(tag && snapshotStore.seenLines(absolutePath, tag)).toEqual([2, 3]);
+	});
+
+	test("reports original line numbers when a range selection is truncated", async () => {
+		const cwd = await createTempDir();
+		const lines = Array.from({ length: 3500 }, (_, i) => `line ${i + 1}`);
+		await Bun.write(path.join(cwd, "big.txt"), lines.join("\n"));
+
+		const messages = await generateFileMentionMessages(["big.txt:2-3500"], cwd);
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+		expect(message.files[0]?.content.startsWith("2|line 2")).toBe(true);
+		expect(message.files[0]?.content).toContain("[Showing lines 2-3001 of 3500. Use :3002 to continue]");
+	});
+
+	test("keeps a typed selector following a quoted path mention", async () => {
+		const cwd = await createTempDir();
+		await fs.mkdir(path.join(cwd, "My Folder"), { recursive: true });
+		await Bun.write(path.join(cwd, "My Folder", "notes.txt"), "one\ntwo\nthree");
+
+		const mentions = extractFileMentions('see @"My Folder/notes.txt":2-3 now');
+		expect(mentions).toEqual(["My Folder/notes.txt:2-3"]);
+
+		const messages = await generateFileMentionMessages(mentions, cwd);
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+		expect(message.files[0]?.content).toBe("2|two\n3|three");
 	});
 
 	test("lists an exact directory path", async () => {

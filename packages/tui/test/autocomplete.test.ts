@@ -642,6 +642,16 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.lines[0]).toBe("@src/config.ts:10-20 ");
 		});
 
+		it("replaces a stale file completion instead of preserving filename characters", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const line = "@foo.tsx";
+			const result = provider.applyCompletion([line], 0, line.length, { value: "@foo.ts", label: "foo.ts" }, "@foo");
+
+			// The stale suggestion `@foo.ts` prefixes the live `@foo.tsx`; Tab must
+			// apply the selected completion, not accept the unrelated longer path.
+			expect(result.lines[0]).toBe("@foo.ts ");
+		});
+
 		it("preserves earlier slash command arguments when completing a path inside the last argument", () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const result = provider.applyCompletion(

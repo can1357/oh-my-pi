@@ -375,6 +375,17 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
 }
 
 /**
+ * True when `value` is a well-formed read-tool selector tail — colon-joined
+ * chunks, each a range list, tail selector, or display mode (`1-5`, `-60`,
+ * `raw:1-5`). Used by callers that capture typed text trailing a path (the
+ * file-mention extractor's quoted-path lookahead) to distinguish a selector
+ * from ordinary prose.
+ */
+export function isSelectorTail(value: string): boolean {
+	return value.length > 0 && value.split(":").every(chunk => FILE_LINE_RANGE_RE.test(chunk));
+}
+
+/**
  * Three-way probe for whether the exact filesystem entry named by `filePath`
  * exists. `stat` (used earlier) failed for reasons other than "no such file"
  * (dangling symlink, `EACCES` on a parent, transient I/O), and each of those
