@@ -12,7 +12,8 @@ use gix::bstr::{BString, ByteSlice};
 
 use super::{
 	GitRepo, normalize_path,
-	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index},
+	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
+	read::literal_pathspec,
 };
 use crate::{
 	error::{Error, Result},
@@ -386,36 +387,75 @@ impl GitRepo {
 
 	/// Remove untracked files and directories according to ignore mode.
 	pub fn clean(&self, options: &CleanOptions) -> Result<()> {
-		let repo = self.gix()?;
-		let index = load_index_or_head(&repo, "git clean")?;
-		let tracked: BTreeSet<String> = index
-			.entries()
-			.iter()
-			.map(|e| e.path(&index).to_str_lossy().into_owned())
-			.collect();
-		let ignores = load_ignore_patterns(self.root());
-		let mut paths = Vec::new();
-		walk_files(self.root(), self.root(), &mut paths)?;
-		for rel in paths {
-			if tracked.contains(&rel)
-				|| !options.paths.is_empty() && !options.paths.iter().any(|p| path_matches(&rel, p))
-			{
-				continue;
+		// `.` (and `./`) normalize to "" and mean "everything", so they drop out
+		// of the restriction set. A literally empty string is rejected the way
+		// git rejects it instead of silently widening to the whole worktree.
+		let mut paths = BTreeSet::new();
+		for raw in &options.paths {
+			if raw.is_empty() {
+				return Err(Error::backend("git clean", "empty string is not a valid pathspec"));
 			}
-			let ignored = is_ignored(&rel, &ignores);
-			if (options.ignored_only && !ignored)
-				|| (!options.ignored_only && !options.include_ignored && ignored)
-			{
-				continue;
-			}
-			let path = self.root().join(&rel);
-			if path.is_dir() {
-				fs::remove_dir_all(path)?;
-			} else {
-				fs::remove_file(path)?;
+			let normalized = normalize_stage_path(raw);
+			if !normalized.is_empty() {
+				paths.insert(normalized);
 			}
 		}
-		remove_empty_dirs(self.root(), self.root())?;
+
+		// Fresh open: the cached handle snapshots config, so a
+		// `core.excludesFile` configured after first use would be missed and
+		// its excluded files deleted.
+		let repo = self.gix_fresh()?;
+		let mut platform =
+			status_with_index(&repo, "git clean", load_index_or_head(&repo, "git clean")?)?
+				.untracked_files(gix::status::UntrackedFiles::Files);
+		let emit_ignored = options.include_ignored || options.ignored_only;
+		let for_deletion = if emit_ignored {
+			gix::dir::walk::ForDeletionMode::FindNonBareRepositoriesInIgnoredDirectories
+		} else {
+			gix::dir::walk::ForDeletionMode::IgnoredDirectoriesCanHideNestedRepositories
+		};
+		platform = platform.dirwalk_options(|opts| {
+			let opts = opts
+				.emit_empty_directories(true)
+				.for_deletion(Some(for_deletion));
+			if emit_ignored {
+				opts.emit_ignored(Some(gix::dir::walk::EmissionMode::Matching))
+			} else {
+				opts
+			}
+		});
+
+		let iter = platform
+			.into_index_worktree_iter(
+				paths
+					.iter()
+					.map(|path| literal_pathspec(path).into_bytes().into()),
+			)
+			.map_err(|e| Error::backend("git clean", e))?;
+
+		for item in iter {
+			let item = item.map_err(|e| Error::backend("git clean", e))?;
+			let gix::status::index_worktree::Item::DirectoryContents { entry, .. } = item else {
+				continue;
+			};
+			if entry.disk_kind == Some(gix::dir::entry::Kind::Repository) {
+				continue;
+			}
+			let wanted = if options.ignored_only {
+				matches!(entry.status, gix::dir::entry::Status::Ignored(_))
+			} else if options.include_ignored {
+				entry.status == gix::dir::entry::Status::Untracked
+					|| matches!(entry.status, gix::dir::entry::Status::Ignored(_))
+			} else {
+				entry.status == gix::dir::entry::Status::Untracked
+			};
+			if !wanted {
+				continue;
+			}
+			let full = self.root().join(entry.rela_path.to_str_lossy().as_ref());
+			remove_existing(&full)?;
+			prune_empty_parents(self.root(), full.parent(), &paths)?;
+		}
 		Ok(())
 	}
 
@@ -588,7 +628,7 @@ impl GitRepo {
 				Ok(_) => {},
 				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
 					remove_existing(&dst)?;
-					prune_empty_parents(path, dst.parent());
+					prune_empty_parents(path, dst.parent(), &BTreeSet::new())?;
 				},
 				Err(err) => return Err(err.into()),
 			}
@@ -689,7 +729,7 @@ impl GitRepo {
 		for relative in &delete {
 			let full = path.join(relative.to_path_lossy());
 			match fs::remove_file(&full) {
-				Ok(()) => prune_empty_parents(path, full.parent()),
+				Ok(()) => prune_empty_parents(path, full.parent(), &BTreeSet::new())?,
 				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
 				Err(err) => return Err(err.into()),
 			}
@@ -1457,105 +1497,6 @@ fn path_matches(path: &str, wanted: &str) -> bool {
 			.is_some_and(|r| r.starts_with('/'))
 }
 
-fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
-	for entry in fs::read_dir(dir)? {
-		let entry = entry?;
-		let path = entry.path();
-		if path == root.join(".git") {
-			continue;
-		}
-		let kind = entry.file_type()?;
-		if kind.is_dir() {
-			walk_files(root, &path, out)?;
-		} else {
-			out.push(
-				path
-					.strip_prefix(root)
-					.map_err(|e| Error::backend("git walk", e))?
-					.to_string_lossy()
-					.replace('\\', "/"),
-			);
-		}
-	}
-	Ok(())
-}
-
-fn load_ignore_patterns(root: &Path) -> Vec<String> {
-	let mut out = Vec::new();
-	for path in [root.join(".gitignore"), root.join(".git/info/exclude")] {
-		if let Ok(text) = fs::read_to_string(path) {
-			out.extend(
-				text
-					.lines()
-					.map(str::trim)
-					.filter(|l| !l.is_empty() && !l.starts_with('#'))
-					.map(str::to_owned),
-			);
-		}
-	}
-	out
-}
-
-fn is_ignored(path: &str, patterns: &[String]) -> bool {
-	let mut ignored = false;
-	for raw in patterns {
-		let (negate, pattern) = raw
-			.strip_prefix('!')
-			.map_or((false, raw.as_str()), |p| (true, p));
-		let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
-		let matches = if pattern.contains('*') {
-			wildcard_match(pattern, path) || path.split('/').any(|part| wildcard_match(pattern, part))
-		} else {
-			path == pattern
-				|| path.starts_with(&format!("{pattern}/"))
-				|| path.split('/').any(|part| part == pattern)
-		};
-		if matches {
-			ignored = !negate;
-		}
-	}
-	ignored
-}
-
-const fn wildcard_match(pattern: &str, text: &str) -> bool {
-	let (mut p, mut t, mut star, mut mark) = (0, 0, None, 0);
-	let (pb, tb) = (pattern.as_bytes(), text.as_bytes());
-	while t < tb.len() {
-		if p < pb.len() && (pb[p] == b'?' || pb[p] == tb[t]) {
-			p += 1;
-			t += 1;
-		} else if p < pb.len() && pb[p] == b'*' {
-			star = Some(p);
-			p += 1;
-			mark = t;
-		} else if let Some(s) = star {
-			p = s + 1;
-			mark += 1;
-			t = mark;
-		} else {
-			return false;
-		}
-	}
-	while p < pb.len() && pb[p] == b'*' {
-		p += 1;
-	}
-	p == pb.len()
-}
-
-fn remove_empty_dirs(root: &Path, dir: &Path) -> Result<bool> {
-	for entry in fs::read_dir(dir)? {
-		let path = entry?.path();
-		if path.is_dir() && path != root.join(".git") {
-			remove_empty_dirs(root, &path)?;
-		}
-	}
-	let empty = dir != root && fs::read_dir(dir)?.next().is_none();
-	if empty {
-		fs::remove_dir(dir)?;
-	}
-	Ok(empty)
-}
-
 fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 	let mut config = if path.exists() {
 		gix::config::File::from_path_no_includes(path.to_owned(), gix::config::Source::Local)
@@ -1664,13 +1605,47 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 	Ok(())
 }
 
-fn prune_empty_parents(root: &Path, mut parent: Option<&Path>) {
+/// Remove now-empty ancestors of a deleted entry, walking up from `parent`
+/// and stopping at `root`, the first non-empty directory, or — when `scope`
+/// is non-empty — the first directory outside every scoped pathspec.
+fn prune_empty_parents(
+	root: &Path,
+	mut parent: Option<&Path>,
+	scope: &BTreeSet<String>,
+) -> Result<()> {
 	while let Some(dir) = parent {
-		if dir == root || fs::remove_dir(dir).is_err() {
+		if dir == root {
 			break;
 		}
-		parent = dir.parent();
+		if !scope.is_empty() {
+			let Ok(rel) = dir.strip_prefix(root) else {
+				break;
+			};
+			let rel = rel.to_string_lossy().replace('\\', "/");
+			let in_scope = scope.iter().any(|p| {
+				*p == rel
+					|| rel
+						.strip_prefix(p.as_str())
+						.is_some_and(|r| r.starts_with('/'))
+			});
+			if !in_scope {
+				break;
+			}
+		}
+		match fs::remove_dir(dir) {
+			Ok(()) => parent = dir.parent(),
+			Err(err)
+				if matches!(
+					err.kind(),
+					std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+				) =>
+			{
+				break;
+			},
+			Err(err) => return Err(err.into()),
+		}
 	}
+	Ok(())
 }
 
 fn worktree_admin_name(common: &Path, path: &Path) -> String {
@@ -2169,6 +2144,203 @@ mod tests {
 			repo.write_tree(Some(&alternate)).unwrap(),
 			git(temp.path(), &["rev-parse", "HEAD^{tree}"])
 		);
+	}
+
+	#[test]
+	fn clean_respects_nested_ignores_and_preserves_submodules() {
+		let (temp, repo) = fixture();
+		let outside = tempfile::tempdir().unwrap();
+		// 1. Nested gitignore
+		let nested = temp.path().join("nested");
+		fs::create_dir_all(&nested).unwrap();
+		fs::write(nested.join(".gitignore"), "secret.env\n").unwrap();
+		repo.stage_files(&["nested/.gitignore".into()]).unwrap();
+		repo
+			.commit_create("add nested gitignore", &CommitOptions::default())
+			.unwrap();
+		fs::write(nested.join("secret.env"), "secret\n").unwrap();
+		fs::write(nested.join("untracked.txt"), "delete\n").unwrap();
+
+		// 2. Checked-out submodule
+		let sub = temp.path().join("sub-repo");
+		fs::create_dir_all(&sub).unwrap();
+		git(&sub, &["init", "-q", "-b", "main"]);
+		git(&sub, &["config", "user.email", "test@example.com"]);
+		git(&sub, &["config", "user.name", "test"]);
+		fs::write(sub.join("sub-file.txt"), "committed-in-sub\n").unwrap();
+		git(&sub, &["add", "."]);
+		git(&sub, &["commit", "-qm", "sub init"]);
+
+		git(temp.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			sub.to_str().unwrap(),
+			"my-submodule",
+		]);
+		git(temp.path(), &["commit", "-qm", "add submodule"]);
+
+		let checked_out_sub = temp.path().join("my-submodule");
+		fs::write(checked_out_sub.join("dirty-untracked.txt"), "sub untracked\n").unwrap();
+		fs::write(checked_out_sub.join("sub-file.txt"), "sub modified\n").unwrap();
+
+		// 3. Parent untracked file
+		fs::write(temp.path().join("parent-untracked.txt"), "delete\n").unwrap();
+
+		// 4. Global excludesfile (core.excludesFile), configured *after* `repo`'s
+		//    cached gix handle was opened by the staging calls above. The clean below
+		//    must observe it or `global.env` is deleted.
+		let global_exclude = outside.path().join("global-excludes");
+		fs::write(&global_exclude, "global.env\n").unwrap();
+		git(temp.path(), &["config", "core.excludesFile", global_exclude.to_str().unwrap()]);
+		fs::write(temp.path().join("global.env"), "global-secret\n").unwrap();
+
+		// 4b. Repository-local `.git/info/exclude`
+		let info_dir = repo.info().git_dir.join("info");
+		fs::create_dir_all(&info_dir).unwrap();
+		fs::write(info_dir.join("exclude"), "info-excluded.env\n").unwrap();
+		fs::write(temp.path().join("info-excluded.env"), "info-secret\n").unwrap();
+
+		// 5. Untracked nested repository
+		let untracked_repo = temp.path().join("untracked-nested-repo");
+		fs::create_dir_all(&untracked_repo).unwrap();
+		git(&untracked_repo, &["init", "-q", "-b", "main"]);
+		fs::write(untracked_repo.join("nested.txt"), "nested content\n").unwrap();
+
+		// 6. Symlink to directory (must unlink the symlink, not delete the target
+		//    directory)
+		#[cfg(unix)]
+		let target_dir = outside.path().join("target-dir");
+		#[cfg(unix)]
+		{
+			fs::create_dir_all(&target_dir).unwrap();
+			fs::write(target_dir.join("important.txt"), "keep this\n").unwrap();
+			std::os::unix::fs::symlink(&target_dir, temp.path().join("symlink-to-dir")).unwrap();
+		}
+
+		// 7. Untracked directory with file inside: empty directory gets pruned
+		let to_prune = temp.path().join("untracked-dir/subdir");
+		fs::create_dir_all(&to_prune).unwrap();
+		fs::write(to_prune.join("leaf.txt"), "leaf\n").unwrap();
+
+		// 8. Untracked directory initially empty: pruned (-d contract)
+		let initially_empty = temp.path().join("initially-empty-dir");
+		fs::create_dir_all(&initially_empty).unwrap();
+
+		// 9. Ignored empty directory: MUST SURVIVE
+		let ignored_empty = temp.path().join("ignored-empty-dir");
+		fs::create_dir_all(&ignored_empty).unwrap();
+		let sub_gitignore = temp.path().join(".gitignore");
+		let mut current_gitignore = fs::read_to_string(&sub_gitignore).unwrap_or_default();
+		current_gitignore.push_str("ignored-empty-dir/\n");
+		fs::write(&sub_gitignore, current_gitignore).unwrap();
+
+		repo
+			.clean(&CleanOptions { paths: vec!["nested".into()], ..Default::default() })
+			.unwrap();
+		assert!(
+			!nested.join("untracked.txt").exists(),
+			"pathspec-scoped clean removes matches under the path"
+		);
+		assert!(
+			nested.join("secret.env").exists(),
+			"pathspec-scoped clean still honors nested ignores"
+		);
+		assert!(
+			temp.path().join("parent-untracked.txt").exists(),
+			"pathspec-scoped clean leaves paths outside the pathspec"
+		);
+		assert!(
+			initially_empty.exists(),
+			"pathspec-scoped clean leaves directories outside the pathspec"
+		);
+		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside the
+		//     pathspec but preserves the parent
+		let pathspec_dir = temp.path().join("pathspec-parent/child/grandchild");
+		fs::create_dir_all(&pathspec_dir).unwrap();
+		fs::write(pathspec_dir.join("leaf.txt"), "leaf\n").unwrap();
+		repo
+			.clean(&CleanOptions { paths: vec!["pathspec-parent/child".into()], ..Default::default() })
+			.unwrap();
+		assert!(
+			!temp.path().join("pathspec-parent/child").exists(),
+			"empty dir inside pathspec must be pruned"
+		);
+		assert!(
+			temp.path().join("pathspec-parent").exists(),
+			"parent directory outside pathspec must not be pruned"
+		);
+
+		repo.clean(&CleanOptions::default()).unwrap();
+
+		// Untracked files deleted and parent directories pruned
+		assert!(!temp.path().join("parent-untracked.txt").exists());
+		assert!(!nested.join("untracked.txt").exists());
+		assert!(!temp.path().join("untracked-dir").exists());
+		assert!(!temp.path().join("pathspec-parent").exists());
+		assert!(!initially_empty.exists(), "empty untracked directory must be pruned by -d");
+
+		// Ignored empty directory MUST SURVIVE
+		assert!(ignored_empty.exists(), "ignored empty directory must survive clean");
+
+		// Nested ignored file MUST SURVIVE
+		assert!(nested.join("secret.env").exists());
+		assert_eq!(fs::read_to_string(nested.join("secret.env")).unwrap(), "secret\n");
+
+		// Global excluded file MUST SURVIVE (config set after the handle was cached)
+		assert!(temp.path().join("global.env").exists());
+		assert_eq!(fs::read_to_string(temp.path().join("global.env")).unwrap(), "global-secret\n");
+
+		// `.git/info/exclude` file MUST SURVIVE
+		assert_eq!(
+			fs::read_to_string(temp.path().join("info-excluded.env")).unwrap(),
+			"info-secret\n"
+		);
+
+		// Submodule files and .git MUST SURVIVE
+		assert!(checked_out_sub.join(".git").exists());
+		assert!(checked_out_sub.join("sub-file.txt").exists());
+		assert_eq!(
+			fs::read_to_string(checked_out_sub.join("sub-file.txt")).unwrap(),
+			"sub modified\n"
+		);
+		assert!(checked_out_sub.join("dirty-untracked.txt").exists());
+
+		// Untracked nested repo MUST SURVIVE
+		assert!(untracked_repo.join(".git").exists());
+		assert!(untracked_repo.join("nested.txt").exists());
+		// Symlink to directory: symlink is removed, target directory content survives
+		#[cfg(unix)]
+		{
+			assert!(!temp.path().join("symlink-to-dir").exists());
+			assert!(target_dir.join("important.txt").exists());
+		}
+	}
+
+	#[test]
+	fn clean_rejects_empty_pathspec_and_treats_dot_as_everything() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join("untracked.txt"), "x").unwrap();
+
+		let err = repo
+			.clean(&CleanOptions { paths: vec![String::new()], ..Default::default() })
+			.unwrap_err();
+		assert!(
+			err.to_string()
+				.contains("empty string is not a valid pathspec"),
+			"{err}"
+		);
+		assert!(
+			temp.path().join("untracked.txt").exists(),
+			"an empty pathspec must not widen to the whole worktree"
+		);
+
+		repo
+			.clean(&CleanOptions { paths: vec!["./".into()], ..Default::default() })
+			.unwrap();
+		assert!(!temp.path().join("untracked.txt").exists(), "`.` selects everything like git");
 	}
 
 	#[cfg(unix)]
