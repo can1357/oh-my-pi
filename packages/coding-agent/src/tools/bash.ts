@@ -7,6 +7,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -33,6 +34,7 @@ import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
+import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
@@ -382,8 +384,45 @@ interface ManagedBashJobHandle {
 	stopUpdates: () => void;
 }
 
+interface BashProgressDetails extends BashToolDetails {
+	images?: ImageContent[];
+}
+
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
+}
+
+/**
+ * Incrementally decodes cumulative client-terminal snapshots. Normal snapshots
+ * append only the unseen suffix; a host-side rolling/truncated window retires
+ * the old decoder and starts from the replacement snapshot without losing
+ * images already completed before the rollover.
+ */
+class TerminalSnapshotDecoder {
+	#decoder = new TerminalGraphicsDecoder();
+	#raw = "";
+	#clean = "";
+	#retiredImages: Array<Promise<ImageContent[]>> = [];
+
+	push(snapshot: string): string {
+		if (!snapshot.startsWith(this.#raw)) {
+			this.#decoder.finish();
+			this.#retiredImages.push(this.#decoder.images());
+			this.#decoder = new TerminalGraphicsDecoder();
+			this.#raw = "";
+			this.#clean = "";
+		}
+		const suffix = snapshot.slice(this.#raw.length);
+		this.#raw = snapshot;
+		this.#clean += this.#decoder.push(suffix);
+		return this.#clean;
+	}
+
+	async finish(snapshot: string): Promise<{ text: string; images: ImageContent[] }> {
+		const text = this.push(snapshot) + this.#decoder.finish();
+		const batches = await Promise.all([...this.#retiredImages, this.#decoder.images()]);
+		return { text, images: batches.flat() };
+	}
 }
 
 function normalizeBashEnv(env: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -740,7 +779,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), inlineCap);
 			return toolResult(details)
-				.text(timeoutOutputText)
+				.content([{ type: "text", text: timeoutOutputText }, ...(result.images ?? [])])
 				.truncationFromSummary(result, { direction: "tail" })
 				.error()
 				.done();
@@ -753,7 +792,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
 
 		const resultBuilder = toolResult(details)
-			.text(cappedOutputText)
+			.content([{ type: "text", text: cappedOutputText }, ...(result.images ?? [])])
 			.truncationFromSummary(result, { direction: "tail" });
 		if (failedExit) resultBuilder.error();
 		return resultBuilder.done();
@@ -814,6 +853,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
 		let latestText = "";
+		let latestProgressDetails: BashProgressDetails | undefined;
 		let forwardUpdates = options.forwardUpdates;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 
@@ -848,6 +888,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
+					const images = finalResult.content.filter((block): block is ImageContent => block.type === "image");
+					latestProgressDetails = {
+						...finalResult.details,
+						...(images.length > 0 ? { images } : {}),
+					};
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding
 					// the job's terminal state.
@@ -858,13 +903,19 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						// delivers the error text, matching prior throw-based behavior.
 						throw new ToolError(finalText);
 					}
-					await reportProgress(finalText, { async: { state: "completed", jobId, type: "bash" } });
+					await reportProgress(finalText, {
+						...latestProgressDetails,
+						async: { state: "completed", jobId, type: "bash" },
+					});
 					return finalText;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
 					completion.resolve({ kind: "failed", error });
-					await reportProgress(message, { async: { state: "failed", jobId, type: "bash" } });
+					await reportProgress(message, {
+						...latestProgressDetails,
+						async: { state: "failed", jobId, type: "bash" },
+					});
 					throw error;
 				}
 			},
@@ -875,7 +926,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					if (!forwardUpdates) return;
 					await options.onUpdate?.({
 						content: [{ type: "text", text }],
-						details: {},
+						details: latestProgressDetails ?? {},
 					});
 				},
 			},
@@ -1138,6 +1189,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 
 			const bridgeWallTimeStart = performance.now();
+			const bridgeGraphics = new TerminalSnapshotDecoder();
 			const killGraceMs = 1000;
 			const outputSnapshotGraceMs = 2000;
 			// Cancellable timeout: a bare Bun.sleep(timeoutMs) would leave a live,
@@ -1222,8 +1274,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						outputLines: 0,
 						outputBytes: 0,
 					};
-					this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
-					throw new ToolError("Command timed out");
+					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+						requestedTimeoutSec,
+						notices: pendingNotices,
+						wallTimeMs: performance.now() - bridgeWallTimeStart,
+					});
 				}
 
 				handle = createRaced.handle;
@@ -1281,19 +1336,24 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 								error,
 							});
 						}
+						const decoded = await bridgeGraphics.finish(current.output);
 						const timedOutResult: BashInteractiveResult = {
-							output: current.output,
+							output: decoded.text,
 							exitCode: undefined,
 							cancelled: false,
 							timedOut: true,
 							truncated: current.truncated,
-							totalLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-							totalBytes: current.output.length,
-							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-							outputBytes: current.output.length,
+							totalLines: decoded.text.length > 0 ? decoded.text.split("\n").length : 0,
+							totalBytes: decoded.text.length,
+							outputLines: decoded.text.length > 0 ? decoded.text.split("\n").length : 0,
+							outputBytes: decoded.text.length,
+							...(decoded.images.length > 0 ? { images: decoded.images } : {}),
 						};
-						this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
-						throw new ToolError("Command timed out");
+						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+							requestedTimeoutSec,
+							notices: pendingNotices,
+							wallTimeMs: performance.now() - bridgeWallTimeStart,
+						});
 					}
 
 					if (raced.kind === "exit") {
@@ -1312,7 +1372,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					}
 					lastPolledOutput = pollOutput;
 					onUpdate?.({
-						content: [{ type: "text", text: pollOutput.output }],
+						content: [{ type: "text", text: bridgeGraphics.push(pollOutput.output) }],
 						details: { terminalId: handle.terminalId },
 					});
 				}
@@ -1336,7 +1396,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const exitCode: number | undefined =
 					rawExitCode != null ? rawExitCode : exitStatus.signal ? 137 : undefined;
 
-				const outputText = finalOutput.output;
+				const decoded = await bridgeGraphics.finish(finalOutput.output);
+				const outputText = decoded.text;
 				const outputByteLen = outputText.length;
 				const outputLineCount = outputText.length > 0 ? outputText.split("\n").length : 0;
 
@@ -1349,6 +1410,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					totalBytes: outputByteLen,
 					outputLines: outputLineCount,
 					outputBytes: outputByteLen,
+					...(decoded.images.length > 0 ? { images: decoded.images } : {}),
 				};
 
 				const bridgeNotices: string[] = [];

@@ -2,13 +2,16 @@
 
 ## [Unreleased]
 
+## [18.1.9] - 2026-09-04
+
 ### Added
 
-- Added transactional native OAuth callback registration and one-shot delivery across macOS, Linux desktops, and Windows.
+- Added native Sixel-to-PNG decoding for terminal graphics returned by shell commands.
+- Added transactional native OAuth callback registration with one-shot callback delivery on macOS, Linux desktops, and Windows.
 
 ### Fixed
 
-- Fixed native VCS cleanup to correctly honor ignore rules and path boundaries while safely handling symlinks, nested repositories, and submodules.
+- Fixed native version-control cleanup to respect ignore rules and path boundaries while safely handling symlinks, nested repositories, and submodules.
 
 ## [18.1.7] - 2026-09-03
 

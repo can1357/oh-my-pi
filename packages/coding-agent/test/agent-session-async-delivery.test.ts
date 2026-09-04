@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
@@ -49,7 +50,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		AsyncJobManager.resetForTests();
 	});
 
-	it("injects an owned completion as a follow-up turn and reaches quiescence", async () => {
+	it("delivers background text and images to the owning model and reaches quiescence", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
@@ -73,8 +74,22 @@ describe("AgentSession owner-routed async delivery", () => {
 			asyncJobManager: manager,
 		});
 
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+		};
 		const gate = Promise.withResolvers<string>();
-		manager.register("bash", "gated job", () => gate.promise, { id: "sub-job", ownerId: "SubAgent" });
+		manager.register(
+			"bash",
+			"gated job",
+			async ({ reportProgress }) => {
+				const text = await gate.promise;
+				await reportProgress(text, { images: [image] });
+				return text;
+			},
+			{ id: "sub-job", ownerId: "SubAgent" },
+		);
 
 		// A running owned job holds the session out of quiescence.
 		expect(session.hasPendingAsyncWork()).toBe(true);
@@ -97,6 +112,12 @@ describe("AgentSession owner-routed async delivery", () => {
 			}),
 		);
 		expect(sawResult).toBe(true);
+		const deliveredImages = mock.calls.flatMap(call =>
+			call.context.messages.flatMap(message =>
+				typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image"),
+			),
+		);
+		expect(deliveredImages).toEqual([image]);
 	});
 
 	it("carries a schema-valid background task's structured output as a pointer only", () => {

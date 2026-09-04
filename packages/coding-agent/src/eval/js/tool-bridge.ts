@@ -1,7 +1,9 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
+import { invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
@@ -41,13 +43,8 @@ type ToolValue =
 			hasError?: boolean;
 	  };
 function toolResultHasError(result: AgentToolResult): boolean {
-	if ((result as { isError?: unknown }).isError === true) {
-		return true;
-	}
-	if (!(result.details && typeof result.details === "object")) {
-		return false;
-	}
-	return (result.details as { isError?: unknown }).isError === true;
+	if (isRecord(result) && result.isError === true) return true;
+	return isRecord(result.details) && result.details.isError === true;
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
@@ -59,14 +56,21 @@ function getTool(session: ToolSession, name: string): AgentTool {
 }
 
 function normalizeArgs(args: unknown): unknown {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
-		return args;
-	}
-	const record = { ...(args as Record<string, unknown>) };
+	if (!isRecord(args)) return args;
+	const record = { ...args };
 	if (record[INTENT_FIELD] === undefined) {
 		record[INTENT_FIELD] = "js prelude";
 	}
 	return record;
+}
+
+function parsePreludeRequest(args: unknown): { name: string; parameters: unknown } {
+	if (!isRecord(args)) throw new ToolError("Invalid eval prelude bridge request");
+	const name = args.name;
+	if (typeof name !== "string" || name.length === 0) {
+		throw new ToolError("Invalid eval prelude bridge name");
+	}
+	return { name, parameters: args.parameters };
 }
 
 function summarizeToolResult(
@@ -76,13 +80,8 @@ function summarizeToolResult(
 	text: string,
 	hasError: boolean,
 ): JsStatusEvent {
-	const record = (args && typeof args === "object" ? (args as Record<string, unknown>) : {}) as Record<
-		string,
-		unknown
-	>;
-	const details = (
-		result.details && typeof result.details === "object" ? (result.details as Record<string, unknown>) : {}
-	) as Record<string, unknown>;
+	const record = isRecord(args) ? args : {};
+	const details = isRecord(result.details) ? result.details : {};
 	const withError = (event: JsStatusEvent): JsStatusEvent =>
 		hasError ? { ...event, hasError: true, error: text.slice(0, 500) } : event;
 
@@ -121,7 +120,60 @@ function summarizeToolResult(
 	}
 }
 
+function normalizeAgentToolResult(
+	name: string,
+	args: unknown,
+	result: AgentToolResult,
+	options: ToolBridgeOptions,
+): ToolValue {
+	const textBlocks = result.content.filter(
+		(content): content is { type: "text"; text: string } =>
+			content.type === "text" && typeof content.text === "string",
+	);
+	const imageBlocks = result.content.filter(
+		(content): content is { type: "image"; mimeType: string; data: string } =>
+			content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
+	);
+	const text = textBlocks.map(block => block.text).join("");
+	const hasError = toolResultHasError(result);
+	options.emitStatus?.(summarizeToolResult(name, args, result, text, hasError));
+	if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
+		return text;
+	}
+	const value: Exclude<ToolValue, string> = {
+		text,
+		details: result.details,
+	};
+	if (imageBlocks.length > 0) {
+		value.images = imageBlocks.map(block => ({
+			mimeType: block.mimeType,
+			data: block.data,
+		}));
+	}
+	if (hasError) value.hasError = true;
+	return value;
+}
+
 export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	if (name === "__prelude__") {
+		const request = parsePreludeRequest(args);
+		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
+		try {
+			const result = await invokeEvalPrelude(request.name, request.parameters, {
+				session: options.session,
+				toolCallId,
+				signal: options.signal,
+				context: options.session.getToolContext?.(),
+			});
+			return normalizeAgentToolResult(request.name, request.parameters, result, options);
+		} catch (error) {
+			options.emitStatus?.({
+				op: request.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
 		return await runEvalCompletion(args, options);
 	}
@@ -159,34 +211,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			undefined,
 			options.session.getToolContext?.(),
 		);
-		const textBlocks = result.content.filter(
-			(content): content is { type: "text"; text: string } =>
-				content.type === "text" && typeof content.text === "string",
-		);
-		const imageBlocks = result.content.filter(
-			(content): content is { type: "image"; mimeType: string; data: string } =>
-				content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
-		);
-		const text = textBlocks.map(block => block.text).join("");
-		const hasError = toolResultHasError(result);
-		options.emitStatus?.(summarizeToolResult(name, normalizedArgs, result, text, hasError));
-		if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
-			return text;
-		}
-		const value: Exclude<ToolValue, string> = {
-			text,
-			details: result.details,
-		};
-		if (imageBlocks.length > 0) {
-			value.images = imageBlocks.map(block => ({
-				mimeType: block.mimeType,
-				data: block.data,
-			}));
-		}
-		if (hasError) {
-			value.hasError = true;
-		}
-		return value;
+		return normalizeAgentToolResult(name, normalizedArgs, result, options);
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

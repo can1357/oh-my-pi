@@ -6224,7 +6224,33 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:36",
+				"source": "classes/openai.kdl:37",
+				"class": "openai",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "5.6.0"
+					}
+				],
+				"catalog": {
+					"delegationBias": "gated"
+				}
+			},
+			{
+				"source": "classes/openai.kdl:40",
+				"class": "openai",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "6.0.0"
+					}
+				],
+				"catalog": {
+					"delegationBias": "restrained"
+				}
+			},
+			{
+				"source": "classes/openai.kdl:46",
 				"class": "openai",
 				"models": [
 					{
@@ -6237,7 +6263,7 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:42",
+				"source": "classes/openai.kdl:52",
 				"class": "openai",
 				"family": "codex",
 				"revision": [

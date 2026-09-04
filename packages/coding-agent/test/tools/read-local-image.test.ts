@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { completeSimple } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -40,19 +42,28 @@ const TINY_PNG = Buffer.from(
 const TINY_SVG =
 	'<svg xmlns="http://www.w3.org/2000/svg" width="12" height="7"><rect width="12" height="7" fill="red"/></svg>';
 
-function makeSession(testDir: string, inspectImageActive = false): ToolSession {
+function makeSession(testDir: string, textOnlyModel = false): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
 	const artifactsDir = sessionFile.slice(0, -6);
+	const model = createMockModel({ id: textOnlyModel ? "text-only" : "vision" });
+	if (!textOnlyModel) model.input.push("image");
+	const settings = Settings.isolated({ "images.autoResize": false });
+	settings.setModelRole("vision", `${model.provider}/${model.id}`);
 	return {
 		cwd: testDir,
 		hasUI: false,
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
-		// A restricted slate without inspect_image (and no xdev mount) must keep
-		// inlining images — metadata-only guidance would point at an absent tool.
-		isToolActive: (name: string) => inspectImageActive && name === "inspect_image",
-		settings: Settings.isolated({ "images.autoResize": false }),
+		getModelString: () => `${model.provider}/${model.id}`,
+		getActiveModelString: () => `${model.provider}/${model.id}`,
+		getActiveModel: () => model,
+		modelRegistry: {
+			getAvailable: () => [model],
+			getApiKey: async () => "test-key",
+			resolver: () => async () => "test-key",
+		},
+		settings,
 	} as unknown as ToolSession;
 }
 
@@ -111,14 +122,40 @@ describe("read local:// images", () => {
 		expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 		expect(joinText(result.content)).toContain("Read SVG file [image/png]");
 	});
-	it("directs a selected SVG through inspect_image when native vision is unavailable", async () => {
+	it("returns SVG metadata plus a question hint for text-only models", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
 		const tool = new ReadTool(makeSession(testDir, true));
 
 		const result = await tool.execute("call", { path: "local://diagram.svg:img" });
 
 		expect(result.content.some(content => content.type === "image")).toBe(false);
-		expect(joinText(result.content)).toContain('diagram.svg:img"');
+		expect(joinText(result.content)).toContain("local://diagram.svg:img?q=<question>");
+	});
+
+	it("answers questions about selected local SVGs", async () => {
+		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
+		const complete: typeof completeSimple = async model => ({
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+			content: [{ type: "text", text: "Red rectangle" }],
+		});
+		const tool = new ReadTool(makeSession(testDir), complete);
+
+		const result = await tool.execute("call", { path: "local://diagram.svg:img?q=What shape is shown?" });
+
+		expect(result.content).toEqual([{ type: "text", text: "Red rectangle" }]);
 	});
 
 	it("keeps a local SVG as text without :img", async () => {

@@ -261,7 +261,7 @@ export class AssistantMessageComponent extends Container {
 
 	#textColorTransform?: (text: string) => string;
 	#linkTargets: ReadonlyMap<string, string> = EMPTY_LINK_TARGETS;
-	#markdownTheme: MarkdownTheme = getMarkdownTheme();
+	#markdownTheme: MarkdownTheme | undefined;
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
@@ -269,6 +269,15 @@ export class AssistantMessageComponent extends Container {
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
+	}
+
+	#getProseTheme(): MarkdownTheme {
+		if (this.#markdownTheme) return this.#markdownTheme;
+		const base = getMarkdownTheme();
+		const snapshot = this.#linkTargets;
+		const markdownTheme = snapshot.size > 0 ? { ...base, resolveLink: (href: string) => snapshot.get(href) } : base;
+		this.#markdownTheme = markdownTheme;
+		return markdownTheme;
 	}
 
 	/**
@@ -285,11 +294,7 @@ export class AssistantMessageComponent extends Container {
 			return;
 		}
 		this.#linkTargets = targets;
-		const snapshot = targets;
-		this.#markdownTheme = {
-			...getMarkdownTheme(),
-			resolveLink: href => snapshot.get(href),
-		};
+		this.#markdownTheme = undefined;
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
 		if (this.#lastMessage) {
@@ -367,14 +372,7 @@ export class AssistantMessageComponent extends Container {
 	) {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
-		if (linkTargets?.size) {
-			this.#linkTargets = linkTargets;
-			const snapshot = linkTargets;
-			this.#markdownTheme = {
-				...getMarkdownTheme(),
-				resolveLink: href => snapshot.get(href),
-			};
-		}
+		if (linkTargets?.size) this.#linkTargets = linkTargets;
 
 		// Container for text/thinking content.
 		this.#contentContainer = new Container();
@@ -410,9 +408,7 @@ export class AssistantMessageComponent extends Container {
 		// their theme at construction, so drop them and force the teardown path to
 		// rebuild with the current theme. Streaming updates call updateContent()
 		// directly and keep the fast path.
-		const snapshot = this.#linkTargets;
-		this.#markdownTheme =
-			snapshot.size > 0 ? { ...getMarkdownTheme(), resolveLink: href => snapshot.get(href) } : getMarkdownTheme();
+		this.#markdownTheme = undefined;
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
 		if (this.#lastMessage) {
@@ -1043,7 +1039,7 @@ export class AssistantMessageComponent extends Container {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, this.#markdownTheme, mdOptions, 0);
+				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });

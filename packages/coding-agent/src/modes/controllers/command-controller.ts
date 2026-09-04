@@ -1357,6 +1357,8 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
+					images: result.images,
+					showImages: this.ctx.settings.get("terminal.showImages"),
 				});
 			}
 			try {
