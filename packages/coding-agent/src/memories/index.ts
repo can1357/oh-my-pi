@@ -5,7 +5,15 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getMemoriesDir,
+	isEnoent,
+	logger,
+	parseJsonlLenient,
+	peekFile,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
@@ -640,6 +648,7 @@ function markPhase2FailureWithFallback(
 	}
 }
 
+/** @internal Exported for unit-testing. */
 export async function collectThreads(session: AgentSession, currentThreadId?: string): Promise<MemoryThread[]> {
 	const sessionDir = session.sessionManager.getSessionDir();
 	const files = await fs.readdir(sessionDir);
@@ -663,7 +672,9 @@ export async function collectThreads(session: AgentSession, currentThreadId?: st
 			// falls on the slice boundary, fall back to a full read.
 			const HEAD_CAP = 64 * 1024;
 			let isLarge = stat.size > HEAD_CAP;
-			let fileText = isLarge ? await Bun.file(fullPath).slice(0, HEAD_CAP).text() : await Bun.file(fullPath).text();
+			let fileText = isLarge
+				? await peekFile(fullPath, HEAD_CAP, bytes => new TextDecoder().decode(bytes))
+				: await Bun.file(fullPath).text();
 			let lines = fileText.split(/\r?\n/);
 			let sawTitleSlot = false;
 			for (let i = 0; i < lines.length; i++) {
