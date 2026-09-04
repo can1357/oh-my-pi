@@ -336,6 +336,24 @@ describe("CopySelectorComponent", () => {
 		selector.dispose();
 	});
 
+	it("preserves all copied block markers when copying multiple blocks sequentially", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
+
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER); // copy block 1
+
+		selector.handleInput(DOWN);
+		selector.handleInput(DOWN);
+		selector.handleInput(ENTER); // copy block 3
+
+		const frame = selector.render(100).join("\n");
+		const copiedCount = (frame.match(/✓ copied!/g) ?? []).length;
+		expect(copiedCount).toBe(2);
+		selector.dispose();
+	});
+
 	it("does not mark block or turn as copied when onPick rejects payload", () => {
 		const onCancel = vi.fn();
 		const selector = new CopySelectorComponent(makeEntries(), {

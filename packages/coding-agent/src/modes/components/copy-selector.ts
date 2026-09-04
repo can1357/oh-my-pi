@@ -109,8 +109,8 @@ export class CopySelectorComponent implements Component {
 	#blockCache = new Map<string, CopyBlock[]>();
 	/** Click targets of the last render, keyed by composed-column line index. */
 	#controls = new Map<number, ControlRegion[]>();
-	#copiedBlock?: { turnId: string; blockIndex: number };
-	#copiedTurnId?: string;
+	#copiedBlocks = new Set<string>();
+	#copiedTurns = new Set<string>();
 	constructor(
 		entries: SessionMessageEntry[],
 		private readonly deps: CopySelectorDeps,
@@ -224,7 +224,7 @@ export class CopySelectorComponent implements Component {
 				const block = this.#blocks[this.#blockSelected];
 				if (block) {
 					if (this.deps.onPick(block.content, block.label)) {
-						this.#copiedBlock = { turnId: target.turnId, blockIndex: this.#blockSelected };
+						this.#copiedBlocks.add(`${target.turnId}:${this.#blockSelected}`);
 					}
 					this.deps.requestRender();
 				}
@@ -232,7 +232,7 @@ export class CopySelectorComponent implements Component {
 			}
 			const item = targetCopy(target, this.#blocksFor(target));
 			if (this.deps.onPick(item.content, item.label)) {
-				this.#copiedTurnId = target.turnId;
+				this.#copiedTurns.add(target.turnId);
 			}
 			this.deps.requestRender();
 			return;
@@ -268,7 +268,7 @@ export class CopySelectorComponent implements Component {
 		if (this.deps.onPick(block.content, block.label)) {
 			const target = this.#targets[this.#selected];
 			if (target) {
-				this.#copiedBlock = { turnId: target.turnId, blockIndex: hit.blockIndex };
+				this.#copiedBlocks.add(`${target.turnId}:${hit.blockIndex}`);
 			}
 		}
 		this.deps.requestRender();
@@ -368,11 +368,8 @@ export class CopySelectorComponent implements Component {
 		output.push(...this.#scrollView.render(width));
 		const selectedBlock = this.#blocks?.[this.#blockSelected];
 		const openHint = selectedBlock?.href && this.deps.onOpen ? "  o open" : "";
-		const isTurnCopied = target ? this.#copiedTurnId === target.turnId : false;
-		const isBlockCopied =
-			target && this.#copiedBlock
-				? this.#copiedBlock.turnId === target.turnId && this.#copiedBlock.blockIndex === this.#blockSelected
-				: false;
+		const isTurnCopied = target ? this.#copiedTurns.has(target.turnId) : false;
+		const isBlockCopied = target ? this.#copiedBlocks.has(`${target.turnId}:${this.#blockSelected}`) : false;
 		const hint = this.#blocks
 			? isBlockCopied
 				? `${theme.fg("success", theme.bold("✓ Copied!"))}  ${theme.fg("dim", `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  enter copy  ←/esc back  q exit${openHint}`)}`
@@ -407,10 +404,7 @@ export class CopySelectorComponent implements Component {
 			}
 			const selected = index === this.#blockSelected;
 			const captionColor: ThemeColor = selected ? OUTLINE_COLOR : "dim";
-			const isThisBlockCopied =
-				turnId && this.#copiedBlock
-					? this.#copiedBlock.turnId === turnId && this.#copiedBlock.blockIndex === index
-					: false;
+			const isThisBlockCopied = Boolean(turnId && this.#copiedBlocks.has(`${turnId}:${index}`));
 			const controls: Array<{ action: ControlRegion["action"]; text: string }> = [
 				{
 					action: "copy",
