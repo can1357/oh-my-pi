@@ -368,6 +368,11 @@ export class ModelRegistry {
 	) {
 		this.#ignoreLocalModelConfig = options?.ignoreLocalModelConfig ?? false;
 		this.#settings = options?.settings;
+		// The settings layer (config overlays, project settings) decides the
+		// account-selection policy; discovery only saw `<agentDir>/config.yml`.
+		// Applied here so every boot path that hands the registry its settings
+		// (runRootCommand, createAgentSession) routes credentials the same way.
+		if (options?.settings) this.authStorage.setAccountSelection(options.settings.get("auth.accountSelection"));
 		this.#fetch =
 			options?.fetch ??
 			(isBunTestRuntime()
