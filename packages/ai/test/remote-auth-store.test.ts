@@ -1097,6 +1097,129 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		expect(clientStorage.get("kagi")).toEqual({ type: "api_key", key: "new-key" });
 		clientStorage.close();
 	});
+
+	test("conditional generated-key upload preserves a credential written concurrently on the broker", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.reload();
+
+		await serverStorage!.set("anysearch", { type: "api_key", key: "broker-login-key", source: "login" });
+		const inserted = await clientStorage.addGeneratedApiKeyIfAbsent("anysearch", "generated-key");
+
+		expect(inserted).toBe(false);
+		expect(serverStore!.listAuthCredentials("anysearch").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "broker-login-key", source: "login" },
+		]);
+		expect(clientStorage.listStoredCredentials("anysearch").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "broker-login-key", source: "login" },
+		]);
+		clientStorage.close();
+	});
+
+	test("aborted conditional upload does not persist a generated key on the broker", async () => {
+		const originalAddGeneratedApiKeyIfAbsent = serverStorage!.addGeneratedApiKeyIfAbsent.bind(serverStorage);
+		const writeStarted = Promise.withResolvers<void>();
+		const serverAttemptSettled = Promise.withResolvers<void>();
+		vi.spyOn(serverStorage!, "addGeneratedApiKeyIfAbsent").mockImplementation(async (provider, apiKey, signal) => {
+			writeStarted.resolve();
+			try {
+				if (!signal) throw new Error("conditional broker persistence requires the request signal");
+				if (!signal.aborted) {
+					const aborted = Promise.withResolvers<void>();
+					const onAbort = (): void => aborted.resolve();
+					signal.addEventListener("abort", onAbort, { once: true });
+					try {
+						await aborted.promise;
+					} finally {
+						signal.removeEventListener("abort", onAbort);
+					}
+				}
+				return await originalAddGeneratedApiKeyIfAbsent(provider, apiKey, signal);
+			} finally {
+				serverAttemptSettled.resolve();
+			}
+		});
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const controller = new AbortController();
+		const upload = brokerClient.uploadCredential(
+			"anysearch",
+			{ type: "api_key", key: "generated-key" },
+			controller.signal,
+			{ ifProviderAbsent: true },
+		);
+		await writeStarted.promise;
+		controller.abort(new DOMException("provider deadline expired", "AbortError"));
+
+		await expect(upload).rejects.toThrow("Auth broker request aborted");
+		await serverAttemptSettled.promise;
+		expect(serverStore!.listAuthCredentials("anysearch")).toEqual([]);
+	});
+
+	test("conditional generated-key upload stops without retrying when the caller aborts", async () => {
+		const snapshotClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await snapshotClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+
+		const uploadStarted = Promise.withResolvers<void>();
+		let uploadAttempts = 0;
+		const fetchImpl: typeof fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const signal = init?.signal;
+				if (!signal) throw new Error("expected broker request signal");
+				const pathname = new URL(String(input)).pathname;
+				if (pathname === "/v1/credential") {
+					uploadAttempts += 1;
+					uploadStarted.resolve();
+				} else if (pathname !== "/v1/snapshot") {
+					throw new Error(`unexpected broker path ${pathname}`);
+				}
+
+				const aborted = Promise.withResolvers<Response>();
+				const onAbort = (): void => aborted.reject(signal.reason);
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
+				try {
+					return await aborted.promise;
+				} finally {
+					signal.removeEventListener("abort", onAbort);
+				}
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const brokerClient = new AuthBrokerClient({
+			url: "http://broker.invalid",
+			token: "unused",
+			timeoutMs: 25,
+			maxRetries: 1,
+			fetchImpl,
+		});
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.reload();
+		const controller = new AbortController();
+
+		try {
+			const insertion = clientStorage.addGeneratedApiKeyIfAbsent("anysearch", "generated-key", controller.signal);
+			await uploadStarted.promise;
+			controller.abort(new DOMException("provider deadline expired", "AbortError"));
+
+			await expect(insertion).rejects.toThrow("Auth broker request aborted");
+			expect(uploadAttempts).toBe(1);
+		} finally {
+			clientStorage.close();
+		}
+	});
 	test("snapshot with a login-sourced api_key passes client wire validation", async () => {
 		// Regression: keys stored via the /login flow carry `source: "login"`.
 		// exportSnapshot() forwards them verbatim; the client wire schema used

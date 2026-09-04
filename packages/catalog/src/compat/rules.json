@@ -9,6 +9,7 @@
 		"auth/alibaba-token-plan.kdl",
 		"auth/amazon-bedrock.kdl",
 		"auth/anthropic.kdl",
+		"auth/anysearch.kdl",
 		"auth/azure.kdl",
 		"auth/baseten.kdl",
 		"auth/bedrock-mantle.kdl",
@@ -16710,6 +16711,23 @@
 					"instructions": "Log in to the OpenCode Zen console and copy your OpenCode Go API key",
 					"prompt": "Paste your OpenCode Go API key",
 					"placeholder": "sk-..."
+				}
+			},
+			{
+				"id": "anysearch",
+				"apiKeyFormat": "bearer",
+				"name": "AnySearch",
+				"env": {
+					"vars": [
+						"ANYSEARCH_API_KEY"
+					]
+				},
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://www.anysearch.com/console",
+					"instructions": "Create or copy your API key from the AnySearch console.",
+					"prompt": "Paste your AnySearch API key",
+					"placeholder": "API key"
 				}
 			},
 			{

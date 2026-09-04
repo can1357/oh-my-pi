@@ -10,6 +10,7 @@ import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-u
 import { runSearchCommand } from "../../../src/cli/web-search-cli";
 
 const WEB_SEARCH_ENV_KEYS = [
+	"ANYSEARCH_API_KEY",
 	"ANTHROPIC_API_KEY",
 	"BRAVE_API_KEY",
 	"EXA_API_KEY",

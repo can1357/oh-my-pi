@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
 ### Fixed
 
 - Fixed two idle subagents exchanging a single IRC message ping-ponging forever: wake-turn relays are now tagged and never relayed back, so each automated relay is delivered exactly once instead of waking a reciprocal relay until manual cancellation.

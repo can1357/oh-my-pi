@@ -118,11 +118,15 @@ export interface UsageStaleResponse {
 export interface CredentialUploadRequest {
 	provider: string;
 	credential: AuthCredential;
+	/** Insert only while the provider has no active credential at commit time. */
+	ifProviderAbsent?: boolean;
 }
 
 /** POST /v1/credential response body — redacted snapshot of the provider's rows after upsert. */
 export interface CredentialUploadResponse {
 	entries: AuthCredentialSnapshotEntry[];
+	/** Present for conditional uploads; false means another credential won the race. */
+	inserted?: boolean;
 }
 
 /**

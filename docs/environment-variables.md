@@ -343,6 +343,7 @@ therefore completes through the paste-code path.
 
 | Variable                                            | Used by                                                                   |
 | --------------------------------------------------- | ------------------------------------------------------------------------- |
+| `ANYSEARCH_API_KEY`                                 | AnySearch API; alternatively use `/login anysearch`                       |
 | `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                            |
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                       |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                     |
@@ -621,7 +622,7 @@ Treat these as secrets; do not log or commit them:
 
 - Provider/API keys and OAuth/bearer credentials (all `*_API_KEY`, `*_TOKEN`, OAuth access/refresh tokens)
 - Cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS` path may expose service-account material)
-- Search/provider auth vars (`EXA_API_KEY`, `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, Anthropic search keys)
+- Search/provider auth vars (`ANYSEARCH_API_KEY`, `EXA_API_KEY`, `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, Anthropic search keys)
 - Foundry mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS` when it points to private CA bundles)
 
 Python runtime also explicitly strips many common key vars before spawning kernel subprocesses (`packages/coding-agent/src/eval/py/runtime.ts`).

@@ -9,5 +9,5 @@ login-order "openai-codex" "anthropic" "zai" "zai-coding-plan" "kimi-code" "open
 	"cerebras" "baseten" "fireworks" "together" "nvidia" "novita" "deepinfra" "huggingface" "perplexity" \
 	"qianfan" "venice" "siliconflow" "siliconflow-cn" "synthetic" "nanogpt" "wafer-serverless" "coreweave" \
 	"vercel-ai-gateway" "cloudflare-ai-gateway" "litellm" "kilo" "zenmux" "opencode-zen" "opencode-go" \
-	"yolo-auto" "tavily" "kagi" "exa" "parallel" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" "vllm" \
+	"anysearch" "yolo-auto" "tavily" "kagi" "exa" "parallel" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" "vllm" \
 	"gmi-cloud"

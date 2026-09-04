@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
+### Fixed
+
+- Prevented provider-generated API keys from replacing credentials added concurrently or outranking a later environment key ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
 ## [18.1.8] - 2026-09-03
 
 ### Added
