@@ -419,6 +419,39 @@ if "__omp_prelude_loaded__" not in globals():
             raise RuntimeError(msg or f"bridge call {name!r} failed")
         return data.get("value")
 
+    def _surface_bridged_tool_images(value):
+        """Surface bridge metadata/images without leaking opaque payloads to cell code."""
+        if not isinstance(value, dict):
+            return value
+        images = value.get("images")
+        if not isinstance(images, list) or not images:
+            return value
+        displayed = 0
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            data = image.get("data")
+            mime_type = image.get("mimeType")
+            if not isinstance(data, str) or not isinstance(mime_type, str):
+                continue
+            _omp_display({mime_type: data}, raw=True)
+            displayed += 1
+        if displayed == 0:
+            return value
+        surfaced = {key: item for key, item in value.items() if key != "images"}
+        suffix = "" if displayed == 1 else "s"
+        surfaced["images"] = f"({displayed} image{suffix} displayed)"
+        return surfaced
+
+    async def _omp_prelude(name: str, parameters):
+        """Invoke one enabled eval prelude capability through the host bridge."""
+        value = await asyncio.to_thread(
+            _bridge_call,
+            "__prelude__",
+            {"name": name, "parameters": parameters},
+        )
+        return _surface_bridged_tool_images(value)
+
     class _ToolCallable:
         """Invokes one host-side tool via the loopback HTTP bridge."""
 
@@ -442,7 +475,8 @@ if "__omp_prelude_loaded__" not in globals():
             merged.update(kwargs)
             if INTENT_FIELD not in merged:
                 merged[INTENT_FIELD] = "py prelude"
-            return await asyncio.to_thread(_bridge_call, self._name, merged)
+            value = await asyncio.to_thread(_bridge_call, self._name, merged)
+            return _surface_bridged_tool_images(value)
 
     def _annotation_schema(annotation) -> dict:
         """Map supported Python annotations to JSON Schema."""

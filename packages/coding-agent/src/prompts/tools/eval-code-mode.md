@@ -10,4 +10,8 @@ exec tool declarations:
 declare const tool: {
 {{declarations}}
 };
+{{#if preludeDeclarations}}
+
+{{{preludeDeclarations}}}
+{{/if}}
 ```

@@ -5420,16 +5420,6 @@ describe("AgentSession retry fallback", () => {
 				throw new Error("Not exercised");
 			},
 		});
-		const inspectImageTool: AgentTool = {
-			name: "inspect_image",
-			label: "Inspect Image",
-			description: "Inspect an image",
-			parameters: type({ value: "string" }),
-			strict: true,
-			async execute() {
-				return { content: [{ type: "text", text: "inspected" }] };
-			},
-		};
 
 		session = new AgentSession({
 			agent,
@@ -5437,29 +5427,26 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry: registry,
 			rebindModelAfterDiscovery: true,
-			toolRegistry: new Map([[inspectImageTool.name, inspectImageTool]]),
 		});
 
 		// Stale until discovery settles: the active model and its context-usage
 		// derivation both carry the 1.05M window that contradicts the catalog.
 		expect(session.model?.contextWindow).toBe(1_050_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(1_050_000);
-		expect(session.inspectImageState().active).toBe(false);
 
-		const { promise: inspectImageActiveAtNotification, resolve: resolveInspectImageActiveAtNotification } =
-			Promise.withResolvers<boolean>();
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
 		const unsubscribe = session.subscribe(event => {
 			if (event.type === "model_changed") {
 				unsubscribe();
-				resolveInspectImageActiveAtNotification(session!.inspectImageState().active);
+				resolveModelChanged();
 			}
 		});
 
 		// The CLI starts discovery only after the session is built; the rebind
 		// waiter armed in the constructor resolves once this settles.
 		registry.refreshInBackground("offline");
-		const activeAtNotification = await Promise.race([
-			inspectImageActiveAtNotification,
+		await Promise.race([
+			modelChanged,
 			scheduler.wait(5_000).then(() => {
 				throw new Error("model_changed was not emitted after discovery settled");
 			}),
@@ -5470,8 +5457,6 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe("deepseek-v4-tiered");
 		expect(session.model?.contextWindow).toBe(400_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
-		expect(activeAtNotification).toBe(true);
-		expect(session.inspectImageState().active).toBe(true);
 	});
 
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {

@@ -2449,12 +2449,33 @@ mod tests {
 		let _ = repo.worktree_remove(&linked, true);
 	}
 
+	/// Whether any host-available clone backend can actually clone a tree
+	/// on `dir`'s filesystem. `pi_iso::clone_candidates` is a host-level
+	/// probe only: Linux reports reflink support even when the temp dir
+	/// sits on ext4, where `FICLONE` fails with `EOPNOTSUPP`.
+	fn clone_works_on(dir: &Path) -> bool {
+		let source = dir.join("clone-probe-src");
+		let target = dir.join("clone-probe-dst");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(source.join("file"), b"probe\n").unwrap();
+		let works = pi_iso::clone_candidates(None).into_iter().any(|kind| {
+			let _ = fs::remove_dir_all(&target);
+			pi_iso::backend(kind)
+				.clone_tree(&source, &target, &[])
+				.is_ok()
+		});
+		let _ = fs::remove_dir_all(&source);
+		let _ = fs::remove_dir_all(&target);
+		works
+	}
+
 	#[test]
 	fn clone_first_worktree_at_source_head_needs_no_checkout() {
 		let (temp, repo) = fixture();
 		git(temp.path(), &["branch", "same-as-head"]);
 		let linked = temp.path().join("../linked-clone-noop");
 		let _ = fs::remove_dir_all(&linked);
+		let clone_works = clone_works_on(temp.path());
 		let result = repo
 			.worktree_add(&linked, "same-as-head", WorktreeAddOptions {
 				detach:       false,
@@ -2462,11 +2483,18 @@ mod tests {
 				keep_changes: false,
 			})
 			.unwrap();
-		assert!(
-			result.clone_error.is_none() || pi_iso::clone_candidates(None).is_empty(),
-			"an identical tree must not fail the clone path: {:?}",
-			result.clone_error
-		);
+		if clone_works {
+			assert!(
+				result.cloned_with.is_some(),
+				"an identical tree must not fail the clone path: {:?}",
+				result.clone_error
+			);
+		} else {
+			assert!(
+				result.clone_error.is_some() || pi_iso::clone_candidates(None).is_empty(),
+				"a failed clone attempt must surface its reason"
+			);
+		}
 		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
 		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
 		let _ = repo.worktree_remove(&linked, true);

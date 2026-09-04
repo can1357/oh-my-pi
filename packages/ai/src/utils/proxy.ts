@@ -162,43 +162,49 @@ export function getProxyForUrl(provider: string, url: URL): string | undefined {
 }
 
 /**
- * Wraps `fetchImpl` so non-local requests tunnel through `proxyUrl`.
- * A caller-supplied `init.proxy` always wins, so stacked wrappers keep the
- * innermost (most specific) proxy decision.
+ * Return `init` with `proxy: proxyUrl` set when the request should tunnel.
+ * A caller-supplied `init.proxy` always wins (the innermost, most specific
+ * decision); local/metadata hosts, NO_PROXY matches, and unparseable URLs
+ * pass through unchanged.
  */
+export function withProxyInit(
+	input: string | URL | Request,
+	init: RequestInit | undefined,
+	proxyUrl: string,
+): RequestInit | undefined {
+	if ((init as { proxy?: unknown } | undefined)?.proxy) return init;
+	const urlStr = input instanceof Request ? input.url : input.toString();
+	let urlObj: URL;
+	try {
+		urlObj = new URL(urlStr);
+	} catch {
+		return init;
+	}
+
+	if (shouldBypassProxy(urlObj)) {
+		// A NO_PROXY rule silencing a configured proxy is otherwise invisible
+		// until the unproxied egress is refused; local hosts are routine.
+		if (!isLocalOrMetadataHost(urlObj.hostname)) {
+			logger.debug("proxy bypassed by NO_PROXY", {
+				host: urlObj.host,
+				noProxy: Bun.env.NO_PROXY || Bun.env.no_proxy,
+			});
+		}
+		return init;
+	}
+
+	const proxied: RequestInit & { proxy: string } = { ...init, proxy: proxyUrl };
+	return proxied;
+}
+
+/** Wraps `fetchImpl` so non-local requests tunnel through `proxyUrl`; see {@link withProxyInit}. */
 function wrapFetchWithProxyUrl(fetchImpl: FetchImpl, proxyUrl: string | undefined): FetchImpl {
 	if (!proxyUrl) {
 		return fetchImpl;
 	}
 
-	const wrapped = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		if ((init as { proxy?: unknown } | undefined)?.proxy) {
-			return fetchImpl(input, init);
-		}
-		const urlStr = input instanceof Request ? input.url : input.toString();
-		let urlObj: URL;
-		try {
-			urlObj = new URL(urlStr);
-		} catch {
-			// Fallback to calling fetch unmodified if URL is unparseable
-			return fetchImpl(input, init);
-		}
-
-		if (shouldBypassProxy(urlObj)) {
-			// A NO_PROXY rule silencing a configured proxy is otherwise invisible
-			// until the unproxied egress is refused; local hosts are routine.
-			if (!isLocalOrMetadataHost(urlObj.hostname)) {
-				logger.debug("proxy bypassed by NO_PROXY", {
-					host: urlObj.host,
-					noProxy: Bun.env.NO_PROXY || Bun.env.no_proxy,
-				});
-			}
-			return fetchImpl(input, init);
-		}
-
-		const mergedInit = { ...init, proxy: proxyUrl };
-		return fetchImpl(input, mergedInit);
-	};
+	const wrapped = (input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+		fetchImpl(input, withProxyInit(input, init, proxyUrl));
 
 	if (fetchImpl.preconnect) {
 		wrapped.preconnect = fetchImpl.preconnect;

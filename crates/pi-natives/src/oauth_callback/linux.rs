@@ -1,5 +1,6 @@
 use std::{
 	collections::BTreeSet,
+	fmt::Write as _,
 	fs,
 	os::unix::fs::PermissionsExt,
 	path::{Component, Path, PathBuf},
@@ -274,10 +275,8 @@ fn change_default(
 		let Some((key, _)) = line.split_once('=') else {
 			continue;
 		};
-		if key.trim() == mime_type {
-			if entry_index.replace(index).is_some() {
-				bail!("ambiguous duplicate {mime_type} defaults");
-			}
+		if key.trim() == mime_type && entry_index.replace(index).is_some() {
+			bail!("ambiguous duplicate {mime_type} defaults");
 		}
 	}
 
@@ -313,10 +312,11 @@ fn change_default(
 	if !result.is_empty() && !has_blank_separator {
 		result.push_str(newline);
 	}
-	result.push_str(&format!(
+	let _ = write!(
+		result,
 		"[{DEFAULT_APPLICATIONS_SECTION}]{newline}{mime_type}={}{newline}",
 		desired.value
-	));
+	);
 	Ok(result)
 }
 
@@ -750,8 +750,11 @@ mod tests {
 
 	#[test]
 	fn removes_only_the_generated_default_section_that_owned_the_entry() {
-		let before = "[Default Applications]\ntext/plain=editor.desktop;\n\n[Other]\nkey=value\n\\
-		              n[Default Applications]\nx-scheme-handler/test=owned.desktop;\n";
+		let before = concat!(
+			"[Default Applications]\ntext/plain=editor.desktop;\n\n",
+			"[Other]\nkey=value\n\n",
+			"[Default Applications]\nx-scheme-handler/test=owned.desktop;\n",
+		);
 		let without_entry = change_default(before, "x-scheme-handler/test", &DefaultEntry {
 			present: false,
 			value:   String::new(),
@@ -782,10 +785,10 @@ mod tests {
 	#[test]
 	fn chooses_first_valid_current_desktop_for_highest_user_precedence() {
 		let root = TempDir::new();
-		let context = context(&root, " INVALID! :KDE:GNOME:KDE", "inherited.desktop");
-		let expected = expected_paths(&context).unwrap();
-		assert_eq!(expected.preference_path, context.home.join("xdg-config/kde-mimeapps.list"));
-		assert_eq!(expected.applications_directory, context.home.join("xdg-data/applications"));
+		let kde = context(&root, " INVALID! :KDE:GNOME:KDE", "inherited.desktop");
+		let expected = expected_paths(&kde).unwrap();
+		assert_eq!(expected.preference_path, kde.home.join("xdg-config/kde-mimeapps.list"));
+		assert_eq!(expected.applications_directory, kde.home.join("xdg-data/applications"));
 
 		let no_desktop = context(&root, "", "inherited.desktop");
 		assert_eq!(

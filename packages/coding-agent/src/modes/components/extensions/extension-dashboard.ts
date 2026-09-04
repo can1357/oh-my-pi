@@ -64,6 +64,7 @@ export interface ExtensionDashboardOptions {
 	eventBus?: EventBus;
 	toolSource?: ToolRuntimeSource;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
+	browserMcpFilterEnabled?: () => boolean;
 }
 
 function extFooter(): string {
@@ -113,7 +114,8 @@ export class ExtensionDashboard implements Component {
 		private readonly mcpManager: MCPManager | undefined,
 		private readonly eventBus: EventBus | undefined,
 		private readonly toolSource: ToolRuntimeSource | undefined,
-		private readonly onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void,
+		private readonly onMcpToolsChanged: ((tools: CustomTool[]) => Promise<void> | void) | undefined,
+		private readonly browserMcpFilterEnabled: (() => boolean) | undefined,
 	) {}
 
 	static async create(options: ExtensionDashboardOptions): Promise<ExtensionDashboard> {
@@ -125,6 +127,7 @@ export class ExtensionDashboard implements Component {
 			options.eventBus,
 			options.toolSource,
 			options.onMcpToolsChanged,
+			options.browserMcpFilterEnabled,
 		);
 		await dashboard.#init();
 		return dashboard;
@@ -419,7 +422,7 @@ export class ExtensionDashboard implements Component {
 				discovery: {
 					enableProjectConfig: sm.get("mcp.enableProjectConfig") ?? true,
 					filterExa: true,
-					filterBrowser: sm.get("browser.enabled") ?? false,
+					filterBrowser: this.browserMcpFilterEnabled?.() ?? false,
 				},
 				manager: this.mcpManager,
 				session: this.onMcpToolsChanged ? { refreshMCPTools: this.onMcpToolsChanged } : undefined,

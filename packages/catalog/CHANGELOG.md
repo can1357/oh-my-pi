@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added the `delegation-bias` capability for tuning how agents delegate work to subagents.
+
+### Changed
+
+- Adjusted subagent delegation for GPT-6 and newer OpenAI models to reduce unnecessary delegation.
+
 ### Fixed
 
-- Fixed `/login zai` (Z.AI GLM Coding Plan sign-in) failing after Z.AI stopped registering loopback redirects: local desktops now capture the required `zcode://zai-auth/callback` scheme automatically, remote sessions retain paste-code completion, and `ZAI_OAUTH_REDIRECT_URI` remains configurable ([#10745](https://github.com/can1357/oh-my-pi/issues/10745)).
+- Fixed `/login zai` for Z.AI GLM Coding Plan by supporting the provider’s updated authentication flow, including local desktop sign-in, remote paste-code completion, and the configurable `ZAI_OAUTH_REDIRECT_URI`.
 
 ## [18.1.8] - 2026-09-03
 
