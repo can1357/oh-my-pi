@@ -5,6 +5,7 @@
 ### Added
 
 - Added `--agent <name>`, `/agent <name>`, and `/switch-agent` to apply a discovered agent definition (tools, model, thinking, spawns, system prompt) as the main-session persona, persisting across resume; explicit `--model`/`--tools`/`--thinking` flags take precedence. Closes [#6836](https://github.com/can1357/oh-my-pi/issues/6836), [#5306](https://github.com/can1357/oh-my-pi/issues/5306), [#7056](https://github.com/can1357/oh-my-pi/issues/7056).
+- Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 
 ### Fixed
 
