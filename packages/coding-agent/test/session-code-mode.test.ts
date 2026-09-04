@@ -469,27 +469,6 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.getToolForEvalBridge("read")?.name).toBe("read");
 	});
 
-	test("prompt rebuilds retain safety gates for bridge-enabled tools", async () => {
-		const promptToolSets: string[][] = [];
-		const { session } = createSession(
-			Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
-			async names => {
-				promptToolSets.push([...names]);
-				return { systemPrompt: [`tools:${names.join(",")}`] };
-			},
-			undefined,
-			[tool("computer")],
-		);
-
-		await session.setActiveToolsByName(["eval", "computer"]);
-
-		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
-		expect(promptToolSets.at(-1)).toEqual(["eval", "computer"]);
-
-		await session.setActiveToolsByName(["eval"]);
-		expect(promptToolSets.at(-1)).toEqual(["eval"]);
-	});
-
 	test("bridge-enabled task retains eager delegation", async () => {
 		const settings = Settings.isolated({
 			"providers.openai-codex.codeMode": "auto",

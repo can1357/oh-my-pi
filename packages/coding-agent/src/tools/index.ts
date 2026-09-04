@@ -5,6 +5,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -34,17 +35,14 @@ import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
-import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
-import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
-import { ComputerTool } from "./computer";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -52,7 +50,6 @@ import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
 import { HubTool, isIrcEnabled } from "./hub";
-import { InspectImageTool } from "./inspect-image";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -93,7 +90,6 @@ export * from "./glob";
 export * from "./grep";
 export * from "./hub";
 export * from "./image-gen";
-export * from "./inspect-image";
 export * from "./learn";
 export * from "./manage-skill";
 export * from "./memory-edit";
@@ -269,6 +265,8 @@ export interface ToolSession {
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries">;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
+	/** Current enabled eval prelude definitions. */
+	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Reject new eval work once session disposal has started. */
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
@@ -331,8 +329,6 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
-	/** Session-scoped inspect_image mode override set by `/vision`; wins over the persisted setting. */
-	getInspectImageModeOverride?: () => InspectImageMode | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
@@ -471,9 +467,6 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
-	inspect_image: s => new InspectImageTool(s),
-	browser: s => new BrowserTool(s),
-	computer: s => new ComputerTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: s => TaskTool.create(s),
@@ -634,13 +627,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "inspect_image") return isInspectImageToolActive(session);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return session.settings.get("ask.enabled");
-		if (name === "browser") return session.settings.get("browser.enabled");
-		if (name === "computer") return session.settings.get("computer.enabled");
 		if (name === "checkpoint" || name === "rewind")
 			return (
 				session.settings.get("checkpoint.enabled") &&

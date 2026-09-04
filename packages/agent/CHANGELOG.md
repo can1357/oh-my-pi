@@ -5,6 +5,12 @@
 ### Fixed
 
 - Fixed streaming CPU blowup on long turns: per-delta `message_update` snapshots now deep-clone only the blocks the stream actually touched instead of the entire accumulated message, eliminating the quadratic cloning work that could freeze the TUI for tens of seconds to minutes while a subagent streams ([#10605](https://github.com/can1357/oh-my-pi/issues/10605)).
+## [18.1.10] - 2026-09-04
+
+### Fixed
+
+- Fixed Codex V2 remote compaction ignoring explicit thinking-off.
+- Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
 
 ## [18.1.6] - 2026-09-03
 

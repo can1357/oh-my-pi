@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added the `delegation-bias` capability for tuning how agents delegate work to subagents.
+
+### Changed
+
+- Adjusted subagent delegation for GPT-6 and newer OpenAI models to reduce unnecessary delegation.
+
+### Fixed
+
+- Fixed `/login zai` for Z.AI GLM Coding Plan by supporting the provider’s updated authentication flow, including local desktop sign-in, remote paste-code completion, and the configurable `ZAI_OAUTH_REDIRECT_URI`.
+
+## [18.1.8] - 2026-09-03
+
+### Added
+
+- Added GPT-6 Astra to the OpenAI Codex model catalog, including support for configuration updates and requests using the freeform `apply_patch` tool.
+
+### Fixed
+
+- Fixed `omp models refresh` so revoked ChatGPT account tokens no longer prevent the remaining OpenAI Codex models from being discovered.
+
 ## [18.1.6] - 2026-09-03
 
 ### Added

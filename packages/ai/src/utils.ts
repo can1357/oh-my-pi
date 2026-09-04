@@ -40,24 +40,17 @@ export function normalizeToolCallId(id: string): string {
 
 type ResponsesToolItemIdPrefix = "fc" | "ctc";
 
+/** Preserve opaque call IDs for Responses replay while normalizing or generating the separate item ID. */
 export function normalizeResponsesToolCallId(
 	id: string,
 	itemPrefix: ResponsesToolItemIdPrefix = "fc",
 ): { callId: string; itemId: string } {
 	const [callId, itemId] = id.split("|");
 	if (callId && itemId) {
-		const normalizedCallId = truncateResponseItemId(callId, getIdPrefix(callId, "call"));
-		const normalizedItemId = normalizeResponsesItemId(itemId, itemPrefix);
-		return { callId: normalizedCallId, itemId: normalizedItemId };
+		return { callId, itemId: normalizeResponsesItemId(itemId, itemPrefix) };
 	}
 	const hash = Bun.hash(id).toString(36);
-	const normalizedCallId = id.startsWith("call_") ? truncateResponseItemId(id, "call") : `call_${hash}`;
-	return { callId: normalizedCallId, itemId: `${itemPrefix}_${hash}` };
-}
-
-function getIdPrefix(id: string, fallback: string): string {
-	const prefix = id.match(/^([a-zA-Z][a-zA-Z0-9]*)_/)?.[1];
-	return prefix || fallback;
+	return { callId: id, itemId: `${itemPrefix}_${hash}` };
 }
 
 function getExplicitIdPrefix(id: string): string | undefined {
@@ -224,7 +217,6 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
-	const normalizedCallIds = new Map<string, string>();
 	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
@@ -234,7 +226,6 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 		const preserveForComputer = computerLinkedReasoningItems?.has(item) === true;
 		const sanitizedItem = sanitizeOpenAIResponsesHistoryItemForReplay(
 			item,
-			normalizedCallIds,
 			supportsImageDetailOriginal,
 			preserveForComputer,
 		);
@@ -407,7 +398,6 @@ export function sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(items: Re
 
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
-	normalizedCallIds: Map<string, string>,
 	supportsImageDetailOriginal: boolean,
 	preserveReasoningItemIds: boolean,
 ): OpenAIResponsesReplayItem | undefined {
@@ -426,9 +416,6 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	}
 	const { id: _id, ...sanitizedItem } = item;
 	if (item.type === "computer_call" && typeof item.id === "string") sanitizedItem.id = item.id;
-	if (typeof item.call_id === "string") {
-		sanitizedItem.call_id = normalizeReplayedResponsesHistoryCallId(item.call_id, normalizedCallIds);
-	}
 
 	return clampReplayItemImageDetail(
 		sanitizedItem,
@@ -462,14 +449,6 @@ function sanitizeOpenAIResponsesImageGenerationCallForReplay(
 		status: "completed",
 		result: item.result,
 	};
-}
-
-function normalizeReplayedResponsesHistoryCallId(value: string, normalizedValues: Map<string, string>): string {
-	const normalized = normalizedValues.get(value);
-	if (normalized) return normalized;
-	const next = truncateResponseItemId(value, getIdPrefix(value, "call"));
-	normalizedValues.set(value, next);
-	return next;
 }
 
 export function createOpenAIResponsesHistoryPayload(
