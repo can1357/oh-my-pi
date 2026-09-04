@@ -20,9 +20,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, isToolScopedIn, normalizeToolNames } from "../tools/builtin-names";
-import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -1039,9 +1037,9 @@ export class SessionTools {
 				const promptToolNames = codeMode.active ? [...this.#enabledToolNames] : appliedNames;
 				const promptTools = codeMode.active
 					? promptToolNames.flatMap(name => {
-						const tool = this.#toolRegistry.get(name);
-						return tool ? [tool] : [];
-					})
+							const tool = this.#toolRegistry.get(name);
+							return tool ? [tool] : [];
+						})
 					: appliedTools;
 				const directToolNames = codeMode.active ? appliedNames : undefined;
 				const signature = this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames);
@@ -1296,11 +1294,11 @@ export class SessionTools {
 		const removed = removedNames.map(name => ({ name }));
 		const docs = this.#xdev
 			? xdevDocsFor(
-				this.#xdev,
-				new Set(addedNames),
-				this.#host.settings.get("tools.xdevDocs"),
-				this.#host.settings.get("tools.xdevInlineDevices"),
-			)
+					this.#xdev,
+					new Set(addedNames),
+					this.#host.settings.get("tools.xdevDocs"),
+					this.#host.settings.get("tools.xdevInlineDevices"),
+				)
 			: "";
 		for (const name of addedNames) this.#announcedMounts.add(name);
 		for (const name of removedNames) this.#announcedMounts.delete(name);

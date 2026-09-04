@@ -1,3 +1,4 @@
+import type { EvalBackendsAllowance } from "../tools/eval-backends";
 import { expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
 import type { AgentDefinition } from "./types";
 
@@ -25,15 +26,7 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"rewind",
 ]);
 
-export function isReadOnlyAgent(
-	agent: AgentDefinition,
-	evalBackends?: {
-		python: boolean;
-		js: boolean;
-		ruby: boolean;
-		julia: boolean;
-	},
-): boolean {
+export function isReadOnlyAgent(agent: AgentDefinition, evalBackends?: EvalBackendsAllowance): boolean {
 	// Classify from the EFFECTIVE tool set: `disallowedTools:` can remove a
 	// mutating tool (e.g. `tools: [read, write]` + `disallowedTools: [write]`),
 	// leaving a read-only scope that the declared list alone would mark
@@ -76,11 +69,9 @@ export function isReadOnlyAgent(
 	// - non-restricted spawn paths auto-add `hub` (`exec`-tier approval), so an
 	//   effective set that is otherwise read-only still cannot be flagged
 	//   read-only unless `READ_ONLY_TOOL_NAMES` already covers it.
-	const effective = expandExecToolAlias(
-		agent.tools,
-		patterns,
-		evalBackends ?? { python: true, js: true, ruby: false, julia: false },
-	).filter(tool => !isToolDisallowed(tool, patterns));
+	const effective = expandExecToolAlias(agent.tools, patterns, evalBackends ?? { python: true, js: true }).filter(
+		tool => !isToolDisallowed(tool, patterns),
+	);
 	const taskAutoAdded =
 		agent.spawns !== undefined && !effective.includes("task") && !isToolDisallowed("task", patterns);
 	const withAutoAdds = taskAutoAdded ? [...effective, "task"] : effective;

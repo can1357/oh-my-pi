@@ -1,3 +1,5 @@
+import type { EvalBackendsAllowance } from "./eval-backends";
+
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
@@ -76,7 +78,7 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 export function expandExecToolAlias(
 	names: readonly string[],
 	patterns: readonly string[],
-	backends: { python: boolean; js: boolean; ruby: boolean; julia: boolean },
+	backends: EvalBackendsAllowance,
 ): string[] {
 	if (!names.includes("exec")) return [...names];
 	const withoutAlias = names.filter(name => name !== "exec");
@@ -84,7 +86,7 @@ export function expandExecToolAlias(
 	// expansion; an explicit deny on either child still wins downstream.
 	if (isToolDisallowed("exec", patterns)) return withoutAlias;
 	const expanded = [...withoutAlias];
-	if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
+	if (backends.python || backends.js) expanded.push("eval");
 	expanded.push("bash");
 	return Array.from(new Set(expanded)).filter(name => !isToolDisallowed(name, patterns));
 }

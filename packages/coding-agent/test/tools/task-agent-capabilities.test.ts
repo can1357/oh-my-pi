@@ -60,21 +60,18 @@ describe("task agent capability descriptions", () => {
 		// With backends available (runtime default), exec expands to eval+bash:
 		// mutating, not read-only.
 		expect(isReadOnlyAgent(execOnly)).toBe(false);
-		expect(isReadOnlyAgent(execOnly, { python: true, js: true, ruby: false, julia: false })).toBe(false);
+		expect(isReadOnlyAgent(execOnly, { python: true, js: true })).toBe(false);
 		// Both concrete backends denied: no execution or mutation tool survives.
-		expect(
-			isReadOnlyAgent(
-				{ ...execOnly, disallowedTools: ["eval", "bash"] },
-				{ python: true, js: true, ruby: false, julia: false },
-			),
-		).toBe(true);
+		expect(isReadOnlyAgent({ ...execOnly, disallowedTools: ["eval", "bash"] }, { python: true, js: true })).toBe(
+			true,
+		);
 		// A deny on the alias itself blocks the whole expansion.
 		expect(isReadOnlyAgent({ ...execOnly, disallowedTools: ["exec"] })).toBe(true);
 		// Read-only companion tools keep the classification true.
 		expect(
 			isReadOnlyAgent(
 				{ ...base, tools: ["read", "exec"], disallowedTools: ["eval", "bash"] },
-				{ python: true, js: true, ruby: false, julia: false },
+				{ python: true, js: true },
 			),
 		).toBe(true);
 	});

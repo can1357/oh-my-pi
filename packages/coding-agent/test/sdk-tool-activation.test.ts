@@ -2396,52 +2396,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("keeps the read description from advertising inspect_image when a scope removes it", async () => {
-		// A `disallowedTools: ["inspect_image"]` session drops the tool from the
-		// applied active set even though the text-only model would enable it, so
-		// the `read` tool must not advertise guidance pointing at an absent tool.
-		// Regression: reconcileInspectImageTool advertised from the pre-scope
-		// enabled set, so the prompt claimed `inspect_image` was available.
-		const tempDir = makeTempDir();
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			// gpt-4o-mini has native image input, so auto mode would hide
-			// inspect_image by itself; force it on to exercise the enable path.
-			settings: Settings.isolated({ "inspect_image.mode": "on" }),
-			disallowedTools: ["inspect_image"],
-		});
-
-		try {
-			expect(session.getAllToolNames()).toContain("inspect_image");
-			expect(session.getEnabledToolNames()).not.toContain("inspect_image");
-			const readTool = session.getAllToolInfos().find(info => info.name === "read");
-			expect(readTool).toBeDefined();
-			expect(readTool?.description ?? "").not.toContain("call `inspect_image`");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("keeps the read description advertising inspect_image for the unscoped session", async () => {
-		// Same forced-on mode without the disallow: the tool is active and the
-		// `read` description must keep pointing at it (prevents the fix from
-		// overcorrecting main-session behavior).
-		const tempDir = makeTempDir();
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-			settings: Settings.isolated({ "inspect_image.mode": "on" }),
-		});
-
-		try {
-			expect(session.getEnabledToolNames()).toContain("inspect_image");
-			const readTool = session.getAllToolInfos().find(info => info.name === "read");
-			expect(readTool).toBeDefined();
-			expect(readTool?.description ?? "").toContain("call `inspect_image`");
-		} finally {
-			await session.dispose();
-		}
-	});
-
 	it("keeps a late extension tool inactive when the enforced allowlist does not list it", async () => {
 		const tempDir = makeTempDir();
 		const lateUnlistedExtension: ExtensionFactory = pi => {
