@@ -6,8 +6,8 @@
  * Stands up a loopback OTLP/proto receiver, sets OTEL_SERVICE_NAME plus
  * OTEL_RESOURCE_ATTRIBUTES (including a service.name that must lose to
  * OTEL_SERVICE_NAME), exports a span, and inspects the captured protobuf
- * payload. Exits 0 only when the resource carries the OTEL_RESOURCE_ATTRIBUTES
- * entries and service.name resolves to OTEL_SERVICE_NAME.
+ * payload. Exits 0 only when the resource carries a generated instance ID,
+ * the configured resource attributes, and the OTEL_SERVICE_NAME override.
  */
 
 import {
@@ -58,7 +58,9 @@ const has = (s: string) => payload.includes(s);
 const merged = has("deployment.environment") && has("staging") && has("tenant.id") && has("acme");
 // OTEL_SERVICE_NAME must win over the service.name in OTEL_RESOURCE_ATTRIBUTES.
 const precedence = has("svc-probe") && !has("should-lose");
+const instanceId =
+	has("service.instance.id") && /[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i.test(payload);
 
-console.log(merged && precedence ? "PROBE: RECEIVED" : "PROBE: NO_EXPORT");
-console.log("merged:", merged, "precedence:", precedence);
-process.exit(merged && precedence ? 0 : 1);
+console.log(merged && precedence && instanceId ? "PROBE: RECEIVED" : "PROBE: NO_EXPORT");
+console.log("merged:", merged, "precedence:", precedence, "instanceId:", instanceId);
+process.exit(merged && precedence && instanceId ? 0 : 1);
