@@ -370,8 +370,8 @@ function buildNormalizedCodexModel(
 			baseUrl,
 			reasoning: parsed.reasoning,
 			input: parsed.input,
-			// Daybreak standard API pricing is rule-owned (`providers/openai-codex.kdl`
-			// cost-patch) and corrected at build time.
+			// Codex discovery omits pricing; documented subscription credit-equivalent
+			// rates are rule-owned (`providers/openai-codex.kdl`) and applied at build time.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			remoteCompaction: CODEX_REMOTE_COMPACTION,
 			contextWindow,
