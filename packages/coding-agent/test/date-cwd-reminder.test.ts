@@ -352,28 +352,12 @@ describe("now stamp across processes", () => {
 	// a process-global stamp cache would stay warm inside one test process.
 	// The design holds no module-level value state (only a WeakMap), so the
 	// second process must re-derive the first process's stamped bytes.
-	const CHILD_SCRIPT = `
-(async () => {
-// Runtime-selected module path (this test pins byte-identity across processes
-// for whatever date-cwd-reminder.ts the env points at): static import impossible.
-const { applyNowStamp } = await import(process.env.NOWSTAMP_SRC);
-const T1 = Date.parse("2026-08-30T02:51:16Z");
-const T2 = Date.parse("2026-08-30T03:12:45Z");
-const a = { role: "assistant", content: [{ type: "text", text: "hi" }], timestamp: T1 + 1 };
-const m1 = { role: "user", content: "first turn", timestamp: T1 };
-const m3 = { role: "user", content: [{ type: "text", text: "new turn after resume" }, { type: "image", data: "imgB", mimeType: "image/png" }], timestamp: T2 };
-const messages = process.env.NOWSTAMP_MODE === "orig" ? [m1, a] : [m1, a, m3];
-const ctx = applyNowStamp({ systemPrompt: ["SYSTEM"], messages });
-console.log(JSON.stringify([JSON.stringify(ctx.systemPrompt), ...ctx.messages.map(m => JSON.stringify(m.content))]));
-})();
-`;
+	const CHILD_FIXTURE = `${import.meta.dir}/fixtures/now-stamp-process-child.ts`;
 	async function stampInColdProcess(mode: "orig" | "resumed"): Promise<string[]> {
-		const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "--eval", CHILD_SCRIPT], {
+		const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", CHILD_FIXTURE, mode], {
 			cwd: import.meta.dir,
 			env: {
 				...process.env,
-				NOWSTAMP_SRC: new URL("../src/session/date-cwd-reminder.ts", import.meta.url).href,
-				NOWSTAMP_MODE: mode,
 				TZ: "America/Chicago",
 			},
 			stdout: "pipe",
