@@ -42,4 +42,21 @@ describe("HTML export themes", () => {
 		expect(parseExportArgs("")).toEqual({ outputPath: undefined, useUserThemes: false });
 		expect(() => parseExportArgs("one.html two.html")).toThrow("Usage: /export [--themes] [path]");
 	});
+
+	it("supports quoted output paths containing spaces and preserves path literals", () => {
+		expect(parseExportArgs('--themes "my export.html"')).toEqual({
+			outputPath: "my export.html",
+			useUserThemes: true,
+		});
+		expect(parseExportArgs("'my report.html' --themes")).toEqual({
+			outputPath: "my report.html",
+			useUserThemes: true,
+		});
+		expect(parseExportArgs('"C:\\\\Users\\\\me\\\\My Reports\\\\session.html"')).toEqual({
+			outputPath: "C:\\Users\\me\\My Reports\\session.html",
+			useUserThemes: false,
+		});
+		expect(parseExportArgs('"flat.html"')).toEqual({ outputPath: "flat.html", useUserThemes: false });
+		expect(() => parseExportArgs('"one file.html" "second file.html"')).toThrow("Usage: /export [--themes] [path]");
+	});
 });
