@@ -66,18 +66,16 @@ describe("status line loop mode segment", () => {
 		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop waiting 10/10"));
 	});
 
-	it("shows the live remaining duration while a loop is running", () => {
-		const now = Date.parse("2026-07-17T12:00:00Z");
-		vi.spyOn(Date, "now").mockReturnValue(now);
+	it("shows the firing interval while a duration-limited loop is running", () => {
 		const rendered = renderSegment(
 			"mode",
 			createContext({
 				state: "running",
-				limit: { kind: "duration", durationMs: 90_000, deadlineMs: now + 90_000 },
+				limit: { kind: "duration", durationMs: 90_000 },
 			}),
 		);
 
-		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop running 1m30s left"));
+		expect(Bun.stripANSI(rendered.content)).toBe(withIcon(theme.icon.loop, "Loop running every 1m30s"));
 	});
 
 	it("distinguishes a paused loop from an active loop", () => {
