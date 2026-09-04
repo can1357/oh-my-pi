@@ -187,26 +187,40 @@ export function resolveAgentSkills(
 	const allowlist = agent.skills;
 	const deny = agent.hideSkills;
 	const unhide = agent.unhideSkills;
-	const matches = (patterns: string[] | undefined, name: string): boolean => {
-		if (!patterns?.length) return false;
-		return patterns.some(pattern => {
+	const compile = (patterns: string[] | undefined): Array<{ glob: Bun.Glob; pattern: string }> | undefined => {
+		if (!patterns?.length) return undefined;
+		const warned = new Set<string>();
+		const compiled: Array<{ glob: Bun.Glob; pattern: string }> = [];
+		for (const pattern of patterns) {
 			try {
-				return new Bun.Glob(pattern).match(name);
+				compiled.push({ glob: new Bun.Glob(pattern), pattern });
 			} catch {
-				logger.warn("Invalid skill glob in agent frontmatter", { pattern });
-				return false;
+				if (!warned.has(pattern)) {
+					warned.add(pattern);
+					logger.warn("Invalid skill glob in agent frontmatter", { pattern });
+				}
 			}
-		});
+		}
+		return compiled;
 	};
+	const denyGlobs = compile(deny);
+	const unhideGlobs = compile(unhide);
+	// `skills: []` ("none") is a present-but-empty allowlist: everything is
+	// filtered out. An absent `skills` field is unrestricted. `compile`
+	// collapses empty arrays to `undefined`, so track presence separately.
+	const allowGlobs = compile(allowlist);
+	const allowlistPresent = allowlist !== undefined;
+	const matches = (globs: Array<{ glob: Bun.Glob; pattern: string }> | undefined, name: string): boolean =>
+		globs?.some(({ glob }) => glob.match(name)) ?? false;
 	return sessionSkills.map(skill => {
 		// `unhideSkills` overrides presentation hides (`SKILL.md` `hide: true`)
 		// only. A `disableModelInvocation: true` opt-out is a capability
 		// revocation the agent author must not silently resurrect.
 		const unhideable = skill.hide === true && skill.modelInvocationDisabled !== true;
 		const listed =
-			!matches(deny, skill.name) &&
-			(allowlist === undefined || matches(allowlist, skill.name)) &&
-			(skill.hide !== true || (unhideable && matches(unhide, skill.name)));
+			!matches(denyGlobs, skill.name) &&
+			(!allowlistPresent || matches(allowGlobs, skill.name)) &&
+			(skill.hide !== true || (unhideable && matches(unhideGlobs, skill.name)));
 		if (listed) {
 			return skill.hide === true ? { ...skill, hide: false } : skill;
 		}

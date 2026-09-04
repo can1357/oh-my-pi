@@ -45,8 +45,8 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
 - `skills` (globs or comma-separated) allowlists which skills appear in the child's rendered `<skills>` block; `skills: "none"` or `skills: []` lists none. Absent = unrestricted (all skills listed, as default). Only the listing is filtered — hidden skills remain loadable via `skill://<name>` and `/skill:<name>`.
 - `hideSkills` (globs or comma-separated) excludes matching skills from the child's `<skills>` block and takes precedence over both `skills` and `unhideSkills`.
-- `unhideSkills` (globs or comma-separated) clears a skill's source hide state for the child's listing, re-exposing it in the `<skills>` block without changing the skill itself. This covers both frontmatter flags that hide a skill from the listing at load time — `hide: true` and `disableModelInvocation: true`, which set the same load-time `hide` flag. Because `disableModelInvocation`'s only effect is that listing hide, an unhidden `disableModelInvocation` skill is fully re-exposed to the role: it appears in the child's `<skills>` block and can be model-invoked like any other listed skill.
-- `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off. downgrade is a real hand-off and still arms and switches at the first edit/write.
+- `unhideSkills` (globs or comma-separated) clears a skill's source `hide: true` state for the child's listing, re-exposing it in the `<skills>` block without changing the skill itself. It overrides presentation-only hides only: a skill whose `SKILL.md` sets `disableModelInvocation: true` carries a model-invocation opt-out that `unhideSkills` must not resurrect, so such skills stay hidden regardless of agent frontmatter.
+- `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
 
 ## Role-backed custom agents
@@ -71,7 +71,7 @@ Set the role mapping in `~/.omp/agent/config.yml`:
 
 ```yaml
 modelRoles:
-  review: openai/gpt-5.4:high
+   review: openai/gpt-5.4:high
 ```
 
 `@review` resolves through `modelRoles.review`. Each `modelRoles.<role>` value stores a concrete model selector and may append a thinking suffix such as `:high` (`src/config/model-resolver.ts`). Changing that mapping affects subsequent task resolutions without editing agent definitions. Task/eval preflight reloads the current global, project, and explicit overlay settings before rediscovering agents, so agent files and their role aliases added during a live session resolve from one refreshed configuration state.
@@ -80,10 +80,8 @@ For a dispatch, set the agent name and task:
 
 ```json
 {
-  "context": "Review the current change in this repository.",
-  "tasks": [
-    { "agent": "reviewer", "task": "Report concrete correctness findings." }
-  ]
+	"context": "Review the current change in this repository.",
+	"tasks": [{ "agent": "reviewer", "task": "Report concrete correctness findings." }]
 }
 ```
 
@@ -101,12 +99,12 @@ Route these tiers through roles by keeping aliases in `task.agentModelOverrides`
 
 ```yaml
 task:
-  agentModelOverrides:
-    sonic: "@fast_worker"
-    task: "@good_worker"
+   agentModelOverrides:
+      sonic: "@fast_worker"
+      task: "@good_worker"
 modelRoles:
-  fast_worker: openai/gpt-5-mini
-  good_worker: openai/gpt-5.4:high
+   fast_worker: openai/gpt-5-mini
+   good_worker: openai/gpt-5.4:high
 ```
 
 The `vibe_spawn` `cli` remains `fast` or `good`; update `modelRoles` to change the worker model.
