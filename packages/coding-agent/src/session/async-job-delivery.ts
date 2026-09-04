@@ -107,13 +107,15 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			...(job.structured ? { schema: job.structured } : {}),
 		})),
 	};
+	const text = prompt.render(asyncResultTemplate, {
+		multiple: jobs.length > 1,
+		jobs,
+	});
+	const images = entries.flatMap(entry => entry.job?.latestDetails?.images ?? []);
 	return {
 		role: "custom",
 		customType: ASYNC_RESULT_MESSAGE_TYPE,
-		content: prompt.render(asyncResultTemplate, {
-			multiple: jobs.length > 1,
-			jobs,
-		}),
+		content: images.length > 0 ? [{ type: "text", text }, ...images] : text,
 		display: true,
 		attribution: "agent",
 		details,

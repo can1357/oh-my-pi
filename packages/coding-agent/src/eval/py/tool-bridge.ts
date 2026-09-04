@@ -1,11 +1,11 @@
 /**
- * HTTP loopback bridge that lets the Python kernel synchronously invoke
- * host-side tools by name, mirroring the JS worker's `tool.<name>(args)` proxy.
+ * HTTP loopback bridge that lets the Python kernel invoke host-side tools and
+ * enabled eval-prelude capabilities, mirroring the JavaScript worker bridge.
  *
- * The Python prelude builds a `tool` proxy that POSTs to `/v1/tool` over a
- * 127.0.0.1 loopback socket; the host resolves the request against the
- * `ToolSession` registered for the current execution and forwards to the same
- * `callSessionTool` implementation the JS bridge uses.
+ * The Python prelude POSTs to `/v1/tool` over a 127.0.0.1 loopback socket; the
+ * host resolves the request against the `ToolSession` registered for the
+ * current execution and forwards to the same `callSessionTool` implementation
+ * the JavaScript bridge uses.
  */
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";

@@ -37,7 +37,13 @@ export async function refreshAssistantMessageLinkTargets(
 	messages: readonly AssistantMessage[],
 ): Promise<ReadonlyMap<string, string>> {
 	const session: SessionWithMarkdownLinkTargets = ctx.viewSession;
+	const previous = session[kMarkdownLinkTargets] ?? EMPTY_LINK_TARGETS;
 	const texts = assistantTextBlocks(messages);
+	const hrefs = new Set<string>();
+	for (const text of texts) {
+		for (const href of getMarkdownLinkUrls(text)) hrefs.add(href);
+	}
+	if (hrefs.size === 0) return previous;
 	const resolved = await resolveMarkdownLinkTargets(texts, {
 		cwd: session.sessionManager.getCwd(),
 		sessionFile: session.sessionFile,
@@ -49,11 +55,6 @@ export async function refreshAssistantMessageLinkTargets(
 		skills: session.skills,
 		rules: session.ttsrManager?.getRules(),
 	});
-	const previous = session[kMarkdownLinkTargets] ?? EMPTY_LINK_TARGETS;
-	const hrefs = new Set<string>();
-	for (const text of texts) {
-		for (const href of getMarkdownLinkUrls(text)) hrefs.add(href);
-	}
 	let changed = false;
 	for (const href of hrefs) {
 		if (previous.get(href) !== resolved.get(href)) {
