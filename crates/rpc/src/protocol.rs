@@ -659,6 +659,40 @@ pub struct RpcAuthAccount {
 	pub label:       Option<String>,
 }
 
+/// Lifecycle state of one stored account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcAccountState {
+	/// Account may serve requests.
+	Active,
+	/// Account must refresh its credential before serving.
+	RefreshRequired,
+	/// Account is administratively or provider disabled.
+	Disabled,
+	/// Account credentials were removed.
+	LoggedOut,
+}
+
+/// Non-secret stored account summary returned by `list_accounts`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcAccount {
+	/// Stable opaque account identifier accepted by `set_account` and
+	/// `logout_account`.
+	pub account_id:  String,
+	/// Provider identifier.
+	pub provider_id: String,
+	/// Optional public principal, such as the subscriber email when the
+	/// provider exposes one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub principal:   Option<String>,
+	/// Optional caller-facing label.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub label:       Option<String>,
+	/// Current lifecycle state.
+	pub state:       RpcAccountState,
+}
+
 /// Authentication exchange event emitted by the server.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]

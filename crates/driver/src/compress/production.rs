@@ -294,6 +294,7 @@ impl CompressHost for ProductionCompressHost {
 					credential_provider:   None,
 					api_key:               None,
 					prompt_cache_affinity: None,
+					account_pins:          None,
 					session_generation:    1,
 				},
 				Arc::new(registry),

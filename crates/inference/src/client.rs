@@ -125,10 +125,11 @@ impl<O: Operation> PlannedOperation<O> {
 /// Typed facade over one Tower inference service and one side-effect-free
 /// planner.
 pub struct Client<S, P> {
-	service: S,
-	planner: P,
-	meta:    CallMeta,
-	staging: Option<crate::call::StagingRequest>,
+	service:      S,
+	planner:      P,
+	meta:         CallMeta,
+	staging:      Option<crate::call::StagingRequest>,
+	account_pins: Option<crate::call::AccountPins>,
 }
 
 impl<S, P> Client<S, P>
@@ -138,7 +139,14 @@ where
 	/// Creates a client with a clone-cheap planner and caller-supplied metadata
 	/// defaults.
 	pub const fn new(service: S, planner: P, meta: CallMeta) -> Self {
-		Self { service, planner, meta, staging: None }
+		Self { service, planner, meta, staging: None, account_pins: None }
+	}
+
+	/// Returns this client with host-owned account pins whose current snapshot
+	/// is attached to every subsequently planned call.
+	pub fn with_account_pins(mut self, pins: crate::call::AccountPins) -> Self {
+		self.account_pins = Some(pins);
+		self
 	}
 
 	/// Borrows the underlying service.
@@ -182,6 +190,9 @@ where
 	pub fn plan<O: Operation>(&self, operation: &O) -> Result<PlannedOperation<O>, Error> {
 		let mut call = operation.to_call(self.meta.clone());
 		call.staging = self.staging.clone();
+		if let Some(pins) = &self.account_pins {
+			call.account_pins = pins.snapshot();
+		}
 		let plan = Arc::new(self.planner.plan(&mut call, Instant::now())?);
 		if plan.operation != O::KIND {
 			return Err(Error::planning(

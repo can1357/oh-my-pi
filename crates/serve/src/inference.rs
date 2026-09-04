@@ -19,7 +19,7 @@ use omp_catalog::{
 };
 use omp_core::{Str, encoding::hex, sf};
 use omp_inference::{
-	Client, ProviderResponseHooks, Registry, RetryAction,
+	AccountPins, Client, ProviderResponseHooks, Registry, RetryAction,
 	answer::{
 		Artifact, ArtifactBody, AudioChunk, ChatControl, ChatControlError, ChatStream,
 		GenerationEvent, ImageArtifact, NativeResponse, NativeResponseBody,
@@ -154,6 +154,7 @@ pub struct InferenceRpc {
 	search_settings:       Arc<omp_inference::search_settings::WebSearchSettings>,
 	session_provider:      Option<ProviderId>,
 	prompt_cache_affinity: Option<Str>,
+	account_pins:          AccountPins,
 	provider_authority:    Option<Arc<dyn ProviderGatewayAuthority>>,
 	response_hooks:        ProviderResponseHooks,
 }
@@ -264,6 +265,7 @@ impl InferenceRpc {
 			search_settings: Arc::new(Default::default()),
 			session_provider: None,
 			prompt_cache_affinity: None,
+			account_pins: AccountPins::default(),
 			provider_authority: None,
 			response_hooks: ProviderResponseHooks::default(),
 		}
@@ -310,6 +312,15 @@ impl InferenceRpc {
 	) -> Self {
 		self.session_provider = provider;
 		self.prompt_cache_affinity = prompt_cache_affinity;
+		self
+	}
+
+	/// Shares host-owned account pins with every client this facade builds.
+	///
+	/// The host mutates the pins in place; each planned call carries a snapshot
+	/// so account selection preserves the pinned principal per provider.
+	pub fn with_account_pins(mut self, pins: AccountPins) -> Self {
+		self.account_pins = pins;
 		self
 	}
 
@@ -437,6 +448,7 @@ impl InferenceRpc {
 				response_hooks: self.response_hooks.clone(),
 			},
 		)
+		.with_account_pins(self.account_pins.clone())
 	}
 
 	fn turn_client(
@@ -457,6 +469,7 @@ impl InferenceRpc {
 				response_hooks: self.response_hooks.clone(),
 			},
 		)
+		.with_account_pins(self.account_pins.clone())
 	}
 
 	fn management_target(

@@ -1469,6 +1469,7 @@ impl Runtime {
 				credential_provider: None,
 				api_key: None,
 				prompt_cache_affinity: None,
+				account_pins: None,
 				session_generation: generation,
 			},
 			launch_policy,

@@ -25,7 +25,7 @@ use omp_envd::exthost::{
 		ControlInvocationAuthority,
 	},
 };
-use omp_inference::Registry as InferenceRegistry;
+use omp_inference::{AccountPins, Registry as InferenceRegistry};
 use omp_observability::firehose::{
 	Envelope as TelemetryEnvelope, Event as TelemetryEvent, Firehose, Kind as TelemetryKind,
 	SubscriptionOptions,
@@ -377,6 +377,8 @@ pub struct HeadlessSessionOptions {
 	pub api_key:               Option<SecretString>,
 	/// Opaque prompt-cache identity lowered by compatible codecs.
 	pub prompt_cache_affinity: Option<Str>,
+	/// Host-owned per-provider account pins shared with the inference facade.
+	pub account_pins:          Option<AccountPins>,
 	/// Session-incarnation fence stamped onto observable events.
 	pub session_generation:    u64,
 }
@@ -1005,6 +1007,7 @@ impl HeadlessSession {
 				provider:                credential_provider,
 				api_key:                 options.api_key,
 				prompt_cache_affinity:   options.prompt_cache_affinity,
+				account_pins:            options.account_pins,
 				usage_fetchers:          Some(environment.usage_fetchers()),
 				provider_response_hooks: Some(environment.provider_response_hooks()),
 				catalog:                 catalog_override,

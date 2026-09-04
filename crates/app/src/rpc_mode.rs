@@ -32,7 +32,7 @@ use omp_envd::tool_url::host;
 use omp_inference::{
 	answer::{AccountState, AccountSummary, AuthAnswer, AuthEvent, AuthPromptKind, AuthSession},
 	auth::manager::AuthManager,
-	call::{AuthInput, AuthMethod, AuthRequest, LoginRequest},
+	call::{AccountPins, AuthInput, AuthMethod, AuthRequest, LoginRequest},
 	id::LoginSessionId,
 };
 use omp_proto::{
@@ -361,6 +361,9 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 		HeadlessToolPolicy::All
 	};
 	let credential_provider = None;
+	// Account pins outlive any one headless session so a host-selected
+	// account survives `new_session` without being re-sent.
+	let account_pins = AccountPins::default();
 	let mut headless = HeadlessSession::open_with_policy(
 		data.clone(),
 		HeadlessSessionOptions {
@@ -380,6 +383,7 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 			credential_provider,
 			api_key: args.api_key.clone(),
 			prompt_cache_affinity: args.prompt_cache_key.clone(),
+			account_pins: Some(account_pins.clone()),
 			session_generation: 1,
 		},
 		HeadlessLaunchPolicy {
@@ -414,6 +418,7 @@ async fn run_inner(args: RpcArgs, ui_enabled: bool) -> miette::Result<()> {
 		.map_err(|_| miette!("RPC host URI resolver is already bound"))?;
 	let runtime = Arc::new(Runtime {
 		headless: AsyncMutex::new(HeadlessRuntime { session: headless, events: headless_events }),
+		account_pins,
 		auth,
 		settings_manager,
 		ui_enabled,
@@ -1068,6 +1073,7 @@ impl omp_tool::HostToolExecutor for RpcHostToolExecutor {
 
 struct Runtime {
 	headless:         AsyncMutex<HeadlessRuntime>,
+	account_pins:     AccountPins,
 	auth:             AuthManager,
 	settings_manager: Arc<SettingsManager>,
 	ui_enabled:       bool,
@@ -1471,6 +1477,15 @@ impl Runtime {
 			"set_model" => {
 				let params = parse_params::<SetModelParams>(params)?;
 				self.change_model(&params.provider, &params.model_id).await
+			},
+			"list_accounts" => self.list_accounts().await,
+			"set_account" => {
+				let params = parse_params::<AccountParams>(params)?;
+				self.change_account(&params.account_id).await
+			},
+			"logout_account" => {
+				let params = parse_params::<AccountParams>(params)?;
+				self.logout_account(&params.account_id).await
 			},
 			"set_fast_mode" => {
 				let enabled = boolean(params, "enabled")?;
@@ -2190,6 +2205,7 @@ impl Runtime {
 			"messageCount": session.messages.len(),
 			"queuedMessageCount": state.queue.len(),
 			"todoPhases": state.config.todos,
+			"accountPins": state.config.account_pins,
 		})
 	}
 
@@ -2261,6 +2277,132 @@ impl Runtime {
 			.notify(json!({ "type": "config_update", "config": config }))
 			.map_err(CommandError::transport)?;
 		Ok(json!({ "provider": provider, "modelId": model_id, "model": key }))
+	}
+
+	async fn stored_accounts(&self) -> Result<Vec<AccountSummary>, CommandError> {
+		match self
+			.auth
+			.execute(AuthRequest::ListAccounts { provider: None })
+			.await
+		{
+			Ok(AuthAnswer::Accounts(accounts)) => Ok(accounts),
+			Ok(_) => Err(CommandError::new(
+				"invalid_auth_answer",
+				"credential authority returned an unexpected account response",
+			)),
+			Err(error) => Err(CommandError::new("auth_failed", error.to_string())),
+		}
+	}
+
+	/// Re-derives every provider's `authenticated` flag from the live account
+	/// list so the flags agree with what `list_accounts` just reported.
+	fn sync_provider_authentication(&self, accounts: &[AccountSummary]) {
+		let mut state = self.state.lock();
+		for provider in &mut state.providers {
+			provider.authenticated = accounts.iter().any(|account| {
+				account.provider.as_str() == provider.id && account.state == AccountState::Active
+			});
+		}
+	}
+
+	async fn list_accounts(&self) -> Result<Value, CommandError> {
+		let accounts = self.stored_accounts().await?;
+		self.sync_provider_authentication(&accounts);
+		let accounts = accounts.into_iter().map(rpc_account).collect::<Vec<_>>();
+		Ok(json!({ "accounts": accounts }))
+	}
+
+	fn publish_account_pins(&self) -> Result<(), CommandError> {
+		let state = self.state.lock();
+		let config = serde_json::to_value(&state.config).map_err(CommandError::json)?;
+		drop(state);
+		self
+			.notify(json!({ "type": "config_update", "config": config }))
+			.map_err(CommandError::transport)
+	}
+
+	async fn change_account(&self, account_id: &str) -> Result<Value, CommandError> {
+		if account_id.is_empty() {
+			return Err(CommandError::new("invalid_params", "accountId must not be empty"));
+		}
+		let accounts = self.stored_accounts().await?;
+		let account = accounts
+			.iter()
+			.find(|candidate| candidate.account.as_str() == account_id)
+			.ok_or_else(|| {
+				CommandError::new("account_not_found", format!("unknown account `{account_id}`"))
+			})?;
+		if !matches!(account.state, AccountState::Active | AccountState::RefreshRequired) {
+			return Err(CommandError::new(
+				"account_unavailable",
+				format!("account `{account_id}` cannot serve requests"),
+			));
+		}
+		let Some(principal) = account.principal.clone() else {
+			return Err(CommandError::new(
+				"account_principal_unknown",
+				format!("account `{account_id}` has no principal to pin"),
+			));
+		};
+		// The pin is read by every later planned call; publish the
+		// configuration only after the live pin is in place.
+		self
+			.account_pins
+			.set(account.provider.clone(), principal.clone());
+		self
+			.state
+			.lock()
+			.config
+			.account_pins
+			.insert(account.provider.as_str().to_owned(), account_id.to_owned());
+		self.publish_account_pins()?;
+		Ok(json!({
+			"accountId": account_id,
+			"providerId": account.provider.as_str(),
+			"principal": principal.as_str(),
+		}))
+	}
+
+	async fn logout_account(&self, account_id: &str) -> Result<Value, CommandError> {
+		if account_id.is_empty() {
+			return Err(CommandError::new("invalid_params", "accountId must not be empty"));
+		}
+		let accounts = self.stored_accounts().await?;
+		let account = accounts
+			.iter()
+			.find(|candidate| candidate.account.as_str() == account_id)
+			.cloned()
+			.ok_or_else(|| {
+				CommandError::new("account_not_found", format!("unknown account `{account_id}`"))
+			})?;
+		self
+			.auth
+			.execute(AuthRequest::Logout { account: account.account.clone() })
+			.await
+			.map_err(|error| CommandError::new("auth_failed", error.to_string()))?;
+		let remaining = self.stored_accounts().await?;
+		self.sync_provider_authentication(&remaining);
+		let provider = account.provider.as_str().to_owned();
+		let was_pinned = self
+			.state
+			.lock()
+			.config
+			.account_pins
+			.get(&provider)
+			.is_some_and(|pinned| pinned == account_id);
+		if was_pinned {
+			self.account_pins.clear(&account.provider);
+			self.state.lock().config.account_pins.remove(&provider);
+			self.publish_account_pins()?;
+		}
+		let provider_authenticated = remaining.iter().any(|candidate| {
+			candidate.provider == account.provider && candidate.state == AccountState::Active
+		});
+		Ok(json!({
+			"accountId": account_id,
+			"providerId": provider,
+			"providerAuthenticated": provider_authenticated,
+		}))
 	}
 
 	fn set_bool_config(&self, key: &str, value: bool) -> Result<Value, CommandError> {
@@ -3833,6 +3975,12 @@ struct SetModelParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AccountParams {
+	account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SwitchSessionParams {
 	session_path: String,
 }
@@ -3874,6 +4022,8 @@ struct ConfigState {
 	auto_compaction: bool,
 	auto_retry:      bool,
 	todos:           Vec<Value>,
+	/// Host-selected account per provider, keyed by provider identifier.
+	account_pins:    BTreeMap<String, String>,
 }
 
 enum CommandIntercept {
@@ -4013,6 +4163,7 @@ impl ServerState {
 				auto_compaction: true,
 				auto_retry: true,
 				todos: Vec::new(),
+				account_pins: BTreeMap::new(),
 			},
 			models,
 			providers,
@@ -4460,6 +4611,24 @@ fn auth_account(account: AccountSummary) -> RpcAuthAccount {
 			.principal
 			.map(|principal| principal.as_str().to_owned()),
 		label:       account.label.map(|label| label.to_string()),
+	}
+}
+
+fn rpc_account(account: AccountSummary) -> omp_rpc::protocol::RpcAccount {
+	use omp_rpc::protocol::RpcAccountState;
+	omp_rpc::protocol::RpcAccount {
+		account_id:  account.account.as_str().to_owned(),
+		provider_id: account.provider.as_str().to_owned(),
+		principal:   account
+			.principal
+			.map(|principal| principal.as_str().to_owned()),
+		label:       account.label.map(|label| label.to_string()),
+		state:       match account.state {
+			AccountState::Active => RpcAccountState::Active,
+			AccountState::RefreshRequired => RpcAccountState::RefreshRequired,
+			AccountState::Disabled => RpcAccountState::Disabled,
+			AccountState::LoggedOut => RpcAccountState::LoggedOut,
+		},
 	}
 }
 

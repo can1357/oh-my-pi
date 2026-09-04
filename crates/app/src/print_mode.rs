@@ -209,6 +209,7 @@ async fn run_inner(args: PrintArgs) -> miette::Result<()> {
 			credential_provider,
 			api_key: args.api_key.clone(),
 			prompt_cache_affinity: args.prompt_cache_key.clone(),
+			account_pins: None,
 			session_generation: 1,
 		},
 		HeadlessLaunchPolicy {

@@ -1311,6 +1311,33 @@ impl RpcClient {
 		Ok(messages)
 	}
 
+	/// Lists stored non-secret account summaries across every provider.
+	pub async fn list_accounts(&self) -> Result<Vec<crate::protocol::RpcAccount>, ClientError> {
+		#[derive(serde::Deserialize)]
+		struct Accounts {
+			accounts: Vec<crate::protocol::RpcAccount>,
+		}
+		Ok(self
+			.request::<_, Accounts>("list_accounts", &())
+			.await?
+			.accounts)
+	}
+
+	/// Pins the provider that owns `account_id` to that account for later
+	/// turns in this session.
+	pub async fn set_account(&self, account_id: &str) -> Result<Value, ClientError> {
+		self
+			.request("set_account", &json!({"accountId":account_id}))
+			.await
+	}
+
+	/// Removes one stored account together with its credentials.
+	pub async fn logout_account(&self, account_id: &str) -> Result<Value, ClientError> {
+		self
+			.request("logout_account", &json!({"accountId":account_id}))
+			.await
+	}
+
 	/// Returns OAuth login providers.
 	pub async fn get_login_providers(&self) -> Result<Vec<OAuthProvider>, ClientError> {
 		#[derive(serde::Deserialize)]

@@ -1152,6 +1152,7 @@ mod tests {
 			deadline:       None,
 			budget:         budget.clone(),
 			session:        None,
+			account_pins:   Default::default(),
 			response_hooks: Default::default(),
 			attribution:    CallInferenceAttribution::core(),
 			execution:      Some(Arc::new(plan)),

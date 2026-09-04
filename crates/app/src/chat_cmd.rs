@@ -1989,6 +1989,7 @@ pub(crate) async fn run(
 				provider:                credential_provider,
 				api_key:                 args.api_key.clone(),
 				prompt_cache_affinity:   args.prompt_cache_key.clone(),
+				account_pins:            None,
 				usage_fetchers:          Some(environment.usage_fetchers()),
 				provider_response_hooks: Some(environment.provider_response_hooks()),
 				catalog:                 Some(Arc::clone(&catalog_owner)),

@@ -1,6 +1,7 @@
 //! Clone-cheap request envelopes and the closed operation vocabulary.
 
 use std::{
+	collections::BTreeMap,
 	error,
 	fmt::{self, Display},
 	sync::Arc,
@@ -9,6 +10,7 @@ use std::{
 
 use bytes::Bytes;
 use omp_core::{SecretString, Str, sf};
+use parking_lot::Mutex;
 use serde_json::{Value, value::RawValue};
 use strum::IntoStaticStr;
 
@@ -148,6 +150,38 @@ pub struct SessionRequest {
 	pub forked:                bool,
 }
 
+/// Host-owned principal pins keyed by provider.
+///
+/// A pin restricts account selection for its provider to the pinned principal
+/// on every call that carries a snapshot of it; providers without a pin keep
+/// ordinary pool selection. Pins are invocation-scoped and are never journaled
+/// or persisted by inference.
+#[derive(Clone, Debug, Default)]
+pub struct AccountPins(Arc<Mutex<BTreeMap<ProviderId, PrincipalId>>>);
+
+impl AccountPins {
+	/// Pins one provider to the principal that owns the selected account.
+	pub fn set(&self, provider: ProviderId, principal: PrincipalId) {
+		self.0.lock().insert(provider, principal);
+	}
+
+	/// Removes the pin for one provider, returning the previously pinned
+	/// principal.
+	pub fn clear(&self, provider: &ProviderId<str>) -> Option<PrincipalId> {
+		self.0.lock().remove(provider)
+	}
+
+	/// Returns the pinned principal for one provider.
+	pub fn get(&self, provider: &ProviderId<str>) -> Option<PrincipalId> {
+		self.0.lock().get(provider).cloned()
+	}
+
+	/// Copies the current pins for attachment to one call.
+	pub fn snapshot(&self) -> BTreeMap<ProviderId, PrincipalId> {
+		self.0.lock().clone()
+	}
+}
+
 /// Determines how canonical conversation context reaches a provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextStrategy {
@@ -244,6 +278,8 @@ pub struct Call {
 	pub budget:         ExecutionBudget,
 	/// Optional append-only conversation context.
 	pub session:        Option<SessionRequest>,
+	/// Host-pinned principal per provider; account selection preserves it.
+	pub account_pins:   BTreeMap<ProviderId, PrincipalId>,
 	/// Bitmap-gated provider request/response hook sink.
 	pub response_hooks: crate::codec::ProviderResponseHooks,
 	/// Principal and extension charged for this request.
@@ -276,6 +312,7 @@ impl Call {
 			deadline: meta.deadline,
 			budget: meta.budget,
 			session: meta.session,
+			account_pins: BTreeMap::new(),
 			response_hooks: meta.response_hooks,
 			attribution: InferenceAttribution::core(),
 			operation,
@@ -287,6 +324,12 @@ impl Call {
 	/// Replaces the default harness attribution before request dispatch.
 	pub fn with_attribution(mut self, attribution: InferenceAttribution) -> Self {
 		self.attribution = attribution;
+		self
+	}
+
+	/// Attaches host-pinned principals that account selection must preserve.
+	pub fn with_account_pins(mut self, pins: BTreeMap<ProviderId, PrincipalId>) -> Self {
+		self.account_pins = pins;
 		self
 	}
 
