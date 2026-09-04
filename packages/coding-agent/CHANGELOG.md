@@ -18,6 +18,7 @@
 ### Fixed
 
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
+- Fixed `/export` argument parsing rejecting quoted output paths that contain spaces ([#10785](https://github.com/can1357/oh-my-pi/pull/10785)).
 
 ## [18.1.11] - 2026-09-05
 
@@ -43,9 +44,6 @@
 
 - Fixed Codex V2 remote compaction rebuilding the request prefix differently from normal turns, restoring prompt-cache reuse ([#10786](https://github.com/can1357/oh-my-pi/issues/10786)).
 - Restored mouse clicks, hover, and wheel scrolling in Plan Review.
-### Fixed
-
-- Fixed `/export` argument parsing rejecting quoted output paths that contain spaces ([#10785](https://github.com/can1357/oh-my-pi/pull/10785)).
 
 ## [18.1.9] - 2026-09-04
 
