@@ -109,6 +109,18 @@ describe("createMCPToolName", () => {
 		expect(createLegacyMCPToolName("plain", "tool")).toBeUndefined();
 	});
 
+	it("exposes the legacy alias on both live and deferred tools", () => {
+		// Slow-startup servers register DeferredMCPTool instead of MCPTool;
+		// approval fallback must not depend on connection timing (#10810 review).
+		const digitTool = { name: "query-docs", inputSchema: { type: "object" as const } };
+		const live = new MCPTool(makeConnection(mockTransport(async () => ({})), "context7"), digitTool);
+		const deferred = new DeferredMCPTool("context7", digitTool, async () => {
+			throw new Error("unneeded");
+		});
+		expect(live.legacyName).toBe("mcp__context_query_docs");
+		expect(deferred.legacyName).toBe("mcp__context_query_docs");
+	});
+
 	it("is deterministic and keeps distinct overlong names distinct", () => {
 		const a = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
 		const b = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");

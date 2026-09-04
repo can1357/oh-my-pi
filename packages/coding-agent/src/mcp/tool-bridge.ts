@@ -684,6 +684,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
  */
 export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/** See {@link MCPTool.legacyName}. */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -719,6 +721,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
+		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${serverName}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
