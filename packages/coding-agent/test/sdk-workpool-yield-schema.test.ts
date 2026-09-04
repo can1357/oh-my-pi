@@ -90,6 +90,11 @@ describe("SDK workpool yield schema", () => {
 		sessions.push(session);
 		const tool = session.getToolByName("yield");
 		if (!tool) throw new Error("Missing yield tool");
-		expect(tool.description).toContain("Submit subagent output");
+		const result = await tool.execute("yield-default", { type: "complete", data: { answer: 42 } });
+		expect(result.details).toMatchObject({
+			data: { answer: 42 },
+			status: "success",
+			type: "complete",
+		});
 	});
 });
