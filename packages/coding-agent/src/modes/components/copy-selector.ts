@@ -109,7 +109,8 @@ export class CopySelectorComponent implements Component {
 	#blockCache = new Map<string, CopyBlock[]>();
 	/** Click targets of the last render, keyed by composed-column line index. */
 	#controls = new Map<number, ControlRegion[]>();
-
+	#copiedBlock?: { turnId: string; blockIndex: number };
+	#copiedTurnId?: string;
 	constructor(
 		entries: SessionMessageEntry[],
 		private readonly deps: CopySelectorDeps,
@@ -177,6 +178,10 @@ export class CopySelectorComponent implements Component {
 			else this.deps.onCancel();
 			return;
 		}
+		if (data === "q" || data === "Q") {
+			this.deps.onCancel();
+			return;
+		}
 		if (matchesAppToolsExpand(data)) {
 			this.#expanded = !this.#expanded;
 			this.#builder.setExpanded(this.#expanded);
@@ -213,15 +218,21 @@ export class CopySelectorComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			if (this.#blocks) {
-				const block = this.#blocks[this.#blockSelected];
-				if (block) this.deps.onPick(block.content, block.label);
-				return;
-			}
 			const target = this.#targets[this.#selected];
 			if (!target) return;
+			if (this.#blocks) {
+				const block = this.#blocks[this.#blockSelected];
+				if (block) {
+					this.#copiedBlock = { turnId: target.turnId, blockIndex: this.#blockSelected };
+					this.deps.onPick(block.content, block.label);
+					this.deps.requestRender();
+				}
+				return;
+			}
 			const item = targetCopy(target, this.#blocksFor(target));
+			this.#copiedTurnId = target.turnId;
 			this.deps.onPick(item.content, item.label);
+			this.deps.requestRender();
 			return;
 		}
 		// Page/home/end/shift+arrow scrolling without moving the selection.
@@ -252,7 +263,12 @@ export class CopySelectorComponent implements Component {
 			if (block.href && this.deps.onOpen) this.deps.onOpen(block.href, block.label);
 			return;
 		}
+		const target = this.#targets[this.#selected];
+		if (target) {
+			this.#copiedBlock = { turnId: target.turnId, blockIndex: hit.blockIndex };
+		}
 		this.deps.onPick(block.content, block.label);
+		this.deps.requestRender();
 	}
 
 	#moveVertical(delta: -1 | 1): void {
@@ -298,7 +314,6 @@ export class CopySelectorComponent implements Component {
 			else if (below < this.#targets.length) this.#selected = below;
 			this.#blocks = undefined;
 		}
-
 		const target = this.#targets[this.#selected];
 		const blocks = target ? this.#blocksFor(target) : [];
 		let composed: ComposedColumn;
@@ -306,7 +321,7 @@ export class CopySelectorComponent implements Component {
 		if (this.#blocks && target) {
 			// Descended: the turn's rendered region is replaced by its block stack.
 			const before = composeOutlineColumn(childRows, 0, target.start, [], -1, contentWidth, undefined);
-			const stack = this.#composeBlocks(this.#blocks, contentWidth, before.lines.length);
+			const stack = this.#composeBlocks(this.#blocks, contentWidth, before.lines.length, target.turnId);
 			const after = composeOutlineColumn(childRows, target.end, children.length, [], -1, contentWidth, undefined);
 			composed = {
 				lines: [...before.lines, ...stack.lines, ...after.lines],
@@ -345,16 +360,25 @@ export class CopySelectorComponent implements Component {
 		const output: string[] = [];
 		output.push(...this.#border.render(width));
 		output.push(
-			` ${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on the clipboard")}`,
+			` ${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on clipboard  (esc/q to exit)")}`,
 		);
 		output.push(...this.#border.render(width));
 		output.push(...this.#scrollView.render(width));
 		const selectedBlock = this.#blocks?.[this.#blockSelected];
 		const openHint = selectedBlock?.href && this.deps.onOpen ? "  o open" : "";
+		const isTurnCopied = target ? this.#copiedTurnId === target.turnId : false;
+		const isBlockCopied =
+			target && this.#copiedBlock
+				? this.#copiedBlock.turnId === target.turnId && this.#copiedBlock.blockIndex === this.#blockSelected
+				: false;
 		const hint = this.#blocks
-			? `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter copy${openHint}  click ${theme.cmd.copy}/${theme.cmd.share}`
-			: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter copy  ctrl+o expand  esc close`;
-		output.push(` ${theme.fg("dim", hint)}`);
+			? isBlockCopied
+				? `${theme.fg("success", theme.bold("✓ Copied!"))}  ${theme.fg("dim", `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  enter copy  ←/esc back  q exit${openHint}`)}`
+				: `${this.#blockSelected + 1}/${this.#blocks.length}  ↑/↓ block  ←/esc back  enter copy  q exit${openHint}`
+			: isTurnCopied
+				? `${theme.fg("success", theme.bold("✓ Copied turn!"))}  ${theme.fg("dim", `↑/↓ step  enter copy  esc/q exit`)}`
+				: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter copy  esc/q exit`;
+		output.push(` ${hint}`);
 		output.push(...this.#border.render(width));
 		return output;
 	}
@@ -365,7 +389,7 @@ export class CopySelectorComponent implements Component {
 	 * are recorded in `#controls` under the composed line index
 	 * (`lineOffset` + local index) so {@link #click} can resolve a mouse hit.
 	 */
-	#composeBlocks(blocks: CopyBlock[], columnWidth: number, lineOffset: number): ComposedColumn {
+	#composeBlocks(blocks: CopyBlock[], columnWidth: number, lineOffset: number, turnId?: string): ComposedColumn {
 		const inner = Math.max(10, columnWidth - 4);
 		const lines: string[] = [];
 		let selStart = -1;
@@ -381,8 +405,15 @@ export class CopySelectorComponent implements Component {
 			}
 			const selected = index === this.#blockSelected;
 			const captionColor: ThemeColor = selected ? OUTLINE_COLOR : "dim";
+			const isThisBlockCopied =
+				turnId && this.#copiedBlock
+					? this.#copiedBlock.turnId === turnId && this.#copiedBlock.blockIndex === index
+					: false;
 			const controls: Array<{ action: ControlRegion["action"]; text: string }> = [
-				{ action: "copy", text: `${theme.cmd.copy} copy` },
+				{
+					action: "copy",
+					text: isThisBlockCopied ? `${theme.fg("success", "✓ copied!")}` : `${theme.cmd.copy} copy`,
+				},
 			];
 			if (block.href && this.deps.onOpen) controls.push({ action: "open", text: `${theme.cmd.share} open` });
 			const controlsWidth = controls.reduce((sum, control) => sum + visibleWidth(control.text) + 2, 0);

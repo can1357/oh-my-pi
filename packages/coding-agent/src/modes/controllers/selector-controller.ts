@@ -1411,10 +1411,12 @@ export class SelectorController {
 			return;
 		}
 
+		let lastCopied: string | undefined;
 		const done = () => {
 			overlayHandle?.hide();
 			selector?.dispose();
 			this.focusActiveEditorArea();
+			if (lastCopied) this.ctx.showStatus(`Copied ${lastCopied} to clipboard`);
 			this.ctx.ui.requestRender();
 		};
 		const selector = new CopySelectorComponent(entries, {
@@ -1428,16 +1430,15 @@ export class SelectorController {
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onPick: (content, label) => {
-				done();
 				if (!content.trim()) {
 					this.ctx.showStatus("Nothing to copy in that item");
 					return;
 				}
+				lastCopied = label;
 				void copyToClipboard(content);
-				this.ctx.showStatus(`Copied ${label} to clipboard`);
+				this.ctx.ui.requestRender();
 			},
 			onOpen: (href, label) => {
-				done();
 				openPath(href);
 				this.ctx.showStatus(`Opening ${label}: ${href}`);
 			},

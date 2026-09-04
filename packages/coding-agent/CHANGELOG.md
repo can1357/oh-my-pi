@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Updated `/copy` to keep the fullscreen transcript selector open after copying with `Enter`, adding localized `✓ copied!` feedback and exiting on explicit `Esc` or `q`.
 
 ### Fixed
 
