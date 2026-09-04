@@ -261,6 +261,50 @@ describe("status line path segment", () => {
 			removeSyncWithRetries(parentDir);
 		}
 	});
+	it("does not repeat canonical filesystem reads for an unchanged project directory", () => {
+		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-cache-"));
+		try {
+			setProjectDir(scratchDir);
+			const realpath = vi.spyOn(fs, "realpathSync");
+
+			renderSegment("path", createPathContext());
+			const coldReads = realpath.mock.calls.length;
+			expect(coldReads).toBeGreaterThan(0);
+
+			renderSegment("path", createPathContext());
+			expect(realpath).toHaveBeenCalledTimes(coldReads);
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
+		}
+	});
+
+	it("re-canonicalizes a reselected path once the classification TTL lapses", () => {
+		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-ttl-"));
+		try {
+			setProjectDir(scratchDir);
+			let clock = 1_000;
+			vi.spyOn(performance, "now").mockImplementation(() => clock);
+			const realpath = vi.spyOn(fs, "realpathSync");
+
+			renderSegment("path", createPathContext());
+			const coldReads = realpath.mock.calls.length;
+			expect(coldReads).toBeGreaterThan(0);
+
+			// Still within the freshness window: cache serves without re-reading.
+			clock += 4_000;
+			renderSegment("path", createPathContext());
+			expect(realpath).toHaveBeenCalledTimes(coldReads);
+
+			// Past the TTL: reselection observes the current canonical target again.
+			clock += 2_000;
+			renderSegment("path", createPathContext());
+			expect(realpath.mock.calls.length).toBeGreaterThan(coldReads);
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
+		}
+	});
 });
 
 describe("status line path segment in a linked worktree", () => {

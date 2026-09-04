@@ -6,6 +6,7 @@
 
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
+- Reduced TUI CPU use while waiting and streaming on WSL by eliminating repeated status-line path filesystem reads ([#10826](https://github.com/can1357/oh-my-pi/issues/10826)).
 
 ## [18.1.10] - 2026-09-04
 
