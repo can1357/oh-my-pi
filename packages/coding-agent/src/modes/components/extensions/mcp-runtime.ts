@@ -243,10 +243,20 @@ export function snapshotMcpRuntime(
 			: manager.getConnectionStatus(server.name);
 	const connection = manager.getConnection(server.name);
 	const identity = identityFrom(connection?.serverInfo, server.name);
-	const connectedTools = (connection?.tools ?? []).map(tool =>
-		catalogItem(tool.name, tool.title ?? tool.annotations?.title, tool.description, tool.inputSchema),
+	const filteredConfigured = Boolean(
+		connection?.config.enabledTools?.length || connection?.config.disabledTools?.length,
 	);
-	const tools = connectedTools.length > 0 ? connectedTools : toolsFromManager(manager, server.name);
+	const managerTools = toolsFromManager(manager, server.name);
+	// With a configured tool filter, the session's tool set is authoritative:
+	// raw `connection.tools` is pre-filter, so preferring it would advertise
+	// tools the filter excludes. Without a filter the raw list is richer
+	// (annotated titles/schemas) and identical in membership.
+	const connectedTools = filteredConfigured
+		? managerTools
+		: (connection?.tools ?? []).map(tool =>
+				catalogItem(tool.name, tool.title ?? tool.annotations?.title, tool.description, tool.inputSchema),
+			);
+	const tools = connectedTools.length > 0 ? connectedTools : managerTools;
 
 	return {
 		...base,

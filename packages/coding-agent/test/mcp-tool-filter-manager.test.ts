@@ -190,4 +190,28 @@ describe("MCP tool filtering through the manager", () => {
 			stop();
 		}
 	}, 30_000);
+	it("an incremental connectServers preserves the standing filter-empty failure", async () => {
+		// Regression: the already-connected fast path reported every connected
+		// server as success, so a second connectServers pass for the same
+		// server flipped a standing filter-empty failure to success.
+		await manager.connectServers({ [SERVER]: fixtureConfig({ enabledTools: ["zzz_nonexistent"] }) }, {});
+		expect(manager.getFilterEmptyToolCount(SERVER)).toBe(45);
+		expect(manager.getTools()).toHaveLength(0);
+
+		const result = await manager.connectServers(
+			{ [SERVER]: fixtureConfig({ enabledTools: ["zzz_nonexistent"] }) },
+			{},
+		);
+		expect(result.errors.get(SERVER)).toContain("tool filter excludes all");
+		expect(result.connectedServers).not.toContain(SERVER);
+		expect(manager.getFilterEmptyToolCount(SERVER)).toBe(45);
+	}, 20_000);
+
+	it("a healthy server re-passed through connectServers stays in connectedServers", async () => {
+		await manager.connectServers({ [SERVER]: fixtureConfig({ enabledTools: ["tool_a*"] }) }, {});
+		expect(manager.getTools().length).toBeGreaterThan(0);
+		const result = await manager.connectServers({ [SERVER]: fixtureConfig({ enabledTools: ["tool_a*"] }) }, {});
+		expect(result.errors.has(SERVER)).toBe(false);
+		expect(result.connectedServers).toContain(SERVER);
+	}, 20_000);
 });

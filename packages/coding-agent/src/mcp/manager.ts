@@ -576,9 +576,19 @@ export class MCPManager {
 				}
 			}
 
-			// Skip if already connected
-			if (this.#connections.has(name)) {
-				connectedServers.add(name);
+			// Skip if already connected — but preserve a standing filter-empty
+			// failure instead of reporting success: the transport is healthy yet
+			// contributes zero tools, and re-running connectServers (e.g. an
+			// incremental discover-and-connect pass) must not flip the reported
+			// result to success while the filter still excludes everything.
+			const existingConnection = this.#connections.get(name);
+			if (existingConnection) {
+				const filterEmptyCount = existingConnection.filterEmptyByToolFilter;
+				if (filterEmptyCount !== undefined) {
+					MCPManager.#reportFilterEmpty(name, filterEmptyCount, sources[name], errors, reportedErrors, notify);
+				} else {
+					connectedServers.add(name);
+				}
 				continue;
 			}
 
@@ -700,6 +710,11 @@ export class MCPManager {
 					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+					// Persist the filter-empty marker here (not only on reconnect):
+					// query-based surfaces read it via getFilterEmptyToolCount and the
+					// reconnect path keys its failed/connected emit on it.
+					connection.filterEmptyByToolFilter =
+						customTools.length === 0 && serverTools.length > 0 ? serverTools.length : undefined;
 					this.#replaceServerTools(name, customTools);
 					void this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
