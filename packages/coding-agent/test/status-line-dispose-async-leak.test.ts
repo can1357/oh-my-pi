@@ -37,6 +37,12 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+	fakeRefHead = {
+		kind: "ref",
+		branch: "main",
+		refName: "refs/heads/main",
+		commit: undefined,
+	};
 	defaultBranchMock = vi.fn(async () => null);
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
 	const gitRepository = {
@@ -92,7 +98,7 @@ function makeSession() {
 	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
 }
 
-const fakeRefHead: VcsHeadState = {
+let fakeRefHead: VcsHeadState = {
 	kind: "ref",
 	branch: "main",
 	refName: "refs/heads/main",
@@ -176,11 +182,26 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 
 	it("suppresses stale PR lookup callbacks after dispose()", async () => {
 		defaultBranchMock.mockResolvedValue("main");
-		vi.spyOn(github, "run").mockResolvedValue({
+		fakeRefHead = {
+			kind: "ref",
+			branch: "feature/status-line",
+			refName: "refs/heads/feature/status-line",
+			commit: undefined,
+		};
+		const ghLookup = Promise.withResolvers<{
+			exitCode: number;
+			stdout: string;
+			stderr: string;
+		}>();
+		const githubRunMock = vi.spyOn(github, "run").mockReturnValue(ghLookup.promise);
+		const ghResult = {
 			exitCode: 0,
-			stdout: JSON.stringify({ number: 9314, url: "https://github.com/can1357/oh-my-pi/pull/9314" }),
+			stdout: JSON.stringify({
+				number: 9314,
+				url: "https://github.com/can1357/oh-my-pi/pull/9314",
+			}),
 			stderr: "",
-		});
+		};
 
 		const onBranchChange = vi.fn(() => {
 			throw new Error("disposed PR lookup invoked its stale callback");
@@ -193,7 +214,9 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		component.watchBranch(onBranchChange);
 
 		component.getTopBorder(80);
+		expect(githubRunMock).toHaveBeenCalledTimes(1);
 		component.dispose();
+		ghLookup.resolve(ghResult);
 
 		await Promise.resolve();
 		await Promise.resolve();
