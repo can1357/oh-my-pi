@@ -69,9 +69,9 @@ provider "openai-codex" {
 				}
 			}
 		}
-		// First-party GPT-5 Responses SKUs support the freeform apply_patch
+		// First-party GPT-5/GPT-6 Responses SKUs support the freeform apply_patch
 		// custom tool with a Lark grammar.
-		revision ">=5 <6" {
+		revision ">=5 <7" {
 			apply-patch-tool-type "freeform"
 		}
 	}

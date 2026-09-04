@@ -6,8 +6,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
-import { getEditClipboard } from "../../edit/edit-clipboard";
-import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
@@ -44,6 +42,7 @@ import { createUsageRowBlock, turnElapsedMs } from "../../modes/components/usage
 import { UserMessageComponent } from "../../modes/components/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
+import { videoPreviewSource } from "../../utils/video";
 import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
@@ -115,7 +114,8 @@ function imageLinksForMessage(
 		(content): content is ImageContent =>
 			content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
 	);
-	return materializeImageReferenceLinksSync(images, putBlobSync);
+	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
+	return images.map((image, index) => videoPreviewSource(image) ?? materialized?.[index]);
 }
 
 export class UiHelpers {
@@ -221,7 +221,8 @@ export class UiHelpers {
 					if (
 						message.customType === "irc:incoming" ||
 						message.customType === "irc:autoreply" ||
-						message.customType === "irc:relay"
+						message.customType === "irc:relay" ||
+						message.customType === "irc:workpool"
 					) {
 						const card = buildIrcMessageCard(message, () => this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(card);
@@ -308,6 +309,7 @@ export class UiHelpers {
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
+				assistantComponent.pickReactionTarget(this.ctx.chatContainer.children);
 				this.ctx.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -585,11 +587,7 @@ export class UiHelpers {
 						renderArgs,
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
-							snapshots: getFileSnapshotStore(this.ctx.viewSession),
-							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 						},
 						tool,
 						this.ctx.ui,

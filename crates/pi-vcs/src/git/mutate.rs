@@ -81,24 +81,44 @@ pub(crate) fn update_reference(
 
 impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
+	///
+	/// Empty `files` matches `git add -A`: refresh tracked paths and add
+	/// untracked files that survive the standard ignore stack (nested
+	/// `.gitignore`, exclude files). When `core.precomposeUnicode` is set,
+	/// a worktree path that is a unicode-composition equivalent of an
+	/// existing index path (macOS NFD dirent vs NFC index name) is stored
+	/// under the index name. Unrelated names that share an inode (hardlinks)
+	/// and distinct NFC/NFD files when precompose is off stay separate.
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
 		let mut index = load_index_or_head(&repo, "git add")?;
-		let mut selected = collect_stage_paths(self.root(), files)?;
 		let all = files.is_empty();
-		let requested: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+		let mut requested: BTreeSet<String> = files
+			.iter()
+			.map(|path| normalize_stage_path(path))
+			.collect();
+		if precompose_unicode_enabled(&repo) {
+			requested = remap_composed_index_paths(self.root(), &index, requested);
+		}
+		let mut selected = collect_stage_paths(self, &requested, all)?;
 		for entry in index.entries() {
 			let path = entry.path(&index).to_str_lossy().into_owned();
-			if (all || requested.iter().any(|wanted| path_matches(&path, wanted)))
+			if (all
+				|| requested
+					.iter()
+					.any(|wanted| stage_path_matches(&path, wanted)))
 				&& fs::symlink_metadata(self.root().join(&path)).is_ok()
 			{
 				selected.insert(path);
 			}
 		}
 		index.remove_entries(|_, path, _| {
-			let p = path.to_str_lossy();
-			(all || requested.iter().any(|wanted| path_matches(&p, wanted)))
-				&& !selected.contains(&p.into_owned())
+			let path = path.to_str_lossy();
+			(all
+				|| requested
+					.iter()
+					.any(|wanted| stage_path_matches(&path, wanted)))
+				&& !selected.contains(path.as_ref())
 		});
 		for path in selected {
 			stage_one(&repo, self.root(), &mut index, &path)?;
@@ -1015,25 +1035,121 @@ fn index_for_tree(
 	}
 }
 
-fn collect_stage_paths(root: &Path, files: &[String]) -> Result<BTreeSet<String>> {
-	let ignores = load_ignore_patterns(root);
-	let mut candidates = Vec::new();
-	if files.is_empty() {
-		walk_files(root, root, &mut candidates)?;
+fn collect_stage_paths(
+	repo: &GitRepo,
+	requested: &BTreeSet<String>,
+	all: bool,
+) -> Result<BTreeSet<String>> {
+	let untracked = if all || requested.contains("") {
+		repo.ls_files(true, true)?
 	} else {
-		for item in files {
-			let path = root.join(item);
-			if path.is_dir() {
-				walk_files(root, &path, &mut candidates)?;
-			} else if path.exists() || fs::symlink_metadata(&path).is_ok() {
-				candidates.push(item.replace('\\', "/"));
+		repo.ls_files_at_paths(true, true, requested)?
+	};
+	Ok(untracked.into_iter().collect())
+}
+
+fn normalize_stage_path(path: &str) -> String {
+	let normalized = path.replace('\\', "/");
+	let mut relative = normalized.as_str();
+	while let Some(stripped) = relative.strip_prefix("./") {
+		relative = stripped;
+	}
+	if relative == "." {
+		String::new()
+	} else {
+		relative.trim_end_matches('/').to_owned()
+	}
+}
+
+fn stage_path_matches(path: &str, wanted: &str) -> bool {
+	wanted.is_empty() || path_matches(path, wanted)
+}
+
+fn remap_composed_index_paths(
+	root: &Path,
+	index: &gix::index::File,
+	selected: BTreeSet<String>,
+) -> BTreeSet<String> {
+	let mut exact = BTreeSet::new();
+	let mut by_composed = BTreeMap::new();
+	let mut dir_by_composed: BTreeMap<String, String> = BTreeMap::new();
+	for entry in index.entries() {
+		let Ok(name) = entry.path(index).to_str() else {
+			continue;
+		};
+		exact.insert(name.to_owned());
+		by_composed
+			.entry(precomposed(name).into_owned())
+			.or_insert_with(|| name.to_owned());
+		let mut start = 0;
+		while let Some(slash) = name[start..].find('/') {
+			let dir = &name[..start + slash];
+			if !dir.is_empty() {
+				dir_by_composed
+					.entry(precomposed(dir).into_owned())
+					.or_insert_with(|| dir.to_owned());
 			}
+			start += slash + 1;
 		}
 	}
-	Ok(candidates
+	selected
 		.into_iter()
-		.filter(|path| !is_ignored(path, &ignores))
-		.collect())
+		.map(|path| {
+			if exact.contains(&path) {
+				return path;
+			}
+			if let Some(alias) = by_composed.get(precomposed(&path).as_ref())
+				&& alias != &path
+			{
+				let Ok(meta) = fs::symlink_metadata(root.join(&path)) else {
+					return path;
+				};
+				let Ok(imeta) = fs::symlink_metadata(root.join(alias)) else {
+					return path;
+				};
+				if same_worktree_file(&meta, &imeta) {
+					return alias.clone();
+				}
+			}
+			let composed = precomposed(&path);
+			if let Some(alias_dir) = dir_by_composed.get(composed.as_ref())
+				&& alias_dir != &path
+			{
+				let Ok(meta) = fs::symlink_metadata(root.join(&path)) else {
+					return path;
+				};
+				let Ok(imeta) = fs::symlink_metadata(root.join(alias_dir)) else {
+					return path;
+				};
+				if same_worktree_file(&meta, &imeta) {
+					return alias_dir.clone();
+				}
+			}
+			path
+		})
+		.collect()
+}
+
+fn precompose_unicode_enabled(repo: &gix::Repository) -> bool {
+	repo
+		.config_snapshot()
+		.boolean("core.precomposeUnicode")
+		.unwrap_or(false)
+}
+
+fn precomposed(path: &str) -> std::borrow::Cow<'_, str> {
+	gix_utils::str::precompose(std::borrow::Cow::Borrowed(path))
+}
+
+#[cfg(unix)]
+fn same_worktree_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+	use std::os::unix::fs::MetadataExt;
+	left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+	false
 }
 
 fn stage_one(
@@ -1734,6 +1850,176 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "A  new");
 		repo.unstage(&[]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
+	}
+
+	#[test]
+	fn stage_all_skips_nested_gitignore_like_git_add() {
+		let (temp, repo) = fixture();
+		fs::create_dir_all(temp.path().join("tests/e2e/screenshots")).unwrap();
+		fs::write(temp.path().join("tests/e2e/.gitignore"), "screenshots/\ntest-results/\n").unwrap();
+		fs::write(temp.path().join("tests/e2e/screenshots/homepage.png"), "png").unwrap();
+		fs::write(temp.path().join("tests/e2e/visible.txt"), "ok\n").unwrap();
+		repo.stage_files(&[]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(!status.contains("screenshots"), "nested-ignored screenshot was staged:\n{status}");
+		assert!(
+			status.contains("tests/e2e/.gitignore"),
+			"gitignore itself should be staged:\n{status}"
+		);
+		assert!(
+			status.contains("tests/e2e/visible.txt"),
+			"unignored sibling should be staged:\n{status}"
+		);
+	}
+
+	#[test]
+	fn stage_explicit_ignored_file_is_skipped() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitignore"), "secret\n").unwrap();
+		fs::write(temp.path().join("secret"), "x\n").unwrap();
+		fs::write(temp.path().join("visible"), "y\n").unwrap();
+		repo
+			.stage_files(&["secret".into(), "visible".into()])
+			.unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(!status.contains("secret"), "explicit ignored path was staged:\n{status}");
+		assert!(status.contains("visible"), "explicit unignored path should be staged:\n{status}");
+	}
+
+	#[test]
+	fn stage_dot_pathspec_matches_repository_root() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join("a"), "changed\n").unwrap();
+		fs::write(temp.path().join(".gitignore"), "secret\n").unwrap();
+		fs::write(temp.path().join("visible"), "visible\n").unwrap();
+		fs::write(temp.path().join("secret"), "secret\n").unwrap();
+
+		repo.stage_files(&[".".into()]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(status.contains("M  a"), "tracked root file should be staged:\n{status}");
+		assert!(status.contains("A  visible"), "untracked root file should be staged:\n{status}");
+		assert!(
+			!git(temp.path(), &["ls-files"])
+				.lines()
+				.any(|path| path == "secret"),
+			"ignored root file must stay untracked"
+		);
+	}
+
+	#[test]
+	fn stage_dot_prefixed_directory_pathspec_is_scoped() {
+		let (temp, repo) = fixture();
+		fs::create_dir(temp.path().join("dir")).unwrap();
+		fs::write(temp.path().join("dir/tracked"), "base\n").unwrap();
+		git(temp.path(), &["add", "--", "dir/tracked"]);
+		git(temp.path(), &["commit", "-qm", "directory"]);
+		fs::write(temp.path().join("dir/tracked"), "changed\n").unwrap();
+		fs::write(temp.path().join("dir/new"), "new\n").unwrap();
+		fs::write(temp.path().join("outside"), "outside\n").unwrap();
+
+		repo.stage_files(&["./dir".into()]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(status.contains("M  dir/tracked"), "tracked child should be staged:\n{status}");
+		assert!(status.contains("A  dir/new"), "untracked child should be staged:\n{status}");
+		assert!(status.contains("?? outside"), "unrequested path should stay untracked:\n{status}");
+	}
+
+	#[test]
+	fn stage_explicit_metachar_directory_is_literal() {
+		let (temp, repo) = fixture();
+		fs::create_dir(temp.path().join("[x]")).unwrap();
+		fs::create_dir(temp.path().join("x")).unwrap();
+		fs::write(temp.path().join("[x]/selected"), "selected\n").unwrap();
+		fs::write(temp.path().join("x/unselected"), "unselected\n").unwrap();
+
+		repo.stage_files(&["[x]".into()]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(
+			status.contains("A  [x]/selected"),
+			"literal metacharacter directory should be staged:\n{status}"
+		);
+		assert!(
+			status.contains("?? x/"),
+			"pattern lookalike directory should stay untracked:\n{status}"
+		);
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn stage_all_does_not_add_nfd_duplicate_of_nfc_index_path() {
+		let (temp, repo) = fixture();
+		let nfc = "caf\u{e9}.txt";
+		let nfd = "cafe\u{301}.txt";
+		fs::write(temp.path().join(nfc), "hello\n").unwrap();
+		git(temp.path(), &["add", "--", nfc]);
+		git(temp.path(), &["commit", "-qm", "accent"]);
+		let before = git(temp.path(), &["ls-files", "-z"]);
+		assert!(
+			before.split('\0').filter(|p| p.contains("caf")).count() == 1,
+			"setup should track one NFC path, got {before:?}"
+		);
+		assert!(!before.contains('\u{301}'), "git add should store NFC, got {before:?}");
+
+		repo.stage_files(&[]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		let after = git(temp.path(), &["ls-files", "-z"]);
+		let cafe: Vec<_> = after.split('\0').filter(|p| p.contains("caf")).collect();
+		assert_eq!(cafe, [nfc], "native add created a unicode duplicate: {after:?}");
+
+		repo.stage_files(&[nfd.to_owned()]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		let after_explicit = git(temp.path(), &["ls-files", "-z"]);
+		let cafe: Vec<_> = after_explicit
+			.split('\0')
+			.filter(|p| p.contains("caf"))
+			.collect();
+		assert_eq!(cafe, [nfc], "explicit NFD add created a unicode duplicate: {after_explicit:?}");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn stage_explicit_hardlink_keeps_unrelated_name() {
+		let (temp, repo) = fixture();
+		fs::hard_link(temp.path().join("a"), temp.path().join("link")).unwrap();
+		repo.stage_files(&["link".into()]).unwrap();
+		let files = git(temp.path(), &["ls-files"]);
+		assert!(files.contains('a'), "tracked original must remain:\n{files}");
+		assert!(
+			files.contains("link"),
+			"unrelated hardlink name must be staged as its own path:\n{files}"
+		);
+	}
+
+	#[test]
+	fn stage_keeps_distinct_nfc_and_nfd_when_precompose_is_off() {
+		let temp = tempfile::tempdir().unwrap();
+		git(temp.path(), &["init", "-q", "-b", "main"]);
+		git(temp.path(), &["config", "user.name", "Test"]);
+		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		git(temp.path(), &["config", "core.precomposeunicode", "false"]);
+		fs::write(temp.path().join("tracked"), "base\n").unwrap();
+		git(temp.path(), &["add", "."]);
+		git(temp.path(), &["commit", "-qm", "base"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+
+		let nfc = "caf\u{e9}.txt";
+		let nfd = "cafe\u{301}.txt";
+		fs::write(temp.path().join(nfc), "nfc\n").unwrap();
+		fs::write(temp.path().join(nfd), "nfd\n").unwrap();
+		let nfc_body = fs::read_to_string(temp.path().join(nfc)).unwrap();
+		let nfd_body = fs::read_to_string(temp.path().join(nfd)).unwrap();
+		if nfc_body == nfd_body {
+			return;
+		}
+
+		git(temp.path(), &["add", "--", nfc]);
+		git(temp.path(), &["commit", "-qm", "nfc"]);
+		repo.stage_files(&[nfd.to_owned()]).unwrap();
+		let files = git(temp.path(), &["ls-files", "-z"]);
+		let cafe: Vec<_> = files.split('\0').filter(|p| p.contains("caf")).collect();
+		assert_eq!(cafe.len(), 2, "NFC and NFD must stay distinct when precompose is off: {files:?}");
+		assert!(cafe.contains(&nfc), "{cafe:?}");
+		assert!(cafe.contains(&nfd), "{cafe:?}");
 	}
 
 	#[cfg(unix)]

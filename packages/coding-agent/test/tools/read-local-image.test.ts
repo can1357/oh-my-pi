@@ -15,7 +15,22 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
+
+const hasFfprobe = Boolean($which("ffprobe"));
+
+// The video reader owns every video path before the binary sniff: with
+// ffprobe it reports a probe failure naming the file, without it the install
+// hint — either way no decoded byte reaches the text pipeline.
+function expectVideoProbeFailure(text: string, fileName: string): void {
+	if (hasFfprobe) {
+		expect(text).toContain("Could not probe video");
+		expect(text).toContain(fileName);
+	} else {
+		expect(text).toContain("requires ffprobe");
+	}
+	expect(text).not.toContain("\u0000");
+}
 
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
 const TINY_PNG = Buffer.from(
@@ -126,35 +141,24 @@ describe("read local:// images", () => {
 		expect(joinText(result.content)).toContain("hello world");
 	});
 
-	it("rejects a local:// non-image binary without emitting decoded bytes", async () => {
+	it("surfaces a corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
 		await Bun.write(path.join(localRoot, "clip.mp4"), new Uint8Array([0, 1, 2, 3, 4, 5]));
 		const tool = new ReadTool(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://clip.mp4" });
-		const text = joinText(result.content);
-
-		expect(text).toContain("Cannot read binary file");
-		expect(text).toContain("clip.mp4");
-		expect(text).not.toContain("\u0000");
+		const error = await tool.execute("call", { path: "local://clip.mp4" }).catch(e => e);
+		expectVideoProbeFailure(String(error?.message ?? error), "clip.mp4");
 	});
 
-	it("rejects a large local:// binary whose first line exceeds the streaming byte budget", async () => {
-		// The streaming reader's byte budget is `max(DEFAULT_MAX_BYTES, defaultLimit*512)` —
-		// 150 KiB under default settings. A NUL-filled blob larger than that with no 0x0A
-		// byte forces streamLinesFromFile into the firstLineExceedsLimit path: collectedLines
-		// stays empty, so the NUL check that walks collectedLines never sees these bytes.
-		// Without the firstLinePreview guard, the preview would be decoded as UTF-8 and
-		// emitted as text (the reviewer's video/archive case).
+	it("surfaces a large corrupt local:// video as a probe failure without emitting decoded bytes", async () => {
+		// A NUL-filled blob wearing a video extension must fail in the video
+		// reader, not in the text pipeline: no byte budget or line scan ever sees
+		// these bytes.
 		const blob = new Uint8Array(256 * 1024);
 		await Bun.write(path.join(localRoot, "video.mp4"), blob);
 		const tool = new ReadTool(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://video.mp4" });
-		const text = joinText(result.content);
-
-		expect(text).toContain("Cannot read binary file");
-		expect(text).toContain("video.mp4");
-		expect(text).not.toContain("\u0000");
+		const error = await tool.execute("call", { path: "local://video.mp4" }).catch(e => e);
+		expectVideoProbeFailure(String(error?.message ?? error), "video.mp4");
 	});
 
 	it("does not materialize local:// binary resources in the protocol handler", async () => {

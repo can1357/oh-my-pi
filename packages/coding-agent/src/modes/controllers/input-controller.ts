@@ -27,6 +27,7 @@ import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
+import { resolveReadPath } from "../../tools/path-utils";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import {
@@ -39,6 +40,13 @@ import { getSlashCommandUsage, loadSlashCommandUsage, recordSlashCommandUsage } 
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { ensureSupportedImageInput, ImageInputTooLargeError, loadImageInput } from "../../utils/image-loading";
+import {
+	VideoError,
+	buildVideoContactSheetPng,
+	createVideoPreviewImage,
+	isVideoPath,
+	probeVideo,
+} from "../../utils/video";
 import { resizeImage } from "../../utils/image-resize";
 
 /**
@@ -1580,21 +1588,28 @@ export class InputController {
 		return allQueued.length;
 	}
 
-	async #insertPendingImage(imageData: ImageContent): Promise<void> {
-		const image: ImageContent = { type: "image", data: imageData.data, mimeType: imageData.mimeType };
-		const imageLink = (
-			await materializeImageReferenceLinks([image], this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager))
-		)?.[0];
+	async #insertPendingImage(imageData: ImageContent, videoPath?: string): Promise<void> {
+		const image: ImageContent = videoPath
+			? createVideoPreviewImage(imageData, videoPath)
+			: { type: "image", data: imageData.data, mimeType: imageData.mimeType };
+		const imageLink =
+			videoPath ??
+			(
+				await materializeImageReferenceLinks([image], this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager))
+			)?.[0];
 		this.ctx.editor.pendingImages.push(image);
 		this.ctx.editor.pendingImageLinks.push(imageLink);
 		this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 		const imageNum = this.ctx.editor.pendingImages.length;
 		const dims = await this.#imageDimensions(imageData);
 		setCachedImageDimensions(image, dims ?? null);
+		const kind = videoPath === undefined ? "image" : "video";
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
-		const expansion = dims ? `[Image #${imageNum}, ${dims.width}x${dims.height}]` : `[Image #${imageNum}]`;
-		this.ctx.editor.insertAtom(chipLabel("image", imageNum), expansion);
+		const expansion = dims
+			? `[${kind === "video" ? "Video" : "Image"} #${imageNum}, ${dims.width}x${dims.height}]`
+			: `[${kind === "video" ? "Video" : "Image"} #${imageNum}]`;
+		this.ctx.editor.insertAtom(chipLabel(kind, imageNum), expansion);
 		this.ctx.ui.requestRender();
 	}
 
@@ -1610,11 +1625,11 @@ export class InputController {
 		return undefined;
 	}
 
-	async #normalizeAndInsertPastedImage(image: ImageContent, unsupportedMessage: string): Promise<boolean> {
+	async #normalizePastedImage(image: ImageContent, unsupportedMessage: string): Promise<ImageContent | null> {
 		let imageData = await ensureSupportedImageInput(image);
 		if (!imageData) {
 			this.ctx.showStatus(unsupportedMessage);
-			return false;
+			return null;
 		}
 		if (settings.get("images.autoResize")) {
 			try {
@@ -1628,7 +1643,13 @@ export class InputController {
 				// Keep the normalized image when resize fails.
 			}
 		}
-		await this.#insertPendingImage(imageData);
+		return imageData;
+	}
+
+	async #normalizeAndInsertPastedImage(image: ImageContent, unsupportedMessage: string): Promise<boolean> {
+		const normalized = await this.#normalizePastedImage(image, unsupportedMessage);
+		if (!normalized) return false;
+		await this.#insertPendingImage(normalized);
 		return true;
 	}
 
@@ -1645,6 +1666,33 @@ export class InputController {
 	 * the outcome (image attached, or an unsupported-format status surfaced), so
 	 * the caller stops without emitting its own degraded diagnostic.
 	 */
+	/**
+	 * Attach a pasted video path as a contact-sheet preview grid through the
+	 * image pipeline. A missing ffmpeg (or probe failure) degrades to a text
+	 * paste with an actionable status; ENOENT propagates to the caller's
+	 * clipboard-fallback handling.
+	 */
+	async #insertPendingVideoPreview(pastedPath: string): Promise<void> {
+		try {
+			const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
+			const meta = await probeVideo(absolutePath);
+			const sheet = await buildVideoContactSheetPng(absolutePath, meta);
+			const preview = await this.#normalizePastedImage(
+				{ type: "image", data: sheet.png.data, mimeType: sheet.png.mimeType },
+				"Unsupported pasted video preview format",
+			);
+			if (preview) await this.#insertPendingImage(preview, absolutePath);
+		} catch (error) {
+			if (error instanceof VideoError) {
+				this.ctx.editor.pasteText(pastedPath);
+				this.ctx.ui.requestRender();
+				this.ctx.showStatus(error.message);
+				return;
+			}
+			throw error;
+		}
+	}
+
 	async #tryPasteClipboardImage(): Promise<boolean> {
 		const env = process.env;
 		if (env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT) return false;
@@ -1663,6 +1711,10 @@ export class InputController {
 
 	async handleImagePathPaste(path: string): Promise<void> {
 		try {
+			if (isVideoPath(path)) {
+				await this.#insertPendingVideoPreview(path);
+				return;
+			}
 			const image = await loadImageInput({
 				path,
 				cwd: this.ctx.sessionManager.getCwd(),

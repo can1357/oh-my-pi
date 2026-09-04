@@ -83,6 +83,7 @@ import { shortenPath } from "../../tools/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { applyHyperlinkSetting } from "../../tui/hyperlink";
 import { copyToClipboard } from "../../utils/clipboard";
+import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
@@ -1406,6 +1407,11 @@ export class SelectorController {
 				}
 				void copyToClipboard(content);
 				this.ctx.showStatus(`Copied ${label} to clipboard`);
+			},
+			onOpen: (href, label) => {
+				done();
+				openPath(href);
+				this.ctx.showStatus(`Opening ${label}: ${href}`);
 			},
 			onCancel: done,
 		});

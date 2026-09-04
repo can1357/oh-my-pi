@@ -10,11 +10,15 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import {
+	buildAsyncResultBatchMessage,
+	type AsyncResultEntry,
+} from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -93,6 +97,139 @@ describe("AgentSession owner-routed async delivery", () => {
 			}),
 		);
 		expect(sawResult).toBe(true);
+	});
+
+	it("carries a schema-valid background task's structured output as a pointer only", () => {
+		const job: AsyncJob = {
+			id: "SchemaProbe",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "SchemaProbe",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			resultText: "done",
+			structured: { source: "caller", mode: "permissive", status: "valid", data: { summary: "ok", count: 7 } },
+		};
+		const entry: AsyncResultEntry = {
+			jobId: "SchemaProbe",
+			result: "done",
+			job,
+			durationMs: 1000,
+			epoch: 0,
+		};
+		const message = buildAsyncResultBatchMessage([entry]);
+		expect(message?.details?.jobs[0]?.schema).toEqual({
+			source: "caller",
+			mode: "permissive",
+			status: "valid",
+			data: { summary: "ok", count: 7 },
+		});
+		expect(message?.content).toContain("schema valid");
+		expect(message?.content).toContain("agent://SchemaProbe");
+		expect(message?.content).not.toContain("```json");
+	});
+
+	it("advertises the agent:// URL using the task's agent id, not a disambiguated job id", () => {
+		// Regression: AsyncJobManager suffixes a requested job id when it
+		// collides with another live job (e.g. a task id reusing a vibe turn's
+		// job id), but the task's artifacts are still written under its own
+		// unsuffixed agent id. Advertising the suffixed job id points at a
+		// handle with no backing `<id>.md`/`.json` on disk (PR #10625 review).
+		const job: AsyncJob = {
+			id: "Foo-t1-2",
+			agentId: "Foo-t1",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "Foo-t1",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			resultText: "done",
+			structured: { source: "caller", mode: "permissive", status: "valid", data: { summary: "ok" } },
+		};
+		const entry: AsyncResultEntry = {
+			jobId: "Foo-t1-2",
+			result: "done",
+			job,
+			durationMs: 1000,
+			epoch: 0,
+		};
+		const message = buildAsyncResultBatchMessage([entry]);
+		expect(message?.content).toContain("agent://Foo-t1,");
+		expect(message?.content).not.toContain("agent://Foo-t1-2");
+	});
+
+	it("carries a schema-invalid background task's parsed payload as both a pointer and an inline preview", () => {
+		// Regression: an invalid result's data is now also persisted to the
+		// `<id>.json` sidecar (PR #10625 review), so the delivery must
+		// advertise the same `agent://` recovery pointer as a valid result,
+		// not just the size-capped inline preview (which alone would be the
+		// only model-visible copy for oversized payloads).
+		const job: AsyncJob = {
+			id: "SchemaProbe",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "SchemaProbe",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			resultText: "done",
+			structured: {
+				source: "caller",
+				mode: "strict",
+				status: "invalid",
+				error: "missing required field 'count'",
+				data: { summary: "ok" },
+			},
+		};
+		const entry: AsyncResultEntry = {
+			jobId: "SchemaProbe",
+			result: "done",
+			job,
+			durationMs: 1000,
+			epoch: 0,
+		};
+		const message = buildAsyncResultBatchMessage([entry]);
+		expect(message?.details?.jobs[0]?.schema).toEqual({
+			source: "caller",
+			mode: "strict",
+			status: "invalid",
+			error: "missing required field 'count'",
+			data: { summary: "ok" },
+		});
+		expect(message?.content).toMatch(/```json[\s\S]*"summary": "ok"[\s\S]*```/);
+		expect(message?.content).toContain("missing required field 'count'");
+		expect(message?.content).toContain("full payload at agent://SchemaProbe");
+	});
+
+	it("omits the agent:// pointer for an invalid result with no data to recover", () => {
+		const job: AsyncJob = {
+			id: "SchemaProbe",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "SchemaProbe",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			resultText: "done",
+			structured: {
+				source: "caller",
+				mode: "strict",
+				status: "invalid",
+				error: "subagent yielded no data",
+			},
+		};
+		const entry: AsyncResultEntry = {
+			jobId: "SchemaProbe",
+			result: "done",
+			job,
+			durationMs: 1000,
+			epoch: 0,
+		};
+		const message = buildAsyncResultBatchMessage([entry]);
+		expect(message?.content).not.toContain("agent://SchemaProbe");
+		expect(message?.content).toContain("subagent yielded no data");
 	});
 
 	it("routes an advisor-owned launch completion through the session", async () => {

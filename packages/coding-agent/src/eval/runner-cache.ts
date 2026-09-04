@@ -23,7 +23,7 @@ const stagedPaths = new Map<string, string>();
  * instead of handing back a path to a missing file (issue #8140).
  *
  * @param dirName Cache subdirectory under the OS temp dir (unique per language).
- * @param ext Runner file extension without the dot (e.g. `py`, `jl`, `rb`).
+ * @param ext Runner file extension without the dot (e.g. `py`).
  * @param script Runner source, hashed to key the cached file per version.
  */
 export async function stageRunnerScript(dirName: string, ext: string, script: string): Promise<string> {

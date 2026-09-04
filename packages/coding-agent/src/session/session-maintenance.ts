@@ -5,6 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
@@ -973,11 +974,20 @@ export class SessionMaintenance {
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
 					const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+					// No-reduction decision runs in the encrypted-reasoning-excluded domain
+					// on both sides: opaque replay signatures (thinkingSignature /
+					// redactedThinking) have no trustworthy local token price, so counting
+					// them in the archived region's baseline while the imaged projection
+					// drops them lets an inflating result pass the guard (#10716). The
+					// window-fit check below keeps the conservative `projected`.
+					const projectedForReduction = this.#projectSnapcompactContextTokens(preparation, snapcompactResult, {
+						excludeEncryptedReasoning: true,
+					});
 					const reductionBaseline = this.#projectPreSnapcompactContextTokens(preparation);
-					if (projected >= reductionBaseline) {
+					if (projectedForReduction >= reductionBaseline) {
 						logger.warn("Snapcompact projection would not reduce context", {
 							model: this.#model?.id,
-							projected,
+							projected: projectedForReduction,
 							reductionBaseline,
 						});
 						this.#host.emitNotice("warning", "snapcompact would not reduce context.", "compaction");
@@ -1592,12 +1602,20 @@ export class SessionMaintenance {
 	 * `preparation.tokensBefore`, which carries only provider usage (zero for
 	 * imported sessions with no usage metadata, or a deflated figure behind a
 	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
+	 *
+	 * Opaque provider-replay payloads (`thinkingSignature` / `redactedThinking`)
+	 * are excluded from every region: their local byte size is not a trustworthy
+	 * token price (#2628), and counting them in the archived region — which the
+	 * imaged projection drops — inflated this baseline enough to accept an
+	 * inflating result (#10716). The caller's reduction-side projection excludes
+	 * them symmetrically so the comparison stays in one local token domain.
 	 */
 	#projectPreSnapcompactContextTokens(preparation: CompactionPreparation): number {
+		const opts = { excludeEncryptedReasoning: true } as const;
 		let tokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
-		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize);
-		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
+		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
 		return tokens;
 	}
 
@@ -2488,7 +2506,11 @@ export class SessionMaintenance {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
+	#projectSnapcompactContextTokens(
+		preparation: CompactionPreparation,
+		result: snapcompact.CompactionResult,
+		options?: MessageCountOptions,
+	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive
 			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
@@ -2505,7 +2527,7 @@ export class SessionMaintenance {
 		let tokens =
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
 			this.#tokenizer.countMessage(summaryMessage);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, options);
 		return tokens;
 	}
 
@@ -3434,6 +3456,17 @@ export class SessionMaintenance {
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
 							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+							// Reduction check in the encrypted-reasoning-excluded domain so opaque
+							// replay signatures cannot inflate the removable baseline (#10716);
+							// `triggerContextTokens` is already an encrypted-excluded stored
+							// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
+							const projectedForReduction = this.#projectSnapcompactContextTokens(
+								preparation,
+								snapcompactResult,
+								{
+									excludeEncryptedReasoning: true,
+								},
+							);
 							const reductionBaseline =
 								options.triggerContextTokens !== undefined
 									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
@@ -3443,10 +3476,10 @@ export class SessionMaintenance {
 									? reductionBaseline
 									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
 										this.#projectPreSnapcompactContextTokens(preparation);
-							if (projected >= preparedReductionBaseline) {
+							if (projectedForReduction >= preparedReductionBaseline) {
 								logger.warn("Snapcompact projection would not reduce context", {
 									model: this.#model?.id,
-									projected,
+									projected: projectedForReduction,
 									reductionBaseline: preparedReductionBaseline,
 								});
 								snapcompactBlocker =
