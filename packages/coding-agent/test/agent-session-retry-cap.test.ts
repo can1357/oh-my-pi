@@ -1293,6 +1293,11 @@ describe("AgentSession retry delay cap", () => {
 
 	it.each([
 		["OpenAI-completions stall", "error", "OpenAI completions stream stalled while waiting for the next event"],
+		[
+			"pi-native premature close",
+			"error",
+			"pi-native stream read error: stream closed before a terminal response event",
+		],
 		["reasonless abort", "aborted", "Request was aborted"],
 	] as const)("resumes a %s after a synthetic unexecuted tool result", async (_case, stopReason, errorMessage) => {
 		const model = createMockModel({
@@ -1894,7 +1899,13 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
-	it("retries a transient socket close after partial text and thinking", async () => {
+	it.each([
+		["verbose socket close", "The socket connection was closed unexpectedly"],
+		["bare socket close", "Socket is closed"],
+		["pi-native premature close", "pi-native stream read error: stream closed before a terminal response event"],
+		["gateway 500", "auth-gateway 500: <none>"],
+		["gateway 524", "auth-gateway 524: <none>"],
+	])("retries a transient %s after partial text and thinking", async (_label, errorMessage) => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -1947,8 +1958,7 @@ describe("AgentSession retry delay cap", () => {
 							error: {
 								...partial,
 								stopReason: "error",
-								errorMessage:
-									"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+								errorMessage,
 								duration: 1000,
 							},
 						});

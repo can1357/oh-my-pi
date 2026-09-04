@@ -391,7 +391,10 @@ export function isRetryableStatus(status: number): boolean {
  * proxies surface these for any HTTP/2 stream reset.
  */
 export function isUnexpectedSocketCloseMessage(message: string): boolean {
-	return /\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b/i.test(message);
+	return (
+		/\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b/i.test(message) ||
+		/^(?:error:\s*)?socket is closed\.?$/i.test(message.trim())
+	);
 }
 
 const TRANSIENT_MESSAGE_PATTERN =
