@@ -25,7 +25,6 @@ import {
 	createBridgeEditTool,
 	createBridgeGrepFactory,
 	cursorMcpPrefersReplaceEdit,
-	isCursorTaskMcpName,
 	normalizeCursorReplaceArgs,
 	normalizeCursorTaskArgs,
 } from "@oh-my-pi/pi-coding-agent/cursor-bridge-tools";
@@ -747,24 +746,35 @@ describe("Cursor MCP task tool adapter", () => {
 		await removeWithRetries(cwd);
 	});
 
-	it("recognizes task MCP tool names and aliases", () => {
-		expect(isCursorTaskMcpName("task")).toBe(true);
-		expect(isCursorTaskMcpName("Task")).toBe(true);
-		expect(isCursorTaskMcpName("subagent")).toBe(true);
-		expect(isCursorTaskMcpName("Subagent")).toBe(true);
-		expect(isCursorTaskMcpName("run_subagent")).toBe(true);
-		expect(isCursorTaskMcpName("spawn_subagent")).toBe(true);
-		expect(isCursorTaskMcpName("bash")).toBe(false);
+	it("routes all subagent aliases through the MCP handler to the task tool", async () => {
+		const aliases = ["task", "Task", "subagent", "Subagent", "run_subagent", "spawn_subagent"];
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["task", taskTool]]),
+		});
+
+		for (let i = 0; i < aliases.length; i++) {
+			const alias = aliases[i];
+			const result = await handlers.mcp({
+				name: alias,
+				providerIdentifier: "cursor",
+				toolName: alias,
+				toolCallId: `call-${i}`,
+				args: {
+					prompt: `Do work via ${alias}`,
+					description: `Task-${alias}`,
+				},
+				rawArgs: {},
+			});
+
+			expect(result.isError).toBe(false);
+			expect(executedCalls.length).toBe(i + 1);
+			expect(executedCalls[i].args.task).toBe(`Do work via ${alias}`);
+			expect(executedCalls[i].args.name).toBe(`Task-${alias}`);
+		}
 	});
 
-	it("normalizes single task args with fallback and explore object subagent_type", () => {
-		const raw = { prompt: "run task", subagent_type: { explore: true } };
-		const normalized = normalizeCursorTaskArgs(raw);
-		expect(normalized.task).toBe("run task");
-		expect(normalized.agent).toBe("scout");
-	});
-
-	it("adapts Cursor single-task prompt, description, and subagent_type: 'explore'", async () => {
+	it("treats blank agent and name fields as absent during adaptation", async () => {
 		const handlers = new CursorExecHandlers({
 			cwd,
 			tools: new Map<string, Tool>([["task", taskTool]]),
@@ -774,10 +784,12 @@ describe("Cursor MCP task tool adapter", () => {
 			name: "task",
 			providerIdentifier: "pi-agent",
 			toolName: "task",
-			toolCallId: "t1",
+			toolCallId: "t-blank",
 			args: {
-				prompt: "Search codebase for OAuth handlers",
-				description: "SearchAuth",
+				prompt: "Explore auth subsystem",
+				name: "   ",
+				agent: "",
+				description: "AuthExplorer",
 				subagent_type: "explore",
 			},
 			rawArgs: {},
@@ -785,33 +797,48 @@ describe("Cursor MCP task tool adapter", () => {
 
 		expect(result.isError).toBe(false);
 		expect(executedCalls.length).toBe(1);
-		expect(executedCalls[0].args.task).toBe("Search codebase for OAuth handlers");
-		expect(executedCalls[0].args.name).toBe("SearchAuth");
+		expect(executedCalls[0].args.task).toBe("Explore auth subsystem");
+		expect(executedCalls[0].args.name).toBe("AuthExplorer");
 		expect(executedCalls[0].args.agent).toBe("scout");
 	});
 
-	it("routes subagent alias names (Subagent, run_subagent) to the task tool", async () => {
+	it("preserves an explicitly registered Task tool without falling back to task", async () => {
+		const customTaskExecuted: Array<{ toolCallId: string; args: Record<string, unknown> }> = [];
+		const uppercaseTaskTool: Tool = {
+			name: "Task",
+			label: "UppercaseTask",
+			summary: "Explicitly registered Task tool",
+			approval: "exec",
+			execute: async (toolCallId: string, args: Record<string, unknown>) => {
+				customTaskExecuted.push({ toolCallId, args });
+				return {
+					content: [{ type: "text", text: "Uppercase Task executed" }],
+					details: {},
+				};
+			},
+		} as unknown as Tool;
+
 		const handlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map<string, Tool>([["task", taskTool]]),
+			tools: new Map<string, Tool>([
+				["task", taskTool],
+				["Task", uppercaseTaskTool],
+			]),
 		});
 
 		const result = await handlers.mcp({
-			name: "Subagent",
-			providerIdentifier: "cursor",
-			toolName: "Subagent",
-			toolCallId: "t2",
-			args: {
-				prompt: "Review recent changes for regressions",
-				description: "CodeReview",
-			},
+			name: "Task",
+			providerIdentifier: "custom",
+			toolName: "Task",
+			toolCallId: "call-uppercase-task",
+			args: { customParam: 123 },
 			rawArgs: {},
 		});
 
 		expect(result.isError).toBe(false);
-		expect(executedCalls.length).toBe(1);
-		expect(executedCalls[0].args.task).toBe("Review recent changes for regressions");
-		expect(executedCalls[0].args.name).toBe("CodeReview");
+		expect(customTaskExecuted.length).toBe(1);
+		expect(customTaskExecuted[0].args.customParam).toBe(123);
+		expect(executedCalls.length).toBe(0);
 	});
 
 	it("adapts Cursor batch tasks with prompt items and description context", async () => {

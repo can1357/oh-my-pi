@@ -946,7 +946,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
 		}
 		if (isCursorTaskMcpName(toolName)) {
-			const isExplicitAlias = toolName !== "task" && toolName !== "Task";
+			const isExplicitAlias = toolName !== "task";
 			const exactAliasTool = isExplicitAlias
 				? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
 				: undefined;
@@ -986,7 +986,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
 		const isTask = isCursorTaskMcpName(toolName);
-		const isExplicitAlias = isTask && toolName !== "task" && toolName !== "Task";
+		const isExplicitAlias = isTask && toolName !== "task";
 		const exactAliasTool = isExplicitAlias
 			? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
 			: undefined;

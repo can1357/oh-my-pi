@@ -236,8 +236,8 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 			return {
 				...itemRecord,
 				...(itemTask !== undefined ? { task: itemTask } : {}),
-				...(itemName !== undefined && itemRecord.name === undefined ? { name: itemName } : {}),
-				...(itemAgent !== undefined && itemRecord.agent === undefined ? { agent: itemAgent } : {}),
+				...(itemName !== undefined ? { name: itemName } : {}),
+				...(itemAgent !== undefined ? { agent: itemAgent } : {}),
 			};
 		});
 		const context = nonEmptyStringArg(args, "context") ?? nonEmptyStringArg(args, "description");
@@ -260,7 +260,7 @@ export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<s
 	return {
 		...args,
 		...(task !== undefined ? { task } : {}),
-		...(name !== undefined && args.name === undefined ? { name } : {}),
-		...(agent !== undefined && args.agent === undefined ? { agent } : {}),
+		...(name !== undefined ? { name } : {}),
+		...(agent !== undefined ? { agent } : {}),
 	};
 }
