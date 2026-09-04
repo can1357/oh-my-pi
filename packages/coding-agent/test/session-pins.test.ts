@@ -137,25 +137,33 @@ describe("session-pins", () => {
 		// stranded a truncated file the next launch degraded to an empty set.
 		// The sampler observes on-disk states CONCURRENTLY with the toggles:
 		// every observed state must parse (or be absent); a torn write or a
-		// rename window that exposes partial content fails the parse. Real I/O
-		// interleaving is the point of this test, so the sampler loop awaits
-		// the toggles' own promises rather than sleeping fixed durations.
+		// rename window that exposes partial content fails the parse.
+		// Completion is polled WITHOUT awaiting the aggregate promise, so the
+		// loop keeps reading between writes; a rejected toggle propagates via
+		// the final Promise.all instead of hanging the sampler.
 		const ids = Array.from({ length: 12 }, (_, i) => `session-torn-${i}`);
 		const pinsFile = path.join(tempDir, "session-pins.json");
-		const toggles = ids.map(id => toggleSessionPin(id, tempDir));
+		let settledCount = 0;
+		const toggles = ids.map(id =>
+			toggleSessionPin(id, tempDir).finally(() => {
+				settledCount++;
+			}),
+		);
+		let samples = 0;
 		const sampler = (async () => {
-			while (true) {
+			while (settledCount < toggles.length) {
 				try {
 					const raw = await fs.readFile(pinsFile, "utf-8");
 					if (raw.length > 0) JSON.parse(raw);
+					samples++;
 				} catch (err) {
 					const code = (err as NodeJS.ErrnoException).code;
 					if (code !== "ENOENT") throw err;
 				}
-				if ((await Promise.allSettled(toggles)).every(r => r.status === "fulfilled")) break;
 			}
 		})();
 		await Promise.all([sampler, ...toggles]);
+		expect(samples).toBeGreaterThan(0);
 
 		const raw = await fs.readFile(pinsFile, "utf-8");
 		expect(() => JSON.parse(raw)).not.toThrow();
