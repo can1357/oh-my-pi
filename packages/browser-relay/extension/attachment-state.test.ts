@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
 	extensionOwnedAttachedTabIds,
@@ -15,6 +16,33 @@ import {
 } from "./attachment-state";
 
 describe("attachment-state", () => {
+	it("keeps a main-frame navigation observed before detach as the recovery baseline", () => {
+		const loaderIds = new Map([[1, "loader-before"]]);
+		const generations = new Map([[1, 1]]);
+
+		expect(
+			captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
+				frame: { id: "main", loaderId: "loader-at-detach" },
+			}),
+		).toBe(true);
+		expect(loaderIds.get(1)).toBe("loader-at-detach");
+		expect(generations.get(1)).toBe(2);
+	});
+
+	it("ignores subframe and unrelated events for the recovery baseline", () => {
+		const loaderIds = new Map([[1, "loader-before"]]);
+		const generations = new Map([[1, 1]]);
+
+		expect(
+			captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Page.frameNavigated", {
+				frame: { id: "child", parentId: "main", loaderId: "child-loader" },
+			}),
+		).toBe(false);
+		expect(captureRecoveryLoaderNavigation(loaderIds, generations, 1, "Runtime.ready", {})).toBe(false);
+		expect(loaderIds.get(1)).toBe("loader-before");
+		expect(generations.get(1)).toBe(1);
+	});
+
 	it("keeps unrelated attached tabs fresh when one tab changes after a shared snapshot", () => {
 		const epochs = new Map<number, number>();
 		const tabIds = [11, 22, 33];

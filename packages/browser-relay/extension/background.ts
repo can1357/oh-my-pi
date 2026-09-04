@@ -16,6 +16,7 @@ import type {
 	TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import {
+	captureRecoveryLoaderNavigation,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
 	extensionOwnedAttachedTabIds,
@@ -1156,6 +1157,20 @@ async function connect(): Promise<void> {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
 	if (source.tabId === undefined) return;
+	// A main-frame navigation can commit after the initial Page.getFrameTree
+	// snapshot but before the orphan detach completes. The preload registration
+	// is still active for that navigation, so make its loader the recovery
+	// baseline and invalidate the older in-flight snapshot. Otherwise reconnect
+	// would mistake this covered document for a post-detach navigation and run a
+	// non-idempotent preload twice.
+	if (guardDetachments.has(source.tabId))
+		captureRecoveryLoaderNavigation(
+			recoveryLoaderIds,
+			recoveryLoaderGenerations,
+			source.tabId,
+			method,
+			params,
+		);
 	post({
 		t: "cdpEvent",
 		tabId: source.tabId,

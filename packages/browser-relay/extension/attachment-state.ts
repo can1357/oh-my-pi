@@ -5,6 +5,27 @@ export function noteAttachmentStateChange(
 	epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
 
+export function captureRecoveryLoaderNavigation(
+	loaderIds: Map<number, string>,
+	loaderGenerations: Map<number, number>,
+	tabId: number,
+	method: string,
+	params: unknown,
+): boolean {
+	if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
+		return false;
+	const frame = (params as { frame?: unknown }).frame;
+	if (!frame || typeof frame !== "object") return false;
+	const { loaderId, parentId } = frame as {
+		loaderId?: unknown;
+		parentId?: unknown;
+	};
+	if (parentId !== undefined || typeof loaderId !== "string") return false;
+	noteAttachmentStateChange(loaderGenerations, tabId);
+	loaderIds.set(tabId, loaderId);
+	return true;
+}
+
 export function isAttachmentStateCurrent(
 	epochs: ReadonlyMap<number, number>,
 	tabId: number,

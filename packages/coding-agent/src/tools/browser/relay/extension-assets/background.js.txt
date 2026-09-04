@@ -85,6 +85,19 @@ class AttachmentGuard {
 function noteAttachmentStateChange(epochs, tabId) {
   epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
 }
+function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params) {
+  if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
+    return false;
+  const frame = params.frame;
+  if (!frame || typeof frame !== "object")
+    return false;
+  const { loaderId, parentId } = frame;
+  if (parentId !== undefined || typeof loaderId !== "string")
+    return false;
+  noteAttachmentStateChange(loaderGenerations, tabId);
+  loaderIds.set(tabId, loaderId);
+  return true;
+}
 function isAttachmentStateCurrent(epochs, tabId, epoch) {
   return (epochs.get(tabId) ?? 0) === epoch;
 }
@@ -896,6 +909,8 @@ async function connect() {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
+  if (guardDetachments.has(source.tabId))
+    captureRecoveryLoaderNavigation(recoveryLoaderIds, recoveryLoaderGenerations, source.tabId, method, params);
   post({
     t: "cdpEvent",
     tabId: source.tabId,
