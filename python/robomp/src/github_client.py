@@ -632,7 +632,14 @@ class GitHubClient:
         return [_comment_from_payload(item) for item in (data or [])]
 
     async def list_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
-        """List inline review comments on a PR (the ones attached to a path:line)."""
+        """List inline review comments on a PR (the ones attached to a path:line).
+
+        On Forgejo the flat comment-list endpoint 404s, so we walk the PR's
+        reviews and fetch each review's comments; `position` is treated as the
+        new-file line.
+        """
+        if self._platform == "forgejo":
+            return await self._list_forgejo_review_comments(repo, pr_number)
         data = await self.request(
             "GET",
             f"/repos/{repo}/pulls/{pr_number}/comments",
@@ -655,6 +662,54 @@ class GitHubClient:
                     created_at=str(item.get("created_at") or ""),
                 )
             )
+        return out
+
+    async def _list_forgejo_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
+        """Walk a PR's reviews and collect their inline comments (Forgejo-only).
+
+        Each review's comments paginate with `limit` 50 (Forgejo clamps to
+        MaxResponseItems); a review's items are flattened in review order.
+        """
+        reviews = await self.request(
+            "GET",
+            f"/repos/{repo}/pulls/{pr_number}/reviews",
+            params={"limit": 100},
+        )
+        out: list[ReviewCommentInfo] = []
+        for review in reviews or []:
+            rid = review.get("id")
+            if not isinstance(rid, int):
+                continue
+            # Forgejo clamps limit to MaxResponseItems (default 50), so use
+            # the effective per-page size for the termination check.
+            per_page = 50
+            page = 1
+            while True:
+                data = await self.request(
+                    "GET",
+                    f"/repos/{repo}/pulls/{pr_number}/reviews/{rid}/comments",
+                    params={"limit": per_page, "page": page},
+                )
+                batch = data or []
+                for item in batch:
+                    user = item.get("user") or {}
+                    line = item.get("position")
+                    if not isinstance(line, int):
+                        orig = item.get("original_position")
+                        line = orig if isinstance(orig, int) else None
+                    out.append(
+                        ReviewCommentInfo(
+                            id=int(item.get("id") or 0),
+                            author=str(user.get("login") or ""),
+                            body=str(item.get("body") or ""),
+                            path=str(item.get("path") or ""),
+                            line=line,
+                            created_at=str(item.get("created_at") or ""),
+                        )
+                    )
+                if len(batch) < per_page:
+                    break
+                page += 1
         return out
 
     async def list_pr_reviews(self, repo: str, pr_number: int) -> list[PullRequestReviewInfo]:
@@ -868,12 +923,28 @@ class GitHubClient:
             json={"assignees": assignees},
         )
 
-    async def get_review_comment(self, repo: str, comment_id: int) -> ReviewCommentInfo:
+    async def get_review_comment(
+        self, repo: str, comment_id: int, pr_number: int | None = None
+    ) -> ReviewCommentInfo:
         """Fetch a single inline review comment by id.
 
         Workaround for Forgejo #7935: `pull_request_review_comment` webhook
         payloads on Forgejo carry empty `body` — the API returns the actual text.
+        On Forgejo the flat `pulls/comments/{id}` endpoint 404s, so with
+        `pr_number` given we resolve via the PR's reviews walk and pick the
+        matching id; without it a Forgejo review comment cannot be resolved.
         """
+        if self._platform == "forgejo":
+            if pr_number is None:
+                raise GitHubError(
+                    404,
+                    "cannot resolve a Forgejo review comment by bare id — "
+                    "pass pr_number to walk the PR's reviews",
+                )
+            for comment in await self.list_review_comments(repo, pr_number):
+                if comment.id == comment_id:
+                    return comment
+            raise GitHubError(404, f"review comment {comment_id} not found")
         data = await self.request("GET", f"/repos/{repo}/pulls/comments/{comment_id}")
         user = data.get("user") or {}
         line = data.get("line")

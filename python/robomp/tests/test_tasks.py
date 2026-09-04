@@ -276,7 +276,7 @@ async def test_handle_review_forgejo_empty_body_fetches_comment_text_by_id(db, s
                 is_pull_request=False,
             )
 
-        async def get_review_comment(self, repo, comment_id):
+        async def get_review_comment(self, repo, comment_id, pr_number=None):
             fetched_calls.append((repo, int(comment_id)))
             return ReviewCommentInfo(
                 id=int(comment_id),
@@ -367,7 +367,7 @@ async def test_handle_review_attaches_conversation_thread(db, settings, monkeypa
                 is_pull_request=True,
             )
 
-        async def get_review_comment(self, repo, comment_id):
+        async def get_review_comment(self, repo, comment_id, pr_number=None):
             return ReviewCommentInfo(
                 id=int(comment_id),
                 author="mira",
@@ -473,7 +473,7 @@ async def test_handle_review_refetch_failure_falls_back_to_webhook_body(db, sett
                 is_pull_request=False,
             )
 
-        async def get_review_comment(self, repo, comment_id):
+        async def get_review_comment(self, repo, comment_id, pr_number=None):
             raise GitHubError(500, "internal error")
 
     captured: dict[str, object] = {}
@@ -564,7 +564,7 @@ async def test_handle_review_placeholder_body_is_replaced_by_authoritative_refet
                 is_pull_request=False,
             )
 
-        async def get_review_comment(self, repo, comment_id):
+        async def get_review_comment(self, repo, comment_id, pr_number=None):
             fetched_calls.append((repo, int(comment_id)))
             return ReviewCommentInfo(
                 id=int(comment_id),
