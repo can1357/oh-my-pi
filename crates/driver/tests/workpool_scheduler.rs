@@ -49,14 +49,15 @@ impl WorkpoolPolicy for Policy {
 }
 
 struct Launcher {
-	sessions:  Arc<SessionRegistry>,
-	snapshot:  Arc<RwLock<omp_dom::Snapshot>>,
-	main:      Str,
-	spawned:   AtomicUsize,
-	active:    Arc<AtomicUsize>,
-	maximum:   Arc<AtomicUsize>,
-	die_once:  Arc<AtomicBool>,
-	forwarded: Arc<RwLock<Option<Arc<omp_tools::eval::EvalToolRoster>>>>,
+	sessions:   Arc<SessionRegistry>,
+	snapshot:   Arc<RwLock<omp_dom::Snapshot>>,
+	main:       Str,
+	spawned:    AtomicUsize,
+	active:     Arc<AtomicUsize>,
+	maximum:    Arc<AtomicUsize>,
+	die_once:   Arc<AtomicBool>,
+	fail_after: AtomicUsize,
+	forwarded:  Arc<RwLock<Option<Arc<omp_tools::eval::EvalToolRoster>>>>,
 }
 
 #[async_trait]
@@ -66,7 +67,15 @@ impl WorkpoolLauncher for Launcher {
 		request: WorkerSpawn,
 		events: flume::Sender<WorkerEvent>,
 	) -> Result<WorkerHandle, WorkpoolSchedulerError> {
-		self.spawned.fetch_add(1, Ordering::Relaxed);
+		let spawned = self.spawned.fetch_add(1, Ordering::Relaxed) + 1;
+		if spawned > self.fail_after.load(Ordering::Relaxed) {
+			return Err(WorkpoolSchedulerError::WorkerSpawn {
+				id:     request.id,
+				source: Arc::new(omp_driver::subagent::spawn::SpawnError::Concurrency {
+					maximum: 1,
+				}),
+			});
+		}
 		*self.forwarded.write() = request.eval_tools.clone();
 		let (batches, batch_rx) = flume::unbounded::<WorkerBatch>();
 		let cancel = CancellationToken::new();
@@ -199,6 +208,7 @@ fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
 		active: Arc::new(AtomicUsize::new(0)),
 		maximum: Arc::new(AtomicUsize::new(0)),
 		die_once: Arc::new(AtomicBool::new(die_once)),
+		fail_after: AtomicUsize::new(usize::MAX),
 		forwarded: Arc::new(RwLock::new(None)),
 	});
 	let parent = Arc::new(Mutex::new(parent));
@@ -530,6 +540,29 @@ async fn fresh_policy_honors_concurrency_and_uses_one_worker_per_item() {
 		.expect("wait fresh aggregate")
 		.expect("fresh aggregate");
 	assert_eq!(settled.status, "completed");
+}
+
+#[tokio::test]
+async fn fresh_spawn_failure_fails_every_remaining_queued_item_and_closes() {
+	let harness = harness(1, true, false);
+	harness.launcher.fail_after.store(1, Ordering::Relaxed);
+	let pool = harness
+		.registry
+		.create(WorkpoolCreate { name: sf!("stranded"), agent: sf!("task"), context: None })
+		.expect("create pool");
+	pool
+		.push(vec![sf!("a"), sf!("b"), sf!("c")])
+		.await
+		.expect("push");
+	wait_pending(&pool, 0).await;
+	wait_closed(&pool).await;
+	wait_finished(&harness.jobs, "stranded").await;
+	let status = pool.status();
+	assert_eq!(status.items.completed, 1);
+	assert_eq!(status.items.failed, 2);
+	assert_eq!(status.items.queued, 0);
+	assert_eq!(status.items.running, 0);
+	assert!(status.closed);
 }
 
 #[tokio::test]

@@ -1298,7 +1298,13 @@ impl PoolActor {
 			});
 			state.workers.len() - 1
 		};
-		self.persist("workpool.worker.spawned").await?;
+		if let Err(error) = self.persist("workpool.worker.spawned").await {
+			if let Some(worker) = self.state.lock().workers.pop() {
+				worker.handle.cancel.cancel();
+				self.retired.push((worker.handle.finished, worker.handle.abort));
+			}
+			return Err(error);
+		}
 		Ok(worker)
 	}
 
@@ -1537,7 +1543,6 @@ impl PoolActor {
 				Ok(worker) => self.dispatch(worker, vec![item], false).await,
 				Err(_) => {
 					self.state.lock().items[item].state = ItemState::Failed;
-					break;
 				},
 			}
 		}
