@@ -4312,31 +4312,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Legacy boolean kept only for back-compat migration to `inspect_image.mode`
-	// (see config/settings.ts). Hidden from UI.
-	"inspect_image.enabled": {
-		type: "boolean",
-		default: false,
-	},
-
-	"inspect_image.mode": {
-		type: "enum",
-		values: ["auto", "on", "off"] as const,
-		default: "auto",
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Inspect Image",
-			description:
-				"Controls the inspect_image tool, which delegates image understanding to a vision-capable model. 'auto' exposes it only when the active model lacks native image input; 'on' always exposes it; 'off' never does.",
-			options: [
-				{ value: "auto", label: "Auto (only for models without vision)" },
-				{ value: "on", label: "On" },
-				{ value: "off", label: "Off" },
-			],
-		},
-	},
-
 	"computer.enabled": {
 		type: "boolean",
 		default: false,
@@ -4344,7 +4319,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Computer",
-			description: "Enable the scriptable host-desktop control tool (screenshots, input, accessibility)",
+			description: "Enable the scriptable host-desktop eval prelude (screenshots, input, accessibility)",
 		},
 	},
 
@@ -4381,15 +4356,15 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"inspect_image.timeoutMs": {
+	"images.questionTimeoutMs": {
 		type: "number",
 		default: 300_000,
 		ui: {
 			tab: "tools",
 			group: "Execution",
-			label: "Inspect Image Timeout",
+			label: "Image Question Timeout",
 			description:
-				"Per-request timeout for the inspect_image vision-model call, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
+				"Per-request timeout for the vision-model call behind read's ?q= image questions, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "60000", label: "1 minute" },
@@ -4523,7 +4498,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Browser",
-			description: "Enable the browser tool for scripted Chromium automation (puppeteer)",
+			description: "Enable the browser eval prelude for scripted Chromium automation (Puppeteer)",
 		},
 	},
 
@@ -4547,7 +4522,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Grep & Browser",
 			label: "Browser Relay",
 			description:
-				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser tool needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
+				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser prelude needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
 		},
 	},
 
@@ -4920,6 +4895,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Clone Checkout into Worktrees",
 			description:
 				"New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone",
+		},
+	},
+
+	"worktree.cleanSource": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Clean Source Checkout on /wt",
+			description:
+				"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
 		},
 	},
 

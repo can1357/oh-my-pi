@@ -6,6 +6,7 @@ import {
 	type ImageBudget,
 	ImageProtocol,
 	Markdown,
+	type MarkdownTheme,
 	Spacer,
 	TERMINAL,
 	Text,
@@ -33,6 +34,7 @@ import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcr
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
+const EMPTY_LINK_TARGETS: ReadonlyMap<string, string> = new Map();
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
@@ -258,6 +260,8 @@ export class AssistantMessageComponent extends Container {
 	#thinkingRateLive = false;
 
 	#textColorTransform?: (text: string) => string;
+	#linkTargets: ReadonlyMap<string, string> = EMPTY_LINK_TARGETS;
+	#markdownTheme: MarkdownTheme | undefined;
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
@@ -265,6 +269,37 @@ export class AssistantMessageComponent extends Container {
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
+	}
+
+	#getProseTheme(): MarkdownTheme {
+		if (this.#markdownTheme) return this.#markdownTheme;
+		const base = getMarkdownTheme();
+		const snapshot = this.#linkTargets;
+		const markdownTheme = snapshot.size > 0 ? { ...base, resolveLink: (href: string) => snapshot.get(href) } : base;
+		this.#markdownTheme = markdownTheme;
+		return markdownTheme;
+	}
+
+	/**
+	 * Install resolved destinations for model-authored prose links. A fresh
+	 * theme object is required whenever the map changes because Markdown's
+	 * render cache keys themes by object identity.
+	 */
+	setLinkTargets(targets: ReadonlyMap<string, string>): void {
+		if (
+			targets === this.#linkTargets ||
+			(targets.size === this.#linkTargets.size &&
+				[...targets].every(([href, target]) => this.#linkTargets.get(href) === target))
+		) {
+			return;
+		}
+		this.#linkTargets = targets;
+		this.#markdownTheme = undefined;
+		this.#fastPathKey = undefined;
+		this.#fastPathItems = undefined;
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
 	}
 
 	/**
@@ -333,9 +368,11 @@ export class AssistantMessageComponent extends Container {
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
+		linkTargets?: ReadonlyMap<string, string>,
 	) {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
+		if (linkTargets?.size) this.#linkTargets = linkTargets;
 
 		// Container for text/thinking content.
 		this.#contentContainer = new Container();
@@ -368,9 +405,10 @@ export class AssistantMessageComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		// Theme/symbol changes arrive via invalidate(). Fast-path children captured
-		// getMarkdownTheme() at construction, so drop them and force the teardown
-		// path to rebuild with the current theme. Streaming updates call
-		// updateContent() directly and keep the fast path.
+		// their theme at construction, so drop them and force the teardown path to
+		// rebuild with the current theme. Streaming updates call updateContent()
+		// directly and keep the fast path.
+		this.#markdownTheme = undefined;
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
 		if (this.#lastMessage) {
@@ -1001,7 +1039,7 @@ export class AssistantMessageComponent extends Container {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
+				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });

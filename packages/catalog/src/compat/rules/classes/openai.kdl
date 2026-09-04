@@ -30,6 +30,16 @@ class "openai" {
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		requires-reasoning-off-juice-instruction #true
 	}
+	// Delegation appetite is a lineage trait. GPT-5.6 was trained on Codex's
+	// "no subagents unless asked" developer message; GPT-6 fans out on its own
+	// and over-delegates under Claude-calibrated prompts (reflexive scouts,
+	// single-agent babysitting), so it gets the restrained tier instead.
+	revision "=5.6" {
+		delegation-bias "gated"
+	}
+	revision ">=6" {
+		delegation-bias "restrained"
+	}
 	// GPT-6 Astra changes reasoning effort mid-conversation through a
 	// `configuration_update` input item so the request-level effort (and the
 	// cached prompt prefix) stays put; every other SKU 400s on the item type.

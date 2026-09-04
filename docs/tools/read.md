@@ -203,10 +203,10 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Images
 - Image detection is metadata-based (`readImageMetadata()`).
 - Max accepted image size is `20 MiB` (`MAX_IMAGE_INPUT_BYTES`, re-exported as `MAX_IMAGE_SIZE`). Larger files throw.
-- If the effective `inspect_image` state is active (mode `on`, or `auto` with an active model that lacks native image input), `read` returns metadata only (MIME, bytes, dimensions, channels, alpha) plus a suggestion to call `inspect_image`.
-- Otherwise it calls `loadImageInput()` and returns:
-  - a text note from the image loader
-  - an inline image block
+- `read <image>?q=<question>` loads the image for the resolved vision model and returns its answer as one text block.
+- Without `?q=`, image-capable active models receive a text note plus an inline image block.
+- Without `?q=`, text-only active models receive metadata (MIME, bytes, dimensions, channels, alpha) plus a `?q=<question>` hint.
+- `images.questionTimeoutMs` limits each delegated image question; `0` disables the timeout.
 - Unsupported/undecodable image formats throw a `ToolError`.
 
 ### Internal URLs
