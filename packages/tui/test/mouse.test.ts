@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { TUI } from "@oh-my-pi/pi-tui";
 import {
 	parseSgrMouse,
 	routeSelectListMouse,
@@ -6,6 +7,7 @@ import {
 	type SelectListMouseTarget,
 	type SgrMouseEvent,
 } from "@oh-my-pi/pi-tui/mouse";
+import { VirtualTerminal } from "./virtual-terminal";
 
 describe("parseSgrMouse", () => {
 	it("returns null for non-mouse input", () => {
@@ -24,6 +26,9 @@ describe("parseSgrMouse", () => {
 			wheel: null,
 			motion: false,
 			leftClick: true,
+			shift: false,
+			alt: false,
+			ctrl: false,
 		});
 	});
 
@@ -44,6 +49,23 @@ describe("parseSgrMouse", () => {
 		expect(event?.motion).toBe(true);
 		expect(event?.leftClick).toBe(false);
 		expect(event?.wheel).toBeNull();
+	});
+
+	it("decodes modifier keys in button code", () => {
+		const altClick = parseSgrMouse("\x1b[<8;5;9M");
+		expect(altClick?.alt).toBe(true);
+		expect(altClick?.shift).toBe(false);
+		expect(altClick?.ctrl).toBe(false);
+		expect(altClick?.leftClick).toBe(true);
+
+		const shiftClick = parseSgrMouse("\x1b[<4;5;9M");
+		expect(shiftClick?.shift).toBe(true);
+		expect(shiftClick?.alt).toBe(false);
+
+		const ctrlAltClick = parseSgrMouse("\x1b[<24;5;9M");
+		expect(ctrlAltClick?.ctrl).toBe(true);
+		expect(ctrlAltClick?.alt).toBe(true);
+		expect(ctrlAltClick?.shift).toBe(false);
 	});
 });
 
@@ -128,5 +150,66 @@ describe("routeSelectListMouse", () => {
 		const handled = routeSelectListMouse(target, { ...baseEvent, release: true }, 0);
 		expect(handled).toBe(false);
 		expect(calls).toEqual([]);
+	});
+});
+
+describe("TUI mouse tracking lifecycle", () => {
+	class RecordingTerminal extends VirtualTerminal {
+		writes: string[] = [];
+		override write(data: string): void {
+			this.writes.push(data);
+			super.write(data);
+		}
+	}
+
+	it("defaults normal-mode mouse reporting to disabled", () => {
+		const terminal = new RecordingTerminal(80, 24);
+		const tui = new TUI(terminal, false);
+
+		tui.start();
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1000h");
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1006h");
+		tui.stop();
+	});
+
+	it("delays normal-mode mouse reporting until enableInput when input is deferred", () => {
+		const terminal = new RecordingTerminal(80, 24);
+		const tui = new TUI(terminal, false, { mouseTracking: true });
+		tui.start({ deferInput: true });
+		const startWrites = terminal.writes.join("");
+		expect(startWrites).not.toContain("\x1b[?1000h");
+		expect(startWrites).not.toContain("\x1b[?1006h");
+
+		tui.enableInput();
+		const afterEnable = terminal.writes.join("");
+		expect(afterEnable).toContain("\x1b[?1000h");
+		expect(afterEnable).toContain("\x1b[?1006h");
+
+		tui.stop();
+		const afterStop = terminal.writes.join("");
+		expect(afterStop).toContain("\x1b[?1000l");
+		expect(afterStop).toContain("\x1b[?1006l");
+	});
+
+	it("honors global mouseTracking: false in fullscreen overlays", async () => {
+		const terminal = new RecordingTerminal(80, 24);
+		const tui = new TUI(terminal, false, { mouseTracking: false });
+
+		tui.start();
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1000h");
+
+		const overlay = {
+			render: () => ["modal line"],
+		};
+		tui.showOverlay(overlay, { fullscreen: true });
+		terminal.writes.length = 0;
+		await terminal.waitForRender(() => terminal.writes.some(w => w.includes("\x1b[?1049h")));
+
+		const modalWrites = terminal.writes.join("");
+		expect(modalWrites).toContain("\x1b[?1049h");
+		expect(modalWrites).not.toContain("\x1b[?1000h");
+		expect(modalWrites).not.toContain("\x1b[?1003h");
+
+		tui.stop();
 	});
 });

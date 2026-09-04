@@ -69,6 +69,19 @@ describe("selector setting side effects", () => {
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
+
+	it("updates ui mouse tracking when tui.mouse changes at runtime", () => {
+		const setMouseTracking = vi.fn();
+		const controller = new SelectorController({
+			ui: { setMouseTracking },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("tui.mouse", false);
+		expect(setMouseTracking).toHaveBeenCalledWith(false);
+
+		controller.handleSettingChange("tui.mouse", true);
+		expect(setMouseTracking).toHaveBeenCalledWith(true);
+	});
 	it("applies tui.hyperlinks changes to live renderers", () => {
 		const originalHyperlinks = TERMINAL.hyperlinks;
 		const statusInvalidate = vi.fn();
