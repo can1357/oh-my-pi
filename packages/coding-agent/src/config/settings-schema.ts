@@ -6097,6 +6097,40 @@ export function getUi(path: SettingPath): AnyUiMetadata | undefined {
 	return "ui" in def ? (def.ui as AnyUiMetadata) : undefined;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Declarative Conditions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Declarative descriptor for a `ui.condition` name. Consumers that cannot
+ * evaluate an arbitrary predicate (the `config schema --json` CLI export, the
+ * GUI settings panel) read this instead of a boolean closure. Never an
+ * evaluated boolean itself — the caller decides how to evaluate `kind`.
+ */
+export type ConditionSpec =
+	| { kind: "setting"; dependsOn: SettingPath; equals: unknown }
+	| { kind: "platform"; platform: NodeJS.Platform }
+	| { kind: "terminal"; capability: "imageProtocol" };
+
+/**
+ * Single source of truth mapping every `ui.condition` name used in
+ * {@link SETTINGS_SCHEMA} to its declarative descriptor. `settings-defs.ts`
+ * derives its runtime predicate closures from this table so the two cannot
+ * drift; a condition name missing here is a schema bug, not a supported case.
+ */
+export const CONDITION_SPECS: Record<string, ConditionSpec> = {
+	macOS: { kind: "platform", platform: "darwin" },
+	hasImageProtocol: { kind: "terminal", capability: "imageProtocol" },
+	advisorEnabled: { kind: "setting", dependsOn: "advisor.enabled", equals: true },
+	hindsightActive: { kind: "setting", dependsOn: "memory.backend", equals: "hindsight" },
+	mnemopiActive: { kind: "setting", dependsOn: "memory.backend", equals: "mnemopi" },
+	autolearnActive: { kind: "setting", dependsOn: "autolearn.enabled", equals: true },
+	autoThinkingActive: { kind: "setting", dependsOn: "defaultThinkingLevel", equals: "auto" },
+	usageAwareFallbackEnabled: { kind: "setting", dependsOn: "retry.usageAwareFallback", equals: true },
+	planModeEnabled: { kind: "setting", dependsOn: "plan.enabled", equals: true },
+	unexpectedStopSmart: { kind: "setting", dependsOn: "features.unexpectedStopDetection", equals: "smart" },
+};
+
 /** Get all paths for a specific tab */
 export function getPathsForTab(tab: SettingTab): SettingPath[] {
 	return (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(path => {
