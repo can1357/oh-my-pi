@@ -101,6 +101,13 @@ function stringArg(args: Record<string, unknown>, key: string): string | undefin
 	return typeof value === "string" ? value : undefined;
 }
 
+function nonEmptyStringArg(args: Record<string, unknown>, key: string): string | undefined {
+	const value = args[key];
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function isCursorStrReplaceMcpName(name: string): boolean {
 	return CURSOR_STRREPLACE_MCP_NAMES.has(name);
 }
@@ -169,6 +176,7 @@ export function cursorMcpPrefersReplaceEdit(name: string, args: Record<string, u
 const CURSOR_TASK_MCP_NAMES = new Set(["task", "Task", "subagent", "Subagent", "run_subagent", "spawn_subagent"]);
 
 export function isCursorTaskMcpName(name: string): boolean {
+	if (name.startsWith("mcp__")) return false;
 	return CURSOR_TASK_MCP_NAMES.has(name);
 }
 
@@ -210,44 +218,49 @@ function resolveSubagentTypeToAgent(typeVal: unknown): string | undefined {
  * Cursor's models are fine-tuned to emit `{ description, prompt, subagent_type }`
  * rather than OMP's `{ task, agent, name }` or `{ context, tasks: [...] }`.
  * This adapts single-task calls and per-item batch prompts so models can invoke
- * subagents reliably without schema rejection.
+ * subagents reliably without schema rejection. Canonical fields (`task`, `name`,
+ * `agent`) take precedence over Cursor aliases when both are present.
  */
 export function normalizeCursorTaskArgs(args: Record<string, unknown>): Record<string, unknown> {
 	if (Array.isArray(args.tasks) && args.tasks.length > 0) {
 		const tasks = args.tasks.map(item => {
 			if (!item || typeof item !== "object") return item;
 			const itemRecord = item as Record<string, unknown>;
-			const itemPrompt =
-				stringArg(itemRecord, "prompt") ?? stringArg(itemRecord, "task") ?? stringArg(itemRecord, "instruction");
-			const itemDesc = stringArg(itemRecord, "description") ?? stringArg(itemRecord, "name");
-			const itemAgent = stringArg(itemRecord, "agent") ?? resolveSubagentTypeToAgent(itemRecord.subagent_type);
+			const itemTask =
+				nonEmptyStringArg(itemRecord, "task") ??
+				nonEmptyStringArg(itemRecord, "prompt") ??
+				nonEmptyStringArg(itemRecord, "instruction");
+			const itemName = nonEmptyStringArg(itemRecord, "name") ?? nonEmptyStringArg(itemRecord, "description");
+			const itemAgent =
+				nonEmptyStringArg(itemRecord, "agent") ?? resolveSubagentTypeToAgent(itemRecord.subagent_type);
 			return {
 				...itemRecord,
-				...(itemPrompt !== undefined ? { task: itemPrompt } : {}),
-				...(itemDesc !== undefined && itemRecord.name === undefined ? { name: itemDesc } : {}),
+				...(itemTask !== undefined ? { task: itemTask } : {}),
+				...(itemName !== undefined && itemRecord.name === undefined ? { name: itemName } : {}),
 				...(itemAgent !== undefined && itemRecord.agent === undefined ? { agent: itemAgent } : {}),
 			};
 		});
-		const context = stringArg(args, "context") ?? stringArg(args, "description") ?? "Delegated subagent tasks";
+		const context = nonEmptyStringArg(args, "context") ?? nonEmptyStringArg(args, "description");
 		return {
 			...args,
-			context,
+			...(context !== undefined ? { context } : {}),
 			tasks,
 		};
 	}
 
-	const prompt = stringArg(args, "prompt") ?? stringArg(args, "task") ?? stringArg(args, "instruction");
-	const description = stringArg(args, "description") ?? stringArg(args, "name");
-	const agent = stringArg(args, "agent") ?? resolveSubagentTypeToAgent(args.subagent_type);
+	const task =
+		nonEmptyStringArg(args, "task") ?? nonEmptyStringArg(args, "prompt") ?? nonEmptyStringArg(args, "instruction");
+	const name = nonEmptyStringArg(args, "name") ?? nonEmptyStringArg(args, "description");
+	const agent = nonEmptyStringArg(args, "agent") ?? resolveSubagentTypeToAgent(args.subagent_type);
 
-	if (prompt === undefined && description === undefined && agent === undefined) {
+	if (task === undefined && name === undefined && agent === undefined) {
 		return args;
 	}
 
 	return {
 		...args,
-		...(prompt !== undefined ? { task: prompt } : {}),
-		...(description !== undefined && args.name === undefined ? { name: description } : {}),
+		...(task !== undefined ? { task } : {}),
+		...(name !== undefined && args.name === undefined ? { name } : {}),
 		...(agent !== undefined && args.agent === undefined ? { agent } : {}),
 	};
 }

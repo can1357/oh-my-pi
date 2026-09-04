@@ -892,6 +892,95 @@ describe("Cursor MCP task tool adapter", () => {
 		expect(result.isError).toBe(true);
 		expect(result.content[0].type === "text" && result.content[0].text).toContain("not found");
 	});
+
+	it("preserves canonical task, name, and agent fields over Cursor aliases", () => {
+		const raw = {
+			task: "canonical task",
+			prompt: "fallback prompt",
+			name: "CanonicalName",
+			description: "FallbackDesc",
+			agent: "reviewer",
+			subagent_type: "explore",
+		};
+		const normalized = normalizeCursorTaskArgs(raw);
+		expect(normalized.task).toBe("canonical task");
+		expect(normalized.name).toBe("CanonicalName");
+		expect(normalized.agent).toBe("reviewer");
+
+		const batchRaw = {
+			context: "canonical context",
+			description: "fallback description",
+			tasks: [
+				{
+					task: "canonical item task",
+					prompt: "fallback item prompt",
+					name: "ItemCanonical",
+					description: "ItemFallback",
+					agent: "reviewer",
+					subagent_type: "explore",
+				},
+			],
+		};
+		const batchNormalized = normalizeCursorTaskArgs(batchRaw);
+		expect(batchNormalized.context).toBe("canonical context");
+		const items = batchNormalized.tasks as Array<Record<string, unknown>>;
+		expect(items[0].task).toBe("canonical item task");
+		expect(items[0].name).toBe("ItemCanonical");
+		expect(items[0].agent).toBe("reviewer");
+	});
+
+	it("leaves batch context undefined when neither context nor description is provided", () => {
+		const raw = {
+			tasks: [{ prompt: "scan files" }],
+		};
+		const normalized = normalizeCursorTaskArgs(raw);
+		expect(normalized.context).toBeUndefined();
+	});
+
+	it("does not promote whitespace-only prompt to task", () => {
+		const raw = { prompt: "   " };
+		const normalized = normalizeCursorTaskArgs(raw);
+		expect(normalized.task).toBeUndefined();
+	});
+
+	it("does not shadow an explicitly registered third-party tool named subagent", async () => {
+		const customSubagentExecuted: Array<{ toolCallId: string; args: Record<string, unknown> }> = [];
+		const customSubagentTool: Tool = {
+			name: "subagent",
+			label: "CustomSubagent",
+			summary: "Third-party subagent tool",
+			approval: "exec",
+			execute: async (toolCallId: string, args: Record<string, unknown>) => {
+				customSubagentExecuted.push({ toolCallId, args });
+				return {
+					content: [{ type: "text", text: "Custom subagent output" }],
+					details: {},
+				};
+			},
+		} as unknown as Tool;
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["task", taskTool],
+				["subagent", customSubagentTool],
+			]),
+		});
+
+		const result = await handlers.mcp({
+			name: "subagent",
+			providerIdentifier: "third-party",
+			toolName: "subagent",
+			toolCallId: "custom1",
+			args: { customArg: "hello" },
+			rawArgs: {},
+		});
+
+		expect(result.isError).toBe(false);
+		expect(customSubagentExecuted.length).toBe(1);
+		expect(customSubagentExecuted[0].args.customArg).toBe("hello");
+		expect(executedCalls.length).toBe(0);
+	});
 });
 
 describe("pi_bash timeout presence", () => {

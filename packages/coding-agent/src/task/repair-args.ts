@@ -79,43 +79,12 @@ export function repairDoubleEncodedJsonString(value: string): string {
 	return typeof decoded === "string" && decoded !== value ? decoded : value;
 }
 
-function stringProperty(obj: Record<string, unknown>, key: string): string | undefined {
-	const val = obj[key];
-	return typeof val === "string" && val.trim() !== "" ? val : undefined;
-}
-
 /** Repair a single (possibly partial) task item's prose field (`task`). */
 function repairTaskItem(item: TaskItem): TaskItem {
 	if (item === null || typeof item !== "object") return item;
-	const raw = item as Record<string, unknown>;
-	let nextItem = item;
-
-	// Cursor/foreign model compatibility: prompt -> task, description -> name, explore -> scout
-	if (typeof nextItem.task !== "string" || nextItem.task.trim() === "") {
-		const fallbackTask = stringProperty(raw, "prompt") ?? stringProperty(raw, "instruction");
-		if (fallbackTask !== undefined) {
-			nextItem = { ...nextItem, task: fallbackTask };
-		}
-	}
-	if (typeof nextItem.name !== "string" || nextItem.name.trim() === "") {
-		const fallbackName = stringProperty(raw, "description");
-		if (fallbackName !== undefined) {
-			nextItem = { ...nextItem, name: fallbackName };
-		}
-	}
-	if (
-		!nextItem.agent &&
-		(raw.subagent_type === "explore" ||
-			(raw.subagent_type &&
-				typeof raw.subagent_type === "object" &&
-				(raw.subagent_type as Record<string, unknown>).explore !== undefined))
-	) {
-		nextItem = { ...nextItem, agent: "scout" };
-	}
-
-	const task = typeof nextItem.task === "string" ? repairDoubleEncodedJsonString(nextItem.task) : nextItem.task;
-	if (task === nextItem.task && nextItem === item) return item;
-	return { ...nextItem, task };
+	const task = typeof item.task === "string" ? repairDoubleEncodedJsonString(item.task) : item.task;
+	if (task === item.task) return item;
+	return { ...item, task };
 }
 
 /**
@@ -127,48 +96,14 @@ function repairTaskItem(item: TaskItem): TaskItem {
  */
 export function repairTaskParams(params: TaskParams): TaskParams {
 	if (params === null || typeof params !== "object") return params;
-	const raw = params as Record<string, unknown>;
-	let nextParams = params;
 
-	// Cursor/foreign model single-task compatibility: prompt -> task, description -> name, explore -> scout
-	if (typeof nextParams.task !== "string" || nextParams.task.trim() === "") {
-		const fallbackTask = stringProperty(raw, "prompt") ?? stringProperty(raw, "instruction");
-		if (fallbackTask !== undefined) {
-			nextParams = { ...nextParams, task: fallbackTask };
-		}
-	}
-	if (typeof nextParams.name !== "string" || nextParams.name.trim() === "") {
-		const fallbackName = stringProperty(raw, "description");
-		if (fallbackName !== undefined) {
-			nextParams = { ...nextParams, name: fallbackName };
-		}
-	}
-	if (
-		!nextParams.agent &&
-		(raw.subagent_type === "explore" ||
-			(raw.subagent_type &&
-				typeof raw.subagent_type === "object" &&
-				(raw.subagent_type as Record<string, unknown>).explore !== undefined))
-	) {
-		nextParams = { ...nextParams, agent: "scout" };
-	}
+	const task = typeof params.task === "string" ? repairDoubleEncodedJsonString(params.task) : params.task;
+	const context = typeof params.context === "string" ? repairDoubleEncodedJsonString(params.context) : params.context;
 
-	const task = typeof nextParams.task === "string" ? repairDoubleEncodedJsonString(nextParams.task) : nextParams.task;
-	const context =
-		typeof nextParams.context === "string" ? repairDoubleEncodedJsonString(nextParams.context) : nextParams.context;
-
-	let effectiveContext = context;
-	if (Array.isArray(nextParams.tasks) && (effectiveContext === undefined || effectiveContext.trim() === "")) {
-		const fallbackContext = stringProperty(raw, "description");
-		if (fallbackContext !== undefined) {
-			effectiveContext = fallbackContext;
-		}
-	}
-
-	let tasks = nextParams.tasks;
-	if (Array.isArray(nextParams.tasks)) {
+	let tasks = params.tasks;
+	if (Array.isArray(params.tasks)) {
 		let changed = false;
-		const repaired = nextParams.tasks.map(item => {
+		const repaired = params.tasks.map(item => {
 			const next = repairTaskItem(item);
 			if (next !== item) changed = true;
 			return next;
@@ -176,8 +111,8 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 		if (changed) tasks = repaired;
 	}
 
-	if (task === params.task && effectiveContext === params.context && tasks === params.tasks && nextParams === params) {
+	if (task === params.task && context === params.context && tasks === params.tasks) {
 		return params;
 	}
-	return { ...nextParams, task, context: effectiveContext, tasks };
+	return { ...params, task, context, tasks };
 }

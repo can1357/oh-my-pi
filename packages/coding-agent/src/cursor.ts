@@ -946,14 +946,20 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
 		}
 		if (isCursorTaskMcpName(toolName)) {
-			const targetToolName = "task";
-			const tool = this.options.getExecutableTool?.(targetToolName) ?? this.options.tools.get(targetToolName);
-			if (!tool) {
-				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
-				const message = formatMcpToolErrorMessage(toolName, availableTools);
-				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+			const isExplicitAlias = toolName !== "task" && toolName !== "Task";
+			const exactAliasTool = isExplicitAlias
+				? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
+				: undefined;
+			if (!exactAliasTool) {
+				const targetToolName = "task";
+				const tool = this.options.getExecutableTool?.(targetToolName) ?? this.options.tools.get(targetToolName);
+				if (!tool) {
+					const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+					const message = formatMcpToolErrorMessage(toolName, availableTools);
+					return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
+				}
+				return await executeTool(this.options, targetToolName, toolCallId, normalizeCursorTaskArgs(args));
 			}
-			return await executeTool(this.options, targetToolName, toolCallId, normalizeCursorTaskArgs(args));
 		}
 		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
@@ -980,9 +986,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
 		const isTask = isCursorTaskMcpName(toolName);
+		const isExplicitAlias = isTask && toolName !== "task" && toolName !== "Task";
+		const exactAliasTool = isExplicitAlias
+			? (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName))
+			: undefined;
+		const routeToTask = isTask && !exactAliasTool;
+
 		const tool = preferReplace
 			? this.options.getEditReplaceTool?.()
-			: isTask
+			: routeToTask
 				? (this.options.getExecutableTool?.("task") ?? this.options.tools.get("task"))
 				: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
 		if (!tool) return false;
@@ -992,7 +1004,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
 		const normalizedArgs = preferReplace
 			? normalizeCursorReplaceArgs(args)
-			: isTask
+			: routeToTask
 				? normalizeCursorTaskArgs(args)
 				: args;
 		const approval = resolveApproval(

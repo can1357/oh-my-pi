@@ -89,36 +89,4 @@ describe("repairTaskParams", () => {
 		};
 		expect(repairTaskParams(params)).toBe(params);
 	});
-
-	it("adapts Cursor prompt, description, and subagent_type into task, name, and agent", () => {
-		const cursorCall = {
-			prompt: "Explore the codebase for auth tokens",
-			description: "FindAuthTokens",
-			subagent_type: "explore",
-		} as unknown as TaskParams;
-
-		const repaired = repairTaskParams(cursorCall);
-		expect(repaired.task).toBe("Explore the codebase for auth tokens");
-		expect(repaired.name).toBe("FindAuthTokens");
-		expect(repaired.agent).toBe("scout");
-	});
-
-	it("adapts Cursor batch tasks with prompt and description fallback for context", () => {
-		const cursorBatch = {
-			description: "Auth refactor overview",
-			tasks: [
-				{ prompt: "Search auth files", description: "SearchTask", subagent_type: "explore" },
-				{ prompt: "Run unit tests", name: "TestTask", agent: "task" },
-			],
-		} as unknown as TaskParams;
-
-		const repaired = repairTaskParams(cursorBatch);
-		expect(repaired.context).toBe("Auth refactor overview");
-		expect(repaired.tasks?.[0]?.task).toBe("Search auth files");
-		expect(repaired.tasks?.[0]?.name).toBe("SearchTask");
-		expect(repaired.tasks?.[0]?.agent).toBe("scout");
-		expect(repaired.tasks?.[1]?.task).toBe("Run unit tests");
-		expect(repaired.tasks?.[1]?.name).toBe("TestTask");
-		expect(repaired.tasks?.[1]?.agent).toBe("task");
-	});
 });
