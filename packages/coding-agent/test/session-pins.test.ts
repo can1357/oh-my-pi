@@ -132,15 +132,35 @@ describe("session-pins", () => {
 		for (const id of ids) expect(loaded.has(id)).toBe(true);
 	});
 
-	it("never leaves a truncated pins file behind after concurrent writes", async () => {
+	it("never exposes a truncated pins file while writes are in flight", async () => {
+		// Regression: Bun.write truncated in place, so a crash mid-write
+		// stranded a truncated file the next launch degraded to an empty set.
+		// The sampler observes on-disk states CONCURRENTLY with the toggles:
+		// every observed state must parse (or be absent); a torn write or a
+		// rename window that exposes partial content fails the parse. Real I/O
+		// interleaving is the point of this test, so the sampler loop awaits
+		// the toggles' own promises rather than sleeping fixed durations.
 		const ids = Array.from({ length: 12 }, (_, i) => `session-torn-${i}`);
-		await Promise.all(ids.map(id => toggleSessionPin(id, tempDir)));
+		const pinsFile = path.join(tempDir, "session-pins.json");
+		const toggles = ids.map(id => toggleSessionPin(id, tempDir));
+		const sampler = (async () => {
+			while (true) {
+				try {
+					const raw = await fs.readFile(pinsFile, "utf-8");
+					if (raw.length > 0) JSON.parse(raw);
+				} catch (err) {
+					const code = (err as NodeJS.ErrnoException).code;
+					if (code !== "ENOENT") throw err;
+				}
+				if ((await Promise.allSettled(toggles)).every(r => r.status === "fulfilled")) break;
+			}
+		})();
+		await Promise.all([sampler, ...toggles]);
 
-		// Every intermediate state on disk must be valid JSON: a torn write used
-		// to truncate in place, and the next launch degraded it to an empty set.
-		const raw = await fs.readFile(path.join(tempDir, "session-pins.json"), "utf-8");
+		const raw = await fs.readFile(pinsFile, "utf-8");
 		expect(() => JSON.parse(raw)).not.toThrow();
 		expect((JSON.parse(raw) as string[]).length).toBe(ids.length);
-		expect(await fs.readdir(tempDir)).not.toContain(expect.stringMatching(/\.tmp$/));
+		const files = await fs.readdir(tempDir);
+		expect(files.some(f => f.endsWith(".tmp"))).toBe(false);
 	});
 });
