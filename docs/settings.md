@@ -692,6 +692,15 @@ tui:
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
 
+The model segment renders the serving provider as a dim `provider/` prefix by default (mirroring the model browser), so the provider is always visible without opening `/model`. Disable it with:
+
+```yaml
+statusLine:
+  segmentOptions:
+    model:
+      showProvider: false
+```
+
 ### Interaction
 
 | Key                    | Type    | Default         | Values                                                                                                  |

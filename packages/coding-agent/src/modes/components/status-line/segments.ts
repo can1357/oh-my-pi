@@ -206,6 +206,13 @@ const modelSegment: StatusLineSegment = {
 		}
 		modelName = statusValue(ctx, modelName);
 
+		// The serving provider renders as a dim `provider/` prefix so the
+		// provider stays visible without opening `/model` — same convention as
+		// the model browser. Opt out per-preset or via
+		// `statusLine.segmentOptions.model.showProvider: false`.
+		const providerPrefix =
+			opts.showProvider !== false && state.model?.provider ? theme.fg("dim", `${state.model.provider}/`) : "";
+
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
 		let thinkingDisplay = "";
@@ -250,7 +257,15 @@ const modelSegment: StatusLineSegment = {
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
-		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
+		// Spans must be siblings, never nested: `theme.fg` resets fg with
+		// `\x1b[39m`, so the dim provider prefix's reset would drop the model
+		// name back to the terminal default if it were wrapped inside the
+		// `statusLineModel` span. With a prefix, emit icon, prefix, and name as
+		// separate spans that each re-open their own color.
+		const nameSpan = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
+		let content = providerPrefix
+			? `${accentFg(ctx, "statusLineModel", withIcon(modelIcon, ""))}${providerPrefix}${accentFg(ctx, "statusLineModel", modelName)}`
+			: nameSpan;
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in

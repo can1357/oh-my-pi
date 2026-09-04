@@ -123,6 +123,52 @@ describe("status line model segment advisor badge", () => {
 	});
 });
 
+describe("status line model segment provider prefix", () => {
+	it("renders the provider as a dim `provider/` prefix when known", () => {
+		const ctx = createModelContext(false);
+		ctx.session.state.model = {
+			id: "nemotron-3-ultra",
+			name: "Nemotron 3 Ultra (free)",
+			provider: "nvidia",
+		} as unknown as NonNullable<SegmentContext["session"]["state"]["model"]>;
+		const rendered = renderSegment("model", ctx);
+		expect(rendered.content).toContain(theme.fg("dim", "nvidia/"));
+		expect(rendered.content).toContain("Nemotron 3 Ultra (free)");
+	});
+
+	it("keeps the model name in the statusLineModel color when the prefix is present", () => {
+		const ctx = createModelContext(false);
+		ctx.session.state.model = {
+			id: "nemotron-3-ultra",
+			name: "Nemotron 3 Ultra (free)",
+			provider: "nvidia",
+		} as unknown as NonNullable<SegmentContext["session"]["state"]["model"]>;
+		const rendered = renderSegment("model", ctx);
+		// Raw-ANSI assertion: the dim prefix must be a sibling span — its
+		// trailing `\x1b[39m` reset would otherwise drop the name to the
+		// terminal default instead of `statusLineModel`.
+		expect(rendered.content).toContain(theme.fg("statusLineModel", "Nemotron 3 Ultra (free)"));
+	});
+
+	it("omits the prefix when no provider is known", () => {
+		const rendered = renderSegment("model", createModelContext(false));
+		const modelPrefix = theme.icon.model ? `${theme.icon.model} ` : "";
+		expect(Bun.stripANSI(rendered.content)).toBe(`${modelPrefix}Test Model`);
+	});
+
+	it("omits the prefix when showProvider is false", () => {
+		const ctx = createModelContext(false);
+		ctx.session.state.model = {
+			id: "nemotron-3-ultra",
+			name: "Nemotron 3 Ultra (free)",
+			provider: "nvidia",
+		} as unknown as NonNullable<SegmentContext["session"]["state"]["model"]>;
+		ctx.options = { model: { showProvider: false } };
+		const rendered = renderSegment("model", ctx);
+		expect(rendered.content).not.toContain(theme.fg("dim", "nvidia/"));
+	});
+});
+
 describe("status line model segment compact thinking level", () => {
 	function createThinkingContext(compactThinkingLevel: boolean): SegmentContext {
 		return {
