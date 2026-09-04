@@ -15,11 +15,11 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 const UP = "\x1b[A";
+const DOWN = "\x1b[B";
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";
 const ENTER = "\r";
 const ESC = "\x1b";
-
 const CODE = "const answer = 42;\nconsole.log(answer);";
 const LINK = "https://github.com/can1357/oh-my-pi/pull/10503";
 const ASSISTANT_TEXT = `Here is the fix:\n\`\`\`ts\n${CODE}\n\`\`\`\nDone. See [the PR](${LINK}).`;
@@ -72,7 +72,10 @@ function makeSelector(
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
-		onPick: (content, label) => picks.push({ content, label }),
+		onPick: (content, label) => {
+			picks.push({ content, label });
+			return true;
+		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
 	});
@@ -304,5 +307,50 @@ describe("CopySelectorComponent", () => {
 		const boxed = lines.filter(line => line.startsWith("┆")).join("\n");
 		expect(boxed).toContain("const answer = 42;");
 		expect(boxed).not.toContain("bun test");
+	});
+
+	it("keeps picker open on Enter for sequential block copies, exits on q or Esc", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const onCancel = vi.fn();
+		const selector = makeSelector(picks, onCancel);
+		selector.render(100);
+
+		selector.handleInput(RIGHT);
+		// Copy first block (code)
+		selector.handleInput(ENTER);
+		expect(picks).toHaveLength(1);
+		expect(picks[0]).toEqual({ content: CODE, label: "ts code" });
+		expect(onCancel).not.toHaveBeenCalled();
+
+		// Navigate down and copy third block (bash command)
+		selector.handleInput(DOWN);
+		selector.handleInput(DOWN);
+		selector.handleInput(ENTER);
+		expect(picks).toHaveLength(2);
+		expect(picks[1]).toEqual({ content: "bun test", label: "bash command" });
+		expect(onCancel).not.toHaveBeenCalled();
+
+		// Exit explicitly via q
+		selector.handleInput("q");
+		expect(onCancel).toHaveBeenCalledTimes(1);
+		selector.dispose();
+	});
+
+	it("does not mark block or turn as copied when onPick rejects payload", () => {
+		const onCancel = vi.fn();
+		const selector = new CopySelectorComponent(makeEntries(), {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: () => {},
+			onPick: () => false,
+			onCancel,
+		});
+		selector.render(100);
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER);
+		const frame = selector.render(100).join("\n");
+		expect(frame).not.toContain("✓ copied!");
+		expect(frame).not.toContain("✓ Copied!");
+		selector.dispose();
 	});
 });

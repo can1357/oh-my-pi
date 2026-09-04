@@ -1412,6 +1412,7 @@ export class SelectorController {
 		}
 
 		let lastCopied: string | undefined;
+		let copyQueue: Promise<void> = Promise.resolve();
 		const done = () => {
 			overlayHandle?.hide();
 			selector?.dispose();
@@ -1432,11 +1433,16 @@ export class SelectorController {
 			onPick: (content, label) => {
 				if (!content.trim()) {
 					this.ctx.showStatus("Nothing to copy in that item");
-					return;
+					return false;
 				}
 				lastCopied = label;
-				void copyToClipboard(content);
+				copyQueue = copyQueue
+					.then(async () => {
+						await copyToClipboard(content);
+					})
+					.catch(() => {});
 				this.ctx.ui.requestRender();
+				return true;
 			},
 			onOpen: (href, label) => {
 				openPath(href);

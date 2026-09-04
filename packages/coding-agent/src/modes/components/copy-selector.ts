@@ -58,8 +58,8 @@ export interface CopySelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
-	/** The outlined content was chosen — copy it. `label` feeds the status line. */
-	onPick: (content: string, label: string) => void;
+	/** The outlined content was chosen — copy it. Returns true if accepted. */
+	onPick: (content: string, label: string) => boolean;
 	/** `o` on a link block — open `href` with the system opener. Absent: `o` is ignored. */
 	onOpen?: (href: string, label: string) => void;
 	onCancel: () => void;
@@ -223,15 +223,17 @@ export class CopySelectorComponent implements Component {
 			if (this.#blocks) {
 				const block = this.#blocks[this.#blockSelected];
 				if (block) {
-					this.#copiedBlock = { turnId: target.turnId, blockIndex: this.#blockSelected };
-					this.deps.onPick(block.content, block.label);
+					if (this.deps.onPick(block.content, block.label)) {
+						this.#copiedBlock = { turnId: target.turnId, blockIndex: this.#blockSelected };
+					}
 					this.deps.requestRender();
 				}
 				return;
 			}
 			const item = targetCopy(target, this.#blocksFor(target));
-			this.#copiedTurnId = target.turnId;
-			this.deps.onPick(item.content, item.label);
+			if (this.deps.onPick(item.content, item.label)) {
+				this.#copiedTurnId = target.turnId;
+			}
 			this.deps.requestRender();
 			return;
 		}
@@ -263,11 +265,12 @@ export class CopySelectorComponent implements Component {
 			if (block.href && this.deps.onOpen) this.deps.onOpen(block.href, block.label);
 			return;
 		}
-		const target = this.#targets[this.#selected];
-		if (target) {
-			this.#copiedBlock = { turnId: target.turnId, blockIndex: hit.blockIndex };
+		if (this.deps.onPick(block.content, block.label)) {
+			const target = this.#targets[this.#selected];
+			if (target) {
+				this.#copiedBlock = { turnId: target.turnId, blockIndex: hit.blockIndex };
+			}
 		}
-		this.deps.onPick(block.content, block.label);
 		this.deps.requestRender();
 	}
 
@@ -359,9 +362,8 @@ export class CopySelectorComponent implements Component {
 
 		const output: string[] = [];
 		output.push(...this.#border.render(width));
-		output.push(
-			` ${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on clipboard  (esc/q to exit)")}`,
-		);
+		const headerText = `${theme.cmd.copy} ${theme.bold("Copy")}${theme.sep.dot}${theme.fg("dim", "pick what to put on clipboard  (esc/q to exit)")}`;
+		output.push(` ${truncateToWidth(headerText, Math.max(1, width - 2))}`);
 		output.push(...this.#border.render(width));
 		output.push(...this.#scrollView.render(width));
 		const selectedBlock = this.#blocks?.[this.#blockSelected];
@@ -378,7 +380,7 @@ export class CopySelectorComponent implements Component {
 			: isTurnCopied
 				? `${theme.fg("success", theme.bold("✓ Copied turn!"))}  ${theme.fg("dim", `↑/↓ step  enter copy  esc/q exit`)}`
 				: `${this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : ""}↑/↓ step  ${blocks.length > 0 ? "→ blocks  " : ""}enter copy  esc/q exit`;
-		output.push(` ${hint}`);
+		output.push(` ${truncateToWidth(hint, Math.max(1, width - 2))}`);
 		output.push(...this.#border.render(width));
 		return output;
 	}
