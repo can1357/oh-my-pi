@@ -141,31 +141,32 @@ describe("date-cwd-reminder", () => {
 	});
 
 	describe("injectNowStamp", () => {
-		it("appends the stamp to the last user message with string content without mutating the input", () => {
-			const first: Message = { role: "user", content: "first", timestamp: 1 };
+		it("stamps every user message from its own turn timestamp without mutating the input", () => {
+			const t1 = Date.parse("2026-08-30T02:51:16Z");
+			const t2 = Date.parse("2026-08-30T02:55:00Z");
+			const first: Message = { role: "user", content: "first", timestamp: t1 };
 			const assistant = createAssistantMessage("hi");
-			const last: Message = { role: "user", content: "last", timestamp: 2 };
+			const last: Message = { role: "user", content: "last", timestamp: t2 };
 			const messages = [first, assistant, last];
 
-			const out = injectNowStamp(messages, new Date("2026-08-30T02:51:16Z"));
+			const out = injectNowStamp(messages);
 
 			expect(out).not.toBe(messages);
-			// Earlier messages keep their identity; only the last user message is stamped.
-			expect(out[0]).toBe(first);
+			// Every user message carries the stamp of its own turn; assistant
+			// messages keep their identity.
+			expect(out[0]).not.toBe(first);
 			expect(out[1]).toBe(assistant);
 			expect(out[2]).not.toBe(last);
-			expect(typeof out[2]?.content).toBe("string");
-			expect(textOf(out[2]!)).toMatch(
-				/^last\n\n<system-reminder>\nNow: 2026-08-30T02:51:16Z \(.+\)\n<\/system-reminder>$/,
-			);
+			expect(textOf(out[0]!)).toBe(`first\n\n${renderNowStamp(new Date(t1))}`);
+			expect(textOf(out[2]!)).toBe(`last\n\n${renderNowStamp(new Date(t2))}`);
 			// The input array and its elements are untouched.
-			expect(messages).toEqual([first, assistant, last]);
 			expect(messages[0]).toBe(first);
 			expect(messages[2]).toBe(last);
 			expect(messages[2]!.content).toBe("last");
 		});
 
-		it("appends a trailing text part when the last user message has array content", () => {
+		it("appends a trailing text part when a user message has array content", () => {
+			const t = Date.parse("2026-08-30T02:51:16Z");
 			const messages: Message[] = [
 				{
 					role: "user",
@@ -173,25 +174,21 @@ describe("date-cwd-reminder", () => {
 						{ type: "text", text: "with image" },
 						{ type: "image", data: "img", mimeType: "image/png" },
 					],
-					timestamp: 1,
+					timestamp: t,
 				},
 			];
 
-			const out = injectNowStamp(messages, new Date("2026-08-30T02:51:16Z"));
+			const out = injectNowStamp(messages);
 
 			const content = out[0]?.content;
 			if (!Array.isArray(content)) throw new Error("expected array content");
 			expect(content).toHaveLength(3);
 			expect(content[0]).toEqual({ type: "text", text: "with image" });
 			expect(content[1]).toEqual({ type: "image", data: "img", mimeType: "image/png" });
-			const lastPart = content[2];
-			expect(lastPart?.type).toBe("text");
-			if (lastPart?.type === "text") {
-				expect(lastPart.text).toMatch(/^<system-reminder>\nNow: 2026-08-30T02:51:16Z \(.+\)\n<\/system-reminder>$/);
-			}
+			expect(content[2]!).toEqual({ type: "text", text: renderNowStamp(new Date(t)) });
 		});
 
-		it("leaves a last user message already carrying a Now stamp unchanged", () => {
+		it("leaves a user message already carrying a Now stamp unchanged", () => {
 			const stamped: Message = {
 				role: "user",
 				content: "hi\n\n<system-reminder>\nNow: 2026-01-02T03:04:05Z (04:04 XYZ, UTC+01:00)\n</system-reminder>",
@@ -199,104 +196,151 @@ describe("date-cwd-reminder", () => {
 			};
 			const messages = [stamped];
 
-			const out = injectNowStamp(messages, new Date("2026-08-30T02:51:16Z"));
+			const out = injectNowStamp(messages);
 
 			expect(out).toBe(messages);
 			expect(textOf(out[0]!).match(/Now: /g)).toHaveLength(1);
 		});
 
-		it("re-stamps the same pristine message with the same stamped object even at a later timestamp", () => {
-			const pristine: Message = { role: "user", content: "hi", timestamp: 1 };
+		it("re-stamps the same pristine message with the same stamped object across requests", () => {
+			const t = Date.parse("2026-08-30T02:51:16Z");
+			const pristine: Message = { role: "user", content: "hi", timestamp: t };
 
-			const first = injectNowStamp([pristine], new Date("2026-08-30T02:51:16Z"))[0]!;
+			const first = injectNowStamp([pristine])[0]!;
 			expect(first).not.toBe(pristine);
-			const second = injectNowStamp([pristine], new Date("2026-08-30T03:00:00Z"))[0]!;
+			const second = injectNowStamp([pristine])[0]!;
 			expect(second).toBe(first);
 		});
 
-		it("re-applies the cached stamp to a previously-stamped user message that is no longer last", () => {
+		it("keeps byte-identical wire bytes when a previously-stamped user message slides out of last position", () => {
 			// The append-only log re-hands the pristine messages each request; a
 			// user message stamped in an earlier request must keep its exact wire
 			// bytes once it slides out of the last-user position.
-			const first: Message = { role: "user", content: "first", timestamp: 1 };
+			const t1 = Date.parse("2026-08-30T02:51:16Z");
+			const t2 = Date.parse("2026-08-30T02:55:00Z");
+			const first: Message = { role: "user", content: "first", timestamp: t1 };
 			const assistant = createAssistantMessage("hi");
-			const second: Message = { role: "user", content: "second", timestamp: 2 };
+			const second: Message = { role: "user", content: "second", timestamp: t2 };
 
-			const firstStamped = injectNowStamp([first], new Date("2026-08-30T02:51:16Z"))[0]!;
+			const firstStamped = injectNowStamp([first])[0]!;
 
-			const out = injectNowStamp([first, assistant, second], new Date("2026-08-30T03:00:00Z"));
+			const out = injectNowStamp([first, assistant, second]);
 
 			expect(out[0]).toBe(firstStamped);
 			expect(out[1]).toBe(assistant);
 			expect(out[2]).not.toBe(second);
-			expect(textOf(out[2]!)).toContain("Now: 2026-08-30T03:00:00Z");
+			expect(textOf(out[0]!)).toBe(textOf(firstStamped));
+			expect(textOf(out[2]!)).toBe(`second\n\n${renderNowStamp(new Date(t2))}`);
+		});
+
+		it("re-derives byte-identical stamps for rehydrated history after a session resume", () => {
+			// Resume: a new process rehydrates the persisted session as fresh
+			// message objects (same persisted content + timestamp) with empty
+			// module state; the previously-stamped turn must keep its exact
+			// wire bytes while only the new last turn adds bytes at the tail.
+			const t1 = Date.parse("2026-08-30T02:51:16Z");
+			const t2 = Date.parse("2026-08-30T03:12:45Z");
+			const original: Message = { role: "user", content: "first turn", timestamp: t1 };
+			const originalStamped = injectNowStamp([original])[0]!;
+
+			const rehydrated: Message = { role: "user", content: "first turn", timestamp: t1 };
+			const resumedLast: Message = { role: "user", content: "new turn after resume", timestamp: t2 };
+			const out = injectNowStamp([rehydrated, createAssistantMessage("hi"), resumedLast]);
+
+			expect(textOf(out[0]!)).toBe(textOf(originalStamped));
+			expect(textOf(out[2]!)).toBe(`new turn after resume\n\n${renderNowStamp(new Date(t2))}`);
+		});
+
+		it("stamps same-millisecond distinct turns from each turn's own instant, not a shared value", () => {
+			// Two turns with the same text in the same millisecond but different
+			// image sets are distinct turns: each carries the stamp of its own
+			// timestamp — never a value leaked from the other turn's request.
+			const t = Date.parse("2026-08-30T02:51:16.412Z");
+			const samePrompt = "analyze this image";
+			const turnA: Message = {
+				role: "user",
+				content: [
+					{ type: "text", text: samePrompt },
+					{ type: "image", data: "imgA", mimeType: "image/png" },
+				],
+				timestamp: t,
+			};
+			const turnB: Message = {
+				role: "user",
+				content: [
+					{ type: "text", text: samePrompt },
+					{ type: "image", data: "imgB", mimeType: "image/png" },
+				],
+				timestamp: t,
+			};
+
+			const out = injectNowStamp([turnA, createAssistantMessage("hi"), turnB]);
+			const expected = renderNowStamp(new Date(t));
+
+			for (const i of [0, 2]) {
+				const content = out[i]!.content;
+				if (!Array.isArray(content)) throw new Error("expected array content");
+				expect(content[content.length - 1]!).toEqual({ type: "text", text: expected });
+			}
+		});
+
+		it("derives each stamp from its own message's timestamp, independent of other sessions' messages", () => {
+			// No process-global content-keyed value cache: identical content with
+			// different turn timestamps yields different stamps, and re-creation
+			// with the same persisted identity yields identical bytes.
+			const tA = Date.parse("2026-08-30T02:51:16Z");
+			const tB = Date.parse("2026-08-30T02:52:16Z");
+			const sessionA: Message = { role: "user", content: "hi", timestamp: tA };
+			const sessionB: Message = { role: "user", content: "hi", timestamp: tB };
+
+			const outA = injectNowStamp([sessionA])[0]!;
+			const outB = injectNowStamp([sessionB])[0]!;
+			const outARecreated = injectNowStamp([{ ...sessionA }])[0]!;
+
+			expect(textOf(outA)).toBe(`hi\n\n${renderNowStamp(new Date(tA))}`);
+			expect(textOf(outA)).not.toBe(textOf(outB));
+			expect(textOf(outARecreated)).toBe(textOf(outA));
 		});
 
 		it("returns the input unchanged when there is no user message or no messages", () => {
 			const assistantOnly = [createAssistantMessage("hi")];
-			expect(injectNowStamp(assistantOnly, new Date("2026-08-30T02:51:16Z"))).toBe(assistantOnly);
+			expect(injectNowStamp(assistantOnly)).toBe(assistantOnly);
 			const empty: Message[] = [];
-			expect(injectNowStamp(empty, new Date("2026-08-30T02:51:16Z"))).toBe(empty);
-		});
-
-		it("re-applies the same stamp to a recreated copy of a previously stamped message", () => {
-			// Per-request transforms (steer envelopes, secret obfuscation) may
-			// hand back a fresh object with identical wire bytes; the stamp must
-			// not change with it.
-			const pristine: Message = { role: "user", content: "steer-alpha", timestamp: 101 };
-			const first = injectNowStamp([pristine], new Date("2026-08-30T02:51:16Z"))[0]!;
-
-			const recreated: Message = { role: "user", content: "steer-alpha", timestamp: 101 };
-			const out = injectNowStamp([recreated], new Date("2026-08-30T03:00:00Z"));
-
-			expect(out[0]).not.toBe(recreated);
-			expect(textOf(out[0]!)).toBe(textOf(first));
-		});
-
-		it("keeps the stamp when a recreated copy slides out of last-user position", () => {
-			const first: Message = { role: "user", content: "steer-beta", timestamp: 102 };
-			const assistant = createAssistantMessage("hi");
-			const second: Message = { role: "user", content: "steer-gamma", timestamp: 103 };
-
-			const firstStamped = injectNowStamp([first], new Date("2026-08-30T02:51:16Z"))[0]!;
-
-			const firstRecreated: Message = { role: "user", content: "steer-beta", timestamp: 102 };
-			const out = injectNowStamp([firstRecreated, assistant, second], new Date("2026-08-30T03:00:00Z"));
-
-			expect(textOf(out[0]!)).toBe(textOf(firstStamped));
-			expect(out[1]).toBe(assistant);
-			expect(textOf(out[2]!)).toContain("Now: 2026-08-30T03:00:00Z");
+			expect(injectNowStamp(empty)).toBe(empty);
 		});
 	});
 
 	describe("applyNowStamp", () => {
 		it("leaves NULL_PROMPT-style contexts (empty system prompt) untouched", () => {
 			const context: Context = { systemPrompt: [], messages: [{ role: "user", content: "hi", timestamp: 1 }] };
-			expect(applyNowStamp(context, new Date("2026-08-30T02:51:16Z"))).toBe(context);
+			expect(applyNowStamp(context)).toBe(context);
 		});
 
 		it("leaves no-message contexts untouched", () => {
 			const context: Context = { systemPrompt: ["system"], messages: [] };
-			expect(applyNowStamp(context, new Date("2026-08-30T02:51:16Z"))).toBe(context);
+			expect(applyNowStamp(context)).toBe(context);
 		});
 
-		it("stamps the last user message and keeps the system prompt bytes", () => {
+		it("stamps each user message from its own turn and keeps the system prompt bytes", () => {
 			const systemPrompt = ["PROJECT\n<critical>\n- Must act.\n</critical>"];
+			const t1 = Date.parse("2026-08-30T02:51:16Z");
+			const t2 = Date.parse("2026-08-30T02:55:00Z");
 			const context: Context = {
 				systemPrompt,
 				messages: [
-					{ role: "user", content: "first-apply", timestamp: 201 },
+					{ role: "user", content: "first-apply", timestamp: t1 },
 					createAssistantMessage("hi"),
-					{ role: "user", content: "last-apply", timestamp: 202 },
+					{ role: "user", content: "last-apply", timestamp: t2 },
 				],
 			};
 
-			const out = applyNowStamp(context, new Date("2026-08-30T02:51:16Z"));
+			const out = applyNowStamp(context);
 
 			expect(out).not.toBe(context);
 			expect(out.systemPrompt).toBe(systemPrompt);
-			expect(out.messages[0]).toBe(context.messages[0]);
-			expect(out.messages[2]?.content).toMatch(/Now: 2026-08-30T02:51:16Z \(/);
+			expect(out.messages[0]).not.toBe(context.messages[0]);
+			expect(out.messages[1]).toBe(context.messages[1]);
+			expect(out.messages[2]?.content).toBe(`last-apply\n\n${renderNowStamp(new Date(t2))}`);
 		});
 	});
 });
@@ -393,7 +437,7 @@ describe("date-cwd reminder on the provider wire", () => {
 			authStorage.close();
 		}
 	});
-	it("stamps the last user turn with Now and keeps stamped user turns byte-identical across requests", async () => {
+	it("stamps each user turn with its own Now and keeps stamped turns byte-identical across requests", async () => {
 		using tempDir = TempDir.createSync("@pi-now-reminder-");
 		const api = "test-now-reminder";
 		const contexts: Context[] = [];

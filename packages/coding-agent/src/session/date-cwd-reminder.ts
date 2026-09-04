@@ -136,38 +136,36 @@ export function renderNowStamp(now: Date = new Date()): string {
 }
 
 /**
- * Appends a per-turn `Now:` stamp to the last user message in `messages`,
+ * Appends each user message's own-turn `Now:` stamp to `messages`,
  * returning a new array. The input is never mutated.
  *
- * Placement is deliberate: the stamp rides on the last USER message, not the
- * literal context tail (in tool-call loops the tail is usually a tool_result,
- * which is not message-shape-safe to append to) and not the first user
- * message (Today:/cwd position). It is idempotent per user message, not per
- * request: provider requests repeat within a turn, so a previously-stamped
- * message must be re-sent byte-identical instead of re-stamped — a fresh
- * timestamp would duplicate the stamp and invalidate the prompt cache from
- * message 0.
+ * The stamp is a pure function of the message's persisted identity — its
+ * own `timestamp` — so re-stamps are byte-identical across requests and
+ * across session resumes: a resumed process rehydrates history as fresh
+ * objects with the persisted content and timestamp, and re-derives the
+ * exact wire bytes the original process sent. Only the genuinely-new last
+ * turn adds bytes, at the tail, so the prompt-cache prefix stays stable.
+ * Idempotent per user message: a message already carrying a stamp keeps
+ * it — a fresh stamp would duplicate and invalidate the prompt cache from message 0.
  *
- * Two memo layers keep the on-the-wire bytes stable:
- * - Identity: the pristine-message WeakMap (mirroring `DateCwdReminderInjector`'s
- *   injection memo) covers the append-only context path, where the same message
- *   objects are re-handed on every request and are garbage-collected with them.
- * - Fingerprint: per-request transforms may recreate the message object with
- *   identical wire bytes (steer envelopes in `wrapSteeringForModel`, secret
- *   obfuscation). A recreated object misses the identity memo, so a second
- *   memo keyed on the stable wire identity (timestamp + content shape + final
- *   text) re-applies the exact stamp that already went on the wire — including
- *   for messages that slid out of last-user position. It lives for the process
- *   lifetime (bounded by the number of distinct user messages).
+ * The stamp value is computed, never held in a process-global structure:
+ * two distinct turns in the same second share the correct instant rather
+ * than a value leaked from another turn's request. The only memo is the
+ * object-identity WeakMap (mirroring `DateCwdReminderInjector`'s
+ * injection memo), which keeps stamped objects stable within a live
+ * session and is collected with its key message objects when the session
+ * is discarded.
  */
 const nowStampCache = new WeakMap<Message, Message>();
-const nowStampByFingerprint = new Map<string, string>();
 
-/** Stable wire identity of a user message: timestamp, content shape, final text. */
-function nowStampFingerprint(message: Message, tail: string | undefined): string {
-	const content = message.content;
-	const body = typeof content === "string" ? content : `${content.length}\u0000${tail ?? ""}`;
-	return `${message.timestamp ?? ""}\u0000${body}`;
+/**
+ * The deterministic stamp for a user message: its own-turn instant
+ * rendered as a `Now:` system reminder. Messages without a finite
+ * timestamp are left unstamped rather than fabricated.
+ */
+function nowStampFor(message: Message): string | undefined {
+	if (!Number.isFinite(message.timestamp)) return undefined;
+	return renderNowStamp(new Date(message.timestamp));
 }
 
 /** Final text of a message: its string content, or the last text part. */
@@ -180,43 +178,29 @@ function finalMessageText(content: Message["content"]): string | undefined {
 	return undefined;
 }
 
-export function injectNowStamp(messages: Message[], now: Date = new Date()): Message[] {
-	let last = -1;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		if (messages[i]!.role === "user") {
-			last = i;
-			break;
-		}
-	}
-	if (last < 0) return messages;
-	let changed = false;
-	const out = messages.slice();
-	for (let i = 0; i < out.length; i++) {
-		const message = out[i]!;
+export function injectNowStamp(messages: Message[]): Message[] {
+	let out: Message[] | undefined;
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i]!;
 		if (message.role !== "user") continue;
 		const tail = finalMessageText(message.content);
 		if (tail !== undefined && nowStampTail.test(tail)) continue;
+		const stamp = nowStampFor(message);
+		if (stamp === undefined) continue;
 		const cached = nowStampCache.get(message);
 		if (cached !== undefined) {
-			out[i] = cached;
-			changed = true;
+			(out ??= messages.slice())[i] = cached;
 			continue;
 		}
-		const fingerprint = nowStampFingerprint(message, tail);
-		const knownStamp = nowStampByFingerprint.get(fingerprint);
-		const stamp = knownStamp ?? (i === last ? renderNowStamp(now) : undefined);
-		if (stamp === undefined) continue;
 		const content =
 			typeof message.content === "string"
 				? `${message.content}\n\n${stamp}`
 				: ([...message.content, { type: "text", text: stamp }] as Message["content"]);
 		const stamped = { ...message, content } as Message;
 		nowStampCache.set(message, stamped);
-		if (knownStamp === undefined) nowStampByFingerprint.set(fingerprint, stamp);
-		out[i] = stamped;
-		changed = true;
+		(out ??= messages.slice())[i] = stamped;
 	}
-	return changed ? out : messages;
+	return out ?? messages;
 }
 
 /**
@@ -226,9 +210,9 @@ export function injectNowStamp(messages: Message[], now: Date = new Date()): Mes
  * stay byte-for-byte unchanged; mirrors the guards of
  * {@link DateCwdReminderInjector.transform}.
  */
-export function applyNowStamp(context: Context, now: Date = new Date()): Context {
+export function applyNowStamp(context: Context): Context {
 	if (!context.systemPrompt || context.systemPrompt.length === 0) return context;
 	if (context.messages.length === 0) return context;
-	const messages = injectNowStamp(context.messages, now);
+	const messages = injectNowStamp(context.messages);
 	return messages === context.messages ? context : { ...context, messages };
 }
