@@ -31,6 +31,12 @@ export interface AxisDef {
 	records?: readonly CompatRecordName[];
 	/** Closed value vocabulary for string scalars / string arrays. */
 	values?: readonly string[];
+	/**
+	 * Object axes only: payload child names are literal wire JSON keys copied
+	 * verbatim (`extra-body`). Default object payloads author kebab-case names
+	 * that compile to camelCase resolved keys.
+	 */
+	verbatimKeys?: true;
 }
 
 const OAI = ["openai", "openai-responses"] as const;
@@ -38,6 +44,15 @@ const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Effort tiers accepted by taxonomy collapse/override vocabulary (`Effort` ∪ `"off"`). */
 export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
+
+/**
+ * How hard agent prompts push subagent delegation for a model lineage
+ * (`delegation-bias` axis). `eager` is the unassigned default: the prompt
+ * actively pushes fan-out. `restrained` keeps fan-out for genuinely parallel
+ * slices but forbids reflexive scouts and single-agent babysitting. `gated`
+ * forbids subagents unless the user or a skill asks.
+ */
+export const DELEGATION_BIASES = ["eager", "restrained", "gated"] as const;
 const THINKING_MODES = [
 	"effort",
 	"budget",
@@ -74,13 +89,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
-	"cache-control-format": wire("cacheControlFormat", ["openai"], "scalar", ["anthropic"]),
+	"cache-control-format": wire("cacheControlFormat", OAI, "scalar", ["anthropic"]),
 	"clamp-output-to-model-max": wire("clampOutputToModelMax", ["openai"]),
 	"disable-reasoning-on-forced-tool-choice": wire("disableReasoningOnForcedToolChoice", OAI),
 	"disable-reasoning-on-tool-choice": wire("disableReasoningOnToolChoice", OAI),
 	"drop-thinking-when-reasoning-effort": wire("dropThinkingWhenReasoningEffort", ["openai"]),
 	"empty-length-finish-is-context-error": wire("emptyLengthFinishIsContextError", OAI),
-	"extra-body": wire("extraBody", ["openai"], "object"),
+	"extra-body": { ...wire("extraBody", ["openai"], "object"), verbatimKeys: true },
 	"filter-reasoning-history": wire("filterReasoningHistory", OAI),
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),
@@ -90,6 +105,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
 	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
+	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
+	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
 	"reasoning-content-field": wire("reasoningContentField", OAI, "scalar", [
 		"reasoning_content",
 		"reasoning",
@@ -120,6 +137,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
+	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -134,8 +152,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-multiple-system-messages": wire("supportsMultipleSystemMessages", ["openai"]),
 	"supports-named-tool-choice": wire("supportsNamedToolChoice", OAI),
 	"supports-obfuscation-opt-out": wire("supportsObfuscationOptOut", ["openai-responses"]),
+	"harmony-leak-mitigation": wire("harmonyLeakMitigation", ["openai-responses"]),
 	"supports-penalty-and-stop-params": wire("supportsPenaltyAndStopParams", OAI),
 	"supports-prompt-cache-breakpoints": wire("supportsPromptCacheBreakpoints", OAI),
+	"supports-prompt-cache-key": wire("supportsPromptCacheKey", ["openai"]),
 	"supports-reasoning-effort": wire("supportsReasoningEffort", OAI),
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
@@ -173,15 +193,20 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
 	"inject-claude-code-instruction": wire("injectClaudeCodeInstruction", ["anthropic"]),
-	"official-endpoint": wire("officialEndpoint", ["anthropic"]),
+	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
 	"supports-context-management": wire("supportsContextManagement", ["anthropic"]),
+	"supports-output-effort": wire("supportsOutputEffort", ["anthropic"]),
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
 	"supports-long-cache-retention": wire("supportsLongCacheRetention", ["anthropic"]),
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
+	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
+	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
+	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
+	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 
 	// ── wire: bedrock-converse-stream ──
 	"prompt-cache-maximum-checkpoints": wire("promptCacheMaximumCheckpoints", ["bedrock"]),
@@ -202,6 +227,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"flash-stream-leak-workaround": wire("flashStreamLeakWorkaround", ["google"]),
 	"multimodal-function-response": wire("multimodalFunctionResponse", ["google"]),
 	"requires-skip-thought-signature": wire("requiresSkipThoughtSignature", ["google"]),
+	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
+		"google",
+	]),
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
@@ -228,6 +256,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: THINKING_MODES,
 	},
 	"thinking-requires-effort": { key: "requiresEffort", set: "thinking", shape: "scalar" },
+	"thinking-prefix-binding": { key: "prefixBinding", set: "thinking", shape: "scalar" },
 	"thinking-suppress-when-off": { key: "suppressWhenOff", set: "thinking", shape: "scalar" },
 	"thinking-supports-display": { key: "supportsDisplay", set: "thinking", shape: "scalar" },
 
@@ -241,10 +270,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
+	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
+	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
+	"requires-cursor-tool-schema-projection": {
+		key: "requiresCursorToolSchemaProjection",
+		set: "catalog",
+		shape: "scalar",
+	},
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };

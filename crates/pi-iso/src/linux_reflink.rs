@@ -50,6 +50,18 @@ impl IsolationBackend for LinuxReflinkBackend {
 		}
 	}
 
+	fn clone_tree(&self, lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		#[cfg(target_os = "linux")]
+		{
+			imp::clone_tree(lower, merged, skip)
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			let _ = (lower, merged, skip);
+			Err(IsoError::unavailable("Linux FICLONE reflink isolation is only available on Linux"))
+		}
+	}
+
 	fn stop(&self, merged: &Path) -> IsoResult<()> {
 		#[cfg(target_os = "linux")]
 		{
@@ -88,7 +100,17 @@ mod imp {
 		let lower = canonical_existing_dir(lower)?;
 		prepare_destination(merged)?;
 
-		let result = recursive_reflink(&lower, merged);
+		let result = recursive_reflink(&lower, merged, None);
+		if result.is_err() {
+			let _ = fs::remove_dir_all(merged);
+		}
+		result
+	}
+
+	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		let lower = canonical_existing_dir(lower)?;
+		prepare_destination(merged)?;
+		let result = recursive_reflink(&lower, merged, Some(skip));
 		if result.is_err() {
 			let _ = fs::remove_dir_all(merged);
 		}
@@ -154,7 +176,11 @@ mod imp {
 		Ok(())
 	}
 
-	fn recursive_reflink(src: &Path, dst: &Path) -> IsoResult<()> {
+	fn recursive_reflink(
+		src: &Path,
+		dst: &Path,
+		skip: Option<&[&std::ffi::OsStr]>,
+	) -> IsoResult<()> {
 		let meta = fs::symlink_metadata(src)
 			.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?;
 		fs::create_dir(dst)
@@ -165,6 +191,9 @@ mod imp {
 		for entry in entries {
 			let entry = entry
 				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src.display())))?;
+			if skip.is_some_and(|names| names.contains(&entry.file_name().as_os_str())) {
+				continue;
+			}
 			let file_type = entry.file_type().map_err(|err| {
 				IsoError::other(format!("file_type {}: {err}", entry.path().display()))
 			})?;
@@ -173,7 +202,7 @@ mod imp {
 			if file_type.is_symlink() {
 				clone_symlink(&src_path, &dst_path)?;
 			} else if file_type.is_dir() {
-				recursive_reflink(&src_path, &dst_path)?;
+				recursive_reflink(&src_path, &dst_path, None)?;
 			} else if file_type.is_file() {
 				clone_file(&src_path, &dst_path)?;
 			} else {

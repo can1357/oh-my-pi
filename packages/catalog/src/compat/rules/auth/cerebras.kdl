@@ -1,0 +1,9 @@
+auth "cerebras" {
+	name "Cerebras"
+	login "api-key" {
+		auth-url "https://cloud.cerebras.ai/platform/"
+		instructions "Copy your API key from the Cerebras dashboard"
+		prompt "Paste your Cerebras API key" placeholder="csk-..."
+		validate "chat-completions" label="Cerebras" base-url="https://api.cerebras.ai/v1" model="gpt-oss-120b"
+	}
+}

@@ -6,9 +6,9 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	getConfigRootDir,
@@ -18,6 +18,11 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import {
+	createInteractiveModeContext,
+	createMcpManagerStub,
+	type McpManagerOverrides,
+} from "./helpers/interactive-mode-context";
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";
@@ -42,42 +47,15 @@ function restoreEnvValue(name: string, value: string | undefined): void {
 	Bun.env[name] = value;
 	process.env[name] = value;
 }
-function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<string, unknown> = {}) {
-	const showError = vi.fn();
-	const showStatus = vi.fn();
-	const present = vi.fn();
-	const editor: { onEscape?: () => void } = {};
+function createController(authStorage: AuthStorage, mcpManagerOverrides: McpManagerOverrides = {}) {
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
-	const mcpManager = {
-		prepareConfig,
-		disconnectAll: vi.fn(async () => {}),
-		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
-		getTools: vi.fn(() => []),
-		waitForConnection: vi.fn(async () => {}),
-		getConnectionStatus: vi.fn(() => "connected"),
-		...mcpManagerOverrides,
-	};
-	const oauthManualInput = new OAuthManualInputManager();
-	const ctx = {
-		chatContainer: { addChild: vi.fn() },
-		present,
-		presentCommandOutput: present,
-		ui: { requestRender: vi.fn() },
-		editor,
-		showError,
-		showStatus,
-		oauthManualInput,
-		settings: {
-			get: vi.fn((_key: string): unknown => undefined),
-		},
-		session: {
-			refreshMCPTools: vi.fn(),
-			setMCPPromptCommands: vi.fn(),
-			modelRegistry: { authStorage },
-		},
+	const mcpManager = createMcpManagerStub({ prepareConfig, ...mcpManagerOverrides });
+	const ctx = createInteractiveModeContext({
+		session: { modelRegistry: { authStorage } },
 		mcpManager,
-	} as never;
+	});
 	const controller = new MCPCommandController(ctx);
+	const { showError, showStatus, present, editor, oauthManualInput } = ctx;
 
 	return { controller, ctx, showError, showStatus, present, editor, oauthManualInput, prepareConfig, mcpManager };
 }
@@ -224,17 +202,17 @@ describe("/mcp auth commands", () => {
 			{ preconnect: globalThis.fetch.preconnect },
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			const { url } = await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback");
-			expect(new URL(url).searchParams.get("client_id")).toBe("pathful-dcr-client");
-			return {
-				access: "fresh-access",
-				refresh: "fresh-refresh",
-				expires: Date.now() + 3_600_000,
-			};
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				const { url } = await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback");
+				expect(new URL(url).searchParams.get("client_id")).toBe("pathful-dcr-client");
+				return {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
 		const { controller, showError } = createController(authStorage);
 
 		await controller.handle("/mcp reauth envserver");
@@ -294,16 +272,16 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
-			return {
-				access: "fresh-access",
-				refresh: "fresh-refresh",
-				expires: Date.now() + 3_600_000,
-			};
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
+				return {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		const updated = await controller.handleMCPAuthChallenge("envserver", {
@@ -455,12 +433,12 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
-			return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		await controller.handle("/mcp reauth envserver");
@@ -500,12 +478,12 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
-			return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		await controller.handle("/mcp reauth envserver");
@@ -558,16 +536,16 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
-			return {
-				access: "fresh-access",
-				refresh: "fresh-refresh",
-				expires: Date.now() + 3_600_000,
-			};
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
+				return {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		await controller.handle("/mcp reauth envserver");
@@ -627,12 +605,12 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
-			return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		await controller.handle("/mcp reauth envserver");
@@ -701,12 +679,12 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		const authorizationUrls: URL[] = [];
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrls.push(new URL((await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url));
-			return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrls.push(new URL((await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url));
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		await controller.handle("/mcp reauth envserver");
@@ -786,12 +764,12 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
-			return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
 		const { controller, showError } = createController(authStorage);
 
 		await controller.handle("/mcp reauth envserver");
@@ -1014,8 +992,13 @@ describe("/mcp auth commands", () => {
 			expires: Date.now() + 3_600_000,
 		});
 		const { controller, showError } = createController(authStorage, {
-			getServerConfig: vi.fn(() => ({ type: "http", url: EXPANDED_SERVER_URL })),
-			getSource: vi.fn(() => ({ provider: "test", path: "/tmp/discovered.json" })),
+			getServerConfig: vi.fn((): MCPServerConfig => ({ type: "http", url: EXPANDED_SERVER_URL })),
+			getSource: vi.fn((): SourceMeta => ({
+				provider: "test",
+				providerName: "Test",
+				path: "/tmp/discovered.json",
+				level: "project",
+			})),
 		});
 
 		await controller.handle("/mcp unauth discovered");
@@ -1047,9 +1030,9 @@ describe("/mcp auth commands", () => {
 							type: "http",
 							url: RAW_SERVER_URL,
 							oauth: {
-								// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+								// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 								clientId: "${MCP_OAUTH_CLIENT_ID}",
-								// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+								// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 								clientSecret: "${MCP_OAUTH_CLIENT_SECRET}",
 							},
 						},
@@ -1063,21 +1046,21 @@ describe("/mcp auth commands", () => {
 			vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 			let flowClientId: string | undefined;
 			let flowClientSecret: string | undefined;
-			vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-				this: oauthFlow.MCPOAuthFlow,
-			) {
-				// MCPOAuthFlow keeps its config private; read it back to assert the
-				// resolved credentials the flow will use. Structurally known shape,
-				// no runtime validation is meaningful here.
-				const flow = this as unknown as { config: { clientId?: string; clientSecret?: string } };
-				flowClientId = flow.config.clientId;
-				flowClientSecret = flow.config.clientSecret;
-				return {
-					access: "fresh-access",
-					refresh: "fresh-refresh",
-					expires: Date.now() + 3_600_000,
-				};
-			});
+			vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+				async function (this: oauthFlow.MCPOAuthFlow) {
+					// MCPOAuthFlow keeps its config private; read it back to assert the
+					// resolved credentials the flow will use. Structurally known shape,
+					// no runtime validation is meaningful here.
+					const flow = this as unknown as { config: { clientId?: string; clientSecret?: string } };
+					flowClientId = flow.config.clientId;
+					flowClientSecret = flow.config.clientSecret;
+					return {
+						access: "fresh-access",
+						refresh: "fresh-refresh",
+						expires: Date.now() + 3_600_000,
+					};
+				},
+			);
 			const { controller, showError } = createController(authStorage);
 
 			await controller.handle("/mcp reauth envserver");
@@ -1091,9 +1074,9 @@ describe("/mcp auth commands", () => {
 			// The config file keeps the placeholder; only the flow sees the value.
 			const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
 			const savedServer = saved.mcpServers?.envserver;
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+			// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 			expect(savedServer?.oauth?.clientSecret).toBe("${MCP_OAUTH_CLIENT_SECRET}");
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+			// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 			expect(savedServer?.oauth?.clientId).toBe("${MCP_OAUTH_CLIENT_ID}");
 		} finally {
 			restoreEnvValue("MCP_OAUTH_CLIENT_ID", originalClientId);

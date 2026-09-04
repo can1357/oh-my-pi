@@ -209,8 +209,9 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { toolWireSchema } from "../utils/schema/wire";
+import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError } from "./connect-error-detail";
+import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
 	buildNeutralHookResult,
@@ -342,6 +343,8 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/** Treat unhandled MCP calls as accepted handoffs to an external executor. */
+	externalToolExecutor?: boolean;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
 }
@@ -618,7 +621,7 @@ function streamCursorWithWireMode(
 			const signal = options?.signal;
 			while (inFlightDispatches.size > 0) {
 				if (signal?.aborted) return;
-				const settled = Promise.all([...inFlightDispatches]);
+				const settled = Promise.all(inFlightDispatches);
 				if (!signal) {
 					await settled;
 					continue;
@@ -702,7 +705,10 @@ function streamCursorWithWireMode(
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationStateCache.set(conversationId, conversationState);
-			const requestContextTools = buildMcpToolDefinitions(context.tools);
+			const requestContextTools = buildMcpToolDefinitions(
+				context.tools,
+				model.requiresCursorToolSchemaProjection === true,
+			);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
@@ -868,6 +874,7 @@ function streamCursorWithWireMode(
 							requestContextTools,
 							requestContextRules,
 							onConversationCheckpoint,
+							options?.externalToolExecutor,
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
@@ -1154,6 +1161,7 @@ export async function handleServerMessage(
 	requestContextTools: McpToolDefinition[],
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	externalToolExecutor = false,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1179,6 +1187,7 @@ export async function handleServerMessage(
 				output,
 				stream,
 				state,
+				externalToolExecutor,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -1597,6 +1606,7 @@ async function handleExecServerMessage(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
+	externalToolExecutor: boolean,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -1945,7 +1955,10 @@ async function handleExecServerMessage(
 				execHandlers?.mcp?.bind(execHandlers),
 				onToolResult,
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
-				_reason => buildMcpToolNotFoundResult(mcpCall),
+				_reason =>
+					externalToolExecutor && !execHandlers?.mcp
+						? buildMcpExternalHandoffResult()
+						: buildMcpToolNotFoundResult(mcpCall),
 				error => buildMcpErrorResult(error),
 				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
@@ -2601,15 +2614,15 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
  * and nullable for the one caller whose block is NOT pre-resolved: MCP without
  * an `mcp` handler, which `agent-loop.ts` runs locally and pairs itself.
  */
-export async function resolveExecHandler<TArgs, TResult>(
+export async function resolveExecHandler<TArgs, R>(
 	args: TArgs,
-	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
+	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<R>>) | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
-	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
-	buildRejected: (reason: string) => TResult,
-	buildError: (error: string) => TResult,
+	buildFromToolResult: (toolResult: ToolResultMessage) => R,
+	buildRejected: (reason: string) => R,
+	buildError: (error: string) => R,
 	pairing: CursorExecPairing | null,
-): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
+): Promise<{ execResult: R; toolResult?: ToolResultMessage }> {
 	const pair = async (text: string, isError: boolean): Promise<ToolResultMessage | undefined> => {
 		// `null` only for MCP without a handler: that block is never marked
 		// resolved, so `agent-loop.ts` runs it locally and pairs its own result.
@@ -2637,7 +2650,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
 
 		if (execResult) {
-			// TResult-only is a supported return form, so the transcript entry has to
+			// R-only is a supported return form, so the transcript entry has to
 			// be synthesized here. Deriving its state from the raw result keeps the
 			// two views consistent: every exec result is a proto oneof whose only
 			// non-failure variant is `success`, so a `rejected`/`error`/
@@ -2660,7 +2673,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 
 /**
  * Derive the transcript state of an exec result the SDK handler returned in the
- * TResult-only form, which carries no `toolResult` to copy it from.
+ * R-only form, which carries no `toolResult` to copy it from.
  *
  * Every exec result in `agent.proto` is a `oneof result` whose success variant
  * is named `success` — the rest (`error`, `rejected`, `file_not_found`,
@@ -2703,8 +2716,8 @@ function mcpContentToText(content: unknown[] | undefined): string {
 	return parts.join("\n");
 }
 
-function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult>): {
-	execResult?: TResult;
+function splitExecHandlerResult<R>(result: CursorExecHandlerResult<R>): {
+	execResult?: R;
 	toolResult?: ToolResultMessage;
 } {
 	if (isToolResultMessage(result)) {
@@ -2714,27 +2727,27 @@ function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult
 		const record = result as Record<string, unknown>;
 		if ("execResult" in record) {
 			const { execResult, toolResult } = record as {
-				execResult: TResult;
+				execResult: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("toolResult" in record && !isToolResultMessage(record)) {
 			const { result: execResult, toolResult } = record as {
-				result?: TResult;
+				result?: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("result" in record && !("$typeName" in record)) {
 			const { result: execResult, toolResult } = record as {
-				result: TResult;
+				result: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 	}
-	return { execResult: result as TResult };
+	return { execResult: result as R };
 }
 
 function isToolResultMessage(value: unknown): value is ToolResultMessage {
@@ -3536,13 +3549,10 @@ function describeEditResult(toolCall: CursorEditToolCallCarrier | undefined): { 
 	return { text: "Edit reported no result", isError: true };
 }
 
-function remapExecHandlerToolName<TResult>(
-	result: CursorExecHandlerResult<TResult>,
-	toolName: string,
-): CursorExecHandlerResult<TResult> {
+function remapExecHandlerToolName<R>(result: CursorExecHandlerResult<R>, toolName: string): CursorExecHandlerResult<R> {
 	if (isToolResultMessage(result)) return { ...result, toolName };
 	if (result && typeof result === "object" && "toolResult" in result) {
-		const record = result as { result?: TResult; toolResult?: ToolResultMessage };
+		const record = result as { result?: R; toolResult?: ToolResultMessage };
 		if (record.toolResult && record.result !== undefined) {
 			return { result: record.result, toolResult: { ...record.toolResult, toolName } };
 		}
@@ -4009,6 +4019,27 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 	});
 }
 
+const MCP_EXTERNAL_HANDOFF_MESSAGE = mcpExternalHandoffMessage.trim();
+
+function buildMcpExternalHandoffResult() {
+	return create(McpResultSchema, {
+		result: {
+			case: "success",
+			value: create(McpSuccessSchema, {
+				content: [
+					create(McpToolResultContentItemSchema, {
+						content: {
+							case: "text",
+							value: create(McpTextContentSchema, { text: MCP_EXTERNAL_HANDOFF_MESSAGE }),
+						},
+					}),
+				],
+				isError: false,
+			}),
+		},
+	});
+}
+
 function buildMcpToolNotFoundResult(mcpCall: CursorMcpCall) {
 	return create(McpResultSchema, {
 		result: {
@@ -4047,7 +4078,7 @@ export function mergeCursorMcpToolCallArgs(
 	streamed: Record<string, unknown> | undefined,
 	completion: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-	const merged: Record<string, unknown> = { ...(streamed ?? {}) };
+	const merged: Record<string, unknown> = { ...streamed };
 	if (!completion) return merged;
 	for (const [key, completionValue] of Object.entries(completion)) {
 		const streamedValue = merged[key];
@@ -4612,7 +4643,10 @@ function isJsonValue(value: unknown): value is JsonValue {
 	return true;
 }
 
-export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefinition[] {
+export function buildMcpToolDefinitions(
+	tools: Tool[] | undefined,
+	requiresCursorToolSchemaProjection = false,
+): McpToolDefinition[] {
 	if (!tools || tools.length === 0) {
 		return [];
 	}
@@ -4632,7 +4666,8 @@ export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefin
 	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
 
 	return forwarded.map(tool => {
-		const jsonSchema = toolWireSchema(tool);
+		const wireSchema = toolWireSchema(tool);
+		const jsonSchema = requiresCursorToolSchemaProjection ? sanitizeSchemaForCursor(wireSchema) : wireSchema;
 		const schemaValue: JsonValue =
 			jsonSchema !== null && !Array.isArray(jsonSchema) && isJsonValue(jsonSchema)
 				? jsonSchema

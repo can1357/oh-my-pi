@@ -8,6 +8,8 @@ provider "amazon-bedrock" {
 			}
 		}
 		revision ">=4.7 <5.1" {
+			// Replaces the adaptive Anthropic Bedrock timeout branch.
+			stream-idle-timeout-ms 900000
 			thinking-efforts "low" "medium" "high" "max"
 		}
 	}

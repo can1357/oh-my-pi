@@ -1,6 +1,12 @@
 // Model-lineage compat for "minimax"; regenerated from the frozen census using class taxonomy selectors.
 
 class "minimax" {
+	// Replaces the MiniMax M2 mandatory-reasoning fallback on every host.
+	family "m2" {
+		thinking-requires-effort #true
+	}
+	// Replaces the MiniMax lineage branch in both OpenAI baselines.
+	reasoning-deltas-may-be-cumulative #true
 	on "aimlapi" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" "novita" "nvidia" \
 		"opencode-go" "opencode-zen" "together" "venice" "wafer-serverless" "zenmux" {
 		family "m3" {
@@ -45,7 +51,21 @@ class "minimax" {
 	}
 	on "minimax" "minimax-cn" "vercel-ai-gateway" {
 		thinking-mode "anthropic-adaptive"
+		family "m2" {
+			// Replaces the Anthropic-route MiniMax effort remap table.
+			thinking-effort-map {
+				low "adaptive"
+				medium "adaptive"
+				high "adaptive"
+			}
+		}
 		family "m3" {
+			// Replaces the Anthropic-route MiniMax effort remap table.
+			thinking-effort-map {
+				low "adaptive"
+				medium "adaptive"
+				high "adaptive"
+			}
 			thinking-efforts "low" "medium" "high"
 		}
 	}

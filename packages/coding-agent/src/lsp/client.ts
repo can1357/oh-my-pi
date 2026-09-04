@@ -566,7 +566,7 @@ async function reconcileExecutedChanges(
 	);
 
 	for (const activeClient of activeClients) {
-		for (const uri of [...activeClient.openFiles.keys()]) {
+		for (const uri of Array.from(activeClient.openFiles.keys())) {
 			let deleted = false;
 			for (const root of deletedRoots) {
 				if (uriIsWithin(uri, root)) {

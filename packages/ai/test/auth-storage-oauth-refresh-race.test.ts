@@ -453,7 +453,6 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const expires = Date.now() - 60_000;
 		const refreshedExpires = Date.now() + 60 * 60_000;
-		let credentialId: number | undefined;
 
 		oauthUtils.registerOAuthProvider({
 			id: "unit-oauth-post-lease-race",
@@ -485,7 +484,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		await authStorage.set("unit-oauth-post-lease-race", [
 			{ type: "oauth", access: "access-old", refresh: "refresh-old", expires },
 		]);
-		credentialId = store.listAuthCredentials("unit-oauth-post-lease-race")[0]?.id;
+		const credentialId = store.listAuthCredentials("unit-oauth-post-lease-race")[0]?.id;
 		expect(credentialId).toBeDefined();
 
 		const apiKey = await authStorage.getApiKey("unit-oauth-post-lease-race", "session-post-lease");

@@ -262,6 +262,34 @@ describe("terminal frame plans", () => {
 		tui.stop();
 	});
 
+	it("fuses fullscreen overlay exit into a session replacement paint", () => {
+		const terminal = new CountingTerminal(171, 39);
+		const provider = new Provider({ viewport: ["old session"] });
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+		const overlay = tui.showOverlay(
+			{
+				render: () => ["session selector"],
+			},
+			{
+				width: "100%",
+				maxHeight: "100%",
+				fullscreen: true,
+			},
+		);
+		terminal.writes.length = 0;
+
+		provider.plan = { viewport: ["resumed transcript", "resumed prompt"] };
+		tui.requestRender(true, { clearScrollback: true });
+		overlay.hide();
+
+		const exitPaints = terminal.writes.filter(write => write.includes("\x1b[?1049l"));
+		expect(exitPaints).toHaveLength(1);
+		expect(exitPaints[0]).toContain("\x1b[3J");
+		expect(exitPaints[0]).toContain("resumed transcript");
+		tui.stop();
+	});
+
 	it("repaints a viewport-only frame in place without scrolling", () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const provider = new Provider({ viewport: ["spinner one", "editor"] });

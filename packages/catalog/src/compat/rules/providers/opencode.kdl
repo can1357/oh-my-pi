@@ -1,5 +1,0 @@
-// Provider-wire compat for "opencode"; regenerated from the frozen census using deployment contract selectors.
-
-provider "opencode" {
-	thinking-mode "effort"
-}

@@ -421,7 +421,7 @@ When a bare id matches models from multiple providers, preference order is:
 
 Supported model roles:
 
-- `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`
+- `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`
 
 The `tiny` role overrides the online model used for lightweight background tasks (session titles, memory, `auto`-thinking difficulty classification, unexpected-stop detection); when unset, these fall back to `@smol`. Pick one in `/models`.
 

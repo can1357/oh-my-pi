@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/registry/oauth";
 import { loginGitHubCopilot } from "@oh-my-pi/pi-ai/registry/oauth/github-copilot";
 
@@ -24,7 +25,22 @@ function deviceCodeResponse(overrides: Record<string, unknown> = {}) {
 }
 
 function accessTokenResponse(token = "ghu_test") {
-	return { access_token: token, token_type: "bearer", scope: "read:user" };
+	return {
+		access_token: token,
+		token_type: "bearer",
+		scope: "read:user",
+	};
+}
+
+function expectOfficialOAuthRequest(init: RequestInit | undefined, body: Record<string, string>) {
+	const headers = new Headers(init?.headers);
+	expect(headers.get("Accept")).toBe("application/json");
+	expect(headers.get("Content-Type")).toBe("application/x-www-form-urlencoded");
+	expect(headers.get("User-Agent")).toBe("copilot-developer-action/0.0.1");
+	if (!(init?.body instanceof URLSearchParams)) {
+		throw new Error("Expected URL-encoded OAuth request body");
+	}
+	expect(Object.fromEntries(init.body)).toEqual(body);
 }
 
 function modelPolicyOk() {
@@ -32,12 +48,16 @@ function modelPolicyOk() {
 }
 
 describe("loginGitHubCopilot", () => {
-	it("happy path (github.com)", async () => {
+	it("requests only the scopes needed for Copilot API access", async () => {
 		let pollCount = 0;
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url === "https://github.com/login/device/code") {
 				expect(init?.method).toBe("POST");
+				expectOfficialOAuthRequest(init, {
+					client_id: "Ov23ctDVkRmgkPke0Mmm",
+					scope: "read:user",
+				});
 				return new Response(JSON.stringify(deviceCodeResponse()), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
@@ -45,6 +65,11 @@ describe("loginGitHubCopilot", () => {
 			}
 			if (url === "https://github.com/login/oauth/access_token") {
 				pollCount++;
+				expectOfficialOAuthRequest(init, {
+					client_id: "Ov23ctDVkRmgkPke0Mmm",
+					device_code: "dc_test",
+					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+				});
 				return new Response(JSON.stringify(accessTokenResponse()), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
@@ -70,6 +95,25 @@ describe("loginGitHubCopilot", () => {
 		expect(credentials.expires).toBeGreaterThan(Date.now());
 		expect(credentials.enterpriseUrl).toBeUndefined();
 		expect(pollCount).toBeGreaterThanOrEqual(1);
+	});
+
+	it("preserves credentials minted by the former OAuth app", async () => {
+		const refreshToken = getProviderDefinition("github-copilot")?.refreshToken;
+		if (!refreshToken) throw new Error("expected github-copilot refresh");
+		const credentials = await refreshToken({
+			access: "ghu_existing_opencode_token",
+			refresh: "ghu_existing_opencode_token",
+			expires: 0,
+			enterpriseUrl: "ghe.example.com",
+			apiEndpoint: "https://api.business.githubcopilot.com",
+		});
+		expect(credentials).toMatchObject({
+			access: "ghu_existing_opencode_token",
+			refresh: "ghu_existing_opencode_token",
+			enterpriseUrl: "ghe.example.com",
+			apiEndpoint: "https://api.business.githubcopilot.com",
+		});
+		expect(credentials.expires).toBeGreaterThan(Date.now());
 	});
 
 	it("stores business API endpoint and enables models against it", async () => {
@@ -197,9 +241,11 @@ describe("loginGitHubCopilot", () => {
 		expect(credentials.enterpriseUrl).toBeUndefined();
 	});
 
-	it("invalid domain rejects", async () => {
+	it("invalid domain rejects through the registered custom hook", async () => {
+		const provider = getProviderDefinition("github-copilot");
+		if (!provider?.login) throw new Error("expected github-copilot provider");
 		await expect(
-			loginGitHubCopilot({
+			provider.login({
 				onAuth: vi.fn(),
 				onPrompt: mockOnPrompt("not a valid domain!!!://"),
 			}),

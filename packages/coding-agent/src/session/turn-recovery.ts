@@ -20,6 +20,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -29,6 +30,7 @@ import { formatModelStringWithRouting, resolveModelOverride } from "../config/mo
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -70,6 +72,7 @@ const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
+const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -197,6 +200,7 @@ export interface TurnRecoveryHost {
 		source: string;
 		delayMs?: number;
 		generation?: number;
+		shouldContinue?: () => boolean;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -261,6 +265,7 @@ export class TurnRecovery {
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
+	#malformedFunctionCallRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -391,6 +396,7 @@ export class TurnRecovery {
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
+		this.#malformedFunctionCallRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 	}
 
@@ -476,6 +482,63 @@ export class TurnRecovery {
 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
 	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<boolean> {
 		return this.#handleUnexpectedAssistantStop(message);
+	}
+
+	/**
+	 * Continue past a provider-rejected function call that the replay-based
+	 * retry declined. Gemini reports `MALFORMED_FUNCTION_CALL` when the model
+	 * transcribes the call as text (`call:default_api:read{…}`, a tool_code
+	 * fence) instead of emitting a structured call; the text is already
+	 * rendered, so {@link isRetryableError} refuses to replay the turn and the
+	 * session stopped on a pinned error. Nothing ran and nothing needs
+	 * replaying: keep the failed turn in context so the model sees its own
+	 * output, append a corrective developer message, and resume. Bounded per
+	 * prompt; past the cap the error surfaces as before.
+	 */
+	handleMalformedFunctionCallStop(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		const id = this.#classifyRetryMessage(message);
+		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) {
+			this.#malformedFunctionCallRetryCount = 0;
+			return false;
+		}
+		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+
+		this.#malformedFunctionCallRetryCount++;
+		if (this.#malformedFunctionCallRetryCount > MALFORMED_FUNCTION_CALL_MAX_RETRIES) {
+			logger.warn("Assistant kept emitting malformed function calls after retry cap", {
+				attempts: this.#malformedFunctionCallRetryCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#malformedFunctionCallRetryCount = 0;
+			return false;
+		}
+
+		logger.info("Malformed function call; continuing with corrective reminder", {
+			attempt: this.#malformedFunctionCallRetryCount,
+			model: message.model,
+			provider: message.provider,
+		});
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: prompt.render(malformedFunctionCallRetryTemplate, {
+						retryCount: this.#malformedFunctionCallRetryCount,
+						maxRetries: MALFORMED_FUNCTION_CALL_MAX_RETRIES,
+					}),
+				},
+			],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.scheduleAgentContinue({
+			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
 	}
 
 	/** Removes a persisted failed assistant turn after its persistence slot settles; returns the dropped branch entry id. */
@@ -1408,7 +1471,7 @@ export class TurnRecovery {
 		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message => definitive.add(message));
 		this.#pendingDiscoveryDeferredValidation = false;
 		let changed = false;
-		for (const message of [...this.#fallbackChainWarnings]) {
+		for (const message of Array.from(this.#fallbackChainWarnings)) {
 			if (definitive.has(message)) continue;
 			const index = this.#host.configWarnings.indexOf(message);
 			if (index !== -1) {
@@ -1515,12 +1578,14 @@ export class TurnRecovery {
 		role: string,
 		currentSelector: string,
 		currentModel: Model | null | undefined = this.#host.model(),
+		options?: { wrapAround?: boolean },
 	): RetryFallbackSelector[] {
 		return findRetryFallbackCandidates(
 			this.#getRetryFallbackResolutionContext(),
 			role,
 			currentSelector,
 			currentModel,
+			options,
 		);
 	}
 
@@ -1775,7 +1840,12 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
-		options?: { pinFallback?: boolean; preserveFailedTurn?: boolean },
+		options?: {
+			excludeProvider?: string;
+			pinFallback?: boolean;
+			preserveFailedTurn?: boolean;
+			wrapAround?: boolean;
+		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const latestAssistant = options?.preserveFailedTurn
@@ -1784,11 +1854,12 @@ export class TurnRecovery {
 					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 				);
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
-			for (const selector of this.findRetryFallbackCandidates(role, currentSelector)) {
+			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
 				// model switch can satisfy neither constraint, so keep retrying the
@@ -2121,6 +2192,10 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		const siblingAvailabilityWaitMs =
+			recordedUsageLimitOutcome?.retryAtMs === undefined
+				? undefined
+				: Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
@@ -2147,12 +2222,8 @@ export class TurnRecovery {
 				// recoverable situation into the provider's multi-hour wait and
 				// trips the fail-fast cap below.
 				usageLimitWaitMs = recordedUsageLimitOutcome.retryAfterMs;
-				if (recordedUsageLimitOutcome.retryAtMs !== undefined) {
-					const siblingWaitMs =
-						Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
-					if (siblingWaitMs < usageLimitWaitMs) {
-						usageLimitWaitMs = siblingWaitMs;
-					}
+				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
+					usageLimitWaitMs = siblingAvailabilityWaitMs;
 				}
 				if (usageLimitWaitMs > delayMs) {
 					delayMs = usageLimitWaitMs;
@@ -2181,6 +2252,27 @@ export class TurnRecovery {
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		const effectiveUsageLimitWaitMs =
+			usageLimitWaitMs ??
+			(siblingAvailabilityWaitMs === undefined
+				? (recordedUsageLimitOutcome?.retryAfterMs ?? parsedRetryAfterMs)
+				: Math.min(
+						recordedUsageLimitOutcome?.retryAfterMs ?? parsedRetryAfterMs ?? Infinity,
+						siblingAvailabilityWaitMs,
+					));
+		const waitForSiblingCredential =
+			siblingAvailabilityWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
+		const longUsageLimitFallback =
+			currentModel !== undefined &&
+			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&
+			retrySettings.maxDelayMs > 0 &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs > retrySettings.maxDelayMs &&
+			/\bGoUsageLimitError\b/.test(errorMessage) &&
+			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
+
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
@@ -2188,14 +2280,17 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
+				!waitForSiblingCredential &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
 					pinFallback: classifierRefusal,
 					preserveFailedTurn,
+					wrapAround: longUsageLimitFallback,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -2299,7 +2394,7 @@ export class TurnRecovery {
 				type: "auto_retry_end",
 				success: false,
 				attempt,
-				finalError: `Provider requested ${delayMs}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+				finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 			});
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();
@@ -2378,6 +2473,7 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
+			shouldContinue: () => this.#retryAttempt > 0,
 			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
 		});
 

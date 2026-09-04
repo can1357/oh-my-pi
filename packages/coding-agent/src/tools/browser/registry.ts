@@ -3,7 +3,7 @@ import { isCompiledBinary, logger, withTimeout, workerHostEntry } from "@oh-my-p
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError, ToolError } from "../tool-errors";
-import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, killExistingByPath, waitForCdp } from "./attach";
+import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, waitForCdp } from "./attach";
 import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
@@ -259,7 +259,10 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			`app.path must be absolute (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
 		);
 	}
-	const reused = await findReusableCdp(exe, opts.signal);
+	const reused = await findReusableCdp(exe, {
+		signal: opts.signal,
+		appArgs: opts.appArgs,
+	});
 	let cdpUrl: string;
 	let pid: number;
 	let subprocess: Subprocess | undefined;
@@ -268,8 +271,6 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		cdpUrl = reused.cdpUrl;
 		pid = reused.pid;
 	} else {
-		const killed = await killExistingByPath(exe, opts.signal);
-		if (killed > 0) logger.debug("Killed existing instances before attach", { exe, killed });
 		const port = await findFreeCdpPort();
 		const launchArgs = [...(opts.appArgs ?? []), `--remote-debugging-port=${port}`];
 		const child = Bun.spawn([exe, ...launchArgs], {

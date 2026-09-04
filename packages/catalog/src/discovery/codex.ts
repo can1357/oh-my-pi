@@ -110,6 +110,13 @@ export interface CodexModelDiscoveryOptions {
 export interface CodexModelDiscoveryResult {
 	models: ModelSpec<"openai-codex-responses">[];
 	etag?: string;
+	/**
+	 * Set when the backend rejected the credential itself (401/403, e.g.
+	 * `token_revoked`); `models` is empty. A definitive per-account denial,
+	 * unlike the `null` result for transport/parse failures, so multi-account
+	 * discovery can skip the account instead of aborting.
+	 */
+	rejectedStatus?: 401 | 403;
 }
 
 /**
@@ -139,6 +146,9 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
+		if (response.status === 401 || response.status === 403) {
+			return { models: [], rejectedStatus: response.status };
+		}
 		if (!response.ok) {
 			continue;
 		}

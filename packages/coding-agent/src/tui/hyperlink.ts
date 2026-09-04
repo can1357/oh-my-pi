@@ -5,16 +5,22 @@
  * sequences when the active terminal supports hyperlinks and the user setting
  * permits it. Falls back to plain text when disabled.
  */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import * as url from "node:url";
-import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
+import { getMarkdownLinkUrls, setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import { isSettingsInitialized, settings } from "../config/settings";
 import {
+	extractUriScheme,
+	InternalUrlRouter,
 	LocalProtocolHandler,
 	memoryRootsFromRegistry,
 	parseInternalUrl,
+	type ResolveContext,
 	resolveLocalUrlToPath,
 	resolveMemoryUrlToPath,
 } from "../internal-urls";
+import { expandPath } from "../tools/path-utils";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";
@@ -166,6 +172,60 @@ export function urlHyperlinkAlways(url: string, displayText: string): string {
  */
 export function fileHyperlink(filePath: string, displayText: string, opts?: { line?: number; col?: number }): string {
 	return wrapHyperlink(buildFileUri(filePath, opts), displayText);
+}
+
+/**
+ * Resolve Markdown hyperlinks to existing local resources or absolute file URLs.
+ * Relative paths use the calling session's cwd; missing, virtual, and remote targets stay unchanged.
+ */
+export async function resolveMarkdownLinkTargets(
+	texts: readonly string[],
+	context?: ResolveContext,
+): Promise<ReadonlyMap<string, string>> {
+	const targets = new Map<string, string>();
+	const urls = new Set<string>();
+	const router = InternalUrlRouter.instance();
+	for (const text of texts) {
+		for (const href of getMarkdownLinkUrls(text)) {
+			if (!safeHyperlinkUri(href) || /^(?:#|\?|\/\/)/.test(href)) continue;
+			const scheme = extractUriScheme(href);
+			// Rendering must not fetch remote resources or materialize secrets.
+			if (
+				!scheme ||
+				scheme === "file" ||
+				(/^(?:agent|artifact|history|local|memory|omp|rule|skill):\/\//i.test(href) && router.canHandle(href))
+			) {
+				urls.add(href);
+			}
+		}
+	}
+	await Promise.all(
+		[...urls].map(async href => {
+			try {
+				let sourcePath: string;
+				let suffix: string;
+				if (router.canHandle(href)) {
+					const resource = await router.resolve(href, { ...context, pathOnly: true, skipDirectoryListing: true });
+					if (!resource.sourcePath) return;
+					sourcePath = resource.sourcePath;
+					suffix = parseInternalUrl(href).hash;
+				} else {
+					const suffixIndex = href.search(/[?#]/);
+					const filePath = suffixIndex < 0 ? href : href.slice(0, suffixIndex);
+					suffix = suffixIndex < 0 ? "" : href.slice(suffixIndex);
+					const decoded =
+						extractUriScheme(href) === "file" ? url.fileURLToPath(href) : decodeURIComponent(filePath);
+					sourcePath = path.resolve(context?.cwd ?? process.cwd(), expandPath(decoded));
+				}
+				const stat = await fs.stat(sourcePath);
+				if (!stat.isFile() && !stat.isDirectory()) return;
+				targets.set(href, buildFileUri(sourcePath) + suffix);
+			} catch {
+				// A model-authored link may be incomplete, stale, or outside the resource root.
+			}
+		}),
+	);
+	return targets;
 }
 
 /**

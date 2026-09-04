@@ -41,7 +41,6 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { callWithCopilotModelRetry } from "../utils/retry";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -95,7 +94,6 @@ import {
 	getOpenAIPromptCacheKey,
 	getOpenAIStrictToolsScope,
 	isCompiledGrammarTooLargeStrictError,
-	isOpenRouterAnthropicModel,
 	isStrictToolsDisabledForScope,
 	type OpenAICompatPolicy,
 	type OpenAICompletionsParams,
@@ -733,6 +731,7 @@ const streamOpenAICompletionsOnce = (
 				options?.headers,
 				options?.initiatorOverride,
 				getOpenAIPromptCacheKey(options),
+				options?.sessionId,
 			);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
@@ -753,8 +752,9 @@ const streamOpenAICompletionsOnce = (
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				let { params, strictToolsApplied } = buildParams(model, context, options, effectiveToolStrictModeOverride);
-				appliedStrictTools = strictToolsApplied;
+				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				appliedStrictTools = builtParams.strictToolsApplied;
+				let params = builtParams.params;
 				const reasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"chat-completions",
 					trimmedBaseUrl,
@@ -808,15 +808,12 @@ const streamOpenAICompletionsOnce = (
 				} finally {
 					// Headers arrived (or the request failed); from here the
 					// first-event deadline is enforced by `iterateWithIdleTimeout`.
-					if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					clearTimeout(requestTimeout);
 				}
 			};
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
-				openaiStream = await callWithCopilotModelRetry(() => createCompletionsStream(), {
-					provider: model.provider,
-					signal: requestSignal,
-				});
+				openaiStream = await createCompletionsStream();
 			} catch (error) {
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				const reasoningEffortFallback =
@@ -837,7 +834,7 @@ const streamOpenAICompletionsOnce = (
 						reasoningEffortFallback,
 					);
 				} else if (
-					isOpenRouterAnthropicModel(model) &&
+					model.compat.retryWithoutStrictOnGrammarError &&
 					!disableStrictTools &&
 					isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse)
 				) {
@@ -925,7 +922,7 @@ const streamOpenAICompletionsOnce = (
 				stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 			};
 			const finishPendingToolCallBlocks = (): void => {
-				for (const block of [...pendingToolCallBlocks]) {
+				for (const block of Array.from(pendingToolCallBlocks)) {
 					finishToolCallBlock(block);
 				}
 			};
@@ -1509,6 +1506,7 @@ function createRequestSetup(
 	extraHeaders?: Record<string, string>,
 	initiatorOverride?: MessageAttribution,
 	promptCacheSessionId?: string,
+	sessionId?: string,
 ): OpenAIRequestSetup & { baseUrl: string } {
 	const apiVersion = $env.AZURE_OPENAI_API_VERSION || "2024-10-21";
 	const deploymentName = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(model.id) ?? model.id;
@@ -1517,6 +1515,7 @@ function createRequestSetup(
 		extraHeaders,
 		initiatorOverride,
 		promptCacheSessionId,
+		sessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
 		// Provider auth/header overlay: Kimi-code hosts require shared client
@@ -1616,7 +1615,7 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 	options: OpenAICompletionsOptions | undefined,
 ): void {
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
-	if (model.provider === "kimi-code" && promptCacheKey !== undefined) {
+	if (model.compat.supportsPromptCacheKey && promptCacheKey !== undefined) {
 		params.prompt_cache_key = promptCacheKey;
 	}
 
@@ -1705,7 +1704,7 @@ function buildParams(
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 
 	if (context.tools?.length) {
-		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride, model.provider);
+		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride);
 		params.tools = builtTools.tools;
 		toolStrictMode = builtTools.toolStrictMode;
 		strictToolsApplied = builtTools.strictToolsApplied;
@@ -2418,12 +2417,11 @@ function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompat,
 	toolStrictModeOverride?: ToolStrictModeOverride,
-	provider?: string,
 ): BuiltOpenAICompletionTools {
-	const rejectXaiRootObjectUnion = provider === "xai" || provider === "xai-oauth";
+	const rejectRootObjectUnion = compat.rejectRootObjectUnion;
 	const adaptedTools = tools.map(tool => {
 		const strict = !NO_STRICT && compat.supportsStrictMode !== false && tool.strict !== false;
-		const baseParameters = rejectXaiRootObjectUnion
+		const baseParameters = rejectRootObjectUnion
 			? flattenExclusiveRequiredRootUnion(toolWireSchema(tool))
 			: toolWireSchema(tool);
 		const adapted = adaptSchemaForStrict(baseParameters, strict);
@@ -2470,7 +2468,7 @@ function convertTools(
 				: compat.toolSchemaFlavor === "grammar"
 					? sanitizeSchemaForGrammar(wireParameters)
 					: wireParameters;
-		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectXaiRootObjectUnion });
+		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(
 				`Tool "${tool.name}" omitted from the openai-completions request: its parameter schema is invalid for this provider at ${violation} (an enum/const value cannot match its declared type, or leftover xAI object-root union). Other tools are unaffected.`,

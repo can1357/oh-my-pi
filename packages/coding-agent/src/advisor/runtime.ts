@@ -9,7 +9,6 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
 	formatSessionHistoryMarkdown,
-	formatToolResultErrorPreview,
 	PRIMARY_CONTEXT_CUSTOM_TYPES,
 } from "../session/session-history-format";
 import { ADVISOR_RENDER_OPTIONS, renderAdvisorDeltaChunks } from "./delta-split";
@@ -87,6 +86,10 @@ export interface AdvisorRuntimeHost {
 	notifyQuotaExhausted?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
+	/** Called once the runtime finishes draining its review backlog (or
+	 *  hard-stops), so the host can repaint UI that reflects whether the
+	 *  advisor is still going to comment on the current yield. */
+	notifyIdle?(): void;
 }
 
 /**
@@ -316,6 +319,13 @@ export class AdvisorRuntime {
 	 * explicit {@link reset} (config rebuild, /new, session restart).
 	 */
 	#halted = false;
+	/**
+	 * Whether the runtime has completed at least one review (a drain batch that
+	 * ended in a successful advisor turn). Gates {@link yielded} so the
+	 * status-line eye stays open until a review actually completes — a fresh
+	 * runtime with an empty backlog has not "finished" anything yet.
+	 */
+	#hasReviewed = false;
 	/** True from the moment an advisor turn fails until one succeeds (or an
 	 *  explicit reset/seed). While set, {@link waitForCatchup} resolves
 	 *  immediately: the primary agent NEVER parks on a failing advisor. */
@@ -354,6 +364,22 @@ export class AdvisorRuntime {
 	/** True after the runtime hard-stopped on repeated or permanent failures. */
 	get halted(): boolean {
 		return this.#halted;
+	}
+	/**
+	 * True once the runtime has completed at least one review and has no queued
+	 * or in-flight review work left, or has hard-stopped (halted/quota-paused/
+	 * disposed): the advisor is not going to add any more comments until a new
+	 * primary turn (or an explicit reset). A fresh runtime that has never
+	 * reviewed anything is NOT yielded — the eye stays open until the first
+	 * review completes. Drives the status-line closed-eye state.
+	 */
+	get yielded(): boolean {
+		return (
+			this.disposed ||
+			this.#quotaExhausted ||
+			this.#halted ||
+			(this.#hasReviewed && !this.#busy && this.#backlog === 0 && this.#pending.length === 0)
+		);
 	}
 
 	/**
@@ -421,7 +447,6 @@ export class AdvisorRuntime {
 		)
 			return Promise.resolve(this.#backlog < threshold);
 		const { promise, resolve } = Promise.withResolvers<boolean>();
-		let waiter!: CatchupWaiter;
 		const finish = (caughtUp: boolean): void => {
 			const idx = this.#waiters.indexOf(waiter);
 			if (idx >= 0) this.#waiters.splice(idx, 1);
@@ -430,7 +455,7 @@ export class AdvisorRuntime {
 			resolve(caughtUp);
 		};
 		const abort = (): void => finish(false);
-		waiter = {
+		const waiter = {
 			threshold,
 			finish,
 			timer: setTimeout(abort, maxMs),
@@ -558,6 +583,10 @@ export class AdvisorRuntime {
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
 		this.#halted = false;
+		// A re-primed advisor has not reviewed the (new) conversation yet — drop
+		// the latch so the eye stays open until the first post-reset review, and
+		// so an aborted prior drain cannot emit a stale advisor_yielded.
+		this.#hasReviewed = false;
 		this.#failing = false;
 		this.#droppedBacklogs = 0;
 		this.#consecutiveQuarantines = 0;
@@ -623,6 +652,15 @@ export class AdvisorRuntime {
 				discoveredNewRegexSecretValue = true;
 			}
 		};
+		const addTextualContent = (content: TextualContent): void => {
+			if (typeof content === "string") {
+				addRegexValues(content);
+				return;
+			}
+			for (const block of content) {
+				if (block.type === "text") addRegexValues(block.text);
+			}
+		};
 		for (const message of delta) {
 			if (
 				message.role === "custom" &&
@@ -631,6 +669,7 @@ export class AdvisorRuntime {
 			) {
 				addRegexValues(message.content);
 			}
+			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
 		}
 		addRegexValues(renderedMd);
 		scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
@@ -746,6 +785,7 @@ export class AdvisorRuntime {
 			md = formatSessionHistoryMarkdown(this.#obfuscatePrimaryContextMessages(obfuscator, delta), {
 				...ADVISOR_RENDER_OPTIONS,
 				includeThinking: this.#includeThinking,
+				transformExpandedToolIO: text => obfuscator.obfuscate(text, this.#advisorRegexSecretValues),
 			});
 			md = obfuscator.obfuscate(md, this.#advisorRegexSecretValues);
 		}
@@ -845,7 +885,7 @@ export class AdvisorRuntime {
 	}
 
 	#wakeAllWaiters(): void {
-		for (const w of [...this.#waiters]) {
+		for (const w of Array.from(this.#waiters)) {
 			w.finish(false);
 		}
 	}
@@ -1161,6 +1201,7 @@ export class AdvisorRuntime {
 					if (turnError) throw turnError;
 					success = true;
 					this.#seenContextInFlight = undefined;
+					this.#hasReviewed = true;
 					this.#failing = false;
 					this.#consecutiveFailures = 0;
 					this.#failureNotified = false;
@@ -1439,6 +1480,18 @@ export class AdvisorRuntime {
 		} finally {
 			this.#iterationAbort = undefined;
 			this.#busy = false;
+			// Notify on EVERY path that lands the runtime in the yielded state —
+			// not just an empty backlog. The quota branch requeues the failed
+			// batch (backlog/pending stay non-empty) yet `yielded` is true via
+			// the quota latch, and the eye must close without waiting for an
+			// unrelated repaint. Same for halt.
+			if (!this.disposed && this.yielded) {
+				try {
+					this.host.notifyIdle?.();
+				} catch (err) {
+					logger.debug("advisor idle notification failed", { err: String(err) });
+				}
+			}
 		}
 	}
 }
@@ -1481,29 +1534,6 @@ function obfuscateTextualContent(
 		return { ...block, text };
 	});
 	return changed ? result : content;
-}
-
-function firstAdvisorToolResultErrorLine(content: TextualContent): string | undefined {
-	if (typeof content === "string") return content.split("\n", 1)[0];
-	const first = content[0];
-	if (first?.type !== "text") return undefined;
-	return first.text.split("\n", 1)[0];
-}
-
-function obfuscateAdvisorToolResultErrorContent(
-	obfuscator: SecretObfuscator,
-	content: TextualContent,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): TextualContent {
-	const firstLine = firstAdvisorToolResultErrorLine(content);
-	if (firstLine === undefined) return content;
-	const preview = formatToolResultErrorPreview(content);
-	const obfuscatedPreview = obfuscator.obfuscate(preview, sharedRegexSecretValues);
-	if (obfuscatedPreview === firstLine) return content;
-	if (typeof content === "string") return obfuscatedPreview + content.slice(firstLine.length);
-	const first = content[0]!;
-	if (first.type !== "text") return content;
-	return [{ ...first, text: obfuscatedPreview + first.text.slice(firstLine.length) }, ...content.slice(1)];
 }
 
 function obfuscateAssistantMessage(
@@ -1569,9 +1599,7 @@ function obfuscateAdvisorMessage(
 				details?: Record<string, unknown>;
 				isError?: boolean;
 			};
-			const content = msg.isError
-				? obfuscateAdvisorToolResultErrorContent(obfuscator, msg.content, sharedRegexSecretValues)
-				: msg.content;
+			const content = obfuscateTextualContent(obfuscator, msg.content, sharedRegexSecretValues);
 			let details = msg.details;
 			if (typeof details?.diff === "string") {
 				const diff = obfuscator.obfuscate(details.diff, sharedRegexSecretValues);

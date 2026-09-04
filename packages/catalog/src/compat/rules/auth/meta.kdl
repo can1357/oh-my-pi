@@ -1,0 +1,9 @@
+auth "meta" {
+	name "Meta Model API"
+	login "api-key" {
+		auth-url "https://developer.meta.com/ai/"
+		instructions "Create or copy your key from the Meta Model API dashboard"
+		prompt "Paste your Meta Model API key" placeholder="Model API key"
+		validate "models-endpoint" url="https://api.meta.ai/v1/models"
+	}
+}

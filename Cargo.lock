@@ -288,9 +288,9 @@ dependencies = [
 
 [[package]]
 name = "astral-tl"
-version = "0.7.11"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d90933ffb0f97e2fc2e0de21da9d3f20597b804012d199843a6fe7c2810d28f3"
+checksum = "04d4bb5df351abb6758a04240b0193794ddaf34a7c0b9452fab3c25dcce39e88"
 dependencies = [
  "memchr",
 ]
@@ -3117,9 +3117,9 @@ dependencies = [
 
 [[package]]
 name = "gix-path"
-version = "0.12.5"
+version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b075e730586bba7341304d6fc1b4efc1d10cf64532622521c0e07f30e661046"
+checksum = "38fc6f029ea67de83cbcbd33fd98c05a48360d2932b39d9fdacbc6eae802d475"
 dependencies = [
  "bstr",
  "gix-trace",
@@ -3671,9 +3671,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -3724,9 +3724,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.11.6"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5fe2583aad3e87439e40d841fed327a60892bb9946da1e3a5788ee7f0f4fe3c"
+checksum = "9fd381d291246b2df83535a2f2896dc32633a4cb69a14861f29f9dc0c7fbab77"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -4675,9 +4675,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.21"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7955dfc218a8afb29dfeffd540e3a6e96baeb94fe7138228dd7cc6937fbbf96"
+checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
 dependencies = [
  "libc",
 ]
@@ -4950,9 +4950,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "log",
@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6169,8 +6169,6 @@ dependencies = [
  "rustix 1.1.4",
  "self_cell",
  "serde_json",
- "sha2 0.10.9",
- "sha3",
  "similar 3.2.0",
  "smallvec",
  "strum",
@@ -6188,8 +6186,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-diff"
+version = "18.1.10"
+
+[[package]]
+name = "pi-edit"
+version = "18.1.10"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "pi-ast",
+ "pi-diff",
+ "pi-walker",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "xutf",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "pi-iso"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "async-trait",
  "libc",
@@ -6201,12 +6222,13 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "anyhow",
  "arboard",
  "ashpd",
  "ast-grep-core",
+ "async-trait",
  "atspi",
  "base64 0.22.1",
  "clap",
@@ -6230,6 +6252,7 @@ dependencies = [
  "image",
  "inferno",
  "libc",
+ "log",
  "napi",
  "napi-build",
  "napi-derive",
@@ -6243,6 +6266,8 @@ dependencies = [
  "pdf-inspector",
  "phf 0.13.1",
  "pi-ast",
+ "pi-diff",
+ "pi-edit",
  "pi-iso",
  "pi-shell",
  "pi-vcs",
@@ -6261,6 +6286,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "tiktoken-rs",
+ "tinyvec",
  "tokio",
  "tokio-util",
  "toml",
@@ -6272,13 +6298,14 @@ dependencies = [
  "xkeysym",
  "xutf",
  "xxhash-rust",
+ "zbus",
  "zstd",
  "zune-jpeg",
 ]
 
 [[package]]
 name = "pi-shell"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6306,11 +6333,13 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "gix",
+ "gix-utils",
  "jj-lib",
  "libc",
+ "pi-iso",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6319,7 +6348,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6334,7 +6363,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.0.11"
+version = "18.1.10"
 dependencies = [
  "dashmap",
  "globset",
@@ -7388,7 +7417,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
- "sha2-asm",
 ]
 
 [[package]]
@@ -7400,15 +7428,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
  "digest 0.11.3",
-]
-
-[[package]]
-name = "sha2-asm"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -7547,9 +7566,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 dependencies = [
  "serde",
 ]
@@ -8083,9 +8102,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -8847,13 +8866,13 @@ dependencies = [
 
 [[package]]
 name = "uiautomation_derive"
-version = "0.7.8"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffcc4d404aa1c03a848f95cf5feadc3e63946d7f095bf388770b85550093d388"
+checksum = "1c893ec96e05c3c81ba46f838f3190549ec185ef377d582ab3d44202b2dfacbd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -10278,9 +10297,9 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xutf"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a14f3ca7038796715a5f5fd1c22aac21423b4f86fd9ef5585ef1744a5cfc573e"
+checksum = "990cc0159ef1d38b900524ac2308778ce60de2d32af70f40a71517c6b299fe8a"
 
 [[package]]
 name = "xxhash-rust"

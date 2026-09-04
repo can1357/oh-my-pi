@@ -4,6 +4,7 @@ import type * as zod from "@oh-my-pi/omptype/zod";
 import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
+import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
@@ -96,7 +97,8 @@ export interface HookUIContext {
 
 	/**
 	 * Show a custom component with keyboard focus.
-	 * The factory receives TUI, theme, and a done() callback to close the component.
+	 * The factory receives TUI, theme, keybindings, and a done() callback to close the component.
+	 * Matches the interactive controller call shape (same arity as ExtensionUIContext.custom).
 	 * Can be async for fire-and-forget work (don't await the work, just start it).
 	 *
 	 * @param factory - Function that creates the component. Call done() when finished.
@@ -104,14 +106,14 @@ export interface HookUIContext {
 	 *
 	 * @example
 	 * // Sync factory
-	 * const result = await ctx.ui.custom((tui, theme, done) => {
+	 * const result = await ctx.ui.custom((tui, theme, keybindings, done) => {
 	 *   const component = new MyComponent(tui, theme);
 	 *   component.onFinish = (value) => done(value);
 	 *   return component;
 	 * });
 	 *
 	 * // Async factory with fire-and-forget work
-	 * const result = await ctx.ui.custom(async (tui, theme, done) => {
+	 * const result = await ctx.ui.custom(async (tui, theme, keybindings, done) => {
 	 *   const loader = new CancellableLoader(tui, theme.fg("accent"), theme.fg("muted"), "Working...");
 	 *   loader.onAbort = () => done(null);
 	 *   doWork(loader.signal).then(done);  // Don't await - fire and forget
@@ -122,6 +124,7 @@ export interface HookUIContext {
 		factory: (
 			tui: TUI,
 			theme: Theme,
+			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
 	): Promise<T>;

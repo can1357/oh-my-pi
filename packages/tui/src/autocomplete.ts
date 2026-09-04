@@ -382,7 +382,7 @@ function buildSlashCommandCompletions(
 			// Equal text-match scores fall back to usage frequency, then to the
 			// stable registry order.
 			.sort((a, b) => b.score - a.score || b.usage - a.usage)
-			.map(({ score: _, usage: _usage, ...rest }) => rest)
+			.map(({ score: _score, usage: _usage, ...rest }) => rest)
 	);
 }
 
