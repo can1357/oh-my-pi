@@ -746,3 +746,21 @@ Use the right surface:
 - **Custom-tools** (`src/extensibility/custom-tools/*`): tool-focused modules; when loaded alongside extensions they are adapted and still pass through extension interception wrappers.
 
 If you need one package that owns policy, tools, command UX, and rendering together, use extensions.
+
+## Privacy middleware (PII)
+
+Built-in `secrets.enabled` obfuscates credentials before provider I/O. For NER-style PII (names, emails, phones, addresses) use an extension on:
+
+- `tool_result` — scrub tool output entering the transcript
+- `context` — rewrite `AgentMessage[]` before the model call
+- `before_provider_request` — last-mile provider payload replacement
+
+See `packages/coding-agent/examples/extensions/pii-redact.ts` for a zero-dep pattern, or install the local ProgramAsWeights plugin:
+
+```bash
+omp plugin link /path/to/pii/integrations/omp
+# https://github.com/kvnloo/pii
+```
+
+Do not fold NER models into core secrets.yml unless productizing a unified pipeline (Discord first).
+
