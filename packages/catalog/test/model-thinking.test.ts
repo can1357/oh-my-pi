@@ -779,6 +779,36 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
+	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
+		const ids = [
+			"global.anthropic.claude-fable-5-1",
+			"eu.anthropic.claude-fable-5-1",
+			"us.anthropic.claude-fable-5-1",
+			"us-gov.anthropic.claude-fable-5-1",
+		];
+
+		for (const id of ids) {
+			const model = createModel({
+				id,
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+			});
+
+			expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+			expect(() => mapEffortToAnthropicAdaptiveEffort(model, Effort.Minimal)).toThrow(/not supported/);
+			expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.XHigh)).toBe("xhigh");
+			expect(mapEffortToAnthropicAdaptiveEffort(model, Effort.Max)).toBe("max");
+		}
+
+		const previousRevision = createModel({
+			id: "global.anthropic.claude-fable-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		expect(getSupportedEfforts(previousRevision)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(() => mapEffortToAnthropicAdaptiveEffort(previousRevision, Effort.XHigh)).toThrow(/not supported/);
+	});
+
 	it("does not advertise mid-conversation system messages on Claude Sonnet 5", () => {
 		const sonnet5 = createModel({
 			id: "claude-sonnet-5",
