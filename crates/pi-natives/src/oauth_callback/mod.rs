@@ -716,7 +716,7 @@ fn fill_random(bytes: &mut [u8; 16]) -> AnyResult<()> {
 
 #[cfg(target_os = "windows")]
 fn fill_random(bytes: &mut [u8; 16]) -> AnyResult<()> {
-	let mut guid = windows_sys::core::GUID::zeroed();
+	let mut guid = windows_sys::core::GUID::default();
 	// SAFETY: `guid` is a live writable GUID for the duration of the call.
 	let result = unsafe { windows_sys::Win32::System::Com::CoCreateGuid(&raw mut guid) };
 	if result < 0 {
