@@ -31,7 +31,7 @@ describe("SDK workpool yield schema", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
-	it("switches the constructed yield tool before a pooled turn starts", async () => {
+	it("keeps the yield descriptor available while switching to a pooled turn", async () => {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
@@ -66,5 +66,34 @@ describe("SDK workpool yield schema", () => {
 		expect(Reflect.get(activeTool.parameters, "required")).toEqual(["key"]);
 		const result = await tool.execute("yield-pool-1", { key: 1, data: { answer: 42 } });
 		expect(result.details).toMatchObject({ type: ["pool#1"], complete: true });
+	});
+
+	it("constructs default subagent tools before the session is available to their descriptors", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ inlineToolDescriptors: "on" }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			requireYieldTool: true,
+		});
+		sessions.push(session);
+		const tool = session.getToolByName("yield");
+		if (!tool) throw new Error("Missing yield tool");
+		const result = await tool.execute("yield-default", { type: "complete", data: { answer: 42 } });
+		expect(result.details).toMatchObject({
+			data: { answer: 42 },
+			status: "success",
+			type: "complete",
+		});
 	});
 });
