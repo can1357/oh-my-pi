@@ -8,6 +8,10 @@
 
 ### Fixed
 
+- Fixed sloppy edits without an explicit `<SM:PUT>` so plain text is no longer split into inferred current and final halves, preventing marker-less desired-state blocks from replacing only a matching prefix; safe whole-block recoveries remain, and recovery paths now surface explanatory notes ([#10527](https://github.com/can1357/oh-my-pi/pull/10527) by [@CaiJingLong](https://github.com/CaiJingLong)).
+
+### Added
+
 - Report oversized selected lines that cannot fit after read context, with a working raw recovery selector instead of a looping continuation hint ([#10775](https://github.com/can1357/oh-my-pi/issues/10775)).
 - Fixed WorkPool child sessions crashing during startup while constructing their incremental `yield` tool schema.
 - Commit summaries written in Vietnamese, Korean, and other accented scripts are no longer rejected for exceeding the length limit, and keep their accents as typed.

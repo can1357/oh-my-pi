@@ -403,19 +403,6 @@ fn recovers_a_stray_close_typed_as_an_inline_divider() {
 }
 
 #[test]
-fn auto_splits_a_uniquely_matching_match_prefix_from_an_omitted_separator() {
-	let operations = parse_operations(
-		"«\nconst value = oldValue;\nconst value = newValue;",
-		"const value = oldValue;\nreport(value);\n",
-	)
-	.unwrap();
-	assert_eq!(operations[0].pattern_text, "const value = oldValue;");
-	assert!(
-		matches!(&operations[0].rewrite, OperationRewrite::Explicit { text } if text == "const value = newValue;")
-	);
-}
-
-#[test]
 fn recovers_guillemets_used_as_brackets_around_old_and_new_blocks() {
 	let operations = parse_operations(
 		"«\nconst first = old;\n»\n«\nconst first = new;\n»",

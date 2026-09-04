@@ -10,10 +10,7 @@ use std::{
 use regex::Regex;
 
 use super::{
-	apply::{
-		closest_desired_block, diff_shaped_candidates, is_diff_shaped, locate, normalize_text,
-		parse_pattern,
-	},
+	apply::{closest_desired_block, diff_shaped_candidates, locate, normalize_text, parse_pattern},
 	types::{InlineSloppyRegion, Operation, OperationRewrite, SloppySection, markers},
 };
 use crate::error::EditError;
@@ -565,51 +562,6 @@ fn normalize_block(lines: &[String], rewrite: bool) -> String {
 		}
 	}
 	cleaned.join("\n")
-}
-
-fn recover_missing_separator(lines: &[String], content: &str) -> Option<(String, String)> {
-	if is_diff_shaped(&lines.join("\n")) {
-		return None;
-	}
-	let mut candidates = Vec::new();
-	for split in 1..lines.len() {
-		let mut remainder_start = split;
-		while lines
-			.get(remainder_start)
-			.is_some_and(|line| line.trim().is_empty())
-		{
-			remainder_start += 1;
-		}
-		if remainder_start >= lines.len() {
-			continue;
-		}
-		let pattern = normalize_block(&lines[..split], false);
-		let rewrite = normalize_block(&lines[remainder_start..], true);
-		if js_len(&pattern) < 4 || rewrite.replace(GAP, "").trim().is_empty() {
-			continue;
-		}
-		if rewrite
-			.split('\n')
-			.any(|line| !line.trim().is_empty() && line.trim().replace(GAP, "").is_empty())
-		{
-			continue;
-		}
-		let occurrences: Vec<usize> = content.match_indices(&pattern).map(|(at, _)| at).collect();
-		if occurrences.len() != 1 {
-			continue;
-		}
-		let through_first_rewrite = normalize_block(&lines[..=remainder_start], false);
-		if content[occurrences[0]..].starts_with(&through_first_rewrite) {
-			continue;
-		}
-		if !candidates
-			.iter()
-			.any(|candidate: &(String, String)| candidate.0 == pattern && candidate.1 == rewrite)
-		{
-			candidates.push((pattern, rewrite));
-		}
-	}
-	(candidates.len() == 1).then(|| candidates.remove(0))
 }
 
 fn recover_alternating_separators(lines: &[String], content: &str) -> Option<Vec<String>> {
@@ -1523,10 +1475,10 @@ fn finish_pattern(
 		operations.push(create_operation_text(&source, "", all, number, false)?);
 		return Ok(());
 	}
-	if let Some((pattern, rewrite)) = recover_missing_separator(pattern_lines, content) {
-		operations.push(create_operation_text(&pattern, &rewrite, all, number, true)?);
-		return Ok(());
-	}
+	// Never infer a missing <SM:PUT> separator by splitting plain text.
+	// Content similarity cannot distinguish a forgotten separator from a
+	// marker-less desired-state block, so guessing can silently replace only
+	// a matching prefix. Safe whole-block fallbacks below may still apply.
 	let mut diff_fallback = None;
 	for candidate in diff_shaped_candidates(&source) {
 		let Ok(mut operation) = create_operation_text(&candidate, "", all, number, false) else {

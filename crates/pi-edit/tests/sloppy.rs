@@ -152,3 +152,64 @@ async fn missing_file_target_uses_the_taught_opener() {
 		"Missing file target: start the payload with <SM:EDIT path=\"relative/path.ts\">."
 	);
 }
+
+#[test]
+fn rejects_a_markerless_continuation_instead_of_implicitly_splitting() {
+	// Regression (#10527): a marker-less desired-state block whose first line
+	// matches in the file must never be inferred as current/final halves. The
+	// old recovery split at the first matching line, replacing only the prefix
+	// and keeping the dissimilar continuation — silently corrupting the file.
+	let dir = tempfile::tempdir().expect("tempdir");
+	let path = dir.path().join("legacy.ts");
+	std::fs::write(&path, "const item1 = value;\nrunLegacy();\n").expect("fixture");
+	let canonical = canonical_key(&path);
+	let store = EditStore::new();
+	let mut notes = Vec::new();
+	let error = apply_sloppy(
+		"const item1 = value;\nrunLegacy();\n",
+		"«\nconst item1 = value;\nconst item2 = value;",
+		ApplyContext {
+			path:      "legacy.ts",
+			notes:     &mut notes,
+			store:     &store,
+			canonical: &canonical,
+		},
+	)
+	.expect_err("marker-less continuation must fail closed");
+	assert!(
+		error.to_string().contains("has <SM:FIND> but no <SM:PUT>"),
+		"expected fail-closed separator guidance, got: {error}"
+	);
+}
+
+#[test]
+fn replaces_the_closest_block_for_a_markerless_statement() {
+	// A marker-less desired-state block that matches a whole existing block is
+	// applied as a safe whole-block replacement, with a recovery note — never
+	// split into inferred current/final halves.
+	let dir = tempfile::tempdir().expect("tempdir");
+	let path = dir.path().join("timeout.ts");
+	std::fs::write(&path, "const timeout = 1000;\nreport(timeout);\n").expect("fixture");
+	let canonical = canonical_key(&path);
+	let store = EditStore::new();
+	let mut notes = Vec::new();
+	let result = apply_sloppy(
+		"const timeout = 1000;\nreport(timeout);\n",
+		"«\nconst timeout = 1000;\nconst timeout = 5000;",
+		ApplyContext {
+			path:      "timeout.ts",
+			notes:     &mut notes,
+			store:     &store,
+			canonical: &canonical,
+		},
+	)
+	.expect("whole-block replacement should apply");
+	assert_eq!(result, "const timeout = 1000;\nconst timeout = 5000;\n");
+	assert!(
+		notes
+			.join("\n")
+			.contains("closest matching block was replaced"),
+		"expected whole-block recovery note, got: {}",
+		notes.join("\n")
+	);
+}
