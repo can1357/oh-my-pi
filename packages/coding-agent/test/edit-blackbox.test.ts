@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { canonicalSnapshotKey, EditTool, getFileSnapshotStore, type PatchParams } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditTool, getEditStore, type PatchParams } from "@oh-my-pi/pi-coding-agent/edit";
+import { formatHashlineHeader } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { EditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -152,7 +152,7 @@ describe("edit parse-regression blackbox", () => {
 		});
 
 		const hashlinePath = await writeFixture("hashline.ts");
-		const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(hashlinePath), SOURCE);
+		const tag = getEditStore(session).recordSnapshot(hashlinePath, SOURCE, undefined);
 		const hashlineArg = {
 			input: `${formatHashlineHeader("hashline.ts", tag)}\nPUT 2-2:\n+\treturn (;`,
 		};
@@ -166,7 +166,9 @@ describe("edit parse-regression blackbox", () => {
 		});
 
 		const sloppyPath = await writeFixture("sloppy.ts");
-		const sloppyArg = { input: "§sloppy.ts\n\treturn ⟪1│(⟫;" };
+		const sloppyArg = {
+			input: '<SM:EDIT path="sloppy.ts">\n<SM:FIND>\n\treturn 1;\n</SM:FIND>\n<SM:PUT>\n\treturn (;\n</SM:PUT>',
+		};
 		await new EditTool(session, "sloppy").execute("sloppy", sloppyArg);
 		expected.push({
 			prev: SOURCE,

@@ -203,7 +203,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					"accept-encoding": "identity",
 					"user-agent": "connect-go/1.18.1 (go1.26.3)",
 					"connect-accept-encoding": "gzip",
-					...(options?.headers ?? {}),
+					...options?.headers,
 				},
 				body: frame,
 				signal: options?.signal,

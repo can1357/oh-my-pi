@@ -270,6 +270,23 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
+	it("does not replay a long OpenCode Go usage limit after committed text", () => {
+		const openCodeModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		if (!openCodeModel) throw new Error("Expected bundled OpenCode Go model");
+		const recovery = new TurnRecovery(
+			createHost(openCodeModel, modelRegistry, {
+				fallbackChains: {
+					[`${openCodeModel.provider}/${openCodeModel.id}`]: ["openai/gpt-4o-mini"],
+				},
+			}),
+		);
+		const message = {
+			...makeMessage([{ type: "text", text: "Already shown to the user" }], openCodeModel),
+			errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+		} as AssistantMessage;
+		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
 	it("allows replay-safe hard fallback and excludes committed text with a configured chain", () => {
 		const fallbackChains = {
 			[`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"],
@@ -921,5 +938,84 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			}),
 		);
 		expect(recovery.resolveRetryFallbackRole(`${other.provider}/${other.id}`, other)).toBeUndefined();
+	});
+
+	// Gemini reports MALFORMED_FUNCTION_CALL when the model transcribes the call
+	// as text (`call:default_api:read{…}`). The text is committed, so the replay
+	// retry refuses the turn; the session must still recover by keeping the turn
+	// and continuing with a corrective reminder instead of pinning the error.
+	describe("malformed function call without a structured tool call", () => {
+		function malformedTextTurn(): AssistantMessage {
+			const message = makeMessage(
+				[
+					{
+						type: "text",
+						text: "```call:default_api:read{i:Read call_frame.rs,path:src/call_frame.rs:215-320}```",
+					},
+				],
+				model,
+			);
+			message.errorMessage = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+			return message;
+		}
+
+		function continuationHost(message: AssistantMessage) {
+			const messages: AgentMessage[] = [message];
+			const continues: string[] = [];
+			const host = createHost(model, modelRegistry, { messages });
+			host.agent = {
+				state: { messages },
+				appendMessage: (appended: AgentMessage) => messages.push(appended),
+			} as never;
+			host.scheduleAgentContinue = options => continues.push(options.source);
+			return { host, messages, continues };
+		}
+
+		it("continues with a corrective developer message when replay is refused", () => {
+			const message = malformedTextTurn();
+			const { host, messages, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+
+			expect(messages[0]).toBe(message);
+			const reminder = messages[1];
+			expect(reminder?.role).toBe("developer");
+			if (reminder?.role !== "developer") throw new Error("expected developer reminder");
+			const text =
+				typeof reminder.content === "string"
+					? reminder.content
+					: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(text).toContain("malformed");
+			expect(text).toContain("Attempt #1/3");
+			expect(continues).toEqual(["malformed-function-call-retry"]);
+		});
+
+		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {
+			const message = malformedTextTurn();
+			const { host, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(false);
+			expect(continues).toHaveLength(3);
+
+			recovery.resetForNewPrompt();
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
+		});
+
+		it("ignores errors that are not malformed function calls", () => {
+			const message = makeMessage([{ type: "text", text: "partial answer" }], model);
+			message.errorMessage = "500 Internal Server Error";
+			const { host, messages, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(false);
+			expect(messages).toHaveLength(1);
+			expect(continues).toEqual([]);
+		});
 	});
 });

@@ -1,6 +1,14 @@
 import { shimmerText } from "../../modes/theme/shimmer";
 import { theme as currentTheme, type Theme } from "../../modes/theme/theme";
 
+/** Title-case a provider id for display (`openai-codex` → `Openai Codex`). */
+export function formatProviderName(provider: string): string {
+	return provider
+		.split(/[-_]/g)
+		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
+		.join(" ");
+}
+
 /** Format a millisecond duration as a coarse-grained human label. */
 export function formatDuration(ms: number): string {
 	const seconds = Math.max(0, Math.round(ms / 1000));

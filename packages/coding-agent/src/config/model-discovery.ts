@@ -88,7 +88,7 @@ export function discoveryProbeTimeoutMs(baseUrl: string, loopbackMs: number, cus
 	}
 	hostname = hostname.replace(/^\[/, "").replace(/\]$/, "");
 	const isLoopback =
-		hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::1" || /^127\./.test(hostname);
+		hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::1" || hostname.startsWith("127.");
 	return isLoopback ? loopbackMs : REMOTE_DISCOVERY_TIMEOUT_MS;
 }
 
@@ -425,7 +425,7 @@ async function discoverOllamaModelMetadata(
 		const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 150, customTimeoutMs), async signal => {
 			const response = await ctx.fetch(showUrl, {
 				method: "POST",
-				headers: { ...(headers ?? {}), "Content-Type": "application/json" },
+				headers: { ...headers, "Content-Type": "application/json" },
 				body: JSON.stringify({ model: modelId }),
 				signal,
 			});
@@ -474,7 +474,7 @@ export async function discoverOllamaModels(
 ): Promise<Model<Api>[]> {
 	const endpoint = normalizeOllamaBaseUrl(providerConfig.baseUrl);
 	const tagsUrl = `${endpoint}/api/tags`;
-	const headers = { ...(providerConfig.headers ?? {}) };
+	const headers = { ...providerConfig.headers };
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
 	const payload = await withTimeoutSignal(discoveryProbeTimeoutMs(endpoint, 250, customTimeoutMs), async signal => {
 		const response = await ctx.fetch(tagsUrl, {
@@ -600,7 +600,7 @@ export async function discoverLlamaCppModels(
 	const baseUrl = normalizeLlamaCppBaseUrl(providerConfig.baseUrl);
 	const modelsUrl = `${baseUrl}/models`;
 
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const customTimeoutMs = providerConfig.discovery.timeoutMs;
 	const attempt = async (h: Record<string, string>) => {
@@ -677,7 +677,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	// base URL, which would otherwise send this to `/v1/models`.
 	const nativeBaseUrl = toLlamaCppNativeBaseUrl(baseUrl);
 	const modelsUrl = `${nativeBaseUrl}/models`;
-	const baseHeaders: Record<string, string> = { ...(model.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...model.headers };
 	const attempt = async (headers: Record<string, string>) => {
 		const [entries, serverMetadata] = await Promise.all([
 			withTimeoutSignal(discoveryProbeTimeoutMs(nativeBaseUrl, 250, customTimeoutMs), async signal => {
@@ -750,7 +750,7 @@ export async function discoverLmStudioModelRuntimeMetadata(
 ): Promise<DiscoveredModelRuntimeMetadata | undefined> {
 	const baseUrl = normalizeOpenAIModelsListBaseUrl(model.baseUrl);
 	const timeoutMs = customTimeoutMs ?? 10_000;
-	const baseHeaders: Record<string, string> = { ...(model.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...model.headers };
 	const attempt = async (headers: Record<string, string>) => {
 		const metadata = await withTimeoutSignal(timeoutMs, signal =>
 			fetchLmStudioNativeModelMetadata(baseUrl, ctx.fetch, { headers, signal }),
@@ -820,7 +820,7 @@ export async function discoverOpenAIModelsList(
 		: normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl);
 	const modelsUrl = appendModelsPath(baseUrl);
 
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
@@ -934,7 +934,7 @@ export async function discoverLiteLLMModels(
 	const baseUrl = normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl);
 	const references = getBundledModelReferenceIndex();
 	const resolveReference = (id: string) => resolveModelReference(id, references) as ModelSpec<Api> | undefined;
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) => {
@@ -1006,7 +1006,7 @@ export async function discoverProxyModels(
 	const baseUrl = normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl);
 	const modelsUrl = `${baseUrl}/models`;
 
-	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+	const baseHeaders: Record<string, string> = { ...providerConfig.headers };
 	let headers = baseHeaders;
 	const timeoutMs = providerConfig.discovery.timeoutMs ?? 10_000;
 	const attempt = async (h: Record<string, string>) =>

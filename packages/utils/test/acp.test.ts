@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-	type Agent,
 	AgentSideConnection,
 	type AnyMessage,
 	type Client,
@@ -33,22 +32,23 @@ describe("ACP JSON-RPC transport", () => {
 			},
 		};
 		const clientConnection = new ClientSideConnection(() => client, pair.left);
-		let agentConnection: AgentSideConnection;
-		const agent: Agent = {
-			initialize: params => ({ protocolVersion: params.protocolVersion }),
-			newSession: async () => ({ sessionId: "session-1" }),
-			prompt: async params => {
-				if (params.prompt.length === 0) throw RequestError.invalidParams({ field: "prompt" });
-				await agentConnection.requestPermission({
-					sessionId: params.sessionId,
-					toolCall: { toolCallId: "tool-1" },
-					options: [],
-				});
-				return { stopReason: "end_turn" };
-			},
-			cancel: async () => {},
-		};
-		agentConnection = new AgentSideConnection(() => agent, pair.right);
+		const agentConnection = new AgentSideConnection(
+			connection => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async params => {
+					if (params.prompt.length === 0) throw RequestError.invalidParams({ field: "prompt" });
+					await connection.requestPermission({
+						sessionId: params.sessionId,
+						toolCall: { toolCallId: "tool-1" },
+						options: [],
+					});
+					return { stopReason: "end_turn" };
+				},
+				cancel: async () => {},
+			}),
+			pair.right,
+		);
 
 		await expect(clientConnection.initialize({ protocolVersion: 1, clientCapabilities: {} })).resolves.toEqual({
 			protocolVersion: 1,

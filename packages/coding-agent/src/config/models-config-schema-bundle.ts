@@ -53,10 +53,12 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
+		"supportsReasoningSummary?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
+		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
@@ -316,6 +318,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"guardrailVersion?": "string",
 		/** Bedrock guardrail trace verbosity. */
 		"guardrailTrace?": '"enabled" | "disabled" | "enabled_full"',
+		/**
+		 * Bedrock invocation-log tags attached to every Converse request under this
+		 * provider (max 16 entries; keys/values limited to `[a-zA-Z0-9\s:_@$#=/+,-.]`).
+		 */
+		"requestMetadata?": { "[string]": "string" },
 		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's

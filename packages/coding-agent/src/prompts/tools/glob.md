@@ -11,6 +11,8 @@ Globs files, directories, and path-backed internal URLs with fast pattern matchi
 Matches are newest-first and grouped by directory; directories end in `/`.
 </output>
 
+{{#if eagerDelegation}}
 <avoid>
 Open-ended multi-round discovery → {{#if scoutAvailable}}Task + scout.{{else}}Task.{{/if}}
 </avoid>
+{{/if}}

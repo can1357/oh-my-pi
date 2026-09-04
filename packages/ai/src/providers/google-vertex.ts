@@ -53,8 +53,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 				];
 			}
 			const baseHeaders: Record<string, string> = {
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
+				...model.headers,
+				...options?.headers,
 			};
 			// Vertex AI ignores a `serviceTier` request-body field (unlike the direct
 			// Gemini API); priority must travel as a request header. Only `priority`

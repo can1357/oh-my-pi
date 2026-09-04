@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
 
-import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { getProjectDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import {
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
 	createCancelledKernelResult,
+	EvalKernelNotRunningError,
 	executeWithKernelBase,
 	getExecutionDeadlineMs,
 	getRemainingTimeoutMs,
@@ -14,6 +15,8 @@ import {
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
+import { getEnabledEvalPreludes } from "../preludes";
+import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
 	createKernelSessionRegistry,
 	formatSessionKernelTimeoutAnnotation,
@@ -30,11 +33,27 @@ import {
 	type KernelExecuteResult,
 	type KernelShutdownResult,
 	PythonKernel,
+	type PythonPreludeSource,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
-import { ensurePyToolBridge } from "./tool-bridge";
+import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
 
 export type PythonKernelMode = "session" | "per-call";
+
+/** Raw request sent to a retained Python kernel's tool registry. */
+export type PythonToolRequest =
+	| { op: "describe"; names: string[] }
+	| { op: "call"; name: string; args: Record<string, unknown> };
+
+/** Session identity and bridge context for invoking a retained Python tool. */
+export interface PythonToolInvokeOptions {
+	cwd: string;
+	sessionId: string;
+	interpreter?: string;
+	kernelOwnerId?: string;
+	toolSession: ToolSession;
+	signal?: AbortSignal;
+}
 
 export interface PythonExecutorOptions {
 	/** Working directory for command execution */
@@ -108,6 +127,11 @@ export interface PythonExecutorOptions {
 
 export interface PythonKernelExecutor {
 	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
+	syncPreludes?: (
+		preludes: readonly PythonPreludeSource[],
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+	) => Promise<void>;
 }
 
 export interface PythonResult {
@@ -309,11 +333,26 @@ async function acquireLiveSessionKernel(
 // Execution
 // ---------------------------------------------------------------------------
 
+function pythonPreludeSources(session: ToolSession | undefined): PythonPreludeSource[] {
+	const definitions = getEnabledEvalPreludes(session?.getEvalPreludes?.() ?? []);
+	return definitions.flatMap(definition =>
+		definition.python.trim().length === 0
+			? []
+			: [{ name: definition.name, exports: [...definition.exports], source: definition.python }],
+	);
+}
+
 async function executeWithKernel(
 	kernel: PythonKernelExecutor,
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
+	const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
+	await kernel.syncPreludes?.(
+		pythonPreludeSources(options?.toolSession),
+		options?.signal,
+		Math.max(1, remainingMs ?? 10_000),
+	);
 	return executeWithKernelBase<PythonExecutorOptions>({
 		kernel,
 		code,
@@ -380,6 +419,104 @@ const sessionRegistry = createKernelSessionRegistry<PythonKernel, PythonExecutor
 	validateKernel: (session, kernel) => session.kernel === kernel,
 });
 
+interface PythonToolRequestOutcome {
+	execution: KernelExecuteResult;
+	envelope: unknown;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function pythonToolError(execution: KernelExecuteResult): string {
+	const error = execution.error;
+	if (!error) return "Python tool request failed";
+	return error.value || error.name || "Python tool request failed";
+}
+
+async function invokePythonToolRequest(
+	request: PythonToolRequest,
+	options: PythonToolInvokeOptions,
+): Promise<PythonToolRequestOutcome> {
+	const cwd = normalizeKernelSessionCwd(options.cwd);
+	const kernel = sessionRegistry.peekLiveKernel(cwd, {
+		cwd,
+		sessionId: options.sessionId,
+		interpreter: options.interpreter,
+		kernelOwnerId: options.kernelOwnerId,
+	});
+	if (!kernel) throw new EvalKernelNotRunningError("Python");
+
+	const bridgeOptions: PythonExecutorOptions = {
+		cwd,
+		sessionId: options.sessionId,
+		interpreter: options.interpreter,
+		kernelOwnerId: options.kernelOwnerId,
+		toolSession: options.toolSession,
+		signal: options.signal,
+	};
+	await ensureToolBridge(bridgeOptions);
+
+	const runId = Snowflake.next();
+	const unregister = registerPyToolBridge(options.sessionId, runId, {
+		toolSession: options.toolSession,
+		signal: options.signal,
+		emitStatus: undefined,
+	});
+	let envelope: unknown;
+	try {
+		const execution = await kernel.invokeTool(request, {
+			id: runId,
+			signal: options.signal,
+			onDisplay: output => {
+				if (output.type === "json") envelope = output.data;
+			},
+		});
+		return { execution, envelope };
+	} finally {
+		unregister();
+	}
+}
+
+/** Describe named tools defined in a retained Python kernel. */
+export async function describePythonTools(
+	names: string[],
+	options: PythonToolInvokeOptions,
+): Promise<{ tools: EvalToolDescriptor[]; missing: string[] }> {
+	const { execution, envelope } = await invokePythonToolRequest({ op: "describe", names }, options);
+	if (execution.status === "error") throw new Error(pythonToolError(execution));
+	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
+		throw new Error("Python tool describe request returned an invalid response");
+	}
+
+	const rawTools = Array.isArray(envelope.tools) ? envelope.tools : [];
+	const tools: EvalToolDescriptor[] = [];
+	for (const rawTool of rawTools) {
+		if (!isUnknownRecord(rawTool)) continue;
+		const { name, description, parameters } = rawTool;
+		if (typeof name !== "string" || typeof description !== "string" || !isUnknownRecord(parameters)) continue;
+		tools.push({ name, description, parameters, language: "python" });
+	}
+	const missing = Array.isArray(envelope.missing)
+		? envelope.missing.filter((name): name is string => typeof name === "string")
+		: [];
+	return { tools, missing };
+}
+
+/** Invoke a named tool defined in a retained Python kernel. */
+export async function callPythonTool(
+	name: string,
+	args: Record<string, unknown>,
+	options: PythonToolInvokeOptions,
+): Promise<EvalToolInvokeResult> {
+	const { execution, envelope } = await invokePythonToolRequest({ op: "call", name, args }, options);
+	if (execution.status === "error") return { ok: false, error: pythonToolError(execution) };
+	if (!isUnknownRecord(envelope) || envelope.ok !== true || !("value" in envelope)) {
+		return { ok: false, error: "Python tool call returned an invalid response" };
+	}
+	return { ok: true, value: envelope.value };
+}
+
 export async function disposeAllKernelSessions(): Promise<void> {
 	await sessionRegistry.disposeAll();
 }
@@ -400,7 +537,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 	const cwd = normalizeKernelSessionCwd(options?.cwd ?? getProjectDir());
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const executionOptions: PythonExecutorOptions = {
-		...(options ?? {}),
+		...options,
 		cwd,
 		deadlineMs,
 	};

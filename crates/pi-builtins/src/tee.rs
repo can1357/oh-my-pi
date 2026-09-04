@@ -3,8 +3,9 @@
 //! Ported from uutils coreutils 0.8.0. The standalone utility manipulates
 //! process-global signal disposition for `-i` and SIGPIPE. An in-process builtin
 //! cannot do that safely: `-i` is accepted without changing the shell's signal
-//! policy, while `BrokenPipe` from the invocation's stdout is handled according
-//! to `--output-error` and does not prevent writes to the remaining outputs.
+//! policy. Default mode relies on [`crate::host::Sigpipe`]; `-p` and every
+//! `--output-error` mode opt out via [`Host::ignore_sigpipe`] so `tee` can handle
+//! broken pipes and continue writing to its remaining outputs.
 
 use std::{
 	ffi::OsString,
@@ -66,6 +67,9 @@ impl Utility for Tee {
 					.get_flag(options::IGNORE_PIPE_ERRORS)
 					.then_some(OutputErrorMode::WarnNoPipe)
 			});
+		if output_error.is_some() {
+			host.ignore_sigpipe();
+		}
 		let files = self
 			.matches
 			.get_many::<OsString>(options::FILE)
@@ -347,7 +351,12 @@ mod tests {
 		io::{self, Read, Write},
 	};
 
+	#[cfg(unix)]
+	use brush_core::openfiles::OpenFile;
+
 	use super::{MultiWriter, NamedWriter, OutputErrorMode, Tee, Writer};
+	#[cfg(unix)]
+	use crate::host::{SIGPIPE_EXIT_CODE, run_caught};
 	use crate::host::{Host, run_util};
 
 	struct BrokenPipe;
@@ -367,6 +376,32 @@ mod tests {
 		let (code, capture) = run_util::<Tee>(&[], "hello\n", "/");
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "hello\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn output_error_mode_controls_sigpipe_policy() {
+		fn run(args: &[&str], cwd: &std::path::Path) -> (i32, crate::host::Capture) {
+			let (mut host, capture) = Host::for_test("tee", "contents", cwd);
+			let (reader, writer) = std::io::pipe().unwrap();
+			drop(reader);
+			host.set_test_stdout(OpenFile::from(writer));
+			let argv = std::iter::once(OsString::from("tee"))
+				.chain(args.iter().copied().map(OsString::from))
+				.collect::<Vec<_>>();
+			let parsed = <Tee as clap::Parser>::try_parse_from(argv).unwrap();
+			(run_caught::<Tee>(parsed, &mut host), capture)
+		}
+
+		let cwd = tempfile::tempdir().unwrap();
+		let (code, capture) = run(&["default"], cwd.path());
+		assert_eq!(code, SIGPIPE_EXIT_CODE);
+		assert_eq!(capture.err(), "");
+
+		let (code, capture) = run(&["-p", "nopipe"], cwd.path());
+		assert_eq!(code, 0);
+		assert_eq!(std::fs::read(cwd.path().join("nopipe")).unwrap(), b"contents");
 		assert_eq!(capture.err(), "");
 	}
 

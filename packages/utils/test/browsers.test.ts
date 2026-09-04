@@ -34,11 +34,6 @@ describe("Chrome-for-Testing layout goldens", () => {
 			executable: `/cache/chrome/linux-${BUILD_ID}/chrome-linux64/chrome`,
 		},
 		{
-			platform: BrowserPlatform.LINUX_ARM,
-			url: `https://storage.googleapis.com/chrome-for-testing-public/${BUILD_ID}/linux64/chrome-linux64.zip`,
-			executable: `/cache/chrome/linux_arm-${BUILD_ID}/chrome-linux64/chrome`,
-		},
-		{
 			platform: BrowserPlatform.MAC,
 			url: `https://storage.googleapis.com/chrome-for-testing-public/${BUILD_ID}/mac-x64/chrome-mac-x64.zip`,
 			executable: `/cache/chrome/mac-${BUILD_ID}/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`,
@@ -73,6 +68,28 @@ describe("Chrome-for-Testing layout goldens", () => {
 			).toBe(golden.executable);
 		});
 	}
+});
+
+test("Chrome-for-Testing rejects linux/arm64 before producing archive or cache paths", async () => {
+	const unsupported = "Chrome for Testing does not provide linux/arm64 builds";
+	expect(() => getDownloadUrl(Browser.CHROME, BrowserPlatform.LINUX_ARM, BUILD_ID)).toThrow(unsupported);
+	expect(() =>
+		computeExecutablePath({
+			browser: Browser.CHROME,
+			platform: BrowserPlatform.LINUX_ARM,
+			buildId: BUILD_ID,
+			cacheDir: "/cache",
+		}),
+	).toThrow(unsupported);
+	await expect(
+		install({
+			browser: Browser.CHROME,
+			platform: BrowserPlatform.LINUX_ARM,
+			buildId: BUILD_ID,
+			cacheDir: "/cache",
+			baseUrl: "http://127.0.0.1:1",
+		}),
+	).rejects.toThrow(unsupported);
 });
 
 test("detectBrowserPlatform maps the current supported host", () => {

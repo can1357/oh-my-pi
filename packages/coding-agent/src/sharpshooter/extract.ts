@@ -221,7 +221,8 @@ async function runSharpshooterExtraction(
 				tools: [recordDeltasTool],
 			},
 			{
-				apiKey: modelRegistry.resolver(model),
+				apiKey: modelRegistry.resolver(model, session.sessionId),
+				sessionId: session.sessionId,
 				maxTokens: 2048,
 				reasoning: clampThinkingLevelForModel(model, Effort.Low),
 				toolChoice: "required",

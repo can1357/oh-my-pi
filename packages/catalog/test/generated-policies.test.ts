@@ -105,6 +105,33 @@ describe("generated model policies", () => {
 		expect(built[3]?.priority).toBe(1);
 	});
 
+	it("projects Cursor tool schemas only for Anthropic Fable variants", () => {
+		const fableModels = [
+			"claude-fable-5-high",
+			"claude-fable-5-low",
+			"claude-fable-5-max",
+			"claude-fable-5-medium",
+			"claude-fable-5-xhigh",
+		].map(id => buildGenerated(createSpec({ id, api: "cursor-agent", provider: "cursor" })));
+		const grok = buildGenerated(createSpec({ id: "cursor-grok-4.6", api: "cursor-agent", provider: "cursor" }));
+		const otherCursorAnthropic = buildGenerated(
+			createSpec({ id: "claude-opus-4-7-high", api: "cursor-agent", provider: "cursor" }),
+		);
+
+		for (const model of fableModels) {
+			expect(model.requiresCursorToolSchemaProjection).toBe(true);
+		}
+		expect(grok.requiresCursorToolSchemaProjection).toBeUndefined();
+		expect(otherCursorAnthropic.requiresCursorToolSchemaProjection).toBeUndefined();
+
+		const rebuiltGrok = buildModel({
+			...fableModels[0],
+			id: "cursor-grok-4.6",
+			name: "cursor-grok-4.6",
+		});
+		expect(rebuiltGrok.requiresCursorToolSchemaProjection).toBeUndefined();
+	});
+
 	it("preserves OpenRouter's mandatory provider-authored effort ladder", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
